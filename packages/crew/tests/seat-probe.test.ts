@@ -154,6 +154,52 @@ describe('SeatProbe cache', () => {
     expect(probe.read('claude', '/w')).toMatchObject({ signedIn: null });
   });
 
+  it.each(['stale', 'kept', 'deadline'] as const)('launch freshness discards a kept signed-in answer (%s, crew#1607)', async (mode) => {
+    let now = 1_000_000;
+    let answer = LOGGED_IN_CLAUDE;
+    let finish: ((out: ProbeOutput) => void) | undefined;
+    let slow = false;
+    let calls = 0;
+    const probe = new SeatProbe({
+      env: {}, home: '/h', now: () => now,
+      run: async () => {
+        calls += 1;
+        return slow ? new Promise<ProbeOutput>((resolve) => { finish = resolve; }) : answer;
+      },
+    });
+    await probe.refresh('claude', '/w');
+    answer = { code: null, stdout: '', stderr: '', error: 'timed out' };
+    now += PROBE_TTL_SIGNED_IN_MS;
+    if (mode !== 'stale') {
+      await probe.refresh('claude', '/w');
+      expect(probe.read('claude', '/w')?.signedIn).toBe(true); // display keeps the answer
+    }
+    const before = calls;
+    slow = mode === 'deadline';
+    await probe.ensureFresh(['claude'], '/w', 5);
+    expect(probe.read('claude', '/w')?.signedIn).toBeNull();
+    expect(calls).toBeGreaterThan(before); // an inconclusive entry retries even within its TTL
+    finish?.(answer);
+    await probe.refresh('claude', '/w');
+  });
+
+  it('roster readiness drops cached signed-in standing when its next status probe times out (crew#1607)', async () => {
+    let now = 1_000_000;
+    let answer = LOGGED_IN_CLAUDE;
+    const { run } = fakeRunner(() => answer);
+    const probe = new SeatProbe({ run, env: {}, home: '/h', now: () => now });
+    const roster = rosterWithStandingFactory({
+      seatHealth: new SeatHealthTracker(), registry: () => [{ ...CLAUDE }], signedIn: () => true,
+      env: { WICKED_WORKER_HOME: '/w' }, probe,
+    });
+    await roster.ready!();
+    expect(roster()[0]).toMatchObject({ auth: 'signed_in', council_eligible: true });
+    answer = { code: null, stdout: '', stderr: '', error: 'timed out' };
+    now += PROBE_TTL_SIGNED_IN_MS;
+    await roster.ready!();
+    expect(roster()[0]).toMatchObject({ auth: 'unknown', signed_in: null, login_check: 'unverified' });
+  });
+
   it('during the keep window a definite answer replaces the kept one at once, and the normal TTL is back', async () => {
     let now = 1_000_000;
     const TIMED_OUT: ProbeOutput = { code: null, stdout: '', stderr: '', error: 'timed out' };

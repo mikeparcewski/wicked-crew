@@ -885,8 +885,8 @@ interface SeatsRefusal { code: string; message: string }
 
 export class ChatProposals {
   private readonly lock = new KeyedLock();
-  /** (F1/F2) The last `newWorkSeats` read's refusal (`null` = it read): what a proposal broadcast reads blocked by. */
-  private seatsRefusal: SeatsRefusal | null = null;
+  /** Frames publish in append order after reading the live seat setting. */
+  private publishing: Promise<void> = Promise.resolve();
   /** Per chat: resolutions publish in the order their replies were folded (a slow one never lands after a newer one). */
   private readonly order = new KeyedLock();
   private readonly pending = new Set<Promise<void>>();
@@ -936,6 +936,7 @@ export class ChatProposals {
   /** Resolutions still in flight (tests wait on them). */
   async settled(): Promise<void> {
     while (this.pending.size > 0) await Promise.all([...this.pending]);
+    await this.publishing;
   }
 
   /**
@@ -1032,11 +1033,13 @@ export class ChatProposals {
       return false;
     }
     const projectId = this.deps.projectOf(chatId);
-    // A new proposal record reads as served: blocked while `newWorkSeats` can't be honored (the last read, made while
-    // drawing it). The transcript keeps the card as drawn.
-    const served = record.kind === 'proposal' ? this.seatsBlocked(record, this.seatsRefusal, () => true) : record;
-    const frame: ChatProposalFrame = { type: 'chatProposal', chat: chatId, turn_id: record.turnId, record: served, ...(projectId !== null ? { project_id: projectId } : {}) };
-    this.deps.broadcast(frame);
+    this.publishing = this.publishing.then(async () => {
+      const { refusal } = await this.seatPool();
+      if (this.deps.instanceOf(chatId) !== instance) return;
+      const served = this.seatsBlocked(record, refusal ?? null, () => true);
+      const frame: ChatProposalFrame = { type: 'chatProposal', chat: chatId, turn_id: record.turnId, record: served, ...(projectId !== null ? { project_id: projectId } : {}) };
+      this.deps.broadcast(frame);
+    }).catch((err: unknown) => this.log(`[proposals] chat ${chatId}: ${record.kind} broadcast failed: ${err instanceof Error ? err.message : String(err)}`));
     return true;
   }
 
@@ -1122,7 +1125,7 @@ export class ChatProposals {
       // card says so instead of showing them as used (codex A5 r1).
       const sources = (await this.resolveSources(block.sources, { chatId, turnId, records, binding, turnHas, chat, words, personNamed: false })).map((src) =>
         src.status === 'ok' ? { ...src, status: 'struck' as const, reason: 'a change works from the document and your words; make a new document to use this source' } : src);
-      const { helpers, block: helperBlock } = await this.docHelpers(chat);
+      const { helpers, block: helperBlock, seatsUnread } = await this.docHelpers(chat);
       if (helperBlock !== null) blocked.push(helperBlock);
       const title = target?.title ?? (ref !== null ? humanDoc(ref.doc) : block.refine);
       return {
@@ -1133,6 +1136,7 @@ export class ChatProposals {
         sources,
         repos: [],
         helpers,
+        ...(seatsUnread ? { seatsUnread: true } : {}),
         time: await this.timeOf('refine', null, projectId),
         stops: STOPS.refine,
         filedIn: await filedIn(projectId),
@@ -1186,7 +1190,7 @@ export class ChatProposals {
       demo = { url, audience: block.audience ?? null, show: block.show ?? null };
     }
     const sources = kind === 'create' ? await this.resolveSources(block.sources, { chatId, turnId, records, binding, turnHas, chat, words, personNamed: false }) : [];
-    const { helpers, block: helperBlock } = await this.docHelpers(chat);
+    const { helpers, block: helperBlock, seatsUnread } = await this.docHelpers(chat);
     if (helperBlock !== null) blocked.push(helperBlock);
     return {
       pid, chatId, turnId, kind, seat,
@@ -1202,6 +1206,7 @@ export class ChatProposals {
       repos,
       ...(repoRefs.length > 0 ? { repoRefs } : {}),
       helpers,
+      ...(seatsUnread ? { seatsUnread: true } : {}),
       time: await this.timeOf(kind, seed ?? null, chat.projectId),
       stops: STOPS[kind],
       filedIn: await filedIn(chat.projectId),
@@ -1216,7 +1221,7 @@ export class ChatProposals {
   }
 
   /** The two helpers (DES §4.2): the lead seat, then another of the chat's seats, else the roster's next. */
-  helpers(chat: ProposalChat, chosen?: readonly string[], pool?: readonly { key: string }[]): ProposalHelpers | null {
+  helpers(chat: Pick<ProposalChat, 'lead' | 'seats'>, chosen?: readonly string[], pool?: readonly { key: string }[]): ProposalHelpers | null {
     const roster = this.deps.rosterEligible();
     const can = new Set(roster.map((s) => s.key));
     const name = (k: string): string => roster.find((s) => s.key === k)?.name ?? k;
@@ -1565,6 +1570,9 @@ export class ChatProposals {
       const stale = await this.lock.run(`chat\u0000${instance ?? chatId}`, () => this.jobStale(chatId, folded, instance));
       if (stale !== null) return stale;
     }
+    // Check the setting and redraw a card drawn during a refusal before edits or old-seat checks.
+    const seatsRefused = await this.lock.run(`chat\u0000${instance ?? chatId}`, () => this.seatsSettingRefusal(chatId, folded.proposal, folded, instance));
+    if (seatsRefused !== null) return seatsRefused;
     if (kind === 'job') {
       // A reshape starts only through its own transition (the held plan answered Reject first; codex r3).
       // The seats the proposal names can still work, before any edit re-resolves them (codex r3).
@@ -1582,10 +1590,6 @@ export class ChatProposals {
       if (err instanceof EditRefusal || err instanceof JobRefusal) return this.refusalOf(err)!;
       throw err;
     }
-    // (F1/F2) A job's seats and a document's helpers come from `newWorkSeats`: checked here before the card's own block (the
-    // setting is the cause to fix first), and again in `goLocked` for every launch path.
-    const seatsRefused = await this.seatsSettingRefusal(effective, folded);
-    if (seatsRefused !== null) return seatsRefused;
     if (effective.blocked !== null) {
       return { code: 409, body: { code: 'proposal_blocked', error: effective.blocked, view: viewOf(folded) } };
     }
@@ -1623,7 +1627,7 @@ export class ChatProposals {
     }
     // (F1/F2) Every launch path (a fresh Go, Go again, a reshape) re-reads `newWorkSeats` before anything is answered or
     // recorded: set but unreadable or invalid refuses with its code, never starting the seats drawn without the pick.
-    const seatsRefused = await this.seatsSettingRefusal(resolution, folded);
+    const seatsRefused = await this.seatsSettingRefusal(chatId, resolution, folded, instance);
     if (seatsRefused !== null) return seatsRefused;
     // The helpers can still work (one may have signed out since the card was drawn).
     if (resolution.helpers !== null) {
@@ -2356,30 +2360,56 @@ export class ChatProposals {
    * (OpenCode), which are kept only when no other seat can work (crew#1590). A setting that is set but can't be read,
    * or is invalid, is a LIVE state, never a stored one: `refusal`, and the card is drawn as if nothing were picked,
    * but it reads blocked with the reason wherever it is served (`withSeatsSetting`) and Start refuses it
-   * (`seatsSettingRefusal`) until the setting reads again. Fixing the setting lifts the block everywhere at once;
-   * nothing on the transcript has to change.
+   * (`seatsSettingRefusal`) until the setting reads again. Cards drawn during the refusal are marked so Start
+   * redraws their seats after repair, before the person can launch them.
    */
   private async seatPool(): Promise<JobSeatPool & { refusal?: SeatsRefusal }> {
     if (this.deps.newWorkSeats === undefined) return jobSeatPool(this.deps.rosterEligible(), null);
     try {
-      const pool = jobSeatPool(this.deps.rosterEligible(), await this.deps.newWorkSeats());
-      this.seatsRefusal = null;
-      return pool;
+      return jobSeatPool(this.deps.rosterEligible(), await this.deps.newWorkSeats());
     } catch (err) {
       const refusal = err instanceof NewWorkSeatsRefusal
         ? { code: err.code, message: err.message }
         : { code: 'settings_unavailable', message: `crew can't read which seats new work may use (newWorkSeats): ${err instanceof Error ? err.message : String(err)}; it won't start new work on every seat instead. ${NEW_WORK_SEATS_FIX[0]!.toUpperCase()}${NEW_WORK_SEATS_FIX.slice(1)}` };
-      this.seatsRefusal = refusal;
       return { ...jobSeatPool(this.deps.rosterEligible(), null), refusal };
     }
   }
 
-  /** (F1/F2) A seated proposal refused at Start, fresh or again, while `newWorkSeats` is set but unreadable or invalid;
-   *  `null` when it starts no seat or the setting reads. */
-  private async seatsSettingRefusal(p: ArtifactProposal, folded: FoldedProposal): Promise<DecideResult | null> {
+  /** Refuse an unreadable setting, or redraw a card that was drawn without it. Called under the chat lock. */
+  private async seatsSettingRefusal(chatId: string, p: ArtifactProposal, folded: FoldedProposal, instance: string | null): Promise<DecideResult | null> {
     if (!SEATED_KINDS.has(p.kind)) return null;
-    const { refusal } = await this.seatPool();
-    return refusal === undefined ? null : { code: 409, body: { code: refusal.code, error: refusal.message, view: viewOf(folded) } };
+    const { pool, refusal } = await this.seatPool();
+    if (refusal !== undefined) return { code: 409, body: { code: refusal.code, error: refusal.message, view: viewOf(folded) } };
+    if (!p.seatsUnread && !folded.proposal.seatsUnread) return null;
+    const current = foldProposals(this.deps.records(chatId)).get(p.pid);
+    if (current === undefined || current.state !== folded.state) {
+      return { code: 409, body: { code: 'proposal_stale', error: 'this proposal changed; check the card again', ...(current !== undefined ? { view: viewOf(current) } : {}) } };
+    }
+    const recorded = current.accepting?.resolution ?? current.proposal;
+    if (recorded.seatsUnread) {
+      const base = { ...recorded };
+      delete base.seatsUnread;
+      let fresh: ArtifactProposal;
+      if (recorded.shape !== undefined) {
+        const chat: JobChat = this.jobChat(chatId) ?? {
+          projectId: recorded.filedIn.projectId,
+          repos: (recorded.repoRefs ?? []).map((id, i) => ({ id, name: recorded.repos[i] ?? id })),
+          lead: null, seats: [],
+        };
+        const ctx = await this.jobContext(chatId, recorded.pid, recorded.turnId, recorded.seat, chat, {
+          revises: recorded.revises ?? null, lineage: recorded.lineage ?? recorded.pid, notes: [],
+          ...(recorded.request !== undefined ? { request: recorded.request } : {}),
+          ...(recorded.answers !== undefined ? { answers: recorded.answers } : {}),
+        });
+        fresh = { ...base, ...keepReshape(await this.proposalOf(chatId, recorded.pid, { ...factsOf(recorded), lead: null, seats: null }, ctx, this.deps.records(chatId), true, recorded), recorded) };
+      } else {
+        const helpers = this.helpers({ lead: null, seats: [] }, undefined, pool);
+        fresh = { ...base, helpers, blocked: helpers === null ? NEEDS_HELPER : recorded.blocked === NEEDS_HELPER ? null : recorded.blocked };
+      }
+      if (!this.write(chatId, { at: this.now(), turnId: current.turnId, kind: 'proposal', proposal: fresh }, instance)) return this.gone(chatId);
+    }
+    const after = foldProposals(this.deps.records(chatId)).get(p.pid)!;
+    return { code: 409, body: { code: 'seats_redrawn', error: 'the seats setting reads again; check the redrawn card and press Start', view: viewOf(after) } };
   }
 
   /** (F1/F2) A proposal view as it is served: an open job or document reads blocked while `newWorkSeats` can't be
@@ -2416,10 +2446,10 @@ export class ChatProposals {
   }
 
   /** A document's two default helpers from the pool, and the line that blocks it when there are none. */
-  private async docHelpers(chat: ProposalChat): Promise<{ helpers: ProposalHelpers | null; block: string | null }> {
-    const { pool } = await this.seatPool();
+  private async docHelpers(chat: ProposalChat): Promise<{ helpers: ProposalHelpers | null; block: string | null; seatsUnread?: boolean }> {
+    const { pool, refusal } = await this.seatPool();
     const helpers = this.helpers(chat, undefined, pool);
-    return { helpers, block: helpers === null ? NEEDS_HELPER : null };
+    return { helpers, block: helpers === null ? NEEDS_HELPER : null, ...(refusal !== undefined ? { seatsUnread: true } : {}) };
   }
 
   private async jobContext(chatId: string, pid: string, turnId: string | null, seat: string, chat: JobChat, extra: Pick<JobContext, 'revises' | 'lineage' | 'notes'> & Partial<Pick<JobContext, 'answers' | 'request'>>): Promise<JobContext> {
@@ -2433,8 +2463,8 @@ export class ChatProposals {
     const projectLabel = chat.projectId === null ? 'Not in a project · this chat' : ((await this.deps.projectName(chat.projectId)) ?? chat.projectId);
     const qeOff = (await this.deps.qeOff?.().catch(() => false)) === true;
     const powerPresets = (await this.deps.powerPresets?.(chat.projectId).catch(() => null)) ?? null;
-    const { eligible: roster, pool } = await this.seatPool();
-    return { chatId, pid, turnId, seat, chat, served, roster, pool, projectLabel, qeOff, powerPresets, ...extra };
+    const { eligible: roster, pool, refusal } = await this.seatPool();
+    return { chatId, pid, turnId, seat, chat, served, roster, pool, projectLabel, qeOff, powerPresets, ...extra, ...(refusal !== undefined ? { seatsUnread: true } : {}) };
   }
 
   /** Source availability matters only to a card that shows this input. Keep a failed read a named refusal. */
@@ -2601,8 +2631,10 @@ export class ChatProposals {
       ctx = { ...ctx, documents: await this.authorizeDocumentsAt(chatId, input?.kind === 'documents' ? input.tokens : [], records, ctx.turnId ?? '\u0000', r !== null && proposalKindOf(r) === 'create', true) };
     }
     // An unsure reading holds no Start wherever the proposal is rebuilt (a Go's edits, a refresh; codex r4).
-    if (r !== null && proposalKindOf(r) === 'create') return withAskOverlay(await this.documentProposal(chatId, pid, facts, ctx, records));
-    return withAskOverlay(resolveJob(facts, ctx, { allowHidden }));
+    const proposal = r !== null && proposalKindOf(r) === 'create'
+      ? await this.documentProposal(chatId, pid, facts, ctx, records)
+      : resolveJob(facts, ctx, { allowHidden });
+    return withAskOverlay({ ...proposal, ...(ctx.seatsUnread ? { seatsUnread: true } : {}) });
   }
 
   private refusalOf(err: unknown): DecideResult | null {

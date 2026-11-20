@@ -500,7 +500,7 @@ describe('chat proposals (server, A2)', () => {
    * (F1/F2 round 3) A document's helpers come from `newWorkSeats`, read strictly through the route's production reader
    * (the hermetic settings file, tests/setup/hermetic-home.ts). Set but invalid or unreadable is a LIVE state: the card
    * reads blocked on GET while it lasts, and a helper pick or Start refuses with its code; fixed, the same card reads
-   * unblocked and starts, with nothing changed on the transcript.
+   * unblocked; Start redraws cards drawn during the refusal before they can launch.
    */
   describe('a document and the newWorkSeats setting (fail closed, recoverable)', () => {
     const settingsFile = (): string => process.env['WICKED_CREW_SYSTEM_SETTINGS']!;
@@ -541,7 +541,7 @@ describe('chat proposals (server, A2)', () => {
       }
     });
 
-    it('drawn while invalid: read blocked (GET), a helper pick and Start refuse 409 setting_invalid; fixed, the same card reads unblocked and starts', async () => {
+    it('drawn while invalid: Start refuses; after repair it redraws helpers before a second Start launches', async () => {
       try {
         setRaw('{"newWorkSeats": "claude"}');
         await turn(stub, stubListeners, 'nws-doc-1', 'Make a deck on coverage', { entry: 'presentation', title: 'Coverage', sources: ['chat'] });
@@ -558,12 +558,14 @@ describe('chat proposals (server, A2)', () => {
         expect(pick.statusCode).toBe(409);
         expect(pick.json()).toMatchObject({ code: 'setting_invalid' });
         const before = stubRows().length;
-        restore();
-        // Fixed: the same card reads unblocked on the next read (studio's Start enables), with no Start round-trip.
+        setRaw('{"newWorkSeats": ["codex", "opencode"]}');
         expect((await proposalOf(stub, 'nws-doc-1')).blocked).toBeNull();
         expect((await detailProposal('nws-doc-1', p.pid))?.blocked).toBeNull();
         const fixed = await decide(stub, 'nws-doc-1', p.pid, { decision: 'go' });
-        expect(fixed.statusCode, fixed.body).toBe(200);
+        expect(fixed.statusCode, fixed.body).toBe(409);
+        expect(fixed.json()).toMatchObject({ code: 'seats_redrawn', view: { proposal: { pid: p.pid, helpers: { seats: ['codex', 'opencode'] } } } });
+        expect(stubRows().length).toBe(before);
+        expect((await decide(stub, 'nws-doc-1', p.pid, { decision: 'go' })).statusCode).toBe(200);
         expect(stubRows().length - before).toBe(1);
       } finally {
         restore();

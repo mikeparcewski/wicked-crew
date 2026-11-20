@@ -651,6 +651,63 @@ describe('reshape and a bad newWorkSeats (F1/F2 round 4)', () => {
     return { pid: `${CHAT}:reshape:run1:a`, oldRunId: 'run1', parentPid: p.pid, facts: facts('feature'), edits: { card: 'feature' }, reducedAssurance: false, relaunch: { deliver: 'pr' as const }, request: { id: 'a', digest: 'd1' }, confirmLoss: ['parity'] };
   };
 
+  it.each([false, true])('redraws seats under the same pid after repair, even with edits=%s; only the second Start launches (crew#1603)', async (withEdits) => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    r.roster.push({ key: 'opencode', name: 'OpenCode' });
+    setting(r, invalid);
+    await pick(r, 'feature');
+    const p = open(r);
+    expect(p.seats?.keys).toContain('claude');
+    expect((await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1')).body).toMatchObject({ code: 'setting_invalid' });
+    setting(r, async () => ['codex', 'pi', 'opencode']);
+    const redrawn = await r.svc.decide(CHAT, p.pid, { decision: 'go', ...(withEdits ? { edits: { seats: ['claude', 'codex'] } } : {}) }, ME, 'i1');
+    expect(redrawn.code).toBe(409);
+    expect(redrawn.body).toMatchObject({ code: 'seats_redrawn', view: { proposal: { pid: p.pid, seats: { keys: ['codex', 'pi', 'opencode'] } } } });
+    expect(open(r).seats?.keys).toEqual(['codex', 'pi', 'opencode']);
+    expect(open(r).seatsUnread).toBeUndefined();
+    expect(r.launcher.launched).toHaveLength(0);
+    expect(r.records.some((rec) => rec.kind === 'proposal_accepting')).toBe(false);
+    const started = await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1');
+    expect(started.code, JSON.stringify(started.body)).toBe(200);
+    expect(r.launcher.launched).toHaveLength(1);
+    expect(r.launcher.launched[0]!.resolution.seats?.keys).toEqual(['codex', 'pi', 'opencode']);
+  });
+
+  it('a retry broadcast reads the repaired setting without a GET or redraw (crew#1603)', async () => {
+    const r = rig();
+    const frames: Parameters<ChatProposalDeps['broadcast']>[0][] = [];
+    (r.svc as unknown as { deps: ChatProposalDeps }).deps.broadcast = (frame) => { frames.push(frame); };
+    setting(r, invalid);
+    await pick(r, 'feature');
+    const p = open(r);
+    await r.svc.settled();
+    expect(frames.at(-1)).toMatchObject({ record: { proposal: { blocked: expect.stringContaining('newWorkSeats') } } });
+    setting(r, async () => ['codex', 'pi']);
+    const pid = await r.svc.appendRetry(CHAT, p.pid, 'failed-run', '_unfiled/draft', 'failed');
+    await r.svc.settled();
+    expect(frames.at(-1)).toMatchObject({ record: { proposal: { pid, blocked: null } } });
+  });
+
+  it('appends synchronously while a setting read waits, then broadcasts frames in append order', async () => {
+    const r = rig();
+    const frames: Parameters<ChatProposalDeps['broadcast']>[0][] = [];
+    (r.svc as unknown as { deps: ChatProposalDeps }).deps.broadcast = (frame) => { frames.push(frame); };
+    await pick(r, 'feature');
+    const p = open(r);
+    await r.svc.settled();
+    const before = frames.length;
+    let release!: (pick: null) => void;
+    const reading = new Promise<null>((resolve) => { release = resolve; });
+    setting(r, () => reading);
+    const first = await r.svc.appendRetry(CHAT, p.pid, 'failed-1', '_unfiled/draft', 'failed');
+    const second = await r.svc.appendRetry(CHAT, first!, 'failed-2', '_unfiled/draft', 'failed');
+    expect(r.records.slice(-2)).toMatchObject([{ proposal: { pid: first } }, { proposal: { pid: second } }]);
+    expect(frames).toHaveLength(before);
+    release(null);
+    await r.svc.settled();
+    expect(frames.slice(before)).toMatchObject([{ record: { proposal: { pid: first } } }, { record: { proposal: { pid: second } } }]);
+  });
+
   it('a fresh reshape is refused with the setting code before the held plan is answered; fixed, it rejects and launches once', async () => {
     const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
     const base = await held(r);
@@ -662,6 +719,11 @@ describe('reshape and a bad newWorkSeats (F1/F2 round 4)', () => {
     expect(r.rejects).toBe(0);
     expect(r.launcher.launched).toHaveLength(before);
     setting(r, async () => null);
+    const redrawn = await r.svc.reshape(CHAT, base, ME, 'i1');
+    expect(redrawn.code).toBe(409);
+    expect(redrawn.body).toMatchObject({ code: 'seats_redrawn' });
+    expect(r.rejects).toBe(0);
+    expect(r.launcher.launched).toHaveLength(before);
     expect((await r.svc.reshape(CHAT, base, ME, 'i1')).code).toBe(200);
     expect(r.rejects).toBe(1);
     expect(r.launcher.launched).toHaveLength(before + 1);
