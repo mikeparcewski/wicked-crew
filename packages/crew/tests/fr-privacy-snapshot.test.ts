@@ -22,7 +22,8 @@ describe('probeGateway (FINDINGS C3a)', () => {
     expect(row.state).toBe('down');
     expect(row.reason).toBe("Docker isn't running");
     expect(row.reason).not.toMatch(/unix:\/\//);
-    expect(row.remedy ?? '').toMatch(/Start Docker/);
+    expect(row.remedy ?? '').toMatch(/^Start Rancher Desktop/);
+    expect(row.remedy ?? '').not.toMatch(/Docker Desktop/);
     // The row (details included) carries no home path, even though the raw error did.
     expectNoHomePaths(JSON.stringify(row));
     // …and no raw docker line: studio shows `details` under Technical details (codex r1).

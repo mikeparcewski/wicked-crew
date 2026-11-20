@@ -86,6 +86,10 @@ describe('clusterRows', () => {
     expect(off.cluster).toMatchObject({ state: 'down', reason: "Kubernetes isn't answering (context rancher-desktop), so no seat can start", remedy: expect.stringContaining('Rancher Desktop') });
     // The API not answering proves nothing about pods already running: the gateway is unobserved, not down.
     expect(off.gateway).toMatchObject({ state: 'unknown', reason: expect.stringContaining('could not be read') });
+    for (const row of [off.cluster, off.gateway]) {
+      expect(row.remedy).toBe('Start Rancher Desktop with Kubernetes on, then re-check.');
+      expect(row.remedy).not.toContain('Docker Desktop');
+    }
     const noCtl = clusterRows(ok({ ...READY, controller: { ready: false, detail: 'no sandboxes CRD' } }), true, at);
     expect(noCtl.cluster).toMatchObject({ state: 'down', reason: expect.stringContaining('no sandboxes CRD'), remedy: expect.stringContaining('cluster install') });
   });

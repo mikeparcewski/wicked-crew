@@ -35,7 +35,7 @@ describe('a fresh install: no gateway container yet', () => {
     const row = await probeGateway({ ...base, exec: runtimeSaying('Error response from daemon: No such container: wicked-agw-x\n') });
     expect(row.state).toBe('degraded');
     expect(row.reason).toMatch(/^not started/);
-    expect(row.remedy ?? '').not.toMatch(/Start Docker/);
+    expect(row.remedy ?? '').not.toMatch(/Start (?:Docker|Rancher Desktop)/);
   });
 
   it('a runtime that cannot be reached is still down, but the reason is a plain cause, not the raw docker line or the command line (FINDINGS C3a)', async () => {
@@ -47,7 +47,8 @@ describe('a fresh install: no gateway container yet', () => {
     expect(row.reason).toBe("Docker isn't running");
     expect(row.reason).not.toMatch(/unix:\/\//);
     expect(row.reason).not.toMatch(/Command failed/);
-    expect(row.remedy ?? '').toMatch(/Start Docker/);
+    expect(row.remedy ?? '').toMatch(/^Start Rancher Desktop/);
+    expect(row.remedy ?? '').not.toMatch(/Docker Desktop/);
   });
 
   it('an error with no stderr (spawn ENOENT, a plain Error) keeps its message', () => {
