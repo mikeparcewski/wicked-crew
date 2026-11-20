@@ -69,6 +69,12 @@ mentioned only where a daemon release depends on them.
   - **The manifest:** written through an exclusive, unguessable temp file renamed into place, and read without
     following a link.
 
+### Fixed
+
+- **Daemon libuv pool starvation (crew#1495).** Set the pool size before other CLI imports to at least 16 threads,
+  scaling with available CPU parallelism up to 1024, so engine work leaves more capacity for filesystem reads.
+  Valid operator `UV_THREADPOOL_SIZE` overrides from 1 through 1024 are preserved; invalid values use the default.
+
 ## [0.18.18] — 2026-11-19
 
 Feature release. A launch form can ask what a run will keep before it starts: `POST /runs/preview` answers the human gates
