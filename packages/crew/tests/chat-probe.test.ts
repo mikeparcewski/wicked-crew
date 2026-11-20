@@ -41,6 +41,29 @@ function cloneOf(root: string, slug: string): string {
   return g('rev-parse', 'HEAD');
 }
 
+describe('chat probe: quoted citations with columns (crew#1618)', () => {
+  it('grounds a quoted citation with a real line and a column', () => {
+    const text = 'See `alpha/src/lib.rs:2:1`.';
+    const g = gradeReply(text, repos);
+    expect([g.valid, g.fabricated]).toEqual([1, 0]);
+    expect(g.citations).toMatchObject([{ file: 'alpha/src/lib.rs', line: 2, end: 2 }]);
+    expect(resultOf({ id: 'q', q: 'q' }, [{ kind: 'seat', turnId: 't', cliKey: 'c', ok: true, text }], 't', repos, []).grounded).toBe(true);
+  });
+
+  it('grades a quoted citation with a missing line and a column as fabricated', () => {
+    const g = gradeReply('See `alpha/src/lib.rs:99:1`.', repos);
+    expect([g.valid, g.fabricated]).toEqual([0, 1]);
+    expect(g.citations).toMatchObject([{ file: 'alpha/src/lib.rs', line: 99, end: 99 }]);
+    expect(g.citations[0]!.why).toContain('outside 1-3');
+  });
+
+  it('accepts a quoted line range followed by a column', () => {
+    const g = gradeReply('See `alpha/src/lib.rs:2-3:1`.', repos);
+    expect([g.valid, g.fabricated]).toEqual([1, 0]);
+    expect(g.citations).toMatchObject([{ file: 'alpha/src/lib.rs', line: 2, end: 3 }]);
+  });
+});
+
 describe('chat probe: citations', () => {
   it('reads the citation forms answers use, and skips addresses and times', () => {
     const got = extractCitations('See `alpha/src/lib.rs:2`, (CLAUDE.md:3), beta/docs/arch.md:1-2 and lib.rs#L1-L3. Not 127.0.0.1:7741 or 12:30.');
