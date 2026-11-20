@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AuditLog } from '../src/api/audit.js';
 import { extractCitations, verifyCitations } from '../src/api/chat-citations.js';
+import { ChatHistoryStore } from '../src/api/chat-history.js';
 import { chatScopeStatement, prepareChatScratch } from '../src/api/chat-scope.js';
 import { ChatTranscriptStore } from '../src/api/chat-transcripts.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -317,6 +318,8 @@ describe('the routes', () => {
   async function harness() {
     const dir = mkdtempSync(join(tmpdir(), 'consider-routes-'));
     const transcripts = new ChatTranscriptStore({ dir: join(dir, 'chats') });
+    const chatHistory = new ChatHistoryStore(transcripts, null, { dir: join(dir, 'history') });
+    chatHistory.opened('c1', { cli: 'codex', actorId: 'human-1' });
     const adapter = {
       ...engine(),
       sessionsDetail: vi.fn(async () => [
@@ -335,8 +338,8 @@ describe('the routes', () => {
     app.addHook('onRequest', async (req) => {
       const h = req.headers['x-actor'];
       if (typeof h === 'string') {
-        const [kind, trust] = h.split(':');
-        (req as unknown as { actor: unknown }).actor = { id: `${kind}-1`, kind, trust };
+        const [kind, trust, id] = h.split(':');
+        (req as unknown as { actor: unknown }).actor = { id: id ?? `${kind}-1`, kind, trust };
       }
     });
     registerRoutes(
@@ -346,7 +349,7 @@ describe('the routes', () => {
       new ElicitationCache(),
       { bus: null, index, log: () => undefined },
       { audit: AuditLog.noop(), authMode: 'required' },
-      { chatTranscripts: transcripts, decisionLedger: new DecisionLedger(join(dir, 'decisions')), decisionsMode: 'ledger', broadcast: () => undefined },
+      { chatTranscripts: transcripts, chatHistory, decisionLedger: new DecisionLedger(join(dir, 'decisions')), decisionsMode: 'ledger', broadcast: () => undefined },
     );
     await app.ready();
     apps.push({ app, dir });
@@ -362,6 +365,9 @@ describe('the routes', () => {
     const c = chat.json() as Consideration;
     expect(c.key).toBe('considered:c1:t1');
     expect(c.cited).toEqual([{ id: 'proposal:k1', by: 'codex', status: 'unchecked', label: RULE_CITED_LABEL }]);
+    const other = await h.app.inject({ method: 'GET', url: '/api/v1/chats/c1/turns/t1/considered', headers: { 'x-actor': 'human:operator:human-2' } });
+    expect(other.statusCode, other.body).toBe(404);
+    expect(other.json()).toEqual({ error: 'no chat c1 on this daemon' });
     const unit = await h.app.inject({ method: 'GET', url: '/api/v1/runs/r1/units/u0/considered?attempt=2', headers: { 'x-actor': 'human:operator' } });
     expect(unit.statusCode, unit.body).toBe(200);
     expect((unit.json() as Consideration).key).toBe('considered:r1:0:2');

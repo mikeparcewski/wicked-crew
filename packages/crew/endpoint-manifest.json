@@ -441,7 +441,8 @@
       "responseType": "ChatDetailResponse",
       "statusCodes": [
         200,
-        400
+        400,
+        404
       ]
     },
     {

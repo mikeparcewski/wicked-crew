@@ -5785,6 +5785,15 @@ export function registerRoutes(
     },
     log: (m) => app.log.warn(m),
   });
+  /** crew#1669: hidden and unknown chats answer the same 404 under auth: required.
+   *  Local mode is unchanged. Sends the 404 and returns true when refused. */
+  const refuseHiddenChat = (req: FastifyRequest, reply: FastifyReply, id: string): boolean => {
+    if (security.authMode !== 'required') return false;
+    if (chatHistory !== null && chatHistory.visibleTo(id, actorOf(req).id)) return false;
+    void reply.code(404).send({ error: `no chat ${id} on this daemon` });
+    return true;
+  };
+
   // F-RECON-017: a message sent while a targeted seat is still answering the previous one is
   // REFUSED, not queued. The engine queues silently (the worker gets the text the instant the
   // previous turn's final block lands) and its reply frames carry no message correlation, so the
@@ -5794,6 +5803,7 @@ export function registerRoutes(
   // and the 202 returns the `turnId` the reply frames are stamped with (`turn_id`) on `/ws`.
   app.post(`${V}/chats/:id/messages`, async (req, reply) => {
     const { id } = req.params as { id: string };
+    if (refuseHiddenChat(req, reply, id)) return reply;
     const parsed = ChatMessageSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
@@ -5814,9 +5824,8 @@ export function registerRoutes(
     }
     const text = parsed.data.text;
     // DES-CHAT-ARTIFACTS-001 §5.1 (A1): the per-turn block reads crew's records (documents, runs) for the chat's own
-    // person. A message that carries `context` from anyone else (another actor under `auth: required`, or an agent,
-    // system or plugin actor) is refused before anything is reserved or read; one without `context` from them still
-    // goes through, with no block.
+    // person. Another actor's send under `auth: required` is refused 404 above. An agent, system or plugin actor's
+    // `context` is refused before anything is reserved or read; without `context` their send carries no block.
     const msgContext = parsed.data.context;
     const sender = actorOf(req);
     const ownsChat = chatHistory === null || chatHistory.visibleTo(id, security.authMode === 'required' ? sender.id : null);
@@ -6356,6 +6365,7 @@ export function registerRoutes(
     },
     async (req, reply) => {
       const { id } = req.params as { id: string };
+      if (refuseHiddenChat(req, reply, id)) return reply;
       const parsed = ChatSeatsSchema.safeParse(req.body);
       if (!parsed.success) {
         return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
@@ -6530,9 +6540,10 @@ export function registerRoutes(
 
   app.get(
     `${V}/chats/:id`,
-    { config: { manifest: { responseType: 'ChatDetailResponse', statusCodes: [200, 400] } } },
+    { config: { manifest: { responseType: 'ChatDetailResponse', statusCodes: [200, 400, 404] } } },
     async (req, reply) => {
       const { id } = req.params as { id: string };
+      if (refuseHiddenChat(req, reply, id)) return reply;
       try {
         await chatProposals.recheckHeldSeats(id).catch(() => false);
         // The scope recorded at open (crew#502) — `null` for a chat this daemon did not open — and
@@ -6831,6 +6842,7 @@ export function registerRoutes(
     async (req, reply) => {
       if (!operatorOnlyRead(req, reply)) return reply;
       const { id, turnId } = req.params as { id: string; turnId: string };
+      if (refuseHiddenChat(req, reply, id)) return reply;
       const c = await considerations.forChatTurn(id, turnId);
       if (c === null) return reply.code(404).send({ error: `chat ${id} holds no turn ${turnId}` });
       return c;
