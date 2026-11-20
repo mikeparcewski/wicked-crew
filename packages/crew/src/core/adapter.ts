@@ -168,6 +168,7 @@ export async function readNewWorkSeats(): Promise<readonly string[] | null> {
   } catch (err) {
     // Absent only when no entry is there at all: a settings link whose target is gone is a file that can't be read.
     if ((err as NodeJS.ErrnoException).code === 'ENOENT' && !(await lstat(path).then(() => true, () => false))) return null;
+    if (err instanceof NewWorkSeatsRefusal) throw err;
     const why = (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.message : String(err));
     throw new NewWorkSeatsRefusal(
       'settings_unavailable',
@@ -202,22 +203,27 @@ export async function readNewWorkSeats(): Promise<readonly string[] | null> {
  * crew#756 migration, once: a non-default state home with no settings file of its own starts from a
  * COPY of the shared file, so a daemon upgraded onto this rule keeps its configuration while every
  * later write stays in its own state home. Exclusive copy (never overwrites); a missing shared file
- * is no seed. A daemon with an explicit `WICKED_CREW_SYSTEM_SETTINGS` or on the default home skips it.
+ * seeds an empty object. An unreadable or invalid shared file leaves the home unseeded for a retry.
+ * A daemon with an explicit `WICKED_CREW_SYSTEM_SETTINGS` or on the default home skips it.
  */
 async function seedStateHomeSettings(path: string): Promise<void> {
   const override = process.env['WICKED_CREW_SYSTEM_SETTINGS'];
   if ((override !== undefined && override !== '') || isDefaultStateHome() || existsSync(path)) return;
-  // The seed is a VALIDATED snapshot: the shared file's text only when it parses as a JSON object,
-  // else an empty object — so a missing, partial or corrupt shared file starts the home empty and is
-  // never retried (Copilot on #760). Published with `link`, which is atomic and never replaces an
-  // existing file: a racing first read either publishes or finds a complete file.
+  // Published with `link`, so a racing first read either publishes or finds a complete file.
+  const shared = sharedSettingsFilePath();
   let body = '{}';
   try {
-    const raw = await readFile(sharedSettingsFilePath(), 'utf8');
-    const parsed: unknown = JSON.parse(raw);
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) body = raw;
-  } catch {
-    /* absent or not JSON: start empty */
+    body = await readFile(shared, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new NewWorkSeatsRefusal('settings_unavailable', `Cannot read ${shared}: ${err instanceof Error ? err.message : String(err)}. Fix this file to start new work.`);
+    }
+  }
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('expected a JSON object');
+  } catch (err) {
+    throw new NewWorkSeatsRefusal('settings_unavailable', `Cannot use ${shared}: ${err instanceof Error ? err.message : String(err)}. Fix this file to start new work.`);
   }
   await publishSettingsFile(path, body, false);
 }
@@ -858,6 +864,7 @@ interface CoreConstructor {
    *  or not) — every seat that keeps no per-call check there, entries marked `governed_only: true`
    *  (the field is absent on every other entry). */
   worktreeBenched?(clisJson: string, bound: boolean): string;
+  judgeCoverage?(clisJson: string, bound: boolean): string;
   /** (wicked-core-ts ≥ the release carrying it) Whether this host's skill routing admits the seat
    *  (with its roster invocation template) to the engine's isolated QE reviewer turn. Optional for
    *  the same reason as `worktreeBenched`. */
@@ -1875,6 +1882,11 @@ export class CoreAdapter {
   /** The production council roster (static), parsed to seats. */
   static roster(): unknown[] {
     return JSON.parse(Core.registryRoster()) as unknown[];
+  }
+
+  /** The engine's judge coverage, absent on an addon that predates the static. */
+  static judgeCoverage(clisJson: string, bound: boolean): string | null {
+    return typeof Core.judgeCoverage === 'function' ? Core.judgeCoverage(clisJson, bound) : null;
   }
 
   /**
@@ -4236,8 +4248,8 @@ export class CoreAdapter {
   /** The settings as read, and whether the read succeeded: a file that could not be read, parsed or
    *  validated serves the defaults (`ok: false`), which the engine's QE mirror reads as a failure. */
   private async readSettings(): Promise<{ settings: CrewSystemSettings; ok: boolean; kept?: Partial<CrewSystemSettings> }> {
-    await seedStateHomeSettings(settingsFilePath());
     try {
+      await seedStateHomeSettings(settingsFilePath());
       const raw = await readFile(settingsFilePath(), 'utf8');
       const parsed = JSON.parse(raw) as Partial<CrewSystemSettings>;
       // Validate numeric fields; drop anything out-of-range rather than propagate bad values.

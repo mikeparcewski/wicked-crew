@@ -149,7 +149,7 @@ describe('wicked-studio#27 — ad-hoc grouping + campaigns rollup', () => {
       new ElicitationCache(),
       { bus: null, index: new MembershipIndex(), log: () => undefined },
       { audit, authMode: 'off' },
-      { groupIndex: gi, deliveryIndex },
+      { groupIndex: gi, deliveryIndex, judgeCoverage: () => JSON.stringify({ covered: false, singleIdentity: true, authors: [{ seat: 'stub', judges: [], notJudges: [] }], benched: [] }) },
     );
     return a;
   }

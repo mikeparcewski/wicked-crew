@@ -1,68 +1,95 @@
-// wicked-core#850: the one-CLI assurance notice crew answers a full-assurance launch with
-// (`core/assurance.ts`). The real-engine proof is tests/integration/reduced-assurance-launch.test.ts;
-// this pins the roster reading the notice is decided on.
-import { describe, expect, it } from 'vitest';
-import { launchAssuranceNotice, seatIdentity, workSeats } from '../src/core/assurance.js';
+import Fastify from 'fastify';
+import { describe, expect, it, vi } from 'vitest';
+import { coverageNote, launchAssuranceNotice, readJudgeCoverage, type JudgeCoverage } from '../src/core/assurance.js';
+import { CoreAdapter } from '../src/core/adapter.js';
+import { registerRoutes } from '../src/api/routes.js';
+import { GateCache } from '../src/api/gate-cache.js';
+import { ElicitationCache } from '../src/api/elicitation-cache.js';
 
-const seat = (key: string, inv: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
-  key,
-  headless_invocation: inv,
-  ...extra,
-});
-const notice = (seats: unknown[], reducedAssurance?: boolean) =>
-  launchAssuranceNotice({ runId: 'r1', reducedAssurance, engineClisJson: JSON.stringify(seats) });
+const uncovered: JudgeCoverage = {
+  covered: false, singleIdentity: false,
+  authors: [{ seat: 'claude', judges: [{ seat: 'codex', seenSharing: 'anthropic' }], notJudges: [{ seat: 'claude', reason: 'same_identity' }, { seat: 'pi', reason: 'benched', detail: 'Pi cannot work in this checkout' }] }],
+  benched: [{ seat: 'pi', reason: 'worktree', detail: 'Pi cannot work in this checkout' }],
+};
+const notice = (coverage: JudgeCoverage | null, reducedAssurance?: boolean) =>
+  launchAssuranceNotice({ runId: 'r1', reducedAssurance, coverage });
 
-describe('seatIdentity — the engine judge identity (wicked-core validator::seat_identity)', () => {
-  it('is the basename of the invocation argv[0], case-folded; a seat with none has no judge identity', () => {
-    expect(seatIdentity({ headless_invocation: '/usr/local/bin/Claude -p {PROMPT}' })).toBe('claude');
-    expect(seatIdentity({ headless_invocation: 'codex exec {PROMPT}' })).toBe('codex');
-    expect(seatIdentity({ headless_invocation: '   ' })).toBeNull();
-    expect(seatIdentity({})).toBeNull();
-  });
-});
-
-describe('workSeats — the seats that can do work, so evaluate or judge', () => {
-  it('drops launcher-benched and ballot-only seats; null on a roster it cannot read', () => {
-    const seats = workSeats(
-      JSON.stringify([
-        seat('claude', 'claude -p {PROMPT}'),
-        seat('codex', 'codex exec {PROMPT}', { health: { usable: false, reason: 'signed out' } }),
-        seat('pi', 'pi {PROMPT}', { seat_eligible_for_work: false }),
-      ]),
-    );
-    expect(seats).toEqual([{ key: 'claude', identity: 'claude' }]);
-    expect(workSeats('not json')).toBeNull();
-    expect(workSeats('{"key":"x"}')).toBeNull();
-    expect(workSeats(JSON.stringify([{ display_name: 'no key' }]))).toBeNull();
-  });
-});
-
-describe('launchAssuranceNotice', () => {
-  it('a full-assurance launch whose work seats are one CLI identity is TOLD, with the explicit opt-in to relaunch with', () => {
-    const n = notice([seat('claude', 'claude -p {PROMPT}'), seat('claude#2', 'claude -p {PROMPT}')]);
-    expect(n).toMatchObject({ code: 'single_cli_roster', seats: ['claude', 'claude#2'], retryWith: { retryOf: 'r1', reducedAssurance: true } });
-    expect(n?.message).toContain('reducedAssurance');
-    // `false` is the explicit full choice — told the same.
-    expect(notice([seat('claude', 'claude -p {PROMPT}')], false)).not.toBeNull();
+describe('engine judge coverage', () => {
+  it('two CLIs without an independent judge are named with the bench and shared provider', () => {
+    const n = notice(uncovered);
+    expect(n).toMatchObject({ code: 'no_independent_judge', seats: ['claude'], retryWith: { retryOf: 'r1', reducedAssurance: true } });
+    expect(n?.message).toContain('same CLI');
+    expect(n?.message).toContain('Pi cannot work in this checkout');
+    expect(n?.message).toContain('anthropic');
+    expect(n?.message).toContain('"reducedAssurance": true');
   });
 
-  it('two keys invoking ONE binary are one identity (the judge cannot be distinct) — told', () => {
-    expect(notice([seat('claude', 'claude -p {PROMPT}'), seat('claude-sonnet', 'claude --model sonnet -p {PROMPT}')])).not.toBeNull();
+  it('covered, unknown, empty and opted-in launches have no notice', () => {
+    expect(notice({ ...uncovered, covered: true })).toBeNull();
+    expect(notice(null)).toBeNull();
+    expect(notice({ ...uncovered, authors: [] })).toBeNull();
+    expect(notice(uncovered, true)).toBeNull();
   });
 
-  it('a second seat with no invocation cannot judge — told', () => {
-    expect(notice([seat('claude', 'claude -p {PROMPT}'), seat('codex', '')])).not.toBeNull();
+  it('launch coverage notes keep seat keys and mention a benched seat once', () => {
+    const note = coverageNote(uncovered);
+    expect(note).toContain('claude runs the same CLI as claude');
+    expect(note).toContain('pi cannot check it: Pi cannot work in this checkout');
+    expect(note?.match(/\bpi\b/g)).toHaveLength(1);
   });
 
-  it('a second CLI that can only vote, or is benched, does not count — told', () => {
-    expect(notice([seat('claude', 'claude -p {PROMPT}'), seat('codex', 'codex exec {PROMPT}', { seat_eligible_for_work: false })])).not.toBeNull();
-    expect(notice([seat('claude', 'claude -p {PROMPT}'), seat('codex', 'codex exec {PROMPT}', { health: { usable: false } })])).not.toBeNull();
+  it('a single identity names work seats without mistaking a seat key for a CLI', () => {
+    const n = notice({ covered: false, singleIdentity: true, authors: ['a', 'b'].map((seat) => ({ seat, judges: [], notJudges: [] })), benched: [] });
+    expect(n).toMatchObject({ code: 'single_cli_roster', seats: ['a', 'b'] });
+    expect(n?.message).toContain("Every seat that can work (a, b) runs the same CLI, so no other CLI can evaluate or judge this run's work.");
+    expect(n?.message).toContain('relaunch with "reducedAssurance": true to let it evaluate its own work, disclosed on every receipt.');
   });
 
-  it('nothing when the caller opted in, the roster has two CLI identities, or nothing readable is usable', () => {
-    expect(notice([seat('claude', 'claude -p {PROMPT}')], true)).toBeNull();
-    expect(notice([seat('claude', 'claude -p {PROMPT}'), seat('codex', 'codex exec {PROMPT}')])).toBeNull();
-    expect(notice([seat('claude', 'claude', { health: { usable: false } })])).toBeNull();
-    expect(launchAssuranceNotice({ runId: 'r1', reducedAssurance: undefined, engineClisJson: 'garbage' })).toBeNull();
+  it('reads only the engine answer, with the roster and binding unchanged', () => {
+    const calls: unknown[] = [];
+    expect(readJudgeCoverage('roster', true, (json, bound) => { calls.push([json, bound]); return JSON.stringify(uncovered); })).toEqual(uncovered);
+    expect(calls).toEqual([['roster', true]]);
+    expect(readJudgeCoverage('[]', false, () => null)).toBeNull();
+    expect(readJudgeCoverage('[]', false, () => { throw new Error('unavailable'); })).toBeNull();
+    for (const value of ['{', '{}', '{"covered":true}', JSON.stringify({ ...uncovered, authors: [{ seat: 'x', judges: [{}], notJudges: [] }] }), JSON.stringify({ ...uncovered, benched: [{ seat: 'x' }] })]) {
+      expect(readJudgeCoverage('[]', false, () => value)).toBeNull();
+    }
+  });
+
+  it('POST /runs defaults to the adapter static coverage predicate', async () => {
+    const app = Fastify();
+    const predicate = vi.spyOn(CoreAdapter, 'judgeCoverage').mockReturnValue(JSON.stringify(uncovered));
+    try {
+      registerRoutes(app, {
+        getSettings: async () => ({}), sessions: async () => [], sessionsDetail: async () => [],
+        listRepos: async () => [], listWorkflows: () => [], getWorkflow: () => null,
+        launchRun: async () => 'r1',
+      } as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, undefined, {
+        rosterWithStanding: () => [],
+      });
+      const out = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'fix it', clisJson: '[]' } });
+      expect(out.statusCode, out.body).toBe(201);
+      expect(out.json().assuranceNotice?.code).toBe('no_independent_judge');
+      expect(predicate).toHaveBeenCalledWith('[]', false);
+    } finally { predicate.mockRestore(); await app.close(); }
+  });
+
+  it('POST /runs uses the injected coverage of its engine roster', async () => {
+    const app = Fastify();
+    const calls: unknown[] = [];
+    registerRoutes(app, {
+      getSettings: async () => ({}), sessions: async () => [], sessionsDetail: async () => [],
+      listRepos: async () => [], listWorkflows: () => [], getWorkflow: () => null,
+      launchRun: async () => 'r1',
+    } as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, undefined, {
+      rosterWithStanding: () => [],
+      judgeCoverage: (json, bound) => { calls.push([JSON.parse(json), bound]); return JSON.stringify(uncovered); },
+    });
+    try {
+      const out = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'fix it', clisJson: '[]' } });
+      expect(out.statusCode, out.body).toBe(201);
+      expect(out.json().assuranceNotice?.code).toBe('no_independent_judge');
+      expect(calls).toEqual([[[], false]]);
+    } finally { await app.close(); }
   });
 });
