@@ -47,6 +47,23 @@ mentioned only where a daemon release depends on them.
   - Run it now does the same and writes what it found on the row before refusing.
 
   wicked-crew-api-types 0.215.0 (additive): `WorkflowSchedule.blocked`, `ScheduleBlocked`.
+- **A project chat searches each repository by its path, a failed search is not evidence, and the project graph is
+  readable by seats that may only read it (crew#1497).**
+  - **The scope statement:** hands the search form that works (one path per repository; the folder above them is
+    outside the read roots and was refused). It says a refused, failed or empty search is never read as "it does
+    not exist". The example command runs as written.
+  - **The project graph:** seats now get the graph directory read-only (wicked-core's grant, core-ts 0.15.46), and
+    their estate opens it read-only (wicked-estate 0.35.7). So every refresh now ends with one estate writer open,
+    `wicked-estate stats --db <graph> --journal delete` (needs wicked-estate 0.35.7): it migrates the graph and leaves
+    it in DELETE journal mode with estate's own SQLite. Nothing else opens the graph, and the daemon still loads no
+    SQLite library. At boot, every project graph is prepared the same way (no index) before a run is resumed or a
+    chat can open: that covers the graphs an upgrade left behind. crew's own CLI reads of a project graph (search,
+    blast radius, the chat's entity count) prepare it again afterwards, since estate's CLI opens every graph as a
+    writer. A graph that could not be prepared, at a refresh or at boot, is a failed refresh: the project's refresh
+    status says why, the graph is bound to no chat or run (the project page and the chat's scope say it is
+    unavailable and why), and it is retried like a failed link step. A graph that is a link is never prepared.
+  - **The manifest:** written through an exclusive, unguessable temp file renamed into place, and read without
+    following a link.
 
 ## [0.18.18] — 2026-11-19
 
@@ -106,24 +123,6 @@ files.
 - fix(insights): the run review picks its one seat from the seats new work may use (`newWorkSeats`, crew#1592), with the workflow's own rule inside that pick. A seat turned off for new work no longer interprets a review nobody named it on, whether it was started from a chat, by hand or by its schedule. A pick that leaves no usable seat, or a setting that is set but unreadable or invalid, refuses the review with words naming the setting, before anything is written; it never falls back to the whole roster. The refusal answers 409 "the review could not be prepared: ..." from a hand launch and from a schedule's Run it now (which answered 502 for it); an unattended scheduled review that is refused shows the reason on the schedule only, with no run record (crew#1608). The chosen seat also becomes the launch's `primary`, so a primary named against the whole roster can't point at a seat the review doesn't run on.
 - fix(chat jobs): a chat job's Start always hands the engine the card's seats (crew#1593). Before, when they equalled the roster read at Start, no roster was sent; the launch then waited for roster readiness and read the roster again, so a seat added in between joined a job whose card never named it. Start still waits for roster readiness first and checks the lead against that fresh standing, so a lead whose login expired is refused by name rather than launched on a stale snapshot (a reshape still carries its held run's seat records: crew#1606). A card that names no seat still launches on the daemon's roster, and a self-seated workflow still picks its own.
 - fix(settings): concurrent `PUT /settings` writes no longer revert each other (crew#1591). The read, merge and publish of a settings write run as one step in a per-file queue, so a worker's unrelated patch (`graphNodeLimit`) can't restore a person's old `powerModeDefault`, `qeAcceptance` or watch switch while both answer 200. The nested `watch` merge now runs inside the write, against the value it replaces. The daemon is the settings file's only writer; a second process writing the same file is not covered.
-- **A project chat searches each repository by its path, a failed search is not evidence, and the project graph is
-  readable by seats that may only read it (crew#1497).**
-  - **The scope statement:** hands the search form that works (one path per repository; the folder above them is
-    outside the read roots and was refused). It says a refused, failed or empty search is never read as "it does
-    not exist". The example command runs as written.
-  - **The project graph:** seats now get the graph directory read-only (wicked-core's grant, core-ts 0.15.46), and
-    their estate opens it read-only (wicked-estate 0.35.7). So every refresh now ends with one estate writer open,
-    `wicked-estate stats --db <graph> --journal delete` (needs wicked-estate 0.35.7): it migrates the graph and leaves
-    it in DELETE journal mode with estate's own SQLite. Nothing else opens the graph, and the daemon still loads no
-    SQLite library. At boot, every project graph is prepared the same way (no index) before a run is resumed or a
-    chat can open: that covers the graphs an upgrade left behind. crew's own CLI reads of a project graph (search,
-    blast radius, the chat's entity count) prepare it again afterwards, since estate's CLI opens every graph as a
-    writer. A graph that could not be prepared, at a refresh or at boot, is a failed refresh: the project's refresh
-    status says why, the graph is bound to no chat or run (the project page and the chat's scope say it is
-    unavailable and why), and it is retried like a failed link step. A graph that is a link is never prepared.
-  - **The manifest:** written through an exclusive, unguessable temp file renamed into place, and read without
-    following a link.
-
 - fix(seat images): crew reads the seat image status the current engine prints (`{image, present}` per image, with no `held`, `holdSupported` or `disk`). Before, the parser required `held`, so the `seat_images` row read "an engine older than wicked-core#1225" on every probe, and the crew#1097 roster rule never fired. A missing `held` reads as not held. An engine that says nothing about holding or the disk is no longer nagged about either, and the row reads `ok` when the images are present. A contract test runs the `wicked-core` binary that wicked-core-ts ships against a stand-in container runtime, so a schema drift fails CI (crew#1526).
 - fix(chat jobs): crew has a daemon setting, `newWorkSeats`, for which seats new work may use (a list of seat keys, or `null` for the default rule; a person's change only). It is reachable through the API now (`PUT /api/v1/settings`); studio's Agents › "Use <seat> for new work" toggle still writes only the browser and moves onto this setting in the follow-up (F1/F2 PR 3). ONE function (`core/job-seats.ts` `jobSeatPool`) draws every chat job's seats, its seat edits and a document's two helpers from it. A seat turned off is no longer put on a job nobody named it on (F2); naming a seat (`addSeats`) is still the opt-in. A seat removal says what was applied on the card ("Pi is off this job; Claude and Codex work on it"), a seat that isn't on the job is never reported as staying, and the chat instruction tells the seat a removal is a request, never done in its own words (F1). Fail closed: a `newWorkSeats` that is set but can't be read (the settings file unreadable, not a JSON object, or a link whose target is gone) refuses new work as `settings_unavailable`, and one that isn't a list of seat keys refuses as `setting_invalid`, each with a message naming the setting and how to fix it. The refusal is a live state, never stored: while it lasts, every open job and document reads blocked with the reason (on `GET /chats/:id/messages`, in the answer to a proposal request and on a proposal's broadcast), a seat's job block still yields a card, and every launch (Start, Go again, a reshape) refuses with the code before its acceptance is recorded or a held plan is answered. Once the setting reads again, the same card reads unblocked on the next read and starts. A card drawn meanwhile is drawn as if nothing were picked, so after the fix it starts with the seats it shows, which can include a seat the new pick leaves out (change them on the card). Not set at all keeps the default (every seat that can work). An invalid value stays out of `GET /settings` but is kept on disk by unrelated settings writes. One exception: a new state home's first read copies a corrupt shared settings file as empty, so a pick in it reads as not set (crew#1600). The seat count is unchanged; the engine's coverage rule replaces it next (core#1558). wicked-crew-api-types (additive): `SystemSettings.newWorkSeats`.
 - **A leading `Repository: <repo>` line no longer titles the PR (crew#1516).** The deliver title and commit
