@@ -523,7 +523,7 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
         const turn = await deps.draft({
           problem: `Draft one read query for the data source ${source}`,
           stepId: ASK_STEP_ID,
-          noSeat: 'no seat can take a turn to draft the query: sign a seat in from the Agents page, or write the SQL yourself',
+          noSeat: 'no seat can take a turn to draft the query: sign a seat in from the Helpers page, or write the SQL yourself',
           instructions: askPrompt(parsed.data.question, a.catalog, a.views),
         });
         if (!turn.ok) {

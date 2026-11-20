@@ -65,7 +65,7 @@ describe('acpFallbackLine', () => {
   it('an authentication kind benches the seat (auth_failed / unauthenticated / auth_required)', () => {
     for (const kind of ['auth_failed', 'unauthenticated', 'auth_required']) {
       expect(acpFallbackLine(ev({ type: 'acpFallback', cliKey: 'pi', fallbackKind: kind }))).toContain('pi is not signed in');
-      expect(acpFallbackLine(ev({ type: 'acpFallback', cliKey: 'pi', fallbackKind: kind }))).toContain('benched for this run');
+      expect(acpFallbackLine(ev({ type: 'acpFallback', cliKey: 'pi', fallbackKind: kind }))).toContain('benched for this run; sign it in from the Helpers page');
     }
   });
   it('a deliberate *_requires_wrapped reroute is routing, not a drop', () => {

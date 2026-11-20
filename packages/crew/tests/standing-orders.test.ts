@@ -496,7 +496,7 @@ describe('the seat parse', () => {
     const silent = fakeAdapter(null);
     expect(await seatParser({ adapter: silent.adapter, roster, timeoutMs: 30 })('x')).toMatchObject({ ok: false, code: 502, error: 'the claude seat did not answer in 0.03 s' });
     expect(silent.calls).toEqual(['launch claude with-projects', `cancel ${String(silent.launches[0]!['sessionId'])}`]);
-    expect(await seatParser({ adapter: silent.adapter, roster: () => [] })('x')).toMatchObject({ ok: false, code: 409 });
+    expect(await seatParser({ adapter: silent.adapter, roster: () => [] })('x')).toMatchObject({ ok: false, code: 409, error: 'no seat can take a turn to read the order — sign a seat in from the Helpers page' });
   });
 
   it('a path that will not launch is a 502 that leaves no reply timer armed (codex on #686)', async () => {

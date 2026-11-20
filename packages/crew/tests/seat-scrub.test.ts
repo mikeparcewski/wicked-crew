@@ -208,7 +208,7 @@ describe('GET /roster carries no account identifier (A8) and the account kind (A
     expect(claude.auth_source).toBe('seat-stderr');
     // A8: only crew's phrase for the refusal is kept — the account never was text the roster held.
     expect(claude.auth_evidence).toBe('Not logged in');
-    expect(claude.council_ineligible_reason).toMatch(/Agents page/);
+    expect(claude.council_ineligible_reason).toMatch(/Helpers page/);
     expect(leaksIn(JSON.stringify(roster))).toEqual([]);
   });
 });

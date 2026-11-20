@@ -131,9 +131,9 @@ describe('crew#1564 review r2: the words of the none and one-reviewer items', ()
   it('with no seat to sign in, the second-agent remedy does not say "Sign in"', () => {
     const a = attention([signedIn('claude'), out('pi', BENCH)]);
     expect(a[0]).toMatchObject({ id: 'cli:one-reviewer', action: null });
-    expect(a[0]!.remedy).not.toMatch(/Sign in/);
+    expect(a[0]!.remedy).toBe('Set up another helper on the Helpers page.');
     const b = attention([signedIn('claude'), out('codex')]);
-    expect(b[0]!.remedy).toBe('Sign in another agent on the Agents page.');
+    expect(b[0]!.remedy).toBe('Sign in another helper on the Helpers page.');
   });
 });
 

@@ -103,7 +103,7 @@ describe('broker probe', () => {
     expect(failing.state).toBe('degraded');
     expect(failing.reason).toMatch(/token revoked/);
     expect((await probeBroker({ containerFloor: true, clis: ['codex'], status: never, timeoutMs: 30 })).state).toBe('unknown');
-    expect((await probeBroker({ containerFloor: true, clis: ['codex'], status: async () => ({ state: 'signed_out' }) })).state).toBe('degraded');
+    expect(await probeBroker({ containerFloor: true, clis: ['codex'], status: async () => ({ state: 'signed_out' }) })).toMatchObject({ state: 'degraded', remedy: 'Sign a CLI in on the Helpers page.' });
     expect((await probeBroker({ containerFloor: false, clis: ['codex'], status: never })).state).toBe('off');
   });
 });
