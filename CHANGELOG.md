@@ -10,7 +10,8 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
-- **A gate with no open row no longer answers 503 forever (crew#1634).** When the engine's gate-actions ord differs from the cached or logged one and there is no open gate row on a durable re-read, GET `/runs/:id/gate` serves the gate without `actions` instead of `gate_actions_unavailable`; a thrown read and a mismatch against an open row stay 503, which now carries `Retry-After: 1` and is documented in `GateInfo`.
+- fix(seats): a launch freshness check retries an inconclusive probe and discards any kept signed-in answer when the check finishes or its wait expires (crew#1607). This corrects the fresh-standing-at-Start claim from crew#1601 for probe timeouts: the roster reports unknown instead of treating a kept display answer as fresh sign-in evidence. Completed unknown probes retain their existing admission behavior. Ordinary roster reads retain their bounded display behavior.
+- fix(chat proposals): proposal broadcasts read `newWorkSeats` live and publish in append order, so a retry after a settings repair no longer broadcasts a cached block reason (crew#1603). Cards drawn while the setting was unreadable or invalid carry an optional `seatsUnread` marker (`wicked-crew-api-types`, additive). After repair, Start redraws their seats or document helpers under the same proposal id and answers 409 `seats_redrawn` with the new card; a second Start launches that card. This replaces the F1/F2 caveat that a card drawn during a refusal starts with its old displayed seats even when the repaired pick excludes them.
 
 - **Gate offer reads overlap and report unavailable actions (crew#1629, crew#1579).** GET `/runs/:id/gate` reuses one run view for its receipt and concurrent offers on cache and record paths. A failed or moved engine action read is retried once, then returns retryable 503 `gate_actions_unavailable`; engines without the read still omit actions. Regression coverage also checks QE-refused deliver gates on both paths.
 
@@ -70,6 +71,12 @@ mentioned only where a daemon release depends on them.
     unavailable and why), and it is retried like a failed link step. A graph that is a link is never prepared.
   - **The manifest:** written through an exclusive, unguessable temp file renamed into place, and read without
     following a link.
+
+### Fixed
+
+- **Daemon libuv pool starvation (crew#1495).** Set the pool size before other CLI imports to at least 16 threads,
+  scaling with available CPU parallelism up to 1024, so engine work leaves more capacity for filesystem reads.
+  Valid operator `UV_THREADPOOL_SIZE` overrides from 1 through 1024 are preserved; invalid values use the default.
 
 ## [0.18.18] — 2026-11-19
 
