@@ -48,7 +48,15 @@ import type { CoreAdapter, IndexBudget } from '../core/adapter.js';
 import { ExecOutputTooLarge, execCapped } from '../core/exec.js';
 import { codeGraphDb, CodeGraphRootUnresolvableError } from '../core/repoPaths.js';
 import type {
+  BlastRadiusFreshness,
   ProjectBlastRadius,
+  ProjectBlastRadiusFreshness,
+  ProjectGraphBoundaries,
+  ProjectGraphMemberCoverage,
+  ProjectGraphPath,
+  ProjectGraphPathEnd,
+  ProjectGraphPathHop,
+  ProjectGraphPossible,
   ProjectGraphAction,
   ProjectGraphCrossing,
   ProjectGraphLinkRun,
@@ -984,9 +992,10 @@ async function refreshOnce(
   const failed: ProjectGraphRefreshResult['failed'] = [];
   const repoRows: NonNullable<ProjectGraphRefreshResult['repos']> = [];
 
-  if (members.repos.length === 0) {
+  // No members and no graph: nothing to build and nothing to prune (crew#1476 prunes an existing one below).
+  if (members.repos.length === 0 && !existsSync(dbPath)) {
     return {
-      status: buildStatus({ projectId, members, manifest: null, dbExists: existsSync(dbPath), env }),
+      status: buildStatus({ projectId, members, manifest: null, dbExists: false, env }),
       indexed,
       skipped,
       failed,
@@ -996,7 +1005,7 @@ async function refreshOnce(
 
   assertLabelsUnique(members.repos);
 
-  if (!(await estateSupportsMultiRepo(env))) {
+  if (members.repos.length > 0 && !(await estateSupportsMultiRepo(env))) {
     // Refusing is the ONLY safe answer. An estate without `--repo` accepts the flag, drops it, and
     // exits 0, so proceeding would co-locate three repos into a database holding one of them, with
     // nothing in any output to say so.
@@ -1016,8 +1025,22 @@ async function refreshOnce(
   st.budgetMs = [...budgets.values()].reduce((sum, b) => sum + b.budgetMs, 0);
 
   await mkdir(dirname(dbPath), { recursive: true });
-  const dbExisted = existsSync(dbPath);
+  let dbExisted = existsSync(dbPath);
   const prior = dbExisted ? await readManifest(projectId, env) : null;
+  const currentLabels = new Set(members.repos.map((m) => m.label));
+  const pruned = (prior?.repos ?? []).map((r) => r.label).filter((label) => !currentLabels.has(label));
+  if (dbExisted && pruned.length > 0) {
+    // crew#1476: estate has no per-label delete; rebuild only on refresh, including journal siblings.
+    for (const suffix of ['', '-wal', '-shm', '-journal']) {
+      try {
+        await unlink(`${dbPath}${suffix}`);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+    }
+    dbExisted = false;
+    log?.(`project graph ${projectId}: rebuild to prune removed labels ${pruned.join(', ')}`);
+  }
   const priorByLabel = new Map((prior?.repos ?? []).map((r) => [r.label, r]));
   // Prior rows survive a refresh only if the database they describe does. When it does not, every
   // repo is re-indexed and the manifest is rebuilt from this run alone.
@@ -1184,6 +1207,7 @@ async function refreshOnce(
     failed,
     repos: repoRows,
     ...(link === undefined ? {} : { link }),
+    ...(pruned.length === 0 ? {} : { pruned }),
   };
 }
 
@@ -1420,7 +1444,7 @@ export async function queryable(
  * `null` when the prefix is not a CURRENT member's label: rows of a repo that has since been
  * detached are still in the database (estate has no per-label delete), and returning them under a
  * project-scoped query would answer about a repo the project no longer contains. They are excluded
- * here and named in `status.staleRepos`, which is a different thing from being dropped silently.
+ * here and named in `status.staleRepos` until refresh rebuilds without them (crew#1476).
  */
 function attribute(
   path: string,
@@ -1466,6 +1490,8 @@ interface RawHit {
   kind?: unknown;
   file?: unknown;
   line?: unknown;
+  depth?: unknown;
+  stale?: unknown;
   via_crossing?: unknown;
   via_crossing_omitted?: unknown;
 }
@@ -1483,6 +1509,8 @@ function toHit(raw: RawHit, labels: Map<string, string>): ProjectGraphHit | null
     kind: typeof raw.kind === 'string' ? raw.kind : '',
     file: where.file,
     line: typeof raw.line === 'number' ? raw.line : 0,
+    ...(typeof raw.depth === 'number' ? { depth: raw.depth } : {}),
+    ...(raw.stale === 'modified' || raw.stale === 'deleted' ? { stale: raw.stale } : {}),
     ...(typeof raw.via_crossing === 'string' ? { via_crossing: raw.via_crossing } : {}),
     ...(raw.via_crossing_omitted === true ? { via_crossing_omitted: true } : {}),
   };
@@ -1492,11 +1520,60 @@ function toHit(raw: RawHit, labels: Map<string, string>): ProjectGraphHit | null
  *  loop forever. 200 pages of ~235 rows is far past any real answer. */
 const MAX_BLAST_PAGES = 200;
 
+/** crew#1556: estate's cap on the stale-file sample, retained across reply pages. */
+const STALE_FILES_CAP = 20;
+
+function mergeFreshness(pages: BlastRadiusFreshness[]): BlastRadiusFreshness {
+  const staleFiles = new Map<string, NonNullable<BlastRadiusFreshness['stale_files']>[number]>();
+  const indexing = new Set<string>();
+  let commitsBehind: number | null | undefined;
+  let unindexedFiles: number | null = null;
+  let staleFilesTotal = 0;
+  let checkedFiles = 0;
+  let notFileBacked = 0;
+  for (const page of pages) {
+    for (const row of page.stale_files ?? []) {
+      if (!staleFiles.has(row.file) && staleFiles.size < STALE_FILES_CAP) staleFiles.set(row.file, row);
+    }
+    for (const label of page.indexing ?? []) indexing.add(label);
+    if (page.commits_behind === null) commitsBehind = null;
+    else if (commitsBehind !== null && typeof page.commits_behind === 'number') {
+      commitsBehind = Math.max(commitsBehind ?? 0, page.commits_behind);
+    }
+    if (typeof page.unindexed_files === 'number') unindexedFiles = Math.max(unindexedFiles ?? 0, page.unindexed_files);
+    // crew#1556: per-page counts; a file spanning pages counts once on each page.
+    if (typeof page.stale_files_total === 'number') staleFilesTotal += page.stale_files_total;
+    if (typeof page.checked_files === 'number') checkedFiles += page.checked_files;
+    if (typeof page.not_file_backed === 'number') notFileBacked += page.not_file_backed;
+  }
+  const roots = pages.at(-1)?.roots;
+  return {
+    stale_files: [...staleFiles.values()], stale_files_total: staleFilesTotal,
+    checked_files: checkedFiles, not_file_backed: notFileBacked,
+    ...(commitsBehind === undefined ? {} : { commits_behind: commitsBehind }),
+    unindexed_files: unindexedFiles, indexing: [...indexing],
+    ...(roots === undefined ? {} : { roots }),
+  };
+}
+
+/** crew#1555: keep counts intact while attributing the sample and removing host paths. */
+function attributeFreshness(raw: BlastRadiusFreshness, labels: Map<string, string>): ProjectBlastRadiusFreshness {
+  const { stale_files, ...rest } = raw;
+  delete rest.roots;
+  return {
+    ...rest,
+    ...(stale_files === undefined ? {} : { stale_files: stale_files.flatMap((row) => {
+      const where = attribute(row.file, labels);
+      return where === null ? [] : [{ ...where, status: row.status }];
+    }) }),
+  };
+}
+
 /**
  * `wicked-estate blast-radius --json`, EVERY page of it (operator ruling "full graph"; estate#279,
  * wicked-estate 0.28.0+). estate pages a wide answer: a page names the rest with `next_cursor`
  * (null on the last page), and `--cursor` returns the next rows of the SAME answer. The pages'
- * `dependents` are joined; every other field is the LAST page's, so once every page is in,
+ * `dependents` are joined and freshness is merged (crew#1556); other fields are the LAST page's, so once every page is in,
  * `truncated_dependents` says only what the walk itself cut (and `next_cursor` is null). A cursor
  * still unread at the page cap is left on the answer with that page's `truncated_dependents`, so
  * the unread rows read as cut, never as absent. An estate that does not page sends no
@@ -1509,6 +1586,7 @@ export async function readBlastRadiusPages(
   opts: { timeout: number; cwd?: string },
 ): Promise<Record<string, unknown>> {
   const dependents: unknown[] = [];
+  const freshnessPages: BlastRadiusFreshness[] = [];
   let first: Record<string, unknown> | null = null;
   let last: Record<string, unknown> = {};
   let cursor: string | null = null;
@@ -1517,12 +1595,16 @@ export async function readBlastRadiusPages(
     const { stdout } = await execCapped(exe, args, opts);
     last = JSON.parse(stdout) as Record<string, unknown>;
     first ??= last;
+    if (last['freshness'] !== null && typeof last['freshness'] === 'object') {
+      freshnessPages.push(last['freshness'] as BlastRadiusFreshness);
+    }
     if (Array.isArray(last['dependents'])) dependents.push(...(last['dependents'] as unknown[]));
     cursor = typeof last['next_cursor'] === 'string' && last['next_cursor'] !== '' ? last['next_cursor'] : null;
     if (cursor === null) break;
   }
   if (first === last) return last;
   const merged: Record<string, unknown> = { ...last, dependents };
+  if (freshnessPages.length > 0) merged['freshness'] = mergeFreshness(freshnessPages);
   // The joined rows' window: from the first page's start, over the last page's total.
   const p0 = first?.['page'] as { from?: unknown } | undefined;
   const pn = last['page'] as { total?: unknown } | undefined;
@@ -1540,6 +1622,8 @@ export async function projectBlastRadius(
 ): Promise<ProjectBlastRadius> {
   const raw = (await readProjectGraph(q.dbPath, () => readBlastRadiusPages(estateExe(env), name, q.dbPath, { timeout: QUERY_TIMEOUT_MS }), env)) as {
     dependents?: RawHit[];
+    resolved?: unknown;
+    freshness?: BlastRadiusFreshness;
     unresolved?: number;
     target?: string;
     truncated_dependents?: unknown;
@@ -1555,10 +1639,7 @@ export async function projectBlastRadius(
   // X1: estate lists the same (shallowest, capped) crossings on every page; the last page's list.
   // Only crossings between CURRENT members count: a removed member's links stay in the database
   // until the next refresh relinks without it, and must not make an answer read `linked`.
-  const members = new Set(q.labels.keys());
-  const listed = Array.isArray(raw.crossings) ? (raw.crossings as ProjectGraphCrossing[]) : [];
-  const crossings = listed.filter((c) => members.has(c.from?.repo) && members.has(c.to?.repo));
-  const dropped = new Set(listed.filter((c) => !crossings.includes(c)).map((c) => c.id));
+  const { crossings, dropped } = memberCrossings(raw.crossings, q.labels);
   // A hit reached through a dropped crossing loses its provenance claim along with the crossing.
   const hits = allHits.map((h) => {
     if (h.via_crossing === undefined || !dropped.has(h.via_crossing)) return h;
@@ -1585,6 +1666,9 @@ export async function projectBlastRadius(
   };
   return {
     ...causes,
+    ...(typeof raw.resolved === 'boolean' ? { resolved: raw.resolved } : {}),
+    ...(raw.freshness === undefined ? {} : { freshness: attributeFreshness(raw.freshness, q.labels) }),
+    ...blastCoverage(raw.link, q.status.projectId, q.labels),
     projectId: q.status.projectId,
     target: typeof raw.target === 'string' ? raw.target : name,
     dependents: hits,
@@ -1603,6 +1687,135 @@ export async function projectBlastRadius(
       : {}),
     ...(raw.crossings_truncated === true ? { crossings_truncated: true } : {}),
     ...(linked && stale ? { link_stale: true, link_stale_labels: [...new Set(staleLabels)].sort() } : {}),
+  };
+}
+
+/** crew#1476: only crossings between current members can substantiate a project answer. */
+function memberCrossings(raw: unknown, labels: Map<string, string>): { crossings: ProjectGraphCrossing[]; dropped: Set<string> } {
+  const listed = Array.isArray(raw) ? raw as ProjectGraphCrossing[] : [];
+  const crossings = listed.filter((c) => labels.has(c.from?.repo) && labels.has(c.to?.repo));
+  return { crossings, dropped: new Set(listed.filter((c) => !crossings.includes(c)).map((c) => c.id)) };
+}
+
+interface LinkStatus {
+  project?: string;
+  generation?: number;
+  stale?: boolean;
+  stale_labels?: string[];
+  last_error?: string | null;
+  coverage?: Array<Omit<ProjectGraphMemberCoverage, 'repoId' | 'repo'> & {
+    label: string;
+    boundaries?: Record<string, string[]>;
+  }>;
+}
+
+/** crew#1476, crew#1477: shared coverage attribution; omitted metrics stay unknown. */
+function memberCoverage(state: LinkStatus, labels: Map<string, string>): ProjectGraphMemberCoverage[] {
+  return [...labels].sort(([a], [b]) => a.localeCompare(b)).map(([repo, repoId]) => {
+    const row = state.coverage?.find((c) => c.label === repo);
+    return {
+      repoId, repo,
+      ...(typeof row?.links_in === 'number' ? { links_in: row.links_in } : {}),
+      ...(typeof row?.links_out === 'number' ? { links_out: row.links_out } : {}),
+      ...(typeof row?.incomplete === 'boolean' ? { incomplete: row.incomplete } : {}),
+      ...(typeof row?.package_imports === 'number' ? { package_imports: row.package_imports } : {}),
+      ...(typeof row?.manifests === 'number' ? { manifests: row.manifests } : {}),
+      ...(row?.boundary_counts === undefined ? {} : { boundary_counts: row.boundary_counts }),
+    };
+  });
+}
+
+function blastCoverage(raw: unknown, projectId: string, labels: Map<string, string>): { coverage?: ProjectGraphMemberCoverage[] } {
+  const state = (Array.isArray(raw) ? raw as LinkStatus[] : []).find((s) => s.project === projectId);
+  return state === undefined ? {} : { coverage: memberCoverage(state, labels) };
+}
+
+interface RawPathEnd {
+  symbol: string;
+  name: string;
+  kind: string;
+  file: string;
+  line_1based: number;
+}
+
+function pathEnd(raw: RawPathEnd, labels: Map<string, string>): ProjectGraphPathEnd | null {
+  // estate emits a bare `{symbol}` only if an endpoint is missing from its own result: not attributable.
+  if (typeof raw.file !== 'string') return null;
+  const where = attribute(raw.file, labels);
+  return where === null ? null : { ...where, symbol: raw.symbol, name: raw.name, kind: raw.kind, line: raw.line_1based };
+}
+
+/** crew#1476: an estate route is a project answer only when every endpoint is a current member. */
+export async function projectGraphPath(
+  q: Extract<Queryable, { ok: true }>,
+  from: string,
+  to: string,
+  maxDepth?: number,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<ProjectGraphPath> {
+  const { stdout } = await readProjectGraph(q.dbPath, () => execCapped(estateExe(env), [
+    'path', from, to, '--db', q.dbPath, '--json', ...(maxDepth === undefined ? [] : ['--max-depth', String(maxDepth)]),
+  ], { timeout: QUERY_TIMEOUT_MS }), env);
+  const raw = JSON.parse(stdout) as {
+    from: string; to: string; found: boolean; resolved?: boolean; unresolved: 'from' | 'to' | null;
+    depth_bounded: boolean; node_bounded: boolean; crossings?: unknown;
+    hops: Array<{ source: RawPathEnd; target: RawPathEnd; kind: string; confidence?: number }>;
+  };
+  const hops: ProjectGraphPathHop[] = [];
+  let excluded = false;
+  for (const hop of raw.hops) {
+    const source = pathEnd(hop.source, q.labels);
+    const target = pathEnd(hop.target, q.labels);
+    if (source === null || target === null) { excluded = true; break; }
+    hops.push({ source, target, kind: hop.kind, ...(typeof hop.confidence === 'number' ? { confidence: hop.confidence } : {}) });
+  }
+  const { crossings } = memberCrossings(raw.crossings, q.labels);
+  const linked = crossings.length > 0;
+  return {
+    projectId: q.status.projectId, from: raw.from, to: raw.to, found: excluded ? false : raw.found,
+    ...(typeof raw.resolved === 'boolean' ? { resolved: raw.resolved } : {}),
+    unresolved: raw.unresolved, hops: excluded ? [] : hops,
+    depth_bounded: raw.depth_bounded, node_bounded: raw.node_bounded,
+    ...(Array.isArray(raw.crossings) ? { crossings } : {}),
+    ...(excluded ? { excluded: 'the route found runs through a repository that is no longer in this project; refresh the project graph' } : {}),
+    reposSearched: [...q.labels.keys()].sort(), missingRepos: q.status.missingRepos,
+    linkage: linked ? 'linked' : 'co-located',
+    note: `${linked ? LINKED_NOTE : CO_LOCATION_NOTE}${raw.depth_bounded || raw.node_bounded ? ' The search stopped at its depth or node bound, so a route it did not find may still exist.' : ''}`,
+  };
+}
+
+/** crew#1477: possible boundaries are imports the linker could not prove, never graph edges. */
+export async function projectGraphBoundaries(
+  q: Extract<Queryable, { ok: true }>,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<ProjectGraphBoundaries> {
+  const base = { projectId: q.status.projectId, linked: false, possible: [], members: [] };
+  if (!(await estateSupportsLink(env))) return {
+    ...base, note: 'this wicked-estate cannot link repositories (X1, wicked-estate 0.34.0+); upgrade it to see boundaries',
+  };
+  const { stdout } = await readProjectGraph(q.dbPath, () => execCapped(estateExe(env), [
+    'link', '--project', q.status.projectId, '--status', '--json', '--db', q.dbPath,
+  ], { timeout: QUERY_TIMEOUT_MS }), env);
+  const raw = JSON.parse(stdout) as LinkStatus | null;
+  if (raw === null) return { ...base, note: 'this project has not been linked yet; refresh its code graph' };
+  const possible: ProjectGraphPossible[] = [];
+  for (const row of raw.coverage ?? []) {
+    const repoId = q.labels.get(row.label);
+    if (repoId === undefined) continue;
+    for (const [reason, packages] of Object.entries(row.boundaries ?? {})) {
+      for (const pkg of packages) possible.push({ repoId, repo: row.label, reason, package: pkg });
+    }
+  }
+  possible.sort((a, b) => a.repo.localeCompare(b.repo) || a.reason.localeCompare(b.reason) || a.package.localeCompare(b.package));
+  return {
+    projectId: q.status.projectId, linked: true,
+    ...(raw.generation === undefined ? {} : { generation: raw.generation }),
+    ...(raw.stale === undefined ? {} : { stale: raw.stale }),
+    stale_labels: (raw.stale_labels ?? []).filter((label) => q.labels.has(label)),
+    ...(raw.last_error === undefined ? {} : { last_error: raw.last_error }),
+    members: memberCoverage(raw, q.labels), possible: possible.slice(0, 500),
+    ...(possible.length > 500 ? { possible_total: possible.length, possible_truncated: true } : {}),
+    note: 'possible = imports estate could not prove are links to another member, by reason; never edges',
   };
 }
 
