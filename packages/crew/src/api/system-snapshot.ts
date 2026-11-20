@@ -806,6 +806,8 @@ export async function diskRow(
   return infraRow('disk', 'ok', both ? `${said} (of ${gib(total)})` : `${gib(free)} free of ${gib(total)}`, null, started, details);
 }
 
+const LOAD_BUSY_RATIO = 1;
+
 export function loadRow(read: () => { load1: number; cores: number } = () => ({ load1: loadavg()[0] ?? 0, cores: cpus().length }), platform: NodeJS.Platform = process.platform): SystemInfraRow {
   const started = Date.now();
   if (platform === 'win32') return infraRow('load', 'unknown', 'Windows reports no load average', null, started);
@@ -814,7 +816,7 @@ export function loadRow(read: () => { load1: number; cores: number } = () => ({ 
   const details = { load1: Math.round(load1 * 100) / 100, cores, perCore: Math.round(ratio * 100) / 100 };
   const words = `load ${details.load1} on ${cores} cores`;
   if (ratio >= 5) return infraRow('load', 'down', `${words}: the host is saturated; seats and checks will time out`, 'Pause new runs or stop heavy jobs until the load falls.', started, details);
-  if (ratio >= 1.5) return infraRow('load', 'degraded', `${words}: work will run slowly`, 'Avoid starting more parallel runs until the load falls.', started, details);
+  if (ratio >= LOAD_BUSY_RATIO) return infraRow('load', 'degraded', `${words}: work will run slowly`, 'Avoid starting more parallel runs until the load falls.', started, details);
   return infraRow('load', 'ok', words, null, started, details);
 }
 
