@@ -37,7 +37,7 @@ export interface EnvRefusal {
   message: string;
 }
 
-const NAME_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
+const NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 
 /**
  * A canonical fingerprint of a stdio server's non-secret `env` (names and values, sorted, hashed), or
@@ -100,8 +100,8 @@ export function validateServerEnv(env: Readonly<Record<string, string>>, secretE
   const secretUpper = secretEnv?.toUpperCase() ?? null;
   for (const [i, name] of names.entries()) {
     if (i >= ENV_MAX_NAMES) return refuse(name, 'too_many', `at most ${ENV_MAX_NAMES} variables`);
+    if (!NAME_RE.test(name)) return refuse(name, 'bad_name', 'a name is letters, digits and _, not starting with a digit, at most 64 characters');
     const upper = name.toUpperCase();
-    if (!NAME_RE.test(upper)) return refuse(name, 'bad_name', 'a name is letters, digits and _, not starting with a digit, at most 64 characters');
     if (seen.has(upper)) return refuse(name, 'duplicate', 'names are compared without case');
     seen.add(upper);
     if (secretUpper !== null && upper === secretUpper) return refuse(name, 'secret_variable', "this server's secret goes in its secret field");

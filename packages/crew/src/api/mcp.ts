@@ -425,7 +425,7 @@ function toConfig(body: z.infer<typeof McpServerConfigSchema>): McpUpstreamConfi
     args: body.args ?? [],
     url: body.url ?? null,
     ...(body.pm !== undefined ? { pm: { system: body.pm.system } } : {}),
-    ...(body.env !== undefined ? { env: { ...body.env } } : {}),
+    ...(body.env !== undefined && Object.keys(body.env).length > 0 ? { env: { ...body.env } } : {}),
     ...(body.kind === 'rest'
       ? { openapiUrl: body.openapiUrl ?? null, openapi: body.openapi ?? null, operations: body.operations ?? null }
       : {}),
