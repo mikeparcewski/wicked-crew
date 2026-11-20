@@ -60,8 +60,9 @@ engine underneath is **wicked-core**. (In the API and the code a job is a *run*,
 ## Install & quickstart
 
 **Requirements:** Node.js 22.12 or newer / npm · **uv** (the daemon builds its skills environment with
-`uv sync`; without uv every job launch is refused) · **git** · a container runtime · at least one
-coding-agent CLI you can sign in · **wicked-estate** and **wicked-garden** — both installed for you by
+`uv sync`; without uv every job launch is refused) · **git** · a local Kubernetes cluster (Rancher Desktop,
+below) · two coding-agent CLIs you can sign in, so a different one reviews the work (the install guide uses
+Claude Code and Codex) · **wicked-estate** and **wicked-garden** — both installed for you by
 the family installer (and uv too, when it is missing). The fastest path is the installer:
 
 ```bash
@@ -86,7 +87,9 @@ finding then names its version and where it was found. Update that copy (for the
 `npm install -g wicked-garden@latest`) and restart `wicked-crew serve`.
 
 Uploading a file or a SQLite database as a data source needs Node.js 24.12, 25.1 or later. The
-daemon needs a local Kubernetes cluster (Rancher Desktop; Docker Desktop can't set the pod PID limit wicked needs, and the installer reports it as not ready), running and
+daemon needs a local Kubernetes cluster (Rancher Desktop, with the kubelet's `pod-max-pids` set to 4096 or less
+(the install guide shows how); Docker Desktop can't set the pod PID limit wicked needs, and the installer
+reports it as not ready), running and
 installed once for crew: `npx wicked-installer` (0.10.0 or later) runs the install when the cluster can hold seats,
 or run crew's own engine binary by hand (`<platform>` is `darwin-arm64`, `darwin-x64`, `linux-x64-gnu`,
 `linux-arm64-gnu` or `win32-x64-msvc`):
@@ -101,8 +104,10 @@ crew's floor images aren't visible to the kubelet and seats won't start (wicked-
 
 Governed agents run each CLI's headless mode in a hardened seat pod (crew builds the seat images with
 the container CLI on first use, into the store the cluster shares), and you sign each agent in once from
-studio's Helpers page. Governed work needs Claude Code and Codex signed in (the install guide's path);
-Pi, GitHub Copilot and OpenCode are optional extra helpers. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead. Claude Code
+studio's Helpers page. Governed work needs two agents signed in, so one reviews the other's work: any two of
+Claude Code, Codex, GitHub Copilot, OpenCode and Pi (the install guide signs in Claude Code and Codex). With one,
+a job that changes or reviews code waits at a gate unless you launch it as "reduced assurance".
+`WICKED_SEAT_FLOOR=host` keeps the labelled interim host floor instead. Claude Code
 and GitHub Copilot sign in through a login pod; Codex, Pi and OpenCode sign in with their host CLIs and a
 temporary home. Either way the credential goes to the broker and the seat sees a placeholder, except
 a Claude Code seat on a Claude subscription, which receives its sign-in token (a guard fails the step
