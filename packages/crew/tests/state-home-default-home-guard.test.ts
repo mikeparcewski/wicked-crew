@@ -91,8 +91,14 @@ async function boot() {
   return { app, adapter };
 }
 
+// Engine-side, not crew's: wicked-core's governance root is `<HOME>/.wicked/core-gov` whatever the state home
+// (gate_hook.rs gov_root, probed at boot since wicked-core#1652). Filed as wicked-core#1663; left out here until the
+// engine follows the state home, so every crew-owned path stays guarded.
+const ENGINE_GOV_ROOT = '.wicked/core-gov/';
+
 function expectEmptyHome() {
-  const found = tree(home);
+  const left = tree(home).filter((p) => !p.startsWith(ENGINE_GOV_ROOT));
+  const found = left.filter((p) => p !== '.wicked/' || left.some((q) => q !== p && q.startsWith('.wicked/')));
   expect(found, `unexpected fake HOME entries:\n${found.join('\n')}`).toEqual([]);
 }
 
