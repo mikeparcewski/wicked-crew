@@ -1,3 +1,5 @@
+import { registerRedeliverRoutes, type CheckRunTree, type RedeliverExec } from './redeliver.js';
+import type { GhExec } from '../core/deliver.js';
 import { REVIEW_WORKFLOW } from '../insights/workflow.js';
 import { runUsageCost, type LooseEvent, type RunUsageCost } from '../insights/run-facts.js';
 import { appsRuntimeDir, appsServerArtifact, containerEngineKnown } from '../apps/publish/artifacts.js';
@@ -1337,6 +1339,12 @@ export interface RegisteredRoutes {
 }
 
 export interface RuntimeDeps {
+  /** Recheck the rebased tree before redelivery; default reads Core.checkRunTree at call time. */
+  checkRunTree?: CheckRunTree;
+  /** Run a refresh script; tests supply a temp HOME with stub gh and a local origin. */
+  redeliverExec?: RedeliverExec;
+  /** Read delivered PR status through gh; route tests inject the same stub as the scripts. */
+  redeliverGhExec?: GhExec;
   /** DES-CHAT-ARTIFACTS-001 §13 A2: the chat-artifacts TEST configuration — every operation resolves and Go records a
    *  stub dispatch, starting nothing (`WICKED_CHAT_ARTIFACTS_STUB=1`, read by `createServer`). Absent = production.
    *  Since A3, `create` is real in it too whenever {@link launchBoundDraft} is wired; only the unbuilt kinds are stubs. */
@@ -4740,6 +4748,11 @@ export function registerRoutes(
       if (repoDeliverChain.get(repoRef) === mine) repoDeliverChain.delete(repoRef);
     }
   };
+  registerRedeliverRoutes(app, {
+    adapter, index: deliveryIndex, audit, freeze: deliveryFreeze, actorOf, repoRootOf, withRepoDeliverLock,
+    ghExec: runtime.redeliverGhExec, exec: runtime.redeliverExec, checkRunTree: runtime.checkRunTree,
+    identityFor: async (ref) => deliverIdentityFor(await adapter.getSettings(), ref).login || undefined,
+  });
   /** The last words of a failed deliver script — enough to name the refusal, bounded so a full
    *  git transcript never becomes an error body. */
   const deliverErrorTail = (output: string): string => {

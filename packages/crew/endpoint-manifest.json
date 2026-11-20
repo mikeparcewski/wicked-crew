@@ -2361,6 +2361,18 @@
       "statusCodes": []
     },
     {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/pr",
+      "requestType": null,
+      "responseType": "RunPullRequest",
+      "statusCodes": [
+        200,
+        404,
+        409,
+        500
+      ]
+    },
+    {
       "method": "POST",
       "path": "/api/v1/runs/:id/reassign",
       "requestType": "ReassignRequest",
@@ -2370,6 +2382,19 @@
         400,
         404,
         409
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/:id/redeliver",
+      "requestType": null,
+      "responseType": "RedeliverRunResult",
+      "statusCodes": [
+        200,
+        404,
+        409,
+        500,
+        501
       ]
     },
     {

@@ -6742,6 +6742,30 @@ export interface CodebaseArchive {
   source: 'worktree' | 'branch';
 }
 
+/** Live GitHub PR status for a recorded delivery. */
+export interface RunPullRequest {
+  number: number;
+  url: string;
+  state: string;
+  mergeable: string;
+  mergeStateStatus: string;
+  baseRefName: string;
+  headRefName: string;
+  headSha: string;
+  deliveredHead?: string;
+  headMoved: boolean;
+  failingChecks: string[];
+}
+
+/** A leased base-only rebase whose exact new tree passed repository checks. */
+export interface RedeliverRunResult {
+  prUrl: string;
+  oldHead: string;
+  newHead: string;
+  checks: { passed: true; count: number; names: string[] };
+  conflictsResolved: string[];
+}
+
 export interface DeliverRunResult {
   prUrl: string;
   /** (crew#720) The final-codebase zip taken for this delivery (also on `AgentSession.codebase_archive`).
