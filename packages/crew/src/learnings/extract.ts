@@ -6,18 +6,13 @@
  * a list of {@link LearningCandidate}s out. Nothing is written here; {@link ./service.ts} decides
  * what is filed, and everything filed is a PROPOSAL a person approves (never a direct memory write).
  *
- * Two kinds of candidate:
- *
- *  - `template` candidates are worded here, from structured fields, and are filed as they are, at
- *    the run's checkpoints: a test the floor saw fail and then pass on its identical retry (flaky
- *    under load), and a check the floor could not start in its sandbox.
- *  - `material` candidates are raw evidence a person or a seat wrote: the operator's rulings at a
- *    gate (a floor override, a QE skip, each with its reason), standing steers from the working
- *    document, the orchestrator's recorded decisions and their reasons, a QE reviewer that could
- *    not run its checks, a reviewer that asked for changes, a check that was red on the base too
- *    or ran out of time. They are long and run-specific, so at the end of the run ONE distinct,
- *    cheap seat distils them into durable learnings (the builder never grades itself). When no
- *    such seat can run they are not filed: raw evidence is the run's record, not a learning.
+ * `material` candidates are raw evidence a person or a seat wrote: the operator's rulings at a
+ * gate (a floor override, a QE skip, each with its reason), standing steers from the working
+ * document, the orchestrator's recorded decisions and their reasons, a QE reviewer that could
+ * not run its checks, a reviewer that asked for changes, a check that was red on the base too
+ * or ran out of time. They are long and run-specific, so at the end of the run ONE distinct,
+ * cheap seat distils them into durable learnings (the builder never grades itself). When no
+ * such seat can run they are not filed: raw evidence is the run's record, not a learning.
  */
 
 import { createHash } from 'node:crypto';
@@ -52,7 +47,7 @@ export interface LearningCandidate {
 
 /** The longest material text kept per candidate (a ruling, a steer, a review). */
 export const MATERIAL_MAX_CHARS = 1500;
-/** The most test names one template names. */
+/** The most test names one material candidate names. */
 const MAX_TESTS_NAMED = 6;
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -132,33 +127,6 @@ function fromRepoChecks(view: SessionView, repo: string): LearningCandidate[] {
       const name = str(check['name']) ?? 'a check';
       const decision = isRecord(check['decision']) ? check['decision'] : {};
       const outcome = str(decision['outcome']);
-      // A check's own retry cleared these, or the engine's identical retry passed the whole check.
-      const flakyIds = new Set<string>(strings(check['flaky_ids']));
-      for (const rerun of Array.isArray(check['reruns']) ? check['reruns'].filter(isRecord) : []) {
-        for (const id of strings(rerun['flaky_ids'])) flakyIds.add(id);
-      }
-      if (flakyIds.size > 0) {
-        for (const id of flakyIds) {
-          const content =
-            `In ${repo}, the test \`${testName(id)}\` (repo check \`${name}\`) is flaky: it failed and then passed ` +
-            `on a re-run of the same tree. A lone failure of it is not evidence against a change; re-run it before debugging.`;
-          out.push({ key: keyOf('gotcha', content), kind: 'gotcha', source: 'repo_checks', form: 'template', content, ord, cli: null });
-        }
-      } else if (decision['flaky'] === true || check['classification'] === 'flaky_under_load') {
-        const failed = strings(check['failure_ids']);
-        const which = failed.length > 0 ? ` (it failed on ${namesList(failed)})` : '';
-        const content =
-          `In ${repo}, the repo check \`${name}\` failed on an oversubscribed host and passed on its identical retry${which}. ` +
-          `It is load-sensitive: retry it on a quieter host before treating a failure as the change's.`;
-        out.push({ key: keyOf('gotcha', content), kind: 'gotcha', source: 'repo_checks', form: 'template', content, ord, cli: null });
-      }
-      if (outcome === 'could_not_run') {
-        const why = str(decision['reason']) ?? str(check['stderr_tail']) ?? 'no reason recorded';
-        const content =
-          `In ${repo}, the repo check \`${name}\` could not be started in the run's sandbox: ${clip(why, 300)}. ` +
-          `Check its tools are on the seat's PATH before blaming the change.`;
-        out.push({ key: keyOf('gotcha', content), kind: 'gotcha', source: 'repo_checks', form: 'template', content, ord, cli: null });
-      }
       if (outcome === 'base_red_unseparated' || outcome === 'timed_out' || outcome === 'flaky_twice') {
         const base = isRecord(check['base']) && isRecord(check['base']['run']) ? check['base']['run'] : null;
         const baseFailed = base !== null ? strings(base['failure_ids']) : [];

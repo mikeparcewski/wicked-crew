@@ -1,9 +1,9 @@
 /**
  * Run learnings, part 2: from a run's record to the approve queue (the operator's 2026-10-30 ask).
  *
- *  - At the run's CHECKPOINTS (a power checkpoint, a unit done, a gate decided) the template
- *    learnings found so far ({@link extractLearnings}: a flaky test, a check the sandbox could not
- *    start) are filed at once.
+ *  - At the run's CHECKPOINTS (a power checkpoint, a unit done, a gate decided) any template
+ *    learnings found so far ({@link extractLearnings}) are filed at once. None are produced today:
+ *    sandbox and toolchain facts (a flaky test, a check the sandbox could not start) are not proposed (crew#1622).
  *  - At the run's END the rest of the evidence (rulings, steers, decisions, review findings, base-red
  *    checks) goes to ONE cheap seat that did not build the run: a `distill-learnings` run, one seat,
  *    one turn, no repository. Crew files what it writes. When no such seat can run (none signed in,
