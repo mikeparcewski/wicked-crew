@@ -1099,3 +1099,38 @@ describe('crew#1569: the statement on the container seat floor', () => {
     expect(chatScopeStatement('k3', scope, undefined, { containerFloor: true })).toBe(plain);
   });
 });
+
+// studio#1094: only the same live, repo-less scope can acquire its first repository.
+describe('ChatScopeIndex.pickFirstRepo', () => {
+  it('swaps a live empty scope, keeps refusals, and copies the engine and request', async () => {
+    const index = new ChatScopeIndex(base);
+    const empty = await resolveChatScope({ chatId: 'pick', repoRefs: [] }, deps());
+    const picked = await resolveChatScope({ chatId: 'pick', repoRefs: ['r-alpha'] }, deps());
+    if (!empty.ok || !picked.ok) throw new Error('fixture scope refused');
+    const refused = [{ cliKey: 'codex', reason: 'signed out', source: 'auth' as const }];
+    index.set('pick', empty.scope, index.reserve('pick')!, refused, empty.engine);
+    const request = { chatId: 'pick', repoRefs: ['r-alpha'] };
+    expect(index.pickFirstRepo('pick', empty.scope, picked.scope, picked.engine, request)).toBe(true);
+    picked.engine.readRoots.push('/later');
+    request.repoRefs.push('r-beta');
+    expect(index.get('pick')).toBe(picked.scope);
+    expect(index.refusedOf('pick')).toEqual(refused);
+    expect(index.engineOf('pick')?.readRoots).toEqual(['/srv/repos/alpha']);
+    expect(index.requestOf('pick')?.repoRefs).toEqual(['r-alpha']);
+    expect(index.pickFirstRepo('pick', picked.scope, empty.scope, empty.engine, request)).toBe(false);
+  });
+
+  it('refuses a stale previous scope or a non-live slot without changing it', async () => {
+    const index = new ChatScopeIndex(base);
+    const empty = await resolveChatScope({ chatId: 'pick', repoRefs: [] }, deps());
+    const picked = await resolveChatScope({ chatId: 'pick', repoRefs: ['r-alpha'] }, deps());
+    if (!empty.ok || !picked.ok) throw new Error('fixture scope refused');
+    const request = { chatId: 'pick', repoRefs: ['r-alpha'] };
+    expect(index.pickFirstRepo('pick', empty.scope, picked.scope, picked.engine, request)).toBe(false);
+    const token = index.reserve('pick')!;
+    expect(index.pickFirstRepo('pick', empty.scope, picked.scope, picked.engine, request)).toBe(false);
+    index.set('pick', empty.scope, token);
+    expect(index.pickFirstRepo('pick', { ...empty.scope }, picked.scope, picked.engine, request)).toBe(false);
+    expect(index.get('pick')).toBe(empty.scope);
+  });
+});

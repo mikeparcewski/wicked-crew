@@ -648,6 +648,8 @@ export interface ChatProposalDeps {
   projectOf(chatId: string): string | null;
   /** The live chat, or `null` once it has ended. */
   chat(chatId: string): ProposalChat | null;
+  /** studio#1094: validate and record the person's first repository pick for a live repo-less chat. */
+  pickFirstRepo?(chatId: string, repoRef: string, actor: Actor, pid: string): Promise<{ ok: true; name: string } | { ok: false; status: number; error: string }>;
   /** Seats that can work now and that work may NAME, in roster order (enabled for council, work-eligible, not signed
    *  out), opt-in seats included (`proposalRoster` in routes.ts, F43, crew#1590): the default launch rule applies to the
    *  pool drawn from when nobody chose (`jobSeatPool`). */
@@ -2763,7 +2765,7 @@ export class ChatProposals {
           : new Set<string>();
     const confirmed = confirmIds !== null;
     delete edits.confirmLoss;
-    const ctx0 = await this.jobContext(chatId, src.pid, src.turnId, fromPerson ? 'person' : (parent.proposal.seat ?? 'seat'), chat, {
+    let ctx0 = await this.jobContext(chatId, src.pid, src.turnId, fromPerson ? 'person' : (parent.proposal.seat ?? 'seat'), chat, {
       revises: parent.proposal.pid,
       lineage: parent.proposal.lineage ?? parent.proposal.pid,
       notes: [],
@@ -2775,6 +2777,15 @@ export class ChatProposals {
     // the person never asked for in their own words changes nothing. On the person's route, only the press applies it.
     let qe: { reason: string | null } | null = null;
     const extraNotes: string[] = [];
+    // studio#1094: only the person's repository answer can set the chat's first scope.
+    if (src.person !== null && edits.repoRef !== undefined && parent.proposal.needs?.some((n) => n.id === 'repo') === true && chat.repos.length === 0 && this.deps.pickFirstRepo !== undefined) {
+      const picked = await this.deps.pickFirstRepo(chatId, edits.repoRef, src.person, src.pid);
+      if (!picked.ok) return { code: picked.status, body: { code: 'chat_scope_refused', error: picked.error } };
+      const scoped = this.jobChat(chatId);
+      if (scoped === null) return { code: 409, body: { code: 'chat_gone', error: `chat ${chatId} has ended; start a new one` } };
+      ctx0 = { ...ctx0, chat: scoped };
+      extraNotes.push(`This chat now reads ${picked.name}: you picked it for this job.`);
+    }
     if (edits.skipQe !== undefined && !confirmed) {
       const reason = edits.skipQe.reason;
       delete edits.skipQe;

@@ -86,6 +86,12 @@ export class AskPathIndex {
     return this.paths.get(chatId);
   }
 
+  /** studio#1094: a first repository pick changes governance only before the answer run launches. */
+  rescope(chatId: string, scopeKind: GovernanceScopeKind): void {
+    const path = this.paths.get(chatId);
+    if (path !== undefined && path.runId === undefined) path.scopeKind = scopeKind;
+  }
+
   /** The chat a run was launched from, if it is an ask path of this daemon. */
   chatOf(runId: string): string | undefined {
     for (const p of this.paths.values()) if (p.runId === runId) return p.chatId;
