@@ -2390,6 +2390,10 @@ export function registerRoutes(
   // driving this function directly (tests) has no hooks, so downstream code
   // still gets the ONE actor shape via this accessor.
   const actorOf = (req: { actor?: import('../core/types.js').Actor }) => req.actor ?? LOCAL_ACTOR;
+  function clientDetail(req: FastifyRequest): { client?: { userAgent: string } } {
+    const userAgent = req.headers['user-agent'];
+    return typeof userAgent === 'string' ? { client: { userAgent: userAgent.slice(0, 200) } } : {};
+  }
   // crew#753: the blocking `skills.garden` finding (an installed garden older than the minimum), or
   // `null`. Read from the skills runtime's cached health; no seam ⇒ nothing to judge.
   const gardenBlocker = (): { kind: string; severity: string; message: string } | null => {
@@ -7447,6 +7451,7 @@ export function registerRoutes(
           runId: id,
           detail: {
             approve: parsed.data.approve,
+            choice: parsed.data.action ?? (parsed.data.approve ? 'approve' : 'reject'),
             ...(parsed.data.amend !== undefined ? { amend: parsed.data.amend } : {}),
             ...(parsed.data.action !== undefined ? { action: parsed.data.action } : {}),
             ...(parsed.data.amendScope !== undefined ? { amendScope: parsed.data.amendScope } : {}),
@@ -7541,7 +7546,7 @@ export function registerRoutes(
     },
     async (req, reply) => {
       const { id } = req.params as { id: string };
-      const out = await decideGate(id, req.body, actorOf(req));
+      const out = await decideGate(id, req.body, actorOf(req), clientDetail(req));
       return reply.code(out.code).send(out.body);
     },
   );
@@ -7740,7 +7745,7 @@ export function registerRoutes(
       // "who approved" trail has no side door (task #88).
       audit.record(gated ? 'gate.decided' : 'run.resumed', actorOf(req), {
         runId: id,
-        detail: gated ? { approve: true, via: 'resume', status } : { status },
+        detail: gated ? { approve: true, via: 'resume', ...clientDetail(req), status } : { status },
       });
       const landing = steeringPropose
         ? await landSteeringProposal({ adapter, audit, actor: actorOf(req) }, run, gatePrompt)
@@ -8170,7 +8175,7 @@ export function registerRoutes(
       noteRode = note !== undefined;
       audit.record('gate.decided', actorOf(req), {
         runId: id,
-        detail: { approve: true, via: 'reassign', status },
+        detail: { approve: true, via: 'reassign', ...clientDetail(req), status },
       });
     };
     const reassigned = (approved: boolean): void => {
