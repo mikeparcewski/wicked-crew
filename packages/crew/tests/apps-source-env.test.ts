@@ -21,17 +21,17 @@ const stdio = (env?: Record<string, string>): McpUpstreamConfig => ({
   ...(env !== undefined ? { env } : {}),
 });
 
+// Literal canonical JSON and SHA-256 of the descriptor before non-secret env was added.
+const PRE_ENV_DESCRIPTOR_JSON = '{"address":null,"args":["server.mjs"],"auth":{"header":null,"prefix":null,"ref":"env:X"},"command":"node","kind":"mcp-stdio","openapi":null,"openapiUrl":null,"sql":null,"url":null}';
+const PRE_ENV_DESCRIPTOR_SHA256 = '1143f289cede4ca621de58dd29dd6902faf627bd53a6d884e54d78cfdcaed4be';
+
 describe('appSourceDescriptor binds the non-secret env (CX1 review)', () => {
   it('a source with no env keeps exactly its old descriptor and hash (no key added)', () => {
-    // The env key is absent when there is no env, so the descriptor is byte-identical to the pre-change form
-    // and its hash is unchanged — existing Apps locks and write grants do not go stale on upgrade.
     const noEnv = appSourceDescriptor(stdio());
-    expect('env' in noEnv).toBe(false);
-    // The only thing env adds is the `env` key: the no-env descriptor equals the with-env one minus that key,
-    // so a source that never had env keeps its exact pre-change descriptor (and therefore its hash).
-    const withEnvMinusEnv = appSourceDescriptor(stdio({ A: '1' }));
-    delete withEnvMinusEnv.env;
-    expect(noEnv).toEqual(withEnvMinusEnv);
+    expect(noEnv).toEqual(JSON.parse(PRE_ENV_DESCRIPTOR_JSON));
+    expect(canonicalJson(noEnv)).toBe(PRE_ENV_DESCRIPTOR_JSON);
+    expect(pinOf(stdio()).descriptorHash).toBe(PRE_ENV_DESCRIPTOR_SHA256);
+    expect(pinOf(stdio({})).descriptorHash).toBe(PRE_ENV_DESCRIPTOR_SHA256);
   });
 
   it('an env-only change changes the descriptor hash; the same env is stable', () => {

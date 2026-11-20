@@ -4,7 +4,7 @@
 // (the write never reaches the upstream), while re-saving the identical env keeps the grant valid. This drives
 // AppWritePath.prepareAction → recheck (packages/crew/src/apps/actions/write-path.ts), not just a hash compare.
 
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +28,7 @@ const ASSIGN: AppAction = {
 
 describe('an mcp-stdio source env change withdraws the write grant on recheck (CX1 review)', () => {
   let h: Harness;
+  let base: string;
   let specPath: string;
   let version: number;
 
@@ -38,7 +39,7 @@ describe('an mcp-stdio source env change withdraws the write grant on recheck (C
 
   beforeEach(async () => {
     h = await appsHarness();
-    const base = mkdtempSync(join(tmpdir(), 'apps-env-recheck-'));
+    base = mkdtempSync(join(tmpdir(), 'apps-env-recheck-'));
     specPath = join(base, 'spec.json');
     // A single write tool (not readOnly) the Apps action calls.
     writeFileSync(specPath, JSON.stringify({ tools: [{ name: 'assign_ticket', description: 'Assign a ticket', inputSchema: { type: 'object', properties: { id: { type: 'integer' }, owner: { type: 'string' } }, required: ['id', 'owner'] }, annotations: { readOnlyHint: false, destructiveHint: false } }] }));
@@ -50,7 +51,11 @@ describe('an mcp-stdio source env change withdraws the write grant on recheck (C
     version = (landed.body.app as AppDetail).head.version;
   });
   afterEach(async () => {
-    await h.close();
+    try {
+      await h.close();
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 
   it('re-saving the SAME env keeps the grant; an env-only change refuses the action (409 contract_changed)', async () => {

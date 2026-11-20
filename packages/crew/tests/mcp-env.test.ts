@@ -15,8 +15,8 @@ import { McpServerConfigSchema, registerMcpRoutes } from '../src/api/mcp.js';
 import type { McpPreviewResponse, McpServer } from '../src/core/types.js';
 import { validateServerEnv } from '../src/mcp/env.js';
 import { probeMcpServer, transportFor } from '../src/mcp/probe.js';
-import { McpRegistry } from '../src/mcp/registry.js';
-import { McpRegistryStore } from '../src/mcp/registry-store.js';
+import { configOf, McpRegistry } from '../src/mcp/registry.js';
+import { McpRegistryStore, type McpServerRecord } from '../src/mcp/registry-store.js';
 import type { SecretStore } from '../src/mcp/secrets.js';
 import { removeScratch } from './setup/scratch.js';
 
@@ -37,6 +37,8 @@ describe('validateServerEnv', () => {
     ['HTTPS_PROXY', { HTTPS_PROXY: 'http://p' }, 'reserved_name'],
     ['LD_PRELOAD', { LD_PRELOAD: 'x.so' }, 'reserved_name'],
     ['1BAD', { '1BAD': 'x' }, 'bad_name'],
+    ['APP_ſTATE', { 'APP_ſTATE': SENTINEL }, 'bad_name'],
+    ['APP_KEY', { 'APP_KEY': SENTINEL }, 'bad_name'],
     [SECRET_VAR, { [SECRET_VAR]: SENTINEL }, 'secret_variable'],
     ['fixture_token', { fixture_token: SENTINEL }, 'secret_variable'],
     ['GREETING', { GREETING: 'ghp_' + 'a'.repeat(30) }, 'credential_value'],
@@ -166,6 +168,27 @@ class MemorySecretStore implements SecretStore {
   async delete(a: string): Promise<void> { this.values.delete(a); }
 }
 
+describe('configOf env', () => {
+  const record = (env?: Record<string, string>): McpServerRecord => ({
+    name: 'fx', kind: 'mcp-stdio', command: 'node', args: [], url: null, auth: null,
+    enabled: true, health: { state: 'ok', consecutiveFailures: 0, checkedAt: null, lastError: null },
+    registeredAt: '', updatedAt: '', tools: [],
+    ...(env !== undefined ? { env } : {}),
+  });
+
+  it.each([undefined, {}])('omits env with no keys (%j)', (env) => {
+    expect(configOf(record(env))).not.toHaveProperty('env');
+  });
+
+  it('copies env so changing the returned config leaves the stored record unchanged', () => {
+    const stored = record({ LOG_LEVEL: 'debug' });
+    const config = configOf(stored);
+    expect(config.env).toEqual({ LOG_LEVEL: 'debug' });
+    config.env!.LOG_LEVEL = 'info';
+    expect(stored.env).toEqual({ LOG_LEVEL: 'debug' });
+  });
+});
+
 describe('the routes', () => {
   let base: string;
   let specPath: string;
@@ -186,6 +209,40 @@ describe('the routes', () => {
   afterEach(async () => {
     await app.close();
     removeScratch(base);
+  });
+
+  it('uses the same preview hash for empty and absent env and omits env from read views', async () => {
+    const absent = await post('/mcp/servers/preview', config());
+    const empty = await post('/mcp/servers/preview', config({ env: {} }));
+    expect(absent.statusCode, absent.body).toBe(200);
+    expect(empty.statusCode, empty.body).toBe(200);
+    const preview = empty.json() as McpPreviewResponse;
+    expect(preview.previewHash).toBe((absent.json() as McpPreviewResponse).previewHash);
+    expect(preview.server).not.toHaveProperty('env');
+    const saved = await post('/mcp/servers', { previewHash: preview.previewHash });
+    expect(saved.statusCode, saved.body).toBe(201);
+    expect(saved.json()).not.toHaveProperty('env');
+    expect(await registry.get('fx')).not.toHaveProperty('env');
+    expect((await registry.list()).servers[0]).not.toHaveProperty('env');
+  });
+
+  it('omits an empty env from a direct registry preview and saved read view', async () => {
+    const preview = await registry.preview({ name: 'fx', kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath], url: null, auth: null, env: {} });
+    expect(preview.server).not.toHaveProperty('env');
+    await registry.save(preview.previewHash);
+    expect(await registry.get('fx')).not.toHaveProperty('env');
+  });
+
+  it('keeps the previewed env when a caller mutates the returned preview or read env', async () => {
+    const preview = await registry.preview({ name: 'fx', kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath], url: null, auth: null, env: { LOG_LEVEL: 'debug' } });
+    preview.server.env!.LOG_LEVEL = 'info';
+    const saved = await registry.save(preview.previewHash);
+    expect(saved.env).toEqual({ LOG_LEVEL: 'debug' });
+    saved.env!.LOG_LEVEL = 'warn';
+    const read = await registry.get('fx');
+    expect(read.env).toEqual({ LOG_LEVEL: 'debug' });
+    read.env!.LOG_LEVEL = 'error';
+    expect((await registry.snapshot('fx'))?.config.env).toEqual({ LOG_LEVEL: 'debug' });
   });
 
   it('round-trips env through preview and save; the agent view has none; env changes the preview hash', async () => {
