@@ -1,6 +1,6 @@
 // Run learnings (operator 2026-10-30: "with all the run activity, no memories or learnings are being saved").
-// A run proposes what it learned to the approve queue: template learnings at its checkpoints, the rest
-// distilled at its end by ONE seat that did not build it (nothing is filed when no such seat can run). Everything is a
+// A run proposes what it learned to the approve queue, distilled at its end by ONE seat that did not
+// build it (nothing is filed when no such seat can run). Everything is a
 // `memory` PROPOSAL attributed to the source run; nothing is written without a person's approval; an
 // approved learning rides in the next matching launch's brief and never in its PR text.
 
@@ -117,12 +117,9 @@ const events: LooseEvent[] = [
 ];
 
 describe('extractLearnings: what a run\'s record says it learned', () => {
-  it('words templates from structured fields and keeps the rest as material', () => {
+  it('keeps the run evidence as material', () => {
     const c = extractLearnings(runView(), events);
-    const templates = c.filter((x) => x.form === 'template');
-    expect(templates).toHaveLength(1);
-    expect(templates[0]).toMatchObject({ kind: 'gotcha', source: 'repo_checks' });
-    expect(templates[0]!.content).toContain('In acme-core, the test `tests/bridge-reaper.test.ts > finds a child` (repo check `test`) is flaky');
+    expect(c.every((x) => x.form === 'material')).toBe(true);
     const material = c.filter((x) => x.form === 'material');
     expect(material.map((m) => m.source).sort()).toEqual(['operator_ruling', 'qe_review', 'repo_checks', 'review', 'steer', 'working_notes']);
     const ruling = material.find((m) => m.source === 'operator_ruling')!;
@@ -193,17 +190,43 @@ function harness(opts: { seats?: unknown[]; mode?: 'distill' | 'extract'; propos
 }
 
 describe('RunLearningsService: proposals, never writes', () => {
-  it('files the template learnings at a checkpoint, attributed to the run, and nothing else yet', async () => {
+  it('does not propose flaky, load-sensitive or unstartable repo checks as learnings', async () => {
+    const view = runView({ units: [{
+      ord: 2,
+      role: 'creator',
+      assigned_cli: 'claude',
+      repo_checks: { checks: [
+        { name: 'test', decision: { outcome: 'pass' }, flaky_ids: ['FAIL tests/flaky.test.ts > retries'] },
+        { name: 'test-rerun', decision: { outcome: 'pass' }, reruns: [{ flaky_ids: ['FAIL tests/flaky.test.ts > retries later'] }] },
+        { name: 'test-load', decision: { outcome: 'pass', flaky: true } },
+        { name: 'test-classified', decision: { outcome: 'pass' }, classification: 'flaky_under_load' },
+        { name: 'test-unstartable', decision: { outcome: 'could_not_run', reason: 'test runner missing from PATH' } },
+      ] },
+    }] });
+    const candidates = extractLearnings(view, []);
+    expect.soft(candidates.filter((c) => c.form === 'template')).toEqual([]);
+    expect.soft(candidates.filter((c) => /is flaky|could not be started/u.test(c.content))).toEqual([]);
+
+    const h = harness({ view, mode: 'extract' });
+    h.svc.onEvent({ type: 'powerCheckpointReached', session: 'run-1' });
+    await settle();
+    expect.soft(h.submitted).toEqual([]);
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+    await settle();
+    expect(h.submitted).toEqual([]);
+    expect(h.launches).toEqual([]);
+  });
+
+  it('files nothing at checkpoints while the material waits for distillation', async () => {
     const h = harness();
     h.svc.onEvent({ type: 'powerCheckpointReached', session: 'run-1' });
     await settle();
-    expect(h.submitted).toHaveLength(1);
-    expect(h.submitted[0]).toMatchObject({ runId: 'run-1', agent: 'crew', args: { kind_type: 'memory', facets: { repo: 'acme-core', project: 'proj-a' }, payload: { capture: 'gotcha', tier: 'semantic', reach: 'project' } } });
+    expect(h.submitted).toHaveLength(0);
     expect(h.launches).toHaveLength(0);
-    // A second checkpoint proposes nothing twice.
+    // A second checkpoint still waits for the distil seat.
     h.svc.onEvent({ type: 'unitDone', session: 'run-1' });
     await settle();
-    expect(h.submitted).toHaveLength(1);
+    expect(h.submitted).toHaveLength(0);
   });
 
   it('at the end hands the evidence to ONE seat that did not build the run, then files what it distilled', async () => {
@@ -221,9 +244,8 @@ describe('RunLearningsService: proposals, never writes', () => {
     const handoff = JSON.parse(readFileSync(join(runDir, HANDOFF_FILE), 'utf8')) as { evidence: Array<{ id: string; text: string }>; already_proposed: string[]; source_run: string };
     expect(handoff.source_run).toBe('run-1');
     expect(handoff.evidence.length).toBe(6);
-    expect(handoff.already_proposed.some((t) => t.includes('is flaky'))).toBe(true);
-    // Only the template went in at the end sweep; the material waits for the seat.
-    expect(h.submitted.map((s) => s.args.payload['capture'])).toEqual(['gotcha']);
+    expect(handoff.already_proposed).toEqual([]);
+    expect(h.submitted).toHaveLength(0); // the material waits for the seat
     expect((await h.svc.view('run-1')).distilling).toBe(true);
 
     writeFileSync(
@@ -238,18 +260,18 @@ describe('RunLearningsService: proposals, never writes', () => {
     );
     h.svc.onEvent({ type: 'sessionCompleted', session: 'distill-1' });
     await settle();
-    const distilled = h.submitted.slice(1);
+    const distilled = h.submitted;
     expect(distilled).toHaveLength(2);
-    for (const s of distilled) expect(s).toMatchObject({ runId: 'run-1', agent: 'codex', args: { kind_type: 'memory' } });
+    for (const s of distilled) expect(s).toMatchObject({ runId: 'run-1', agent: 'codex', args: { kind_type: 'memory', facets: { repo: 'acme-core', project: 'proj-a' }, payload: { tier: 'semantic', reach: 'project' } } });
     expect(existsSync(join(runDir, FILED_FILE))).toBe(true);
     const v = await h.svc.view('run-1');
-    expect(v).toMatchObject({ runId: 'run-1', proposed: 3, pending: 3, approved: 0, distilling: false });
+    expect(v).toMatchObject({ runId: 'run-1', proposed: 2, pending: 2, approved: 0, distilling: false });
 
     // A resume's second terminal frame files nothing and launches nothing more.
     h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
     h.svc.onEvent({ type: 'sessionCompleted', session: 'distill-1' });
     await settle();
-    expect(h.submitted).toHaveLength(3);
+    expect(h.submitted).toHaveLength(2);
     expect(h.launches).toHaveLength(1);
   });
 
@@ -260,12 +282,9 @@ describe('RunLearningsService: proposals, never writes', () => {
     h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
     await settle();
     expect(h.launches).toHaveLength(0);
-    // Only the checkpoint template; none of the material (the operator's rulings, steers, reviews, base-red text).
-    expect(h.submitted).toHaveLength(1);
-    expect(h.submitted.every((s) => s.args.payload['capture'] === 'gotcha' && /flaky|could not be started/u.test(String(s.args.payload['content'])))).toBe(true);
+    expect(h.submitted).toHaveLength(0);
     const material = extractLearnings(runView(), events).filter((c) => c.form === 'material').map((c) => c.content);
     expect(material.length).toBeGreaterThan(0);
-    for (const s of h.submitted) expect(material).not.toContain(String(s.args.payload['content']));
     // Not marked filed: the next recovery tries the distil again when a seat can run.
     expect(existsSync(join(h.dir, 'run-1', FILED_FILE))).toBe(false);
   });
@@ -274,13 +293,13 @@ describe('RunLearningsService: proposals, never writes', () => {
     const refused = harness({ launchFails: true });
     refused.svc.onEvent({ type: 'sessionFailed', session: 'run-1' });
     await settle();
-    expect(refused.submitted.length).toBe(1);
+    expect(refused.submitted).toHaveLength(0);
 
     const extract = harness({ mode: 'extract' });
     extract.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
     await settle();
     expect(extract.launches).toHaveLength(0);
-    expect(extract.submitted.length).toBe(1);
+    expect(extract.submitted).toHaveLength(0);
     expect(existsSync(join(extract.dir, 'run-1', FILED_FILE))).toBe(true);
 
     const silent = harness();
@@ -288,24 +307,27 @@ describe('RunLearningsService: proposals, never writes', () => {
     await settle();
     silent.svc.onEvent({ type: 'sessionFailed', session: 'distill-1' });
     await settle();
-    expect(silent.submitted.length).toBe(1);
-    expect(silent.submitted.every((s) => s.agent === 'crew' && s.args.payload['capture'] === 'gotcha')).toBe(true);
+    expect(silent.submitted).toHaveLength(0);
     // The outcome is recorded, so a restart does not read the same missing report again.
     expect(JSON.parse(readFileSync(join(silent.dir, 'run-1', FILED_FILE), 'utf8'))).toMatchObject({ distilled: true, filed: 0, noUsableReport: true });
   });
 
   it('never proposes what the queue or the memory store already holds, whichever run filed it', async () => {
-    const flaky = extractLearnings(runView(), events).find((c) => c.form === 'template')!.content;
-    const h = harness({
-      proposals: [{ id: 'old', kind_type: 'memory', state: 'approved', payload: { content: flaky.toUpperCase() }, facets: {}, provenance: { run_id: 'run-0' } }],
-    });
-    h.svc.onEvent({ type: 'gateDecided', session: 'run-1' });
-    await settle();
-    expect(h.submitted).toHaveLength(0);
-    const m = harness({ memories: [flaky] });
-    m.svc.onEvent({ type: 'gateDecided', session: 'run-1' });
-    await settle();
-    expect(m.submitted).toHaveLength(0);
+    const content = 'In acme-core, CHANGELOG.md is owned by release tooling; never edit it by hand.';
+    for (const opts of [
+      { proposals: [{ id: 'old', kind_type: 'memory', state: 'approved', payload: { content: content.toUpperCase() }, facets: {}, provenance: { run_id: 'run-0' } }] },
+      { memories: [content] },
+    ]) {
+      const h = harness(opts);
+      h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+      await settle();
+      expect(h.launches).toHaveLength(1);
+      writeFileSync(join(h.dir, 'run-1', OUT_DIR, REPORT_FILE), JSON.stringify({ learnings: [{ kind: 'gotcha', content }] }));
+      h.svc.onEvent({ type: 'sessionCompleted', session: 'distill-1' });
+      await settle();
+      expect(h.submitted).toHaveLength(0);
+      expect(existsSync(join(h.dir, 'run-1', FILED_FILE))).toBe(true);
+    }
   });
 
   it('learns nothing from runs that capture, review or set up, and nothing when switched off', async () => {
@@ -347,29 +369,26 @@ describe('RunLearningsService under overlap, failure and restart (xreview on cre
     expect(h.submitted.filter((x) => x.agent === 'codex')).toHaveLength(1);
   });
 
-  it('two runs that hit the same flaky test propose it once', async () => {
-    const h = harness();
-    h.views.push(runView({ id: 'run-2' }));
-    h.svc.onEvent({ type: 'unitDone', session: 'run-1' });
-    h.svc.onEvent({ type: 'unitDone', session: 'run-2' });
-    await settle();
-    expect(h.submitted).toHaveLength(1);
-  });
-
   it('a submit that fails leaves the end retryable, and recovery files it without doubling what landed', async () => {
-    const h = harness({ mode: 'extract' });
+    const h = harness();
     const svc = h.svc as unknown as { deps: { submit: (...a: unknown[]) => Promise<string | null> } };
     const real = svc.deps.submit;
     let calls = 0;
-    svc.deps.submit = async (...a: unknown[]) => (++calls === 1 ? Promise.reject(new Error('estate down')) : real(...a));
     h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
     await settle();
+    writeFileSync(join(h.dir, 'run-1', OUT_DIR, REPORT_FILE), JSON.stringify({ learnings: [
+      { kind: 'gotcha', content: 'In acme-core, CHANGELOG.md is owned by release tooling; never edit it by hand.' },
+      { kind: 'steering', content: 'In acme-core, every refusal line starts with WICKED-RETRY none and names the rule.' },
+    ] }));
+    svc.deps.submit = async (...a: unknown[]) => (++calls === 1 ? Promise.reject(new Error('estate down')) : real(...a));
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'distill-1' });
+    await settle();
     expect(existsSync(join(h.dir, 'run-1', FILED_FILE))).toBe(false);
-    expect(h.submitted).toHaveLength(0); // the one template failed; nothing else is filed
+    expect(h.submitted).toHaveLength(1); // the other distilled learning landed
     svc.deps.submit = real;
     await h.svc.recover();
     expect(existsSync(join(h.dir, 'run-1', FILED_FILE))).toBe(true);
-    expect(h.submitted).toHaveLength(1);
+    expect(h.submitted).toHaveLength(2);
     const contents = h.submitted.map((x) => x.args.payload['content']);
     expect(new Set(contents).size).toBe(contents.length);
   });
@@ -428,7 +447,7 @@ describe('RunLearningsService under overlap, failure and restart (xreview on cre
     writeFileSync(join(h.dir, 'run-1', OUT_DIR, REPORT_FILE), JSON.stringify({ learnings: [{ content: 'too short' }] }));
     h.svc.onEvent({ type: 'sessionCompleted', session: 'distill-1' });
     await settle();
-    expect(h.submitted.slice(1)).toHaveLength(0);
+    expect(h.submitted).toHaveLength(0);
   });
 
   // The rig's 467eed15: a codex distil rightly wrote {"learnings": []} with a 183-character reply, the engine's
@@ -479,7 +498,7 @@ describe('RunLearningsService under overlap, failure and restart (xreview on cre
     h.svc.onEvent({ type: 'awaitingHuman', session: 'distill-1', gateKind: 'escalation', prompt: 'worker failed' } as never);
     await settle();
     expect(h.cancels).toEqual(['distill-1']); // a refused stop is logged; the run is filed either way
-    expect(h.submitted.slice(1)).toHaveLength(0);
+    expect(h.submitted).toHaveLength(0);
     expect(JSON.parse(readFileSync(join(h.dir, 'run-1', FILED_FILE), 'utf8'))).toMatchObject({ distilled: true, filed: 0, noUsableReport: true, stopped: 'stopped at escalation: worker failed' });
 
     // xreview on #1253: the refused stop is not abandoned. The run is still parked, so the next recovery stops it
