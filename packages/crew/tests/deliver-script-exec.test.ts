@@ -1345,7 +1345,7 @@ describe('deliver script, driven for real (crew#317)', () => {
     git(fx.clone, 'push', '-q', 'origin', 'main');
     // …and the run adds its OWN bullet to the SAME section — a rebase conflict by construction.
     writeFileSync(join(fx.workdir, 'CHANGELOG.md'), base + '- run TWO change (#411)\n');
-    // The union's three scratch files are made under TMPDIR too.
+    // The resolver's scratch files are made under TMPDIR too.
     const mk = recordMktemp(fx.root);
 
     const r = await runDeliver(fx, { env: { TMPDIR: mk.tmp } });
@@ -1359,6 +1359,155 @@ describe('deliver script, driven for real (crew#317)', () => {
     const delivered = git(fx.origin, 'show', `wicked/${RUN_ID}:CHANGELOG.md`);
     expect(delivered).toContain('run ONE change (#416)');
     expect(delivered).toContain('run TWO change (#411)');
+    expect(delivered).toBe(base + '- run ONE change (#416)\n- run TWO change (#411)\n');
+  }, 60_000);
+
+  it('delivers a CHANGELOG-only conflict after main cuts a RELEASE, preserving its release and link refs (studio#1157)', async () => {
+    const fx = fixture();
+    const base = '## [Unreleased]\n\n### Changed\n- base line\n';
+    writeFileSync(join(fx.clone, 'CHANGELOG.md'), base);
+    git(fx.clone, 'add', '-A');
+    git(fx.clone, 'commit', '-qm', 'add changelog');
+    git(fx.clone, 'push', '-q', 'origin', 'main');
+    git(fx.workdir, 'fetch', '-q', 'origin');
+    git(fx.workdir, 'reset', '--hard', 'origin/main');
+
+    const released = '## [0.5.1]\n\n### Changed\n- base line\n\n[0.5.1]: https://example.test/compare/v0.5.0...v0.5.1\n';
+    writeFileSync(join(fx.clone, 'CHANGELOG.md'), '## [Unreleased]\n\n' + released);
+    git(fx.clone, 'add', '-A');
+    git(fx.clone, 'commit', '-qm', 'cut release');
+    git(fx.clone, 'push', '-q', 'origin', 'main');
+    writeFileSync(join(fx.workdir, 'CHANGELOG.md'), base + '- run change\n');
+
+    const r = await runDeliver(fx);
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).not.toContain('LIFT-CONFLICT');
+    expect(r.lastLine).toBe('https://github.com/o/r/pull/7');
+    expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
+    expect(git(fx.origin, 'show', `wicked/${RUN_ID}:CHANGELOG.md`)).toBe(
+      '## [Unreleased]\n\n### Changed\n- run change\n\n' + released,
+    );
+  }, 60_000);
+
+  it('STRANDS a CHANGELOG plus README rebase conflict, pushing nothing (studio#1157)', async () => {
+    const fx = fixture();
+    const base = '## [Unreleased]\n\n### Changed\n- base line\n';
+    writeFileSync(join(fx.clone, 'CHANGELOG.md'), base);
+    git(fx.clone, 'add', '-A');
+    git(fx.clone, 'commit', '-qm', 'add changelog');
+    git(fx.clone, 'push', '-q', 'origin', 'main');
+    git(fx.workdir, 'fetch', '-q', 'origin');
+    git(fx.workdir, 'reset', '--hard', 'origin/main');
+
+    writeFileSync(join(fx.clone, 'CHANGELOG.md'), base + '- main change\n');
+    writeFileSync(join(fx.clone, 'README.md'), 'base\nfrom main\n');
+    git(fx.clone, 'add', '-A');
+    git(fx.clone, 'commit', '-qm', 'main edits both files');
+    git(fx.clone, 'push', '-q', 'origin', 'main');
+    writeFileSync(join(fx.workdir, 'CHANGELOG.md'), base + '- run change\n');
+    writeFileSync(join(fx.workdir, 'README.md'), 'base\nfrom run\n');
+
+    const r = await runDeliver(fx);
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain('LIFT-CONFLICT');
+    expect(r.outcome).toBe('stranded');
+    expect(originBranches(fx)).toEqual(['main']);
+    expect(git(fx.workdir, 'show', `wicked/${RUN_ID}:CHANGELOG.md`)).toBe(base + '- run change\n');
+    expect(git(fx.workdir, 'show', `wicked/${RUN_ID}:README.md`)).toBe('base\nfrom run\n');
+  }, 60_000);
+
+  it('places CHANGELOG additions by subsection, deduplicates shared lines, and keeps main first (studio#1157)', async () => {
+    const fx = fixture();
+    const prefix = '# Changelog\n\n## [Unreleased]\n\n';
+    const body = '- base intro\n\n### Changed\n- base line\n\n### Fixed\n- base fix\n\n';
+    // A non-version ## heading also ends Unreleased.
+    const suffix = '## Historical notes\n\nOriginal notes\n';
+    writeFileSync(join(fx.clone, 'CHANGELOG.md'), prefix + body + suffix);
+    git(fx.clone, 'add', '-A');
+    git(fx.clone, 'commit', '-qm', 'add changelog');
+    git(fx.clone, 'push', '-q', 'origin', 'main');
+    git(fx.workdir, 'fetch', '-q', 'origin');
+    git(fx.workdir, 'reset', '--hard', 'origin/main');
+
+    const mainBody = body.replace('- base line', '- base line\n- shared change\n- main change');
+    const mainSuffix = suffix.replace('Original notes', 'Notes updated by main');
+    writeFileSync(join(fx.clone, 'CHANGELOG.md'), prefix + mainBody + mainSuffix);
+    git(fx.clone, 'add', '-A');
+    git(fx.clone, 'commit', '-qm', 'main adds entries and updates historical notes');
+    git(fx.clone, 'push', '-q', 'origin', 'main');
+    const runBody = body
+      .replace('- base intro', '- base intro\n- run intro')
+      .replace('- base line', '- base line\n- shared change\n- run change\n\n### Added\n- run addition\n\n### Security\n- run security');
+    writeFileSync(join(fx.workdir, 'CHANGELOG.md'), prefix + runBody + suffix);
+
+    const r = await runDeliver(fx);
+
+    expect(r.status, r.output).toBe(0);
+    // Prove this exercised the resolver rather than a conflict-free git rebase.
+    expect(r.output).toContain('CONFLICT (content)');
+    expect(r.output).not.toContain('LIFT-CONFLICT');
+    expect(git(fx.origin, 'show', `wicked/${RUN_ID}:CHANGELOG.md`)).toBe(
+      prefix + '- run intro\n\n' + mainBody.replace('- main change', '- main change\n- run change') +
+      '### Added\n- run addition\n\n### Security\n- run security\n\n' + mainSuffix,
+    );
+  }, 60_000);
+
+  it.each([
+    { name: 'rewrites an Unreleased line', main: '## [Unreleased]\n\n### Changed\n- main line\n', run: '## [Unreleased]\n\n### Changed\n- rewritten line\n' },
+    { name: 'removes an Unreleased line', main: '## [Unreleased]\n\n### Changed\n- main line\n', run: '## [Unreleased]\n\n### Changed\n' },
+    { name: 'has no Unreleased heading on main', main: '## [0.5.1]\n\n### Changed\n- main line\n', run: '## [Unreleased]\n\n### Changed\n- base line\n- run change\n' },
+    { name: 'has no Unreleased heading on the run', main: '## [Unreleased]\n\n### Changed\n- main line\n', run: '## [0.5.1]\n\n### Changed\n- run change\n' },
+  ])('STRANDS a CHANGELOG conflict when it $name (studio#1157)', async ({ main, run }) => {
+    const fx = fixture();
+    writeFileSync(join(fx.clone, 'CHANGELOG.md'), '## [Unreleased]\n\n### Changed\n- base line\n');
+    git(fx.clone, 'add', '-A');
+    git(fx.clone, 'commit', '-qm', 'add changelog');
+    git(fx.clone, 'push', '-q', 'origin', 'main');
+    git(fx.workdir, 'fetch', '-q', 'origin');
+    git(fx.workdir, 'reset', '--hard', 'origin/main');
+    writeFileSync(join(fx.clone, 'CHANGELOG.md'), main);
+    git(fx.clone, 'add', '-A');
+    git(fx.clone, 'commit', '-qm', 'main changes changelog');
+    git(fx.clone, 'push', '-q', 'origin', 'main');
+    writeFileSync(join(fx.workdir, 'CHANGELOG.md'), run);
+
+    const r = await runDeliver(fx);
+
+    expect(r.status, r.output).not.toBe(0);
+    expect(r.output).toContain('LIFT-CONFLICT');
+    expect(r.outcome).toBe('stranded');
+    expect(originBranches(fx)).toEqual(['main']);
+    expect(git(fx.workdir, 'show', `wicked/${RUN_ID}:CHANGELOG.md`)).toBe(run);
+  }, 60_000);
+
+  it.each(['base', 'main', 'run'])('STRANDS a CHANGELOG conflict with no %s stage (studio#1157)', async (missing) => {
+    const fx = fixture();
+    const base = '## [Unreleased]\n\n### Changed\n- base line\n';
+    if (missing !== 'base') {
+      writeFileSync(join(fx.clone, 'CHANGELOG.md'), base);
+      git(fx.clone, 'add', '-A');
+      git(fx.clone, 'commit', '-qm', 'add changelog');
+      git(fx.clone, 'push', '-q', 'origin', 'main');
+      git(fx.workdir, 'fetch', '-q', 'origin');
+      git(fx.workdir, 'reset', '--hard', 'origin/main');
+    }
+    if (missing === 'main') rmSync(join(fx.clone, 'CHANGELOG.md'));
+    else writeFileSync(join(fx.clone, 'CHANGELOG.md'), base + '- main change\n');
+    git(fx.clone, 'add', '-A');
+    git(fx.clone, 'commit', '-qm', 'main changes changelog');
+    git(fx.clone, 'push', '-q', 'origin', 'main');
+    if (missing === 'run') rmSync(join(fx.workdir, 'CHANGELOG.md'));
+    else writeFileSync(join(fx.workdir, 'CHANGELOG.md'), base + '- run change\n');
+
+    const r = await runDeliver(fx);
+
+    expect(r.status, r.output).not.toBe(0);
+    expect(r.output).toContain('LIFT-CONFLICT');
+    expect(r.outcome).toBe('stranded');
+    expect(originBranches(fx)).toEqual(['main']);
+    expect(existsSync(join(fx.workdir, 'CHANGELOG.md'))).toBe(missing !== 'run');
   }, 60_000);
 
   it('STRANDS a CHANGELOG conflict that reaches a RELEASED section — the union is [Unreleased]-only (crew#418 review)', async () => {
