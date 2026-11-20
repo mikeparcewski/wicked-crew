@@ -27,11 +27,14 @@ Local-first: loopback only, no accounts, no billing, no model reselling. Crew dr
   --admin-context rancher-desktop --home ~/.wicked-crew`. On Rancher Desktop, choose the dockerd (moby)
   container engine (Preferences → Container Engine). With containerd, crew's floor images aren't visible to the
   kubelet and seats won't start (wicked-core#1449). Governed agents work in a hardened seat pod,
-  and you sign each one in from studio's Helpers page. Governed work needs Claude Code and Codex signed
-  in (the install guide's path); Pi, GitHub Copilot and OpenCode are optional extra helpers. Claude Code and
+  and you sign each one in from studio's Helpers page. Governed work needs two agents signed in, so one
+  reviews the other's work; the install guide signs in Claude Code and Codex. One agent alone waits at review
+  unless you launch the job as "reduced assurance". Pi, GitHub Copilot and OpenCode are optional extra
+  helpers. Claude Code and
   GitHub Copilot sign in through a login pod, Codex, Pi and OpenCode with their host CLIs. `WICKED_SEAT_FLOOR=host` keeps the labelled interim host
   floor instead.
-- **At least one coding-agent CLI** you can sign in (Claude Code, Codex, GitHub Copilot, OpenCode or Pi).
+- **Two coding-agent CLIs** you can sign in (Claude Code, Codex, GitHub Copilot, OpenCode or Pi), so a
+  different one reviews the work; the install guide uses Claude Code and Codex.
 - **Voice mode (optional)** — needs whisper.cpp on the daemon's machine: on macOS `brew install whisper-cpp`;
   on Linux from your package manager or a build, so `whisper-cli` is on PATH (or set `WICKED_CREW_WHISPER_BIN`).
   Studio asks before it downloads the 142 MiB speech model.
