@@ -12,7 +12,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { ConformanceRule, CoreEvent, EditorConformanceSummary, EditorGrantsResponse, EditorView, InstallEditorResponse, ListEditorsResponse } from '../src/core/types.js';
-import { conformanceCapMs, DEFAULT_CONFORMANCE_LOAD_S, gardenConformance, installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from '../src/editors/pack-install.js';
+import { conformanceCapMs, DEFAULT_CONFORMANCE_LOAD_S, engineConformance, installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from '../src/editors/pack-install.js';
 import { EditorRegistry, EDITORS_STATE_FILENAME, PluginManifestSchema, RUN_PLUGIN_CASES, sha256Of, validRunTopic } from '../src/editors/registry.js';
 import { registerEditorRoutes } from '../src/editors/routes.js';
 
@@ -238,26 +238,19 @@ describe('pack install admits run plugins (CS7 C4/C5)', () => {
     expect(reg.get('acme-times')).toBeNull();
   });
 
-  it('a plugin row survives garden\'s report as crew parses it (gardenConformance), with the plugin-inclusive cap', async () => {
+  it('a plugin row survives garden\'s report as crew parses it (engineConformance), with the plugin-inclusive cap', async () => {
     const { reg } = registry();
     const root = makePluginPack();
-    const garden = mkdtempSync(join(tmpdir(), 'run-plugin-garden-'));
-    scratches.push(garden);
-    mkdirSync(join(garden, 'scripts', 'editor'), { recursive: true });
-    writeFileSync(join(garden, 'scripts', 'editor', 'conformance.py'), '# stub\n');
     const m = JSON.parse(readFileSync(join(root, 'wicked-pack.json'), 'utf8')) as { plugins: Array<{ id: string; version: string; entry: string }> };
     const p = m.plugins[0]!;
     const report = { ok: true, editors: [], plugins: [{ id: p.id, version: p.version, protocol: [3], sha256: sha256Of(readFileSync(join(root, p.entry))), ok: true, cases: Object.fromEntries(CONTRACT_RUN_CASES.map((c) => [c, { ok: true }])), gaps: [] }] };
-    const seen: Array<{ timeout?: number }> = [];
-    const run = gardenConformance(garden, () => 'http://127.0.0.1:1', {
-      env: {},
-      exec: (async (_b: string, _a: string[], opts: { timeout?: number } = {}) => { seen.push(opts); return { stdout: JSON.stringify(report), stderr: '' }; }) as never,
-    });
+    const binding = vi.fn(async () => JSON.stringify({ record: { outcome: 'pass', attempt: 1 }, report }));
+    const run = engineConformance({ env: {}, run: binding });
     const res = await installPack(root, undefined, { check: passCheck, conformance: run, registry: reg });
     expect(res.conformance.plugins?.[0]).toMatchObject({ id: p.id, ok: true });
     expect(reg.get('acme-times')).toMatchObject({ kind: 'plugin' });
-    // The child's cap is the plugin-inclusive one.
-    expect(seen[0]?.timeout).toBe(conformanceCapMs([], DEFAULT_CONFORMANCE_LOAD_S, m.plugins as never));
+    // The engine's deadline includes the plugin's loads.
+    expect(binding).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ packRoot: root, timeoutS: Math.ceil(conformanceCapMs([], DEFAULT_CONFORMANCE_LOAD_S, m.plugins) / 1000) }));
     expect(conformanceCapMs([], DEFAULT_CONFORMANCE_LOAD_S, m.plugins as never)).toBeGreaterThan(conformanceCapMs([], DEFAULT_CONFORMANCE_LOAD_S, []));
   });
 

@@ -1384,7 +1384,9 @@ describe('materialize — git archive of each pinned tag', () => {
       const [x, y] = await Promise.all([spawnMaterialize(), spawnMaterialize()]);
       for (const r of [x, y]) {
         expect([0, 1]).toContain(r.status);
-        if (r.status === 1) expect(r.stderr).toMatch(/another `materialize` publication holds .*\.materialize\.lock \(pid \d+ generation \d{8}-\d{6}-[0-9a-f]{8}\) — refusing to interleave/);
+        // The loser can open the lock in the instant after the winner's exclusive create and before it
+        // writes `pid … generation …`: the script then names the lock without a holder (withPublicationLock).
+        if (r.status === 1) expect(r.stderr).toMatch(/another `materialize` publication holds .*\.materialize\.lock(?: \(pid \d+ generation \d{8}-\d{6}-[0-9a-f]{8}\))? — refusing to interleave/);
       }
       expect([x.status, y.status]).toContain(0); // at least one published
       const trees = ['alpha@v0.3.0', 'beta@v0.2.0', 'gamma@v0.3.0'];

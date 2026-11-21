@@ -1,10 +1,11 @@
 // B8 (PRODUCT-WORKS J6): a daemon host with no Python Playwright met `422 conformance_unavailable` on
 // its first editor-plugin install. Crew now provisions its own conformance browser runtime (a private
-// venv with a pinned Playwright and its Chromium, made once) and runs the cases again under it.
+// venv with a pinned Playwright and its Chromium, made once) before the engine runs its jailed harness.
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as childExec from '../src/core/exec.js';
 
 import {
   CONFORMANCE_PLAYWRIGHT_ENV,
@@ -21,91 +22,113 @@ import {
   exportEngineConformanceEnv,
   exportManagedChrome,
   CHROMIUM_PATH_FILE,
-  needsBrowserRuntime,
   managedChromium,
   provisionOnDraftLaunch,
   provisionOnEditorPluginLaunch,
   venvPython,
 } from '../src/editors/conformance-runtime.js';
-import { gardenConformance } from '../src/editors/pack-install.js';
+import { CONFORMANCE_CASES, engineConformance } from '../src/editors/pack-install.js';
 import { removeScratch } from './setup/scratch.js';
 
-/** garden's exit-3 report when the Python playwright package is missing (scripts/editor/conformance.py). */
-const NO_BROWSER = JSON.stringify({
-  ok: false,
-  pack: '/pack',
-  error: 'no headless browser: the Python playwright package is not installed (pip install playwright && playwright install chromium); refusing to report conformance without the run',
-});
-const PASSED = JSON.stringify({ ok: true, editors: [{ id: 'e', version: '1.0.0', sha256: 'ab', ok: true, cases: { '0-manifest': { ok: true } }, gaps: [] }] });
+const engine = vi.hoisted(() => ({ runEditorConformance: undefined as ((request: string) => Promise<string>) | undefined }));
+vi.mock('wicked-core-ts', () => ({ Core: engine }));
 
-function exit(code: number, stdout: string): Error {
-  return Object.assign(new Error(`Command failed: exit ${code}`), { code, stdout, stderr: '' });
-}
+const PASSED = {
+  ok: true,
+  editors: [{ id: 'e', version: '1.0.0', sha256: 'ab', protocol: [1], negotiated: 1, ok: true, cases: Object.fromEntries(CONFORMANCE_CASES.map((c) => [c, { ok: true }])) }],
+  plugins: [],
+};
+const passedRun = () => JSON.stringify({ record: { outcome: 'pass', attempt: 1 }, report: PASSED });
 
 let dir: string;
-let garden: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'conformance-runtime-'));
-  garden = join(dir, 'garden');
-  mkdirSync(join(garden, 'scripts', 'editor'), { recursive: true });
-  writeFileSync(join(garden, 'scripts', 'editor', 'conformance.py'), '# stub\n');
+  engine.runEditorConformance = undefined;
 });
-afterEach(() => removeScratch(dir));
+afterEach(() => {
+  vi.restoreAllMocks();
+  removeScratch(dir);
+});
 
-describe('gardenConformance on a host with no browser runtime', () => {
-  it('provisions crew\'s runtime and runs the cases again under its python', async () => {
-    const bins: string[] = [];
-    let provisions = 0;
-    const run = gardenConformance(garden, () => 'http://127.0.0.1:1', {
-      exec: (async (bin: string) => {
-        bins.push(bin);
-        if (bin === '/rt/venv/bin/python') return { stdout: PASSED, stderr: '' };
-        throw exit(3, NO_BROWSER);
-      }) as never,
-      provision: async () => {
-        provisions += 1;
-        return { ok: true, python: '/rt/venv/bin/python' };
-      },
-    });
-    const report = await run('/pack', []);
-    expect(provisions).toBe(1);
-    expect(bins).toEqual(['python3', '/rt/venv/bin/python']);
-    expect(report.ok).toBe(true);
-    expect(report.editors.map((e) => e.id)).toEqual(['e']);
+describe('engineConformance', () => {
+  it('maps a pass report and its editor cases', async () => {
+    const summary = await engineConformance({ run: async () => passedRun() })('/pack');
+    expect(summary).toMatchObject({ ok: true, editors: [{ id: 'e', cases: PASSED.editors[0]!.cases, gaps: [] }] });
+    expect(summary.at).toEqual(expect.any(String));
   });
 
-  it('says what crew tried and the one command that fixes it when it cannot provision (still fail closed)', async () => {
-    const run = gardenConformance(garden, () => 'http://127.0.0.1:1', {
-      exec: (async () => { throw exit(3, NO_BROWSER); }) as never,
-      provision: async () => ({ ok: false, error: 'crew could not provision the conformance browser: installing playwright==1.64.0 failed: no index. On this host, run: pip install playwright==1.64.0 && python -m playwright install chromium' }),
-    });
-    const report = await run('/pack', []);
-    expect(report.ok).toBe(false);
-    expect(report.editors).toEqual([]);
-    expect(report.error).toContain('no headless browser');
-    expect(report.error).toContain('crew could not provision the conformance browser');
-    expect(report.error).toContain('python -m playwright install chromium');
+  it('keeps the rows and failing cases of a failed report', async () => {
+    const report = { ...PASSED, ok: false, editors: [{ ...PASSED.editors[0]!, ok: false, cases: { '1-handshake': { ok: false, error: 'timed out' } } }] };
+    const summary = await engineConformance({ run: async () => JSON.stringify({ record: { outcome: 'fail', attempt: 1 }, report }) })('/pack');
+    expect(summary).toMatchObject({ ok: false, editors: [{ id: 'e', ok: false, cases: { '1-handshake': { ok: false } } }] });
   });
 
-  it('never provisions for a run that reached the cases (a failed case is the editor\'s), or another refusal', async () => {
-    let provisions = 0;
-    const provision = async () => {
-      provisions += 1;
+  it('fails closed for a refused record, even if it contains report rows', async () => {
+    const run = vi.fn(async () => JSON.stringify({ record: { outcome: 'refused', cause: 'unjailed_host', reason: 'no jail available', attempt: 1 }, report: PASSED }));
+    expect(await engineConformance({ run })('/pack')).toMatchObject({ ok: false, editors: [], error: 'unjailed_host: no jail available' });
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['pass', 'fail'])('fails closed for outcome %s with no editor or plugin rows', async (outcome) => {
+    const run = async () => JSON.stringify({ record: { outcome, cause: 'no_studio', reason: 'studio is missing', attempt: 1 }, report: { ok: true, editors: [], plugins: [] } });
+    expect(await engineConformance({ run })('/pack')).toMatchObject({ ok: false, editors: [], error: 'no_studio: studio is missing' });
+  });
+
+  it('fails without a binding and spawns no child process', async () => {
+    const exec = vi.spyOn(childExec, 'execCapped');
+    const provision = vi.fn();
+    expect(await engineConformance({ provision })('/pack')).toMatchObject({
+      ok: false, editors: [], error: 'this engine has no jailed conformance run; update wicked-core-ts',
+    });
+    expect(exec).not.toHaveBeenCalled();
+    expect(provision).not.toHaveBeenCalled();
+  });
+
+  it('uses the optional Core static by default', async () => {
+    engine.runEditorConformance = vi.fn(async function (this: unknown) {
+      expect(this).toBe(engine);
+      return passedRun();
+    });
+    expect((await engineConformance({})('/pack')).ok).toBe(true);
+    expect(engine.runEditorConformance).toHaveBeenCalledTimes(1);
+  });
+
+  it('awaits provisioning once before one run', async () => {
+    const order: string[] = [];
+    const provision = vi.fn(async () => {
+      order.push('provision');
+      await Promise.resolve();
+      order.push('ready');
       return { ok: true as const, python: '/rt/venv/bin/python' };
-    };
-    const failedCase = JSON.stringify({ ok: false, editors: [{ id: 'e', version: '1', sha256: 'ab', ok: false, cases: { '1-handshake': { ok: false } }, gaps: [] }] });
-    const caseRun = gardenConformance(garden, () => 'http://127.0.0.1:1', { exec: (async () => { throw exit(1, failedCase); }) as never, provision });
-    expect((await caseRun('/pack', [])).editors).toHaveLength(1);
-    const noHost = gardenConformance(garden, () => 'http://127.0.0.1:1', { exec: (async () => { throw exit(2, JSON.stringify({ ok: false, error: 'no host: pass --host-url' })); }) as never, provision });
-    expect((await noHost('/pack', [])).error).toMatch(/no host/);
-    expect(provisions).toBe(0);
+    });
+    const run = vi.fn(async () => { order.push('run'); return passedRun(); });
+    expect((await engineConformance({ provision, run })('/pack')).ok).toBe(true);
+    expect(order).toEqual(['provision', 'ready', 'run']);
+    expect(provision).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledTimes(1);
   });
 
-  it('recognises both of garden\'s no-browser reports', () => {
-    expect(needsBrowserRuntime('no headless browser: the Python playwright package is not installed')).toBe(true);
-    expect(needsBrowserRuntime('no headless browser: chromium did not start (Executable doesn\'t exist)')).toBe(true);
-    expect(needsBrowserRuntime('the editor failed')).toBe(false);
-    expect(needsBrowserRuntime(undefined)).toBe(false);
+  it('returns a provisioning failure without running the harness', async () => {
+    const run = vi.fn();
+    const provision = vi.fn(async () => ({ ok: false as const, error: 'crew could not provision the conformance browser: no index' }));
+    expect(await engineConformance({ provision, run })('/pack')).toMatchObject({ ok: false, editors: [], error: 'crew could not provision the conformance browser: no index' });
+    expect(provision).toHaveBeenCalledTimes(1);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it.each([null, 'not a report', 42, {}])('fails for an unreadable report: %j', async (report) => {
+    const run = async () => JSON.stringify({ record: { outcome: 'fail', attempt: 1 }, report });
+    expect(await engineConformance({ run })('/pack')).toMatchObject({ ok: false, editors: [], error: 'the conformance run produced no readable report' });
+  });
+
+  it('fails for malformed binding JSON', async () => {
+    expect(await engineConformance({ run: async () => 'not JSON' })('/pack')).toMatchObject({ ok: false, editors: [], error: 'the conformance run produced no readable report' });
+  });
+
+  it('returns a rejected binding promise as a failed summary', async () => {
+    const run = vi.fn(async () => { throw new Error('engine request rejected'); });
+    expect(await engineConformance({ run })('/pack')).toMatchObject({ ok: false, editors: [], error: 'engine request rejected' });
+    expect(run).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -417,18 +440,6 @@ describe('the engine\'s conformance step inputs', () => {
     })();
     expect(seen.length).toBeGreaterThan(0);
     expect(seen.every((e) => e['XDG_CACHE_HOME'] === undefined)).toBe(true);
-    // The install-time run resolves the same cache (codex, crew review r4).
-    const runEnvs: NodeJS.ProcessEnv[] = [];
-    const run = gardenConformance(garden, () => 'http://127.0.0.1:1', {
-      env: { PLAYWRIGHT_BROWSERS_PATH: 'rel-browsers', XDG_CACHE_HOME: '/abs-cache' },
-      exec: (async (_bin: string, _args: string[], opts: { env: NodeJS.ProcessEnv }) => {
-        runEnvs.push(opts.env);
-        return { stdout: PASSED, stderr: '' };
-      }) as never,
-    });
-    await run('/pack', []);
-    expect(runEnvs[0]?.['PLAYWRIGHT_BROWSERS_PATH']).toBeUndefined();
-    expect(runEnvs[0]?.['XDG_CACHE_HOME']).toBe('/abs-cache');
   });
 
   it('a resume or gate answer on an editor-plugin run starts the runtime when it is not made yet (the retry path)', async () => {

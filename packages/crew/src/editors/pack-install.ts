@@ -8,13 +8,11 @@
  *  2. the pack ships editors and/or run plugins only (CS7 C4): one that also ships skills or blocks is refused
  *     with the approval list (501 `pack_ships_skills_or_blocks`), since their own "Add these" step (§3.2) is
  *     not built;
- *  3. the **conformance run**, done by crew itself: garden's `scripts/editor/conformance.py --pack
- *     <root> --host-url <this daemon>` drives studio's conformance host page (served by this daemon)
- *     in headless Chromium against each editor. A host with no browser runtime gets crew's own
- *     (`conformance-runtime.ts`: a private venv with Playwright, made once, B8). A failed case, a
- *     browser that cannot be provisioned or no runner is a 422 with the report — an unverified
- *     editor is never installed. Only crew's run counts (§12.1, review S13);
- *     an author's own run is not consulted;
+ *  3. the **conformance run**, through the engine's jailed garden harness: its browser can reach
+ *     only the engine's own loopback port and writes stay in a private temp directory. Crew provisions
+ *     its private Playwright venv first (`conformance-runtime.ts`, B8). A failed case, a browser that
+ *     cannot be provisioned or no jailed runner is a 422 with the report — an unverified editor is
+ *     never installed. Only crew's run counts (§12.1, review S13); an author's own run is not consulted;
  *  4. the registry reads every editor back from disk at its pinned hash and records it.
  * Nothing is written into the pack. The registry file is `daemon-editors.json`.
  */
@@ -22,10 +20,12 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 
+import { Core } from 'wicked-core-ts';
+
 import type { EditorConformanceSummary, InstallEditorRefusal, InstallEditorResponse, PackCheckResult } from '../core/types.js';
 import { execCapped } from '../core/exec.js';
 import { EditorInstallConflict, EditorRegistry, PackEditorSchema, PluginManifestSchema, RUN_PLUGIN_CASES, editorEntryDigest, type InstalledPack } from './registry.js';
-import { absoluteCacheEnv, needsBrowserRuntime, type ConformanceProvisioner } from './conformance-runtime.js';
+import type { ConformanceProvisioner } from './conformance-runtime.js';
 
 export type PackCheckRunner = (packRoot: string) => Promise<PackCheckResult>;
 
@@ -184,56 +184,40 @@ export function requiredCases(entry: Record<string, unknown>): string[] {
 }
 
 /**
- * Garden's conformance runner as a child: `python3 <garden>/scripts/editor/conformance.py --pack <root>
- * --host-url <this daemon> --json`. A missing garden or runner, no daemon URL, no browser, or an
- * unreadable report is a FAILED run with the reason — never a pass.
+ * The engine's jailed conformance harness. An addon without the binding, a host refusal, or an
+ * unreadable report is a FAILED run with the reason — never a pass or an unjailed fallback.
  */
-export function gardenConformance(
-  gardenRoot: string | null,
-  hostUrl: () => string | null,
-  deps: { env?: NodeJS.ProcessEnv; exec?: typeof execCapped; provision?: ConformanceProvisioner } = {},
+export function engineConformance(
+  deps: { run?: (requestJson: string) => Promise<string>; provision?: ConformanceProvisioner; env?: NodeJS.ProcessEnv } = {},
 ): ConformanceRunner {
   const failed = (error: string): EditorConformanceSummary => ({ ok: false, at: new Date().toISOString(), editors: [], error });
-  const exec = deps.exec ?? execCapped;
   return async (packRoot, editors = [], plugins = []) => {
-    if (gardenRoot === null) return failed('no wicked-garden plugin found to run the editor conformance cases');
-    const script = join(gardenRoot, 'scripts', 'editor', 'conformance.py');
-    if (!existsSync(script)) return failed('this wicked-garden has no scripts/editor/conformance.py (needs the release with the editor-scaffold skill)');
-    const host = hostUrl();
-    if (host === null) return failed('this daemon does not know its own URL to serve the conformance host page');
-    const args = [script, '--pack', packRoot, '--host-url', host, '--json'];
-    // garden's runner gets the very bound the cap was sized from (any spelling of the env var it would
-    // read differently, e.g. non-ASCII digits, cannot make the two disagree — codex r2).
-    const loadS = conformanceLoadSeconds(deps.env);
-    // The same browser-cache resolution the provisioner installed under (absolute cache variables only).
-    const childEnv: NodeJS.ProcessEnv = { ...absoluteCacheEnv(deps.env ?? process.env), [CONFORMANCE_TIMEOUT_ENV]: String(loadS) };
-    const runWith = async (bins: readonly string[]): Promise<EditorConformanceSummary> => {
-      let stdout = '';
-      for (const bin of bins) {
-        try {
-          stdout = (await exec(bin, args, { timeout: conformanceCapMs(editors, loadS, plugins), windowsHide: true, env: childEnv })).stdout;
-          break;
-        } catch (err) {
-          const e = err as NodeJS.ErrnoException & { stdout?: string };
-          if (e.code === 'ENOENT') continue;
-          // A failing run exits 1 (a case failed) or 3 (no browser) with the JSON report on stdout.
-          if (typeof e.stdout === 'string' && e.stdout.trim() !== '') {
-            stdout = e.stdout;
-            break;
-          }
-          return failed(`the conformance run did not finish: ${e.message}`);
-        }
+    const run = deps.run ?? (Core as unknown as { runEditorConformance?: (j: string) => Promise<string> }).runEditorConformance;
+    if (typeof run !== 'function') return failed('this engine has no jailed conformance run; update wicked-core-ts');
+    let result: string;
+    try {
+      if (deps.provision !== undefined) {
+        const provisioned = await deps.provision();
+        if (!provisioned.ok) return failed(provisioned.error);
       }
-      if (stdout === '') return failed('no python interpreter found (python3 / python)');
-      return parseConformanceReport(stdout) ?? failed('the conformance run printed no readable report');
-    };
-    const first = await runWith(['python3', 'python']);
-    // B8: no browser runtime on this host. Crew provisions its own (a private venv with Playwright and
-    // its Chromium) and runs the cases again under it; a host where it cannot says what to run.
-    if (first.editors.length > 0 || (first.plugins?.length ?? 0) > 0 || deps.provision === undefined || !needsBrowserRuntime(first.error)) return first;
-    const provisioned = await deps.provision();
-    if (!provisioned.ok) return failed(`${first.error ?? 'no headless browser'} — ${provisioned.error}`);
-    return runWith([provisioned.python]);
+      const timeoutS = Math.min(900, Math.ceil(conformanceCapMs(editors, conformanceLoadSeconds(deps.env), plugins) / 1000));
+      result = await run.call(Core, JSON.stringify({ packRoot, timeoutS }));
+    } catch (err) {
+      return failed(err instanceof Error ? err.message : String(err));
+    }
+    try {
+      const response = JSON.parse(result) as { record?: { outcome?: string; cause?: string; reason?: string }; report?: unknown } | null;
+      const record = response?.record;
+      // The engine's refusal (or a run with no rows) says why in its record: cause, then reason.
+      const why = (fallback: string): string => `${record?.cause ?? 'no_report'}: ${record?.reason ?? fallback}`;
+      if (record?.outcome === 'refused') return failed(why('the engine refused the run'));
+      const summary = parseConformanceReport(JSON.stringify(response?.report ?? null));
+      if (summary === null) return failed('the conformance run produced no readable report');
+      if (summary.editors.length === 0 && (summary.plugins?.length ?? 0) === 0) return failed(why(summary.error ?? 'the report named no editor or plugin'));
+      return summary;
+    } catch {
+      return failed('the conformance run produced no readable report');
+    }
   };
 }
 
@@ -259,6 +243,7 @@ function parseRows(list: unknown): ConformanceRow[] {
 function parseConformanceReport(stdout: string): EditorConformanceSummary | null {
   try {
     const raw = JSON.parse(stdout) as { ok?: unknown; error?: unknown; editors?: unknown; plugins?: unknown };
+    if (typeof raw !== 'object' || raw === null || typeof raw.ok !== 'boolean') return null;
     const plugins = parseRows(raw.plugins);
     return {
       ok: raw.ok === true,

@@ -277,11 +277,6 @@ export function venvPython(venv: string, platform: NodeJS.Platform = process.pla
   return platform === 'win32' ? join(venv, 'Scripts', 'python.exe') : join(venv, 'bin', 'python');
 }
 
-/** Whether a garden conformance report says the browser runtime is what is missing. */
-export function needsBrowserRuntime(error: string | undefined): boolean {
-  return typeof error === 'string' && /no headless browser/i.test(error);
-}
-
 function message(err: unknown): string {
   const e = err as { stderr?: unknown; message?: unknown };
   const tail = typeof e.stderr === 'string' && e.stderr.trim() !== '' ? e.stderr.trim().split('\n').slice(-3).join(' | ') : '';
