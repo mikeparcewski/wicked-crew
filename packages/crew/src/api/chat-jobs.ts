@@ -315,12 +315,14 @@ export function checksOf(r: ResolvedOption, skipQe: JobFacts['skipQe']): Catalog
   return r.resolved.gate.filter((g) => !(g === 'qe-acceptance' && skipQe !== null));
 }
 
-function sketchOf(r: ResolvedOption): ProposalSketch {
+function sketchOf(r: ResolvedOption, startChooses: boolean): ProposalSketch {
   const launch = r.resolved.launch.kind;
   if (launch === 'compose') return { steps: [{ label: 'Draft', asks: false }, { label: 'Review', asks: true }] };
   const steps = r.steps.map((s) => {
     const gate = s['gate'];
-    const asks = gate === 'consent_before' || (gate !== null && typeof gate === 'object' && ((gate as Record<string, unknown>)['human_confirm'] !== undefined || (gate as Record<string, unknown>)['human_confirm_if'] !== undefined));
+    // (crew#1685) Where the Start chooses a power run, only consent is promised: a power run makes no def-gate stop,
+    // and a consent_before step pauses in every mode.
+    const asks = gate === 'consent_before' || (!startChooses && gate !== null && typeof gate === 'object' && ((gate as Record<string, unknown>)['human_confirm'] !== undefined || (gate as Record<string, unknown>)['human_confirm_if'] !== undefined));
     return { label: humanStep(s.id), asks };
   });
   return { steps };
@@ -570,7 +572,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     sentence,
     suggestions: suggestions.slice(0, 2),
     question,
-    sketch: sketchOf(r),
+    sketch: sketchOf(r, startChooses),
     revises: ctx.revises,
     lineage: ctx.lineage ?? ctx.pid,
     ...(ctx.answers !== undefined ? { answers: ctx.answers } : {}),

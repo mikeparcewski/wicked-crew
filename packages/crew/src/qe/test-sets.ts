@@ -24,6 +24,8 @@
  * `null` report.
  */
 
+import type { TestSetFile } from 'wicked-crew-api-types';
+
 import type { CoreAdapter } from '../core/adapter.js';
 import type { Actor, AuditEntry, SessionView } from '../core/types.js';
 import type { AuditLog } from '../api/audit.js';
@@ -61,11 +63,13 @@ export interface TestSet {
   /** `true` only when the verify phase PASSED: every produced test executed and green, plan present. */
   verified: boolean;
   /** The produced test files and the harness verdict on each (empty when no report). */
-  files: Array<{ path: string; harness: string; status: 'passed' | 'failed' | 'not-executed' }>;
+  files: TestSetFile[];
   produced: number;
   executed: number;
   passed: number;
   failed: number;
+  /** crew#1393: produced files whose failures also occur on base; absent on sets registered before crew#1393. */
+  failed_on_base?: number;
   not_executed: number;
   /** The produced `tests/PLAN-*.md`, `null` when none was produced. */
   plan: string | null;
@@ -172,11 +176,12 @@ export function buildTestSet(
     run_status: view.session.status,
     verify_status: verify?.status ?? null,
     verified,
-    files: (report?.files ?? []).map((f) => ({ path: f.path, harness: f.harness, status: f.status })),
+    files: (report?.files ?? []).map((f) => ({ path: f.path, harness: f.harness, status: f.status, ...(f.class !== undefined ? { class: f.class } : {}) })),
     produced: report?.produced ?? 0,
     executed: report?.executed ?? 0,
     passed: report?.passed ?? 0,
     failed: report?.failed ?? 0,
+    failed_on_base: report?.failedOnBase ?? 0,
     not_executed: report?.notExecuted ?? 0,
     plan: report?.plan ?? null,
     harnesses,

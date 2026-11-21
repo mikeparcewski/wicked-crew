@@ -18,6 +18,8 @@ import {
   commitSubject,
   conventionalPrefix,
   composeDeliverText,
+  quoteClosingReferences,
+  CLOSING_REFERENCE_MARKER,
   redactHostPaths,
   deliverTitle,
   factsFromRun,
@@ -258,8 +260,8 @@ describe('deliverTitle / commitSubject — never cut mid-word (F-3R2-014); the P
       expect(text.title).toBe("feat: The requirements list API carries each requirement's business domain");
       expect(commitSubject(text.title)).not.toMatch(/Repository/i);
       expect(text.body.split('\n')).toContain('Fixes #1503');
-      // The body keeps the intent verbatim: the routing line is skipped for the title only.
-      expect(text.body).toContain(intent1511);
+      // crew#1377: the routing line stays in the body; closing clauses in the quoted intent carry the marker.
+      expect(text.body).toContain(intent1511.replaceAll('Fixes #1503', `Fixes${CLOSING_REFERENCE_MARKER} #1503`));
     });
 
     it.each([
@@ -1319,5 +1321,70 @@ describe('crew#1499 — host temp and state-home paths never reach the PR title,
     const { text } = compose(intent, 'done');
     expect(text.title).not.toContain('synthetic-hash');
     expect(text.body).not.toContain('synthetic-hash');
+  });
+});
+
+
+describe('crew#1377 — quoted closing references', () => {
+  it.each(['close', 'closes', 'closed', 'fix', 'fixes', 'fixed', 'resolve', 'resolves', 'resolved'])('protects %s in any case with every reference spelling', (word) => {
+    const text = `${word.toUpperCase()}: #9; ${word} owner/other#5; ${word} https://github.com/owner/other/issues/6`;
+    const expected = `${word.toUpperCase()}${CLOSING_REFERENCE_MARKER}: #9; ${word}${CLOSING_REFERENCE_MARKER} owner/other#5; ${word}${CLOSING_REFERENCE_MARKER} https://github.com/owner/other/issues/6`;
+    expect(quoteClosingReferences(text)).toBe(expected);
+    expect(quoteClosingReferences(expected)).toBe(expected);
+  });
+
+  it('marks code too (the commit message is plain text) and leaves only the generated lines as written', () => {
+    const text = 'Fixes #1\nFixes #1\n``Fixes #2 and `x` ``\n~~~text\nFixes #3\n~~~\n`Fixes #4\ncloses #5`\nresolves #6';
+    expect(quoteClosingReferences(text, new Set([1]))).toBe(
+      `Fixes${CLOSING_REFERENCE_MARKER} #1\nFixes #1\n\`\`Fixes${CLOSING_REFERENCE_MARKER} #2 and \`x\` \`\`\n~~~text\nFixes${CLOSING_REFERENCE_MARKER} #3\n~~~\n\`Fixes${CLOSING_REFERENCE_MARKER} #4\ncloses${CLOSING_REFERENCE_MARKER} #5\`\nresolves${CLOSING_REFERENCE_MARKER} #6`,
+    );
+  });
+
+  it('marks a reference across a line break, after a colon, and beside literal backticks or backslashes', () => {
+    expect(quoteClosingReferences('Fixes\n#9')).toBe(`Fixes${CLOSING_REFERENCE_MARKER}\n#9`);
+    expect(quoteClosingReferences('CLOSES:#9')).toBe(`CLOSES${CLOSING_REFERENCE_MARKER}:#9`);
+    for (const text of ['a literal ` before Fixes #9', '`Fixes #9', '\\Fixes #9', '`code`Fixes #9', 'Fixes #9`code`']) {
+      expect(quoteClosingReferences(text)).toBe(text.replace('Fixes', `Fixes${CLOSING_REFERENCE_MARKER}`));
+    }
+    // Not a closing clause: a keyword inside a word, a reference glued to letters, no reference at all.
+    for (const text of ['prefixes #9', 'Fixes #9a', 'fixes the parser']) expect(quoteClosingReferences(text)).toBe(text);
+  });
+
+  it('keeps an exactly max-length bounded title within the cap after inserting the marker', () => {
+    const intent = 'Handle fixes #9 ' + 'x'.repeat(DELIVER_TITLE_MAX - 'Handle fixes #9 '.length);
+    const facts = { ...factsFromRun(runView(), null), intent, workflowId: null };
+    const bare = deliverTitle(intent, facts.runId, facts.workflowId);
+    expect(bare).toHaveLength(DELIVER_TITLE_MAX);
+    const title = composeDeliverText(facts).title;
+    expect(title).toContain(`fixes${CLOSING_REFERENCE_MARKER} #9`);
+    expect(title).toBe(boundedTitle(bare.replace('fixes', `fixes${CLOSING_REFERENCE_MARKER}`)));
+    expect(title.length).toBeLessThanOrEqual(DELIVER_TITLE_MAX);
+  });
+
+  it('marks closing words everywhere except the generated Fixes lines, code included', () => {
+    const facts = { ...factsFromRun(runView(), null), intent: 'Fix #1 and #2. This does not close #2.',
+      reports: [{ phase: 'build', seat: 'claude', role: 'creator' as const, report: 'Fixes #9\n\n```text\nFixes #3\n```\n`CLOSES: #4`' }],
+      followUps: ['resolves owner/other#5'] };
+    const { body } = composeDeliverText(facts);
+    expect(body).toContain(`Fix${CLOSING_REFERENCE_MARKER} #1 and #2. This does not close${CLOSING_REFERENCE_MARKER} #2.`);
+    expect(body).toContain('\nFixes #1\n');
+    expect(body).toContain(`Fixes${CLOSING_REFERENCE_MARKER} #9`);
+    expect(body).toContain(`resolves${CLOSING_REFERENCE_MARKER} owner/other#5`);
+    expect(body).toContain(`\`\`\`text\nFixes${CLOSING_REFERENCE_MARKER} #3\n\`\`\``);
+    expect(body).toContain(`\`CLOSES${CLOSING_REFERENCE_MARKER}: #4\``);
+    expect(composeDeliverText({ ...facts, intent: 'fixes owner/other#5' }).body).toContain(`\nfixes${CLOSING_REFERENCE_MARKER} owner/other#5\n`);
+  });
+
+  it('the composed commit message has only the generated closing reference from intent and reports', () => {
+    const text = composeDeliverText({ ...factsFromRun(runView(), null),
+      intent: 'Handle cache errors and fixes #1. This does not close #2.',
+      reports: [{ phase: 'build', seat: 'claude', role: 'creator', report: 'Fixes #9; CLOSES:owner/other#5; resolves https://github.com/owner/other/issues/6\n\n```sh\ngit commit -m "Fixes #3"\n```' }] });
+    const message = framedDeliverText(text);
+    // GitHub reads plain commit text too: stripping Markdown backticks must not restore a closing clause.
+    const closing = /\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)(?::\s*|\s+)(?:[\w.-]+\/[\w.-]+#\d+|#\d+|https?:\/\/github\.com\/[\w.-]+\/[\w.-]+\/issues\/\d+)\b/gi;
+    expect(message.replaceAll('`', '').match(closing)).toEqual(['Fixes #1']);
+    expect(message).toContain('\nFixes #1\n');
+    expect(message).toContain(`Fixes${CLOSING_REFERENCE_MARKER} #9`);
+    expect(text.title).toContain(`fixes${CLOSING_REFERENCE_MARKER} #1`);
   });
 });

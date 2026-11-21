@@ -9,7 +9,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { CoreAdapter } from '../src/core/adapter.js';
 import { DELIVER_PHASE_ID, EVIDENCE_FLOOR_PIN } from '../src/core/deliver.js';
@@ -23,7 +23,8 @@ import {
   parseQeVerifyOutput,
   qeAuthorPlan,
 } from '../src/qe/author-workflow.js';
-import { buildTestSet, qeTestsGroupLabel } from '../src/qe/test-sets.js';
+import { buildTestSet, qeTestsGroupLabel, TestSetIndex, TEST_SET_REGISTERED_ACTION, TEST_SET_ACTOR, type TestSet } from '../src/qe/test-sets.js';
+import type { TestSet as WireTestSet } from '../../crew-api-types/index.js';
 import type { SessionView } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
 
@@ -36,6 +37,16 @@ let engine: CoreAdapter;
 let def: WorkflowDef;
 beforeAll(async () => {
   engineDir = mkdtempSync(join(tmpdir(), 'qe-author-preset-'));
+  const home = join(engineDir, 'home');
+  mkdirSync(home);
+  const global = join(home, 'gitconfig');
+  writeFileSync(global, '');
+  vi.stubEnv('HOME', home);
+  vi.stubEnv('GIT_CONFIG_GLOBAL', global);
+  vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1');
+  for (const key of Object.keys(process.env)) {
+    if (/^GIT_(AUTHOR|COMMITTER)_|^GIT_CONFIG_(COUNT|KEY_.*|VALUE_.*|PARAMETERS)$/.test(key)) vi.stubEnv(key, undefined);
+  }
   engine = new CoreAdapter({ dbPath: join(engineDir, 'core.db'), stub: true });
   await engine.loadBuiltinCatalog(() => {});
   const served = engine.getWorkflow(QE_AUTHOR_TESTS_WORKFLOW);
@@ -44,6 +55,7 @@ beforeAll(async () => {
 });
 afterAll(() => {
   engine.close();
+  vi.unstubAllEnvs();
   removeScratch(engineDir);
 });
 /** The verify step's script, as the engine's preset ships it (`bash -c <script>`). */
@@ -165,7 +177,7 @@ function harnessRepo(root: string): void {
   chmodSync(join(root, 'node_modules', '.bin', 'playwright'), 0o755);
   writeFileSync(join(root, 'README.md'), '# fixture\n');
   const git = (...args: string[]) =>
-    execFileSync('git', ['-c', 'user.email=t@test', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe' });
+    execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe', env: { ...process.env } });
   git('init', '-q', '-b', 'main');
   git('add', '-A');
   git('commit', '-q', '-m', 'base');
@@ -214,7 +226,7 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     writeFileSync(join(root, 'pyproject.toml'), '[project]\nname = "fixture"\n[tool.pytest.ini_options]\ntestpaths = ["tests"]\n');
     writeFileSync(join(root, 'README.md'), '# py\n');
     const git = (...args: string[]) =>
-      execFileSync('git', ['-c', 'user.email=t@test', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe' });
+      execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe', env: { ...process.env } });
     git('init', '-q', '-b', 'main');
     git('add', '-A');
     git('commit', '-q', '-m', 'base');
@@ -261,7 +273,7 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     chmodSync(join(root, 'packages', 'app', 'node_modules', '.bin', 'vitest'), 0o755);
     writeFileSync(join(root, 'README.md'), '# mono\n');
     const git = (...args: string[]) =>
-      execFileSync('git', ['-c', 'user.email=t@test', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe' });
+      execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe', env: { ...process.env } });
     git('init', '-q', '-b', 'main');
     git('add', '-A', '-f');
     git('commit', '-q', '-m', 'base');
@@ -289,7 +301,7 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     chmodSync(join(root, 'node_modules', '.bin', 'vitest'), 0o755);
     writeFileSync(join(root, 'README.md'), '# z\n');
     const git = (...args: string[]) =>
-      execFileSync('git', ['-c', 'user.email=t@test', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe' });
+      execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe', env: { ...process.env } });
     git('init', '-q', '-b', 'main');
     git('add', '-A', '-f');
     git('commit', '-q', '-m', 'base');
@@ -352,7 +364,7 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'bare', private: true }));
     writeFileSync(join(root, 'README.md'), '# bare\n');
     const git = (...args: string[]) =>
-      execFileSync('git', ['-c', 'user.email=t@test', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe' });
+      execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe', env: { ...process.env } });
     git('init', '-q', '-b', 'main');
     git('add', '-A');
     git('commit', '-q', '-m', 'base');
@@ -392,7 +404,7 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     );
     writeFileSync(join(root, 'README.md'), '# nodetest\n');
     const git = (...args: string[]) =>
-      execFileSync('git', ['-c', 'user.email=t@test', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe' });
+      execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe', env: { ...process.env } });
     git('init', '-q', '-b', 'main');
     git('add', '-A');
     git('commit', '-q', '-m', 'base');
@@ -426,7 +438,7 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     );
     writeFileSync(join(root, 'README.md'), '# fallback\n');
     const git = (...args: string[]) =>
-      execFileSync('git', ['-c', 'user.email=t@test', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe' });
+      execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe', env: { ...process.env } });
     git('init', '-q', '-b', 'main');
     git('add', '-A');
     git('commit', '-q', '-m', 'base');
@@ -450,7 +462,10 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     mkdirSync(join(root, 'node_modules', '.bin'), { recursive: true });
     mkdirSync(join(root, 'tests'), { recursive: true });
     writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'preexisting-fixture', private: true, devDependencies: { vitest: '^3.0.0' } }));
-    // Vitest shim: per-file run of the NEW produced file exits 0; full suite always exits 1 (broken pre-existing test)
+    // Vitest shim: per-file run of the NEW produced file exits 0; full suite always exits 1 (broken pre-existing test).
+    // The failing run names its failing test the way vitest does (` FAIL  <file> > <title>`): the engine's verify
+    // compares failing test identities at head and base (wicked-core#1320), so a failure it cannot name is not
+    // shown to be main's.
     writeFileSync(
       join(root, 'node_modules', '.bin', 'vitest'),
       [
@@ -460,6 +475,7 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
         '  echo "      Tests  1 passed (1)"',
         '  exit 0',
         'fi',
+        'echo " FAIL  tests/broken.test.ts > broken"',
         'echo "      Tests  0 passed, 1 failed (1)"',
         'exit 1',
       ].join('\n'),
@@ -469,7 +485,7 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     // Commit a broken pre-existing test at base on the main branch
     writeFileSync(join(root, 'tests', 'broken.test.ts'), '// always fails\n');
     const git = (...args: string[]) =>
-      execFileSync('git', ['-c', 'user.email=t@test', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe' });
+      execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe', env: { ...process.env } });
     git('init', '-q', '-b', 'main');
     git('add', '-A', '-f');
     git('commit', '-q', '-m', 'base with broken pre-existing test');
@@ -509,7 +525,7 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     ];
     writeFileSync(join(root, 'test', 'm.test.js'), [head, ...mainTests].join('\n') + '\n');
     const git = (...args: string[]) =>
-      execFileSync('git', ['-c', 'user.email=t@test', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe' });
+      execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe', env: { ...process.env } });
     git('init', '-q', '-b', 'main');
     git('add', '-A');
     git('commit', '-q', '-m', 'main with a red test file');
@@ -596,6 +612,15 @@ describe('parseQeVerifyOutput', () => {
     expect(r.checks).toEqual([{ harness: 'vitest', cmd: 'node_modules/.bin/vitest run', exit: 0 }]);
     expect(r).toMatchObject({ produced: 2, executed: 1, passed: 1, failed: 0, notExecuted: 1, plan: 'tests/PLAN-x.md', checksFailed: 0 });
   });
+  it.each(['produced-test-failure', 'pre-existing-on-base', 'unclassified', 'invented', 'PASSED', ''])('validates file class=%s', (classification) => {
+    const report = parseQeVerifyOutput(`QE-VERIFY: file=tests/a.test.ts harness=vitest exit=1 status=failed class=${classification}
+QE-VERIFY-SUMMARY: produced=1 executed=1 passed=0 failed=1`)!;
+    if (['produced-test-failure', 'pre-existing-on-base', 'unclassified'].includes(classification)) {
+      expect(report.files[0]?.class).toBe(classification);
+    } else {
+      expect(report.files[0]).not.toHaveProperty('class');
+    }
+  });
   it('QE-VERIFY-CHECK: class field is parsed when present (produced-test-failure, pre-existing-on-base, unclassified)', () => {
     const out = [
       'QE-VERIFY-CHECK: harness=vitest pkg=. cmd="./node_modules/.bin/vitest run" exit=1 class=pre-existing-on-base',
@@ -634,6 +659,33 @@ describe('the intake plan + the registered test set', () => {
         { id: 'run-1:review', ord: 4, status: 'done' },
       ],
     }) as unknown as SessionView;
+
+  it('crew#1393: hydrates an older audit record with failed_on_base absent on both TestSet contracts', () => {
+    const older = {
+      id: 'testset-run-1', run_id: 'run-1', workflow_id: QE_AUTHOR_TESTS_WORKFLOW,
+      registered_at: 5, repo_ref: null, run_status: 'completed', verify_status: 'done',
+      verified: true, files: [], produced: 1, executed: 1, passed: 1, failed: 0,
+      not_executed: 0, plan: 'tests/PLAN-a.md', harnesses: ['vitest'],
+    } satisfies Omit<TestSet, 'failed_on_base'>;
+    // These assignments also check backward compatibility at compile time.
+    const local: TestSet = older;
+    const wire: WireTestSet = older;
+    const index = new TestSetIndex();
+    index.hydrateFromEntries([{ id: 'audit-old', ts: 5, action: TEST_SET_REGISTERED_ACTION,
+      actor: TEST_SET_ACTOR, detail: { testSet: older } }]);
+    expect(index.forRun('run-1')).toEqual(local);
+    expect(index.list()).toEqual([wire]);
+    expect(index.forRun('run-1')).not.toHaveProperty('failed_on_base');
+  });
+
+  it('crew#1393: preserves a produced failure on base and keeps the successful verify verdict', () => {
+    const report = parseQeVerifyOutput('QE-VERIFY: file=tests/a.test.ts harness=vitest exit=1 tests=1 status=failed class=pre-existing-on-base\nQE-VERIFY-SUMMARY: produced=1 executed=1 passed=0 failed=0 failed_on_base=1 not_executed=0 plan=tests/PLAN-a.md checks_failed=0')!;
+    expect(report.files[0]).toMatchObject({ class: 'pre-existing-on-base' });
+    expect(report).toMatchObject({ failedOnBase: 1 });
+    expect(buildTestSet(view('done'), report, { registeredAt: 5 })).toMatchObject({
+      files: [{ path: 'tests/a.test.ts', class: 'pre-existing-on-base', status: 'failed' }], failed_on_base: 1, verified: true,
+    });
+  });
 
   it('buildTestSet is verified ONLY for a clean verify verdict; a failed or absent report registers red, never hidden', () => {
     const clean = parseQeVerifyOutput(

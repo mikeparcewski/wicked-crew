@@ -665,6 +665,39 @@ function exitLabel(c: DeliverCheckFact): string {
 /** The product site — never a repo owner handle (crew bakes no account name into a script). */
 const FOOTER_LINK = '[wicked-crew](https://wc.wickedagile.com)';
 
+/** crew#1377: the mark that keeps a quoted closing keyword from closing an issue (U+200B ZERO WIDTH SPACE). */
+export const CLOSING_REFERENCE_MARKER = '\u200b';
+
+/**
+ * crew#1377: only crew's generated `Fixes <ref>` lines may close issues. Every other closing keyword followed by an
+ * issue reference (the quoted intent, seat reports, follow-ups, anything else in the text) gets
+ * {@link CLOSING_REFERENCE_MARKER} right after the keyword, so GitHub never reads keyword + `:`/whitespace + reference.
+ * A Markdown code span would not do: this text is also the deliver commit's message, which GitHub reads as plain text
+ * (a single-commit squash lands it on the default branch), so code is marked too. The text reads the same; a keyword
+ * already followed by the marker no longer matches (idempotent). `generatedLines` are the 0-based line indexes left as
+ * written.
+ */
+export function quoteClosingReferences(text: string, generatedLines: ReadonlySet<number> = new Set()): string {
+  const closing = /\b(close[sd]?|fix(?:es|ed)?|resolve[sd]?)(?=(?::\s*|\s+)(?:[\w.-]+\/[\w.-]+#\d+|#\d+|https?:\/\/github\.com\/[\w.-]+\/[\w.-]+\/issues\/\d+)\b)/gi;
+  const mark = (part: string): string => part.replace(closing, `$1${CLOSING_REFERENCE_MARKER}`);
+  if (generatedLines.size === 0) return mark(text);
+  // A closing clause may span a line break (`Fixes\n#9`), so the text between generated lines is marked as one piece.
+  const lines = text.split('\n');
+  const out: string[] = [];
+  let run: string[] = [];
+  lines.forEach((line, index) => {
+    if (!generatedLines.has(index)) {
+      run.push(line);
+      return;
+    }
+    if (run.length > 0) out.push(mark(run.join('\n')));
+    run = [];
+    out.push(line);
+  });
+  if (run.length > 0) out.push(mark(run.join('\n')));
+  return out.join('\n');
+}
+
 /**
  * The PR title + body (and, through {@link framedDeliverText}, the commit message) for a run.
  * Never empty: every section either carries the recorded facts or says why it does not.
@@ -691,10 +724,14 @@ export function composeDeliverText(raw: DeliverTextFacts, links: IssueRefs = iss
   const refs = links.refs.map(canon);
   const intent = intentOnly(f.intent).replace(/\r\n?/g, '\n').replace(CONTROL_CHARS, ' ').trim();
   const out: string[] = [];
+  const generatedLines = new Set<number>();
 
   out.push('## Intent', '', intent === '' ? '_(the run recorded no intent)_' : intent, '');
   if (fixes.length > 0 || refs.length > 0) {
-    for (const x of fixes) out.push(`Fixes ${x}`);
+    for (const x of fixes) {
+      generatedLines.add(out.join('\n').split('\n').length);
+      out.push(`Fixes ${x}`);
+    }
     const noted = (links.byNote ?? []).map(canon).filter((x) => fixes.includes(x));
     if (noted.length > 0) out.push('', `_${noted.join(', ')} closed on the word of the person who answered the deliver gate (the intent did not say it)._`);
     if (refs.length > 0) {
@@ -841,7 +878,8 @@ export function composeDeliverText(raw: DeliverTextFacts, links: IssueRefs = iss
     `Delivered-By: wicked-crew run ${oneLine(f.runId)}`,
     ...(f.trailers ?? []),
   );
-  return { title: redactHostPaths(title), body: redactHostPaths(out.join('\n')) };
+  // Protection adds code units; bound afterward so a keyword and its marker stay together.
+  return { title: boundedTitle(quoteClosingReferences(redactHostPaths(title))), body: quoteClosingReferences(redactHostPaths(out.join('\n')), generatedLines) };
 }
 
 /** (xreview on #1188) Free text (an operator's reason, a login) as literal Markdown: HTML

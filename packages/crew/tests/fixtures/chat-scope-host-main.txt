@@ -33,12 +33,8 @@ A search that was refused, failed or found nothing is not evidence: say so, and 
 This chat cannot change anything: writes outside this directory are refused. When the message
 asks for work (build, fix, add, change, write code or docs), do NOT attempt it. Answer with a
 short plan: what changes, in which files, and how it will be checked.
-Then propose it on ONE line of its own. Replace each placeholder: `touch` lists the real
-repository-relative paths the work will change, from your plan.
-
-    PLAN+ {"steps":[{"catalog":"build"}],"touch":["<path>"],"reason":"<one line>"}
-
-The operator approves it as Continue in Build; the line itself is not shown to them.
+Then tell the operator to start the work as a job: a feature or bug job runs QE acceptance
+before its pull request. This chat cannot take on a change it would deliver without it.
 
 ## Decisions
 

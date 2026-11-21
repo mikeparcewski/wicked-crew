@@ -271,11 +271,11 @@ describe('POST /runs/preview == POST /runs (studio#1150)', () => {
     expect(preview.json().posture.deliver).toBe('pr');
   });
 
-  it('the default evals keep the delivery the launch resolved (main), and the preview says what the engine gets', async () => {
+  it('crew#1585: the default evals drop delivery, and the preview says none', async () => {
     const evalRunsDir = mkdtempSync(join(tmpdir(), 'posture-evals-'));
     for (const [body, engine] of [
       [{ workflow: 'run-evals' }, 'none'],
-      [{ workflow: 'run-evals', repoRef: 'repo-1', deliver: 'pr', power: false }, 'pr'],
+      [{ workflow: 'run-evals', repoRef: 'repo-1', deliver: 'pr', power: false }, 'none'],
     ] as const) {
       const { preview, launched, input } = await both(body, { evalRunsDir });
       expect(launched.statusCode, JSON.stringify(body)).toBe(201);
@@ -283,6 +283,13 @@ describe('POST /runs/preview == POST /runs (studio#1150)', () => {
       expect(input?.deliver ?? 'none').toBe(engine);
       expect(preview.json().posture.deliver).toBe(engine);
     }
+  });
+
+  it.each([undefined, 'pr'] as const)('crew#1418: mapping drops delivery (%s) in preview and launch', async (deliver) => {
+    const { preview, launched, input } = await both({ workflow: 'domain-extraction', repoRef: 'repo-1', ...(deliver !== undefined ? { deliver } : {}) }, {});
+    expect(launched.statusCode).toBe(201);
+    expect(input).not.toHaveProperty('deliver');
+    expect(preview.json().posture.deliver).toBe('none');
   });
 
   it('a change review never delivers: an explicit pr is refused, and the preview answers none', async () => {

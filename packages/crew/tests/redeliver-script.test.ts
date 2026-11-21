@@ -7,7 +7,7 @@ vi.mock('wicked-core-ts', () => engine);
 
 it('T7 pins deliverPrScript byte for byte across resolver extraction', () => {
   const text = deliverPrScript('redeliver extraction pin', { originUrl: 'https://github.com/o/r.git', nonce: '0123456789abcdef' }).split(process.execPath).join('<node>');
-  expect(createHash('sha256').update(text).digest('hex')).toBe('bb44bfdc9ea7fe7c12bc6a15008652789a85f612ff5b11607befec0e05eb1241');
+  expect(createHash('sha256').update(text).digest('hex')).toBe('8d2295fd70158cdbe8b6ffecc51420a71b12156843a2b71aac02250f2a681e44');
 });
 it('exports the single shared CHANGELOG rebase mechanism', async () => {
   const deliver = await import('../src/core/deliver.js');
