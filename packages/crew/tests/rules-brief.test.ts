@@ -313,6 +313,37 @@ describe("POST /runs: a workflow launch carries the project's rules in force, ma
     return { a, launched, adapter, resolved, matchArgs };
   }
 
+  it.each([true, false])('passes the registered checkout root only for a repo launch (repo=%s, wicked-crew#1706)', async (withRepo) => {
+    const { a, matchArgs } = app(async () => ({ in_force: [LEARN], set_aside: [] }), answer({}));
+    try {
+      const res = await a.inject({ method: 'POST', url: '/api/v1/runs', payload: {
+        problem: 'Fix sum()', workflow: 'bug', ...(withRepo ? { repoRef: 'tiny-math' } : {}),
+      } });
+      expect(res.statusCode, res.body).toBe(201);
+      expect(matchArgs).toHaveLength(1);
+      const { job } = matchArgs[0] as { job: Record<string, unknown> };
+      if (withRepo) expect(job.repoRoot).toBe('/srv/tiny-math');
+      else expect(job).not.toHaveProperty('repoRoot');
+    } finally {
+      await a.close();
+    }
+  });
+
+  it('omits an unreadable checkout root and still matches rules and launches (wicked-crew#1706)', async () => {
+    const { a, adapter, matchArgs } = app(async () => ({ in_force: [LEARN], set_aside: [] }), answer({}));
+    vi.mocked(adapter.listRepos).mockRejectedValue(new Error('registry unavailable'));
+    try {
+      const res = await a.inject({ method: 'POST', url: '/api/v1/runs', payload: {
+        problem: 'Fix sum()', workflow: 'bug', repoRef: 'tiny-math',
+      } });
+      expect(res.statusCode, res.body).toBe(201);
+      expect(matchArgs).toHaveLength(1);
+      expect((matchArgs[0] as { job: object }).job).not.toHaveProperty('repoRoot');
+    } finally {
+      await a.close();
+    }
+  });
+
   it('(S1, fails on main) the rig bug job: the brief lists learn-tests-with-fixes and DEV-TINYMATH-2 behind 25+ MCP and review-loop rules', async () => {
     const { a, launched } = app(async () => ({ in_force: rigRules(), set_aside: [] }));
     await a.ready();

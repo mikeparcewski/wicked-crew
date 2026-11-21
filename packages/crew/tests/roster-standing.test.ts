@@ -17,6 +17,49 @@ const REGISTRY = [
   { key: 'opencode', display_name: 'OpenCode', binary: 'opencode', enabled_for_council: true, headless_invocation: 'opencode run {PROMPT}' },
 ];
 
+describe('skills landing before roster admission (wicked-crew#1705)', () => {
+  it.each(['sync', 'batch'] as const)('defers %s admission without memoizing unknown until skills land', async (mode) => {
+    let landed = false;
+    const sync = vi.fn(() => true);
+    const batch = vi.fn(async () => new Map(REGISTRY.map(({ key }) => [key, true])));
+    const roster = rosterWithStandingFactory({
+      seatHealth: new SeatHealthTracker(), registry: () => REGISTRY, signedIn: () => true,
+      env: {}, worktreeBench: () => new Map(), hostBoundary: () => null,
+      skillsLanded: () => landed, qeAdmitted: sync, qeAdmittedBatch: mode === 'batch' ? batch : null,
+    });
+    for (let i = 0; i < 2; i++) expect(roster().every((seat) => seat.qe_reviewer === undefined)).toBe(true);
+    expect(sync).not.toHaveBeenCalled();
+    expect(batch).not.toHaveBeenCalled();
+    landed = true;
+    roster();
+    expect(mode === 'batch' ? batch : sync).toHaveBeenCalled();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(roster().every((seat) => seat.qe_reviewer?.ok === true)).toBe(true);
+    const calls = { sync: sync.mock.calls.length, batch: batch.mock.calls.length };
+    landed = false;
+    expect(roster().every((seat) => mode === 'batch' ? seat.qe_reviewer?.ok === true : seat.qe_reviewer === undefined)).toBe(true);
+    expect(sync).toHaveBeenCalledTimes(calls.sync);
+    expect(batch).toHaveBeenCalledTimes(calls.batch);
+  });
+
+  it.each(['sync', 'batch'] as const)('defers %s admission while the engine input holds the publishing placeholder', (mode) => {
+    const sync = vi.fn(() => true);
+    const batch = vi.fn(async () => new Map<string, boolean>());
+    const env = { WICKED_SKILLS_SNAPSHOT: '/state/skills/refused/skills.publishing' };
+    const roster = rosterWithStandingFactory({
+      seatHealth: new SeatHealthTracker(), registry: () => REGISTRY, signedIn: () => true,
+      env, worktreeBench: () => new Map(), hostBoundary: () => null,
+      qeAdmitted: sync, qeAdmittedBatch: mode === 'batch' ? batch : null,
+    });
+    expect(roster().every((seat) => seat.qe_reviewer === undefined)).toBe(true);
+    expect(sync).not.toHaveBeenCalled();
+    expect(batch).not.toHaveBeenCalled();
+    env.WICKED_SKILLS_SNAPSHOT = '/state/skills/snapshots/000001';
+    roster();
+    expect(mode === 'batch' ? batch : sync).toHaveBeenCalled();
+  });
+});
+
 describe('rosterWithStandingFactory', () => {
   it('includes every reading added over the registry in SEAT_STANDING_FIELDS (crew#1606)', () => {
     const tracker = new SeatHealthTracker();
