@@ -35,6 +35,7 @@ import {
 } from '../src/core/types.js';
 import { SeatHealthTracker } from '../src/api/seat-health.js';
 import { createServer } from '../src/api/server.js';
+import { withRunViews } from './support/run-views.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -904,7 +905,7 @@ describe('stall escalation through the real server (/ws + audit + adapter.reassi
     } as unknown as CoreAdapter;
 
     const auditPath = join(dir, 'audit.log');
-    const app = await createServer(mockAdapter, {
+    const app = await createServer(withRunViews(mockAdapter), {
       auditPath,
       projectEvents: { disabled: true },
       interactiveWsRelay: { disabled: true },
@@ -1028,7 +1029,7 @@ describe('stall escalation through the real server (/ws + audit + adapter.reassi
       },
     } as unknown as CoreAdapter;
 
-    const app = await createServer(mockAdapter, {
+    const app = await createServer(withRunViews(mockAdapter), {
       projectEvents: { disabled: true },
       interactiveWsRelay: { disabled: true },
       // NO escalate override — the settings store's explicit 0 must be honoured as-is (the
@@ -1220,7 +1221,7 @@ describe('the listExecuting mapper derives the arms from the unit DTO (server.ts
     } as unknown as CoreAdapter;
 
     const auditPath = join(dir, 'audit.log');
-    app = await createServer(mockAdapter, {
+    app = await createServer(withRunViews(mockAdapter), {
       auditPath,
       projectEvents: { disabled: true },
       interactiveWsRelay: { disabled: true },
