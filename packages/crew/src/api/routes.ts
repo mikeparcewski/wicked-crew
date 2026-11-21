@@ -303,7 +303,7 @@ import {
 import { createDocInProcess, registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { CreateLauncher } from '../interactive/proposal-create.js';
 import { ThemeLauncher } from './proposal-theme.js';
-import { CHAT_GIT_PROTOCOLS, OnboardLauncher, probeGitUrl, withoutCredentials } from './proposal-onboard.js';
+import { CHAT_GIT_PROTOCOLS, OnboardLauncher, probeGitUrl, shownGitUrl, withoutCredentials } from './proposal-onboard.js';
 import { RefineLauncher } from '../interactive/proposal-refine.js';
 import { lineageSteps, protectedEdits } from '../interactive/protected-edits.js';
 import type { DocBindingStore } from '../interactive/doc-binding.js';
@@ -3290,9 +3290,10 @@ export function registerRoutes(
   });
 
   // Registered repos → target-repo picker. Each carries `git_url` (studio#1012: the repo page's "This repository"
-  // tracker row reads it): the engine records none for its own clones, so it is the checkout's `origin` through
-  // `originOf` (the onboard card's own read), held a minute per checkout so a list never runs a `git` per repository
-  // per request. Credentials and query are removed; no origin = no field.
+  // tracker row reads it): the address the engine recorded, else — it records none for its own clones — the checkout's
+  // `origin` through `originOf` (the onboard card's own read), held a minute per checkout and read eight at a time, so a
+  // list never runs a `git` per repository per request. Shown through `shownGitUrl` (credentials and query removed, an
+  // address it can't vouch for dropped); none = no field.
   const originCache = new Map<string, { at: number; url: Promise<string | null> }>();
   const listedOrigin = (rootPath: string): Promise<string | null> => {
     const now = Date.now();
@@ -3302,13 +3303,21 @@ export function registerRoutes(
     originCache.set(rootPath, { at: now, url });
     return url;
   };
-  app.get(`${V}/repos`, async () => ({
-    repos: await Promise.all((await adapter.listRepos()).map(async (r): Promise<RepoEntry> => {
-      const { git_url: recorded, ...rest } = r;
-      const url = typeof recorded === 'string' && recorded.trim() !== '' ? recorded : await listedOrigin(r.root_path);
-      return url === null ? rest : { ...rest, git_url: withoutCredentials(url) };
-    })),
-  }));
+  const withGitUrl = async (r: RepoEntry): Promise<RepoEntry> => {
+    const { git_url: recorded, ...rest } = r;
+    const raw = typeof recorded === 'string' && recorded.trim() !== '' ? recorded : await listedOrigin(r.root_path);
+    const shown = raw === null ? null : shownGitUrl(raw);
+    return shown === null ? rest : { ...rest, git_url: shown };
+  };
+  app.get(`${V}/repos`, async () => {
+    const listed = await adapter.listRepos();
+    // A checkout no longer registered leaves the cache.
+    const roots = new Set(listed.map((r) => r.root_path));
+    for (const root of originCache.keys()) if (!roots.has(root)) originCache.delete(root);
+    const repos: RepoEntry[] = [];
+    for (let i = 0; i < listed.length; i += 8) repos.push(...await Promise.all(listed.slice(i, i + 8).map(withGitUrl)));
+    return { repos };
+  });
 
   app.delete(`${V}/repos/:id`, { config: { manifest: { responseType: 'UnregisterRepoResponse', statusCodes: [200, 404, 409, 501] } } }, async (req, reply) => {
     const { id } = req.params as { id: string };

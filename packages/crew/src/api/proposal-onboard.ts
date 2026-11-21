@@ -31,6 +31,9 @@ export type GitUrlReading = { ok: true; url: string; key: string; name: string }
 // User and host start with a letter or digit (never `-`: an ssh option).
 const SCP = /^([A-Za-z0-9][A-Za-z0-9._-]*)@([A-Za-z0-9][A-Za-z0-9.-]*):(?!\/)([A-Za-z0-9._~/-]+)$/;
 
+/** The ssh transport's spellings (`git+ssh://`, `ssh+git://` are git's aliases for `ssh://`). */
+const SSH_PROTOCOLS: ReadonlySet<string> = new Set(['ssh:', 'git+ssh:', 'ssh+git:']);
+
 /** Hosts whose repository paths are case-insensitive: only there do two spellings that differ in case name one repo. */
 const CASELESS_HOSTS: ReadonlySet<string> = new Set(['github.com', 'gitlab.com', 'bitbucket.org']);
 
@@ -48,14 +51,33 @@ export function withoutCredentials(raw: string): string {
     const plain = u.search === '' && u.hash === '';
     u.search = '';
     u.hash = '';
-    // An ssh user without a password is part of the address (which account's repository), not a secret.
-    if (u.password === '' && (u.username === '' || u.protocol === 'ssh:')) return plain ? t : u.toString();
-    if (u.protocol !== 'ssh:') u.username = '';
+    // An ssh user without a password is part of the address (which account's repository), not a secret; git spells the
+    // ssh transport three ways.
+    const ssh = SSH_PROTOCOLS.has(u.protocol);
+    if (u.password === '' && (u.username === '' || ssh)) return plain ? t : u.toString();
+    if (!ssh) u.username = '';
     u.password = '';
     return u.toString();
   } catch {
     // Not a URL (an scp spelling keeps its `git@`; anything else loses whatever sits before an `@` in its authority).
     return SCP.test(t) ? t : t.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@\s]*@/i, '$1');
+  }
+}
+
+/**
+ * A recorded or checkout address as `GET /repos` may send it (`git_url`, studio#1012): {@link withoutCredentials}, failing
+ * closed. A spelling it can't vouch for — a remote-helper `https::…`, a query or fragment left on an address no URL parser
+ * reads (`git@host:o/r?access_token=…`), a user or password it could not remove — gives `null`, never the raw text.
+ */
+export function shownGitUrl(raw: string): string | null {
+  const s = withoutCredentials(raw);
+  if (s === '' || s.includes('::') || /[?#\s]/.test(s)) return null;
+  try {
+    const u = new URL(s);
+    return u.password === '' && (u.username === '' || SSH_PROTOCOLS.has(u.protocol)) ? s : null;
+  } catch {
+    // An scp address keeps its `user@`; any other non-URL (a local path) must carry no `@` at all.
+    return SCP.test(s) || !s.includes('@') ? s : null;
   }
 }
 
