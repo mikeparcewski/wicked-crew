@@ -888,9 +888,12 @@ export class McpRegistry {
 
   /** Store a fresh description of a source (a re-describe), bound to the descriptor it was taken under. */
   async saveDescription(name: string, description: SourceDescription, descriptorHash: string): Promise<void> {
-    // Checked and written inside one registry mutation (serialized with every save), so a save that
-    // lands while the source was being described always wins.
-    await this.mutate(async (file) => {
+    // Checked and written in the registry's one-at-a-time chain (serialized with every save), so a save that
+    // lands while the source was being described always wins. The description lives in the catalog store, not the
+    // registry file, so this writes no registry generation (crew#1299 review: the ten-minute re-describe of every
+    // used source would otherwise flush the operator's restore points).
+    await this.deps.store.inspect(async (raw) => {
+      const file = normalizeRegistryFile(raw);
       const s = this.find(file.servers, name);
       if (sourceDescriptorHash(configOf(s)) !== descriptorHash) throw new McpRegistryError(409, 'server_changed', `${name} was saved again while it was being described; describe it again`);
       await this.catalogs.write(name, { ...description, descriptorHash });

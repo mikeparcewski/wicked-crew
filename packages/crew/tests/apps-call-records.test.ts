@@ -1,4 +1,4 @@
-// crew#1300: observers can inspect call metadata without any value from a row.
+// crew#1300: a human operator can inspect call metadata without any value from a row.
 import Fastify from 'fastify';
 import { describe, expect, it } from 'vitest';
 
@@ -6,13 +6,15 @@ import { registerAppRoutes } from '../src/apps/routes.js';
 import { appsHarness, specWith } from './support/apps-harness.js';
 
 describe('Apps call records', () => {
-  it('answers an observer with two reads, oldest first, and never a row value', async () => {
+  it('answers a human operator with two reads, oldest first, and never a row value', async () => {
     const h = await appsHarness({ extra: (app) => { app.get('/api/v1/runs', async () => ({ runs: [{ id: 'PRIVATE-ROW-VALUE' }] })); } });
     try {
       await h.newApp('desk');
       expect((await h.land('desk', specWith([{ id: 'runs', source: 'crew', kind: 'crew', rowPath: '$.runs[*]', output: [{ name: 'id', type: 'string' }] }]), { runs: JSON.stringify({ route: '/runs' }) })).status).toBe(200);
       for (const as of ['priya', 'sam']) expect((await h.call('POST', '/apps/desk/query', { version: 2, query: 'runs' }, as)).status).toBe(200);
-      const r = await h.call('GET', '/apps/desk/calls', undefined, 'olga');
+      // The records name viewers: an observer, a seat or a system actor is refused (coord review W4).
+      for (const as of ['olga', 'seat', 'ci']) expect(await h.call('GET', '/apps/desk/calls', undefined, as)).toMatchObject({ status: 403, body: { code: 'human_only' } });
+      const r = await h.call('GET', '/apps/desk/calls', undefined, 'sam');
       expect(r.status).toBe(200);
       expect(r.body).toMatchObject({ app: 'desk', records: [
         { viewer: 'priya', query: 'runs', rows: 1, outcome: 'ok' },

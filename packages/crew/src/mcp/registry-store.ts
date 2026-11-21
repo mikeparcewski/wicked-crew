@@ -240,6 +240,17 @@ export class McpRegistryStore {
     return next;
   }
 
+  /**
+   * Read under the same one-at-a-time chain as `mutate`, and write nothing back: for a step that must not interleave
+   * with a save but changes nothing in the registry file. No new generation is kept, so a step that runs often (the
+   * ten-minute Apps re-describe) never pushes the operator's restore points out of the kept window.
+   */
+  inspect<T>(fn: (file: McpRegistryFile) => T | Promise<T>): Promise<T> {
+    const next = this.tail.then(async () => fn(await this.read()));
+    this.tail = next.catch(() => undefined);
+    return next;
+  }
+
   private async write(file: McpRegistryFile): Promise<void> {
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
     // The generation on disk now. A file from before generations counts as generation 1 (kept as

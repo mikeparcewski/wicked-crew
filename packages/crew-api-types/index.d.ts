@@ -18253,7 +18253,7 @@ export interface AppCallRecord {
   outcome: string;
 }
 
-/** `GET /apps/:app/calls` (observer): at most 200 records, newest last. Not persisted across restarts. */
+/** `GET /apps/:app/calls` (human operator; the records name viewers): at most 200 records, newest last. Not persisted across restarts. */
 export interface AppCallRecordsResponse {
   app: string;
   records: AppCallRecord[];

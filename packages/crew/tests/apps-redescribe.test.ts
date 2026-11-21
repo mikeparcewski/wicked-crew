@@ -129,6 +129,24 @@ describe('periodic Apps source descriptions', () => {
       expect(log).toHaveBeenCalledTimes(1);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+
+  it("re-describing keeps the registry's generations and restore points as they were (coord review W12)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'redescribe-generations-'));
+    const secrets: SecretStore = { available: false, get: async () => null, has: async () => false, set: async () => undefined, delete: async () => undefined };
+    const store = new McpRegistryStore(join(dir, 'mcp'));
+    const registry = new McpRegistry({ store, secrets, discover: () => [], probe: async () => ({ ok: true, tools: [], serverInfo: null, source: description }) });
+    try {
+      await registry.save((await registry.preview(config('gql'))).previewHash);
+      await registry.save((await registry.preview(config('warehouse'))).previewHash);
+      const before = { generation: (await store.read()).generation, kept: (await store.generations()).map((g) => g.generation) };
+      let n = 0;
+      const refresh = new AppsRedescriber({ store: () => ({ list: () => [{ slug: 'desk' }], detail: async () => ({ spec: spec(['gql', 'warehouse']) }) }), registry, describe: async () => ({ ...description, catalog: { ...description.catalog, describedAt: `tick-${++n}` } }), log: vi.fn() });
+      for (let i = 0; i < 12; i += 1) await refresh.refresh();
+      expect(n).toBe(24);
+      expect((await registry.source('gql')).description?.catalog).toMatchObject({ describedAt: 'tick-23' });
+      expect({ generation: (await store.read()).generation, kept: (await store.generations()).map((g) => g.generation) }).toEqual(before);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
 });
 
 if (PG_TARGETS.length === 0) {

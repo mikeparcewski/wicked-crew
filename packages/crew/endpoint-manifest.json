@@ -148,6 +148,7 @@
       "responseType": "AppCallRecordsResponse",
       "statusCodes": [
         200,
+        403,
         404,
         501
       ]
