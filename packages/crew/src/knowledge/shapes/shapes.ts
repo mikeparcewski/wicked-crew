@@ -254,7 +254,8 @@ const CATALOG_ATTEMPTS = 3;
  * Every catalog document of a source, read as ONE generation: page 0, then each next page pinned to its generation.
  * A generation replaced mid-read starts the read again (at most 3 times, then {@link CatalogChangedError}), so a
  * caller never holds a mix of two generations or a silently partial list. `null` = estate holds no structure for the
- * source that `visible` lets this caller see. `truncated` = more pages than {@link CATALOG_PAGES_MAX}.
+ * source that `visible` lets this caller see. `truncated` = more pages than {@link CATALOG_PAGES_MAX}, or a source over
+ * one estate generation whose catalog names relations it does not list (crew#1328).
  */
 export async function readCatalog(
   estate: EstateCall,
@@ -290,7 +291,17 @@ export async function readCatalog(
       }
       if (opts.owner === true && got.sourceId !== sourceId) throw new Error(`estate answered a catalog that is not source ${sourceId}'s`);
       if (typeof got.generation === 'number') generation = got.generation;
-      for (const d of got.docs ?? []) if (typeof d.key === 'string') docs.push({ key: d.key, title: typeof d.title === 'string' ? d.title : null, entry: d.entry ?? null });
+      for (const d of got.docs ?? []) {
+        if (typeof d.key !== 'string') continue;
+        // (crew#1328) A source over one estate generation lists what fits and one note of how many it does not: the
+        // note is not a relation, and the catalog read is then incomplete (said as `truncated`).
+        const entry = d.entry as { kind?: unknown } | null | undefined;
+        if (typeof entry === 'object' && entry !== null && entry.kind === 'not_listed') {
+          truncated = true;
+          continue;
+        }
+        docs.push({ key: d.key, title: typeof d.title === 'string' ? d.title : null, entry: d.entry ?? null });
+      }
       const pages = typeof got.pages === 'number' ? got.pages : 1;
       if (page + 1 >= pages) break;
       if (page + 1 === CATALOG_PAGES_MAX) truncated = true;

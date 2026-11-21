@@ -21,7 +21,9 @@
  * order, after the registry mutation that wrote the catalog has landed.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 import { callEstateTool } from '../core/estate-mcp-client.js';
 import { Semaphore } from '../mcp/estate-relay.js';
@@ -49,9 +51,11 @@ export interface ReplaceSourceArgs {
   docs: Array<{ key: string; title: string; entry: Record<string, unknown>; sections: Array<{ key: string; text: string }> }>;
 }
 
-/** Estate's per-generation bounds (estate#389 `source.rs`): a source over them is refused whole, never cut. */
+/** Estate's per-generation bounds (estate#389 `source.rs`): estate refuses a generation over them. */
 export const GENERATION_MAX_DOCS = 5_000;
 export const GENERATION_MAX_BYTES = 32 * 1024 * 1024;
+/** (crew#1328) The document that says how many relations a source over those bounds does not list here. */
+export const NOT_LISTED_KEY = '~relations-not-listed';
 /** Estate refuses a key or title over 512 bytes; crew keeps under this. */
 const NAME_MAX_BYTES = 500;
 /** Build one source generation at a time; estate writes also share a single lane with trackers. */
@@ -213,18 +217,44 @@ export function sourceGeneration(s: Pick<GateSource, 'id' | 'name' | 'dialect' |
   if (s.description === null) return null;
   const catalog = s.description.catalog as SqlCatalog;
   const relations = projectableRelations(catalog, s.viewsAllowed);
-  const docs = relations.map((r) => relationDoc(s.name, r));
-  // A source over estate's generation bounds is refused whole: a partial generation would tombstone what it omits.
-  if (docs.length > GENERATION_MAX_DOCS || docs.reduce((n, d) => n + bytes(d), 0) > GENERATION_MAX_BYTES) {
-    throw new Error(`${s.name} has ${docs.length} relations, over what one estate generation holds; its structure is not projected`);
-  }
+  const all = relations.map((r) => relationDoc(s.name, r));
+  const { docs, notListed } = withinGenerationBounds(s.name, all);
   return {
     sourceId: s.id,
     generation,
     label: s.name,
-    catalog: { source: s.name, kind: s.dialect, relations: docs.length, describedAt: catalog.describedAt ?? null, format: PROJECTION_FORMAT },
+    catalog: { source: s.name, kind: s.dialect, relations: all.length - notListed, ...(notListed > 0 ? { relationsNotListed: notListed } : {}), describedAt: catalog.describedAt ?? null, format: PROJECTION_FORMAT },
     docs,
   };
+}
+
+/**
+ * (crew#1328) A source over one estate generation (5,000 documents or 32 MB) used to be refused whole, so none of its
+ * structure reached recall. Now its relations go in catalog order while they fit, and one more document names how many
+ * are not listed here and where every one is (`mcp:<source>/list_tables`), as a relation too wide to list is named
+ * (relationDoc). No earlier generation held more (they had the same bounds), so the cut erases nothing that was there.
+ */
+function withinGenerationBounds(source: string, all: ReplaceSourceArgs['docs']): { docs: ReplaceSourceArgs['docs']; notListed: number } {
+  if (all.length <= GENERATION_MAX_DOCS && all.reduce((n, d) => n + bytes(d), 0) <= GENERATION_MAX_BYTES) return { docs: all, notListed: 0 };
+  const note = (n: number): ReplaceSourceArgs['docs'][number] => ({
+    key: NOT_LISTED_KEY,
+    title: cutBytes(`${source} · relations not listed here`, NAME_MAX_BYTES),
+    entry: { kind: 'not_listed', relationsNotListed: n },
+    sections: [{ key: 'note', text: `${NOT_LISTED_KEY}: data source ${source} has ${n} more relations than one knowledge generation holds; they are not listed here. mcp:${source}/list_tables lists every relation.` }],
+  });
+  // The note's bytes are reserved at the largest count it can say, so it always fits.
+  const budget = GENERATION_MAX_BYTES - bytes(note(all.length));
+  const docs: ReplaceSourceArgs['docs'] = [];
+  let used = 0;
+  for (const d of all) {
+    const b = bytes(d);
+    if (docs.length >= GENERATION_MAX_DOCS - 1 || used + b > budget) break;
+    docs.push(d);
+    used += b;
+  }
+  const notListed = all.length - docs.length;
+  docs.push(note(notListed));
+  return { docs, notListed };
 }
 
 export type EstateCall = (tool: string, args: Record<string, unknown>) => Promise<unknown>;
@@ -240,6 +270,11 @@ export interface SourceProjectorDeps {
   now?: () => number;
   /** TESTS ONLY: the wait between SQLite contention retries. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * (crew#1328) Where the acknowledgements are kept across a restart (`<mcp state>/knowledge-acks.json`); absent = in
+   * memory only. A file that cannot be read starts empty (each source then waits for its next projection, as before).
+   */
+  acksFile?: string;
 }
 
 /** The one writer of source structure into estate (module doc). */
@@ -256,6 +291,41 @@ export class SourceProjector {
   constructor(private readonly deps: SourceProjectorDeps) {
     this.call = deps.call ?? ((tool, args) => callEstateTool(tool, args));
     this.now = deps.now ?? Date.now;
+    if (deps.acksFile !== undefined) {
+      try {
+        const raw = JSON.parse(readFileSync(deps.acksFile, 'utf8')) as { version?: unknown; acked?: unknown };
+        if (raw.version !== 1 || typeof raw.acked !== 'object' || raw.acked === null || Array.isArray(raw.acked)) throw new Error('not a version 1 acknowledgement file');
+        for (const [id, key] of Object.entries(raw.acked as Record<string, unknown>)) if (typeof key === 'string') this.acked.set(id, key);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') deps.log?.(`[knowledge] the projection acknowledgements could not be read, so each source waits for its next projection: ${message(err)}`);
+      }
+    }
+  }
+
+  /** Write the acknowledgements (atomic). Throws: a caller that must not go on without it says so. */
+  private persistAcks(): void {
+    const file = this.deps.acksFile;
+    if (file === undefined) return;
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+    const tmp = `${file}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(tmp, JSON.stringify({ version: 1, acked: Object.fromEntries(this.acked) }), { mode: 0o600 });
+      renameSync(tmp, file);
+    } finally {
+      rmSync(tmp, { force: true });
+    }
+  }
+
+  /** (crew#1328, crew#1354) Sources whose structure was tombstoned: no acknowledgement of theirs is kept. */
+  forget(sourceIds: readonly string[]): void {
+    let changed = false;
+    for (const id of sourceIds) changed = this.acked.delete(id) || changed;
+    if (!changed) return;
+    try {
+      this.persistAcks();
+    } catch (err) {
+      this.deps.log?.(`[knowledge] the projection acknowledgements could not be written: ${message(err)}`);
+    }
   }
 
   /**
@@ -316,15 +386,30 @@ export class SourceProjector {
     return this.gate.run(async () => {
       const gen = sourceGeneration(s, this.nextGeneration(s.id));
       if (gen === null) return false;
+      const key = projectionKey(s);
+      // (crew#1328) The kept acknowledgement of another key goes BEFORE the send: a crash mid-send then leaves none,
+      // never one for a key estate may no longer hold. If it cannot be dropped, nothing is sent (the next describe or
+      // boot projects again).
+      const prior = this.acked.get(s.id);
+      if (prior !== undefined && prior !== key) {
+        this.acked.delete(s.id);
+        this.persistAcks();
+      }
       await replaceSource(this.call, gen as unknown as Record<string, unknown>, this.deps);
-      this.acked.set(s.id, projectionKey(s));
+      this.acked.set(s.id, key);
+      try {
+        this.persistAcks();
+      } catch (err) {
+        // Held in memory (true for this process); after a restart the source waits for the boot projection.
+        this.deps.log?.(`[knowledge] the acknowledgement of ${s.name}'s projection could not be written: ${message(err)}`);
+      }
       return true;
     });
   }
 
   /**
-   * The {@link projectionKey} (descriptor and allowed views) whose structure estate holds for `sourceId`, as this
-   * process last saw estate accept it; `null` until then. The relay's visible set admits a source only while this
+   * The {@link projectionKey} (descriptor and allowed views) whose structure estate holds for `sourceId`, as crew last
+   * saw estate accept it (kept across a restart when {@link SourceProjectorDeps.acksFile} is set); `null` until then. The relay's visible set admits a source only while this
    * equals the source's current key, so what estate still holds of an earlier descriptor or an earlier view
    * allowlist (a projection pending or failed, a restored registry generation) is never released.
    */

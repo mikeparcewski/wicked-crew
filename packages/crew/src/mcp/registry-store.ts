@@ -148,6 +148,18 @@ export interface McpRegistryFile {
   /** (DES-KNOWLEDGE-DATA-001 §5.5) Bumped by every write; absent = 0 (a file from before generations). */
   generation?: number;
   servers: McpServerRecord[];
+  /**
+   * (crew#1328, crew#1354) Estate source ids whose structure must be erased: a removed data source's entry id, a removed
+   * PM entry's trackers. Kept here, outside any entry, so it survives the entry, a restart and a restore (a restore
+   * replaces `servers` only). The tracker projector sends each an empty generation and drops it once estate takes it.
+   */
+  estateTombstones?: EstateTombstone[];
+}
+
+/** One estate source id waiting for its empty generation, and when it was asked for. */
+export interface EstateTombstone {
+  id: string;
+  at: string;
 }
 
 /** One kept generation of the registry. */

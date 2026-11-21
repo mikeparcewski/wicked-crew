@@ -2748,7 +2748,9 @@ export async function createServer(
   });
   // DES-KNOWLEDGE-DATA-001 §4.1: every stored catalog's STRUCTURE (never a row) is projected into estate's knowledge
   // plane, keyed by the registry id; what was described before this release is projected once, off the boot path.
-  const sourceProjector = new SourceProjector({ store: mcpRegistryStore, catalogs: mcpRegistry.catalogs, log: (m) => app.log.warn(m) });
+  // crew#1328: the acknowledgements are kept beside the registry, so a restart does not hide a projected source until
+  // the boot projection lands (estate need not be up at boot for it).
+  const sourceProjector = new SourceProjector({ store: mcpRegistryStore, catalogs: mcpRegistry.catalogs, log: (m) => app.log.warn(m), acksFile: join(mcpRegistryStore.directory, 'knowledge-acks.json') });
   mcpRegistry.catalogs.onWritten = (name) => sourceProjector.written(name);
   // crew#1328: a restored generation changes what estate must hold for a source with no catalog written.
   mcpRegistry.onSourceChanged = (name) => sourceProjector.written(name);
@@ -2763,6 +2765,12 @@ export async function createServer(
   app.addHook('onClose', async () => clearInterval(trackerTimer));
   mcpRegistry.trackerProjection = trackerProjector.projection;
   mcpRegistry.onRestored = () => trackerProjector.changed();
+  // crew#1328, crew#1354: a removed source's structure and a removed PM entry's trackers are erased from estate (the
+  // registry keeps the tombstones, so a restart before estate takes them still erases them).
+  mcpRegistry.onTombstoned = (ids) => {
+    sourceProjector.forget(ids);
+    trackerProjector.changed();
+  };
   trackerProjector.changed();
   // §4.3: what a unit's knowledge reads may see — the sources its project may see (the gate's predicate) and its repos.
   const projectVisible = async (projectId: string | null, repoId: string | null = null): Promise<string[]> => {
