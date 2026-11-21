@@ -309,7 +309,7 @@ describe('estate tombstones survive the entry and a restart (crew#1328 item 1, c
     await store.mutate((f) => {
       f.servers.push(sourceRecord() as never);
     });
-    const tombstoned: string[][] = [];
+    const tombstoned: unknown[] = [];
     registry.onTombstoned = (ids) => void tombstoned.push(ids);
     await registry.restore(await registry.planRestore(1));
     expect((onDisk().estateTombstones ?? []).map((t) => t.id)).toEqual([SOURCE_ID]);
