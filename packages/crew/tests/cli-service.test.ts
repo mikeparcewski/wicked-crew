@@ -419,7 +419,10 @@ describe('wicked-crew CLI (crew#551)', () => {
     expect(out.code).toBe(1);
     expect(out.stdout).toBe('');
     expect(out.stderr.trim().split('\n')).toHaveLength(1);
-    expect(out.stderr).toContain(`wicked-crew serve --install-service --port ${port}`);
+    // The selftest (wicked-ci S10) and cli-status tests pin "start it with `wicked-crew serve`": the port is a note after it.
+    expect(out.stderr).toMatch(/start it with `wicked-crew serve`/);
+    expect(out.stderr).toContain('`wicked-crew serve --install-service`');
+    expect(out.stderr).toContain(`pass \`--port ${port}\` to both`);
     expect(out.stderr).not.toMatch(/^\s+at /m);
   });
 

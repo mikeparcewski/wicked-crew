@@ -334,6 +334,7 @@ export const START_TIMEOUT_MS = 60_000;
 
 /** A bridge that answered `/api/health` for its root. */
 export interface LiveBridge {
+  /** crew#1288: the lockfile's `version`, when it records one; outside the interactive range it is never adopted. */
   version?: string | null;
   host: string;
   port: number;
@@ -582,12 +583,13 @@ export function readLock(root: string): LiveBridge | null {
     if (typeof raw.port !== 'number' || typeof raw.pid !== 'number') return null;
     return {
       host: typeof raw.host === 'string' && raw.host !== '' ? raw.host : '127.0.0.1',
-      version: typeof raw.version === 'string' ? raw.version : null,
       port: raw.port,
       pid: raw.pid,
       startedAt: typeof raw.startedAt === 'string' && raw.startedAt !== '' ? raw.startedAt : null,
       // crew#509: present only when the lockfile echoes one (the shape of a pre-token lockfile is unchanged).
       ...(typeof raw.spawnToken === 'string' && raw.spawnToken !== '' ? { spawnToken: raw.spawnToken } : {}),
+      // crew#1288: the bridge's version, when the lockfile records one (a lockfile without it reads as before).
+      ...(typeof raw.version === 'string' && raw.version !== '' ? { version: raw.version } : {}),
     };
   } catch {
     return null;

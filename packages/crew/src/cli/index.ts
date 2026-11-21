@@ -838,8 +838,8 @@ function noDaemonRemedy(port: number): string {
   if (service !== null) {
     return `${head} — the login service is installed but the daemon is not up; read ${service.logPath ?? service.unitPath}`;
   }
-  const portArg = port === DEFAULT_DAEMON_PORT ? '' : ` --port ${port}`;
-  return `${head} — start it with \`wicked-crew serve${portArg}\` (or at every login: \`wicked-crew serve ${INSTALL_SERVICE_FLAG}${portArg}\`)`;
+  const portNote = port === DEFAULT_DAEMON_PORT ? '' : `; pass \`--port ${port}\` to both`;
+  return `${head} — start it with \`wicked-crew serve\` (or at every login: \`wicked-crew serve ${INSTALL_SERVICE_FLAG}\`)${portNote}`;
 }
 
 /** `serve --install-service` / `--uninstall-service` (crew#551): exit code of the verb. */
