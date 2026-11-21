@@ -2304,7 +2304,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     const launch = engine.launches[0]!;
     expect(launch.sessionId).toBe('run-bound-note');
     expect(launch.clisJson).toBe(spec.clisJson);
-    expect(launch.projectGraph).toEqual({ dbPath: '/graphs/chat.db' });
+    expect(launch.projectGraph).toBeUndefined(); // Unfiled: its chat's repo graph is no project graph (W24)
     expect('projectId' in launch).toBe(false); // Unfiled
     expect(existsSync(join(draftDir, '_unfiled__bound-note', 'attempt-old-run'))).toBe(false);
     expect(existsSync(join(draftDir, '_unfiled__bound-note', 'attempt-elsewhere'))).toBe(true);

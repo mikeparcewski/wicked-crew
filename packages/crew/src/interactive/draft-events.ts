@@ -1661,8 +1661,10 @@ export async function startInteractiveDraftSubscriber(
     // from a project that simply has no graph yet.
     let projectGraphBinding: ProjectGraphBinding | null = null;
     if (bound !== undefined) {
-      // The stored graph binding (DES §5.2), whatever the mount.
-      projectGraphBinding = bound.graphDb !== null ? { dbPath: bound.graphDb } : null;
+      // The stored graph binding (DES §5.2), but only for a document filed into a project (W24): `projectGraph` is the
+      // PROJECT's graph and the adapter refuses it on a run filed nowhere. An Unfiled document's binding holds its chat's
+      // repo graph, which this repo-less launch cannot take; it drafts from its repository snapshot and packet.
+      projectGraphBinding = bound.graphDb !== null && doc.projectId !== undefined ? { dbPath: bound.graphDb } : null;
     } else if (doc.projectId !== undefined) {
       const decision = await resolveProjectGraphBinding(adapter, doc.projectId, undefined).catch(
         (err: unknown) => ({
