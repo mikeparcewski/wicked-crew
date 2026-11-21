@@ -2,10 +2,7 @@
 // (`$WG_EDITOR_CONFORMANCE_TIMEOUT`, default 120 s — scripts/editor/conformance.py `--timeout`), so a
 // correct install on a loaded host is not killed by crew while garden still allows each page load.
 // Incident (orchestrator, 2026-10-14): a fixed 240 s cap killed an install at 249 s.
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   CONFORMANCE_TIMEOUT_ENV,
   DEFAULT_CONFORMANCE_LOAD_S,
@@ -14,9 +11,8 @@ import {
   RUN_PLUGIN_LOADS,
   conformanceCapMs,
   conformanceLoadSeconds,
-  gardenConformance,
+  engineConformance,
 } from '../src/editors/pack-install.js';
-import { removeScratch } from './setup/scratch.js';
 
 const V1 = { id: 'a', protocol: [1] };
 const V2 = { id: 'b', protocol: [1, 2] };
@@ -82,47 +78,16 @@ describe('the overall cap', () => {
   });
 });
 
-describe('gardenConformance hands the derived cap to the runner process', () => {
-  let dir: string;
-  afterEach(() => removeScratch(dir));
-
-  it('timeout = conformanceCapMs(the pack editors, the env bound), and the env reaches the child', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'conformance-cap-'));
-    const garden = join(dir, 'garden');
-    mkdirSync(join(garden, 'scripts', 'editor'), { recursive: true });
-    writeFileSync(join(garden, 'scripts', 'editor', 'conformance.py'), '# stub\n');
-    const seen: Array<{ timeout?: number; env?: NodeJS.ProcessEnv }> = [];
-    const env = { [CONFORMANCE_TIMEOUT_ENV]: '200' };
-    const run = gardenConformance(garden, () => 'http://127.0.0.1:1', {
-      env,
-      exec: (async (_bin: string, _args: string[], opts: { timeout?: number; env?: NodeJS.ProcessEnv } = {}) => {
-        seen.push(opts);
-        return { stdout: JSON.stringify({ ok: true, editors: [] }), stderr: '' };
-      }) as never,
-    });
-    await run('/pack', [V2]);
-    expect(seen[0]?.timeout).toBe(conformanceCapMs([V2], 200));
-    expect(seen[0]?.timeout).toBe((60 + CONFORMANCE_FIXED_WAITS_S + 4 + 3 * 200) * 1000);
-    // The child reads the very bound the cap was sized from.
-    expect(seen[0]?.env?.[CONFORMANCE_TIMEOUT_ENV]).toBe('200');
-  });
-
-  it('a spelling crew does not read (non-ASCII digits) still reaches garden as the bound crew sized for', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'conformance-cap-'));
-    const garden = join(dir, 'garden');
-    mkdirSync(join(garden, 'scripts', 'editor'), { recursive: true });
-    writeFileSync(join(garden, 'scripts', 'editor', 'conformance.py'), '# stub\n');
-    const seen: Array<{ timeout?: number; env?: NodeJS.ProcessEnv }> = [];
-    const run = gardenConformance(garden, () => 'http://127.0.0.1:1', {
-      env: { [CONFORMANCE_TIMEOUT_ENV]: '\uff11\uff10\uff10\uff10', KEEP: 'x' },
-      exec: (async (_b: string, _a: string[], opts: { timeout?: number; env?: NodeJS.ProcessEnv } = {}) => {
-        seen.push(opts);
-        return { stdout: JSON.stringify({ ok: true, editors: [] }), stderr: '' };
-      }) as never,
-    });
-    await run('/pack', [V1]);
-    expect(seen[0]?.env?.[CONFORMANCE_TIMEOUT_ENV]).toBe('120');
-    expect(seen[0]?.env?.['KEEP']).toBe('x');
-    expect(seen[0]?.timeout).toBe(conformanceCapMs([V1], 120));
+describe('engineConformance sends the manifest-derived deadline to the jailed binding', () => {
+  it.each([
+    { editors: [V2], plugins: [], load: '200', timeoutS: 719 },
+    { editors: [V1], plugins: [], load: '7.1', timeoutS: 130 },
+    { editors: [V1], plugins: [], load: '\uff11\uff10\uff10\uff10', timeoutS: 355 },
+    { editors: [V2], plugins: [{ id: 'p' }], load: '120', timeoutS: 859 },
+    { editors: [V2, V2], plugins: [{ id: 'p' }], load: '1800', timeoutS: 900 },
+  ])('sends packRoot and timeoutS=$timeoutS for $editors / $plugins at load=$load', async ({ editors, plugins, load, timeoutS }) => {
+    const run = vi.fn(async () => JSON.stringify({ record: { outcome: 'pass', attempt: 1 }, report: { ok: true, editors: [] } }));
+    await engineConformance({ run, env: { [CONFORMANCE_TIMEOUT_ENV]: load } })('/pack', editors, plugins);
+    expect(run).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ packRoot: '/pack', timeoutS }));
   });
 });

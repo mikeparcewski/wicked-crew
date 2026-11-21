@@ -450,7 +450,7 @@ import { ingestDecision } from '../decisions/ingest.js';
 import { registerDecisionRoutes } from '../decisions/routes.js';
 import { ChatDecisionRecorder } from '../decisions/chat-recorder.js';
 import { ConsiderationService } from '../decisions/consider.js';
-import { gardenConformance, gardenPackCheck, type ConformanceRunner, type PackCheckRunner } from '../editors/pack-install.js';
+import { engineConformance, gardenPackCheck, type ConformanceRunner, type PackCheckRunner } from '../editors/pack-install.js';
 import { conformanceProvisioner, conformanceRuntimeReady, conformanceRuntimeRoot, conformanceVenvDir, editorPluginLaunchListener, venvPython } from '../editors/conformance-runtime.js';
 import { EditorRegistry } from '../editors/registry.js';
 import { registerEditorRoutes, unitTokenProbe, type UnitTokenVerdict } from '../editors/routes.js';
@@ -2095,7 +2095,7 @@ export function registerRoutes(
     adapter,
     broadcast,
     packCheck: runtime.packCheck ?? gardenPackCheck(discoverLivePlugin()?.path ?? null),
-    conformance: runtime.editorConformance ?? gardenConformance(discoverLivePlugin()?.path ?? null, () => process.env['WICKED_CREW_URL'] ?? null, { provision: editorConformanceRuntime }),
+    conformance: runtime.editorConformance ?? engineConformance({ provision: editorConformanceRuntime }),
     // F37: the grant write's §6.4 tripwire asks the engine whether a bearer is a governed unit's token.
     ...(() => {
       const probe = runtime.editorUnitTokenProbe !== undefined ? runtime.editorUnitTokenProbe : unitTokenProbe(CoreAdapter.estateScopeResolver());

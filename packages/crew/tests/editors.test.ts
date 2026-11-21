@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ConformanceRule, CoreEvent, EditorConformanceSummary, EditorGrantsResponse, EditorView, InstallEditorRefusal, InstallEditorResponse, ListEditorsResponse } from '../src/core/types.js';
 import { registerFrameGuard } from '../src/api/frame-guard.js';
 import { BUNDLE_CSP_BASE, bundleHeaders, requestOrigin, shellCsp } from '../src/editors/csp.js';
-import { CONFORMANCE_CASES, gardenConformance, gardenPackCheck, installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from '../src/editors/pack-install.js';
+import { CONFORMANCE_CASES, gardenPackCheck, installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from '../src/editors/pack-install.js';
 import { EditorRegistry, EDITORS_STATE_FILENAME, discoverStudioEditors, externalReferences, readCapped, sha256Of } from '../src/editors/registry.js';
 import { registerEditorRoutes, serveBundle, unitTokenProbe, type UnitTokenVerdict } from '../src/editors/routes.js';
 import { readNoFollow } from '../src/editors/visuals.js';
@@ -423,18 +423,13 @@ describe('pack install: the gate, crew\'s conformance run, then the registry', (
     expect(readCapped(join(dir, 'big.html'), 4096)!.byteLength).toBe(2048);
   });
 
-  it('gardenPackCheck and gardenConformance without a garden FAIL (never pass), and spawn nothing', async () => {
+  it('gardenPackCheck without a garden or check script FAILS (never passes)', async () => {
     const verdict = await gardenPackCheck(null)('/anywhere');
     expect(verdict.ok).toBe(false);
     expect(verdict.errors[0]!.code).toBe('garden-missing');
     const noScript = mkdtempSync(join(tmpdir(), 'editors-garden-'));
     scratches.push(noScript);
     expect((await gardenPackCheck(noScript)('/anywhere')).errors[0]!.code).toBe('garden-too-old');
-    expect(await gardenConformance(null, () => 'http://127.0.0.1:1')('/anywhere')).toMatchObject({ ok: false, editors: [] });
-    expect((await gardenConformance(noScript, () => 'http://127.0.0.1:1')('/anywhere')).error).toMatch(/no scripts\/editor\/conformance\.py/);
-    mkdirSync(join(noScript, 'scripts', 'editor'), { recursive: true });
-    writeFileSync(join(noScript, 'scripts', 'editor', 'conformance.py'), '');
-    expect((await gardenConformance(noScript, () => null)('/anywhere')).error).toMatch(/own URL/);
   });
 });
 
