@@ -1774,7 +1774,7 @@ export interface RepoEntry {
   root_path: string;
   default_branch: string;
   registered_at: number;
-  /** Remote git URL the repo was cloned from (undefined for locally-registered repos). */
+  /** The checkout's git remote (`GET /repos`: its `origin`, credentials and query removed); absent when it has none. */
   git_url?: string;
   /**
    * ABSOLUTE path of this repo's code graph, resolved by the engine (wicked-core#170).

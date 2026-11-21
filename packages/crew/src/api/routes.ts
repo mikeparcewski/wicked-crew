@@ -3289,8 +3289,26 @@ export function registerRoutes(
     return adapter.maintenanceState();
   });
 
-  // Registered repos → target-repo picker.
-  app.get(`${V}/repos`, async () => ({ repos: await adapter.listRepos() }));
+  // Registered repos → target-repo picker. Each carries `git_url` (studio#1012: the repo page's "This repository"
+  // tracker row reads it): the engine records none for its own clones, so it is the checkout's `origin` through
+  // `originOf` (the onboard card's own read), held a minute per checkout so a list never runs a `git` per repository
+  // per request. Credentials and query are removed; no origin = no field.
+  const originCache = new Map<string, { at: number; url: Promise<string | null> }>();
+  const listedOrigin = (rootPath: string): Promise<string | null> => {
+    const now = Date.now();
+    const hit = originCache.get(rootPath);
+    if (hit !== undefined && now - hit.at < 60_000) return hit.url;
+    const url = originOf(rootPath);
+    originCache.set(rootPath, { at: now, url });
+    return url;
+  };
+  app.get(`${V}/repos`, async () => ({
+    repos: await Promise.all((await adapter.listRepos()).map(async (r): Promise<RepoEntry> => {
+      const { git_url: recorded, ...rest } = r;
+      const url = typeof recorded === 'string' && recorded.trim() !== '' ? recorded : await listedOrigin(r.root_path);
+      return url === null ? rest : { ...rest, git_url: withoutCredentials(url) };
+    })),
+  }));
 
   app.delete(`${V}/repos/:id`, { config: { manifest: { responseType: 'UnregisterRepoResponse', statusCodes: [200, 404, 409, 501] } } }, async (req, reply) => {
     const { id } = req.params as { id: string };
