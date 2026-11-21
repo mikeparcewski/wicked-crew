@@ -24,6 +24,8 @@ import { join } from 'node:path';
 import { InteractiveBridgePool, INTERACTIVE_SPEC, LOCK_NAME } from '../../src/interactive/bridge-pool.js';
 import { CREW_GROUNDING_FILE, DocGroundingStore } from '../../src/interactive/doc-grounding.js';
 import { registerFrameGuard } from '../../src/api/frame-guard.js';
+import { documentCsp, INLINE_ONLY_POLICY } from '../../src/editors/csp.js';
+import { guardBundle } from '../../src/editors/webrtc-guard.js';
 import { registerInteractiveProxy } from '../../src/interactive/proxy-routes.js';
 import { mkdirSync as mkdirp } from 'node:fs';
 import { ProjectSettingsStore } from '../../src/projects/settings.js';
@@ -327,8 +329,9 @@ describe('interactive proxy — transport semantics', () => {
   it('keeps the clickjacking guard on proxied documents beside the sandbox and the bridge\'s own policy', async () => {
     const res = await fetch(`${base}${P}/d/doc-1/doc/1`);
     expect(res.headers.get('x-frame-options')).toBe('SAMEORIGIN');
-    // Three policies, each enforced: the guard, the bridge's, the sandbox.
-    expect(res.headers.get('content-security-policy')).toBe(`${GUARD}, img-src 'self', sandbox allow-scripts`);
+    const hashes = guardBundle(Buffer.from('<!doctype html><script>fetch("/api/v1/settings")</script>')).scriptHashes;
+    // Every policy is enforced: the guard, the bridge's, sandbox, document network policy and inline-only scripts.
+    expect(res.headers.get('content-security-policy')).toBe(`${GUARD}, img-src 'self', sandbox allow-scripts, ${documentCsp(hashes)}, ${INLINE_ONLY_POLICY}`);
     const sse = await fetch(`${base}${P}/api/stream`);
     expect(sse.headers.get('x-frame-options')).toBe('SAMEORIGIN');
     expect(sse.headers.get('content-security-policy')).toBe(GUARD);

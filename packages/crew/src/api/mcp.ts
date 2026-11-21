@@ -23,6 +23,10 @@
  *                                       (crew#1316) a preview whose `auth.ref` names a secret it does not stage (an
  *                                       `env:` reference, a keychain entry crew already holds) probes with that
  *                                       secret: human operator only (403 `stored_secret_human_only`)
+ *                                       (crew#1558) stdio env is a per-server allowlist approved by a human
+ *                                       operator: any change of names or values at preview or save needs that
+ *                                       person (403 `env_human_only`). The denylist stays the second line;
+ *                                       each name's warning class in `envNames` is advice for the approver.
  *   PATCH  /mcp/servers/:name           `{enabled}`
  *   DELETE /mcp/servers/:name           remove the server and the keychain secret it owns
  *   POST   /mcp/servers/:name/test      probe again: health plus the tool diff
@@ -83,7 +87,7 @@ import type { McpBroker } from '../mcp/broker.js';
 import type { AskServer } from '../mcp/ask-server.js';
 import type { McpPolicies } from '../mcp/policies.js';
 import { MCP_PREVIEW_ROLES, MCP_RUN_MODES, McpLedgerEditError } from '../mcp/policies.js';
-import { validateServerEnv } from '../mcp/env.js';
+import { envFingerprint, envWarningClass, validateServerEnv } from '../mcp/env.js';
 import { agentServerView, configOf, isWriteGrant, McpRegistryError, type McpRegistry } from '../mcp/registry.js';
 import { restTarget } from '../mcp/rest.js';
 import { listUnitTools } from '../mcp/tool-list.js';
@@ -170,8 +174,9 @@ export const McpServerConfigSchema = z.strictObject({
    */
   address: AddressSchema.optional(),
   /**
-   * (chat-extend CX1) `mcp-stdio` only: non-secret environment variables for the server's process. Judged by
-   * `validateServerEnv` (the one validator) in the refine below; a credential belongs in `secret`.
+   * (chat-extend CX1, crew#1558) `mcp-stdio` only: the human operator's per-server allowlist of names
+   * and values. Changes need that person's approval; `validateServerEnv` in the refine below stays
+   * the second line for everyone. Warning classes advise the approver; a credential belongs in `secret`.
    */
   env: record(z.string(), z.string()).optional(),
   /** (DES-APPS-001 §5.1) `sql` only: a network SQL source's settings (sqlite sources come from uploads). */
@@ -374,6 +379,10 @@ function humanOperatorOnly(reply: FastifyReply, actor: Actor, what: string, code
   return reply.code(403).send({ error: `only a human operator can ${what}; you are ${actor.kind}/${actor.trust}`, code });
 }
 
+function envRefused(reply: FastifyReply, actor: Actor): FastifyReply {
+  return humanOperatorOnly(reply, actor, "set or change a stdio server's environment variables (its allowlist)", 'env_human_only');
+}
+
 function writeGrantRefused(reply: FastifyReply, actor: Actor): FastifyReply {
   return reply.code(403).send({
     error: `only a human operator can enable a write tool (a write grant); you are ${actor.kind}/${actor.trust}`,
@@ -565,11 +574,16 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       // previews a save over one.
       const over = await r.get(parsed.data.name).catch(() => null);
       if ((parsed.data.pm !== undefined || over?.pm !== undefined) && !mayGrantWrite(actor)) return humanOperatorOnly(reply, actor, 'register a project-management source', 'pm_source_human_only');
+      // The preview spawns the program: only the exact names AND values already approved may be reused.
+      if (parsed.data.kind === 'mcp-stdio' && !mayGrantWrite(actor) && envFingerprint(parsed.data.env) !== envFingerprint(over?.env)) return envRefused(reply, actor);
       try {
         const full = await r.preview(toConfig(parsed.data), parsed.data.secret ?? null);
         // (DES-KNOWLEDGE-DATA-001 §5.2) A source's structure reaches an agent only through estate and the gate.
         const { source: described, ...rest } = full;
         const preview: McpPreviewResponse = sees(actor) === 'full' && described !== undefined ? { ...rest, source: described } : rest;
+        if (sees(actor) === 'full' && parsed.data.kind === 'mcp-stdio' && parsed.data.env !== undefined && Object.keys(parsed.data.env).length > 0) {
+          preview.envNames = Object.keys(parsed.data.env).sort().map((name) => ({ name, class: envWarningClass(name) }));
+        }
         if (deps.policies === undefined) return preview;
         let policies: McpPreviewResponse['policies'] = null;
         try {
@@ -615,7 +629,13 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
         // The confirmation rides in the previewed config; saving it is the human operator's, too.
         if (held !== null && confirmsAddress(held.address) && !mayGrantWrite(deps.actorOf(req))) return addressConfirmRefused(reply, deps.actorOf(req));
         if (held !== null && held.pm != null && !mayGrantWrite(deps.actorOf(req))) return humanOperatorOnly(reply, deps.actorOf(req), 'register a project-management source', 'pm_source_human_only');
-        const commit = async (): Promise<McpServer> => {
+        const commit = async (): Promise<McpServer | null> => {
+          // Recheck the current allowlist inside the server's lock, before any withdrawal or write:
+          // a person may have changed it since this preview, or while this save waited for the lock.
+          if (held !== null && held.kind === 'mcp-stdio' && !mayGrantWrite(deps.actorOf(req))) {
+            const over = await r.get(held.name).catch(() => null);
+            if (envFingerprint(held.env) !== envFingerprint(over?.env)) return null;
+          }
           if (held !== null && deps.policies !== undefined) {
             const tokens = await deps.policies.withdrawnBySave(held);
             if (tokens.length > 0) {
@@ -630,6 +650,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
         // waits until the save commits, then is judged against the new registration. With no held
         // preview the save refuses (409) and nothing is withdrawn, so there is nothing to serialize.
         const server = held === null ? await commit() : await exclusive(held.name, commit);
+        if (server === null) return envRefused(reply, deps.actorOf(req));
         deps.audit.record('mcp.server.saved', deps.actorOf(req), {
           detail: {
             name: server.name,
