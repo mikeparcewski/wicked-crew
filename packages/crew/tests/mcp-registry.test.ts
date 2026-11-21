@@ -25,7 +25,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { AuditLog } from '../src/api/audit.js';
 import { LOCAL_ACTOR } from '../src/api/auth.js';
 import { registerMcpRoutes } from '../src/api/mcp.js';
-import type { McpPreviewResponse, McpServer, McpServersResponse, McpServerTestResponse, McpTool } from '../src/core/types.js';
+import type { Actor, McpPreviewResponse, McpServer, McpServersResponse, McpServerTestResponse, McpTool } from '../src/core/types.js';
 import { deriveToolClass, parseMcpSubject } from '../src/mcp/classify.js';
 import { codexServerNames, discoverMcpServers } from '../src/mcp/discovery.js';
 import { probeMcpServer } from '../src/mcp/probe.js';
@@ -75,6 +75,7 @@ let app: FastifyInstance;
 let audit: AuditLog;
 let clock: number;
 let registry: McpRegistry;
+let actor: Actor;
 
 function writeSpec(spec: Tools): void {
   writeFileSync(specPath, JSON.stringify(spec));
@@ -139,7 +140,8 @@ beforeEach(async () => {
     },
   });
   app = Fastify({ logger: { level: 'trace', stream } });
-  registerMcpRoutes(app, { registry, audit, actorOf: () => LOCAL_ACTOR });
+  actor = LOCAL_ACTOR;
+  registerMcpRoutes(app, { registry, audit, actorOf: () => actor });
   await app.ready();
 });
 
@@ -606,5 +608,75 @@ describe('crew reserves the Apps self-check server', () => {
     expect(preview.statusCode).toBe(400);
     expect(preview.json()).toMatchObject({ code: 'reserved_name', error: expect.stringContaining("mcp:apps/<tool> is crew's own Apps self-check") });
     await expect(registry.registerSnapshotSource('apps', 'digest', { catalog: { dialect: 'sqlite', database: 'test', describedAt: '2026-11-12T00:00:00Z', relations: [] } })).rejects.toMatchObject({ code: 'reserved_name', message: expect.stringContaining("mcp:apps/<tool> is crew's own Apps self-check") });
+  });
+});
+
+
+describe('Apps per-tool read acceptance (#1295)', () => {
+  const patch = (body: unknown) => call('PATCH', `/mcp/tools/${encodeURIComponent('mcp:fx/wt_echo')}`, body);
+  const preview = async () => (await call('POST', '/mcp/servers/preview', stdioConfig())).json() as McpPreviewResponse;
+
+  it('saves and audits listed reads, preserves unchanged acceptance, and drops it on a schema change', async () => {
+    const p = await preview();
+    const saved = await call('POST', '/mcp/servers', { previewHash: p.previewHash, acceptedReads: ['wt_echo'] });
+    expect(saved.statusCode, saved.body).toBe(201);
+    expect(toolOf(saved.json() as McpServer, 'wt_echo')).toMatchObject({ readAccepted: true });
+    const store = new McpRegistryStore(join(base, 'state', 'mcp'));
+    const t = (await store.read()).servers[0]!.tools.find((t) => t.name === 'wt_echo')!;
+    expect(t).toMatchObject({ readAccepted: { schemaHash: t.schemaHash } });
+    expect(await audit.read()).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'mcp.tool.read_accepted', detail: expect.objectContaining({ subject: 'mcp:fx/wt_echo', via: 'save' }) })]));
+    expect(toolOf(await previewAndSave(), 'wt_echo')).toMatchObject({ readAccepted: true });
+    writeSpec({ tools: BASE_TOOLS.map((t) => t.name === 'wt_echo' ? { ...t, inputSchema: { type: 'object', properties: { changed: { type: 'number' } } } } : t) });
+    expect((await preview()).tools.find((t) => t.name === 'wt_echo')).toMatchObject({ readAccepted: false });
+    expect(toolOf(await previewAndSave(), 'wt_echo')).toMatchObject({ readAccepted: false });
+  });
+
+  it.each(['wt_note', 'missing'])('refuses %s before saving or spending the preview', async (name) => {
+    const p = await preview();
+    const refused = await call('POST', '/mcp/servers', { previewHash: p.previewHash, acceptedReads: [name] });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json()).toMatchObject({ code: 'not_a_read' });
+    expect((await registry.list()).servers).toEqual([]);
+    expect((await call('POST', '/mcp/servers', { previewHash: p.previewHash, acceptedReads: ['wt_echo'] })).statusCode).toBe(201);
+  });
+
+  it('PATCH accepts and withdraws, audits both, and refuses a write or an unregistered schema', async () => {
+    await previewAndSave();
+    expect((await patch({ readAccepted: true })).json()).toMatchObject({ readAccepted: true });
+    expect((await patch({ readAccepted: false })).json()).toMatchObject({ readAccepted: false });
+    const write = await call('PATCH', `/mcp/tools/${encodeURIComponent('mcp:fx/wt_note')}`, { readAccepted: true });
+    expect(write.statusCode).toBe(409);
+    expect(write.json()).toMatchObject({ code: 'not_a_read' });
+    const store = new McpRegistryStore(join(base, 'state', 'mcp'));
+    await store.mutate((f) => { f.servers[0]!.tools[0]!.schemaHash = null; });
+    expect((await patch({ readAccepted: true })).statusCode).toBe(409);
+    const entries = await audit.read();
+    for (const type of ['mcp.tool.read_accepted', 'mcp.tool.read_withdrawn']) expect(entries).toEqual(expect.arrayContaining([expect.objectContaining({ action: type, detail: expect.objectContaining({ via: 'patch' }) })]));
+  });
+
+  it.each(['agent', 'system'] as const)('%s cannot accept or withdraw reads', async (kind) => {
+    await previewAndSave();
+    const p = await preview();
+    actor = { id: 'worker', kind, trust: 'operator' };
+    for (const r of [await call('POST', '/mcp/servers', { previewHash: p.previewHash, acceptedReads: ['wt_echo'] }), await patch({ readAccepted: true }), await patch({ readAccepted: false })]) {
+      expect(r.statusCode).toBe(403);
+      expect(r.json()).toMatchObject({ code: 'read_accept_human_only' });
+    }
+  });
+
+  it('migrates legacy reads once and persists the marker on the next write; marked missing fields stay unaccepted', async () => {
+    await previewAndSave();
+    const store = new McpRegistryStore(join(base, 'state', 'mcp'));
+    await store.mutate((f) => {
+      delete (f as { readAcceptance?: number }).readAcceptance;
+      for (const t of f.servers[0]!.tools) delete (t as { readAccepted?: unknown }).readAccepted;
+    });
+    expect(toolOf((await registry.list()).servers[0]!, 'wt_echo')).toMatchObject({ readAccepted: true });
+    await call('PATCH', '/mcp/servers/fx', { enabled: true });
+    const migrated = await store.read();
+    expect(migrated).toMatchObject({ readAcceptance: 1 });
+    expect(migrated.servers[0]!.tools.find((t) => t.name === 'wt_note')).toMatchObject({ readAccepted: null });
+    await store.mutate((f) => { for (const t of f.servers[0]!.tools) delete (t as { readAccepted?: unknown }).readAccepted; });
+    expect(toolOf((await registry.list()).servers[0]!, 'wt_echo')).toMatchObject({ readAccepted: false });
   });
 });

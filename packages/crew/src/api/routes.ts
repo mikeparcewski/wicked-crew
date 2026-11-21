@@ -26,7 +26,7 @@ import { promises as fsp } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { videoPalette } from '../appearance/video-palette.js';
-import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, readNewWorkSeats, settingsFilePath, type RunViewsSnapshot } from '../core/adapter.js';
+import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, MaintenanceDrainError, RepoUnregisterUnsupportedError, TERMINAL_RUN_STATUSES, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, readNewWorkSeats, settingsFilePath, type RunViewsSnapshot } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, repoFolderMissing, repoFolderMissingBody } from '../core/repoPaths.js';
 import type {
   ConformanceRule,
@@ -192,7 +192,7 @@ import {
 } from './governance-steering.js';
 import { atProposeGate, draftedSteeringRules, isSteeringAuthorRun, landSteeringProposal, type SteeringProposalSnapshot } from './steering-landing.js';
 import { inventoryComplete, parseInventoryClaims, type InventoryClaim } from '../core/inventory-claim.js';
-import type { GateAction, LaunchPreviewPosture, LaunchPreviewResponse, RejudgeOffer, RunInventoryResponse, RunLearningsResponse, SeatRecordResponse, SkipQeOffer } from 'wicked-crew-api-types';
+import type { GateAction, LaunchPreviewPosture, LaunchPreviewResponse, MaintenanceRequest, RejudgeOffer, RunInventoryResponse, RunLearningsResponse, SeatRecordResponse, SkipQeOffer, UnregisterRepoResponse } from 'wicked-crew-api-types';
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
 import { registerDefaultEvalRoutes, runAndRecord, type DefaultEvalDeps } from '../evals/routes.js';
@@ -3277,8 +3277,40 @@ export function registerRoutes(
     }
   });
 
+  const maintenanceDrainBody = (err: MaintenanceDrainError) => ({ code: err.code, error: err.message, hint: err.hint });
+  const MaintenanceSchema = z.strictObject({ drain: z.boolean() });
+  app.get(`${V}/maintenance`, { config: { manifest: { responseType: 'MaintenanceState', statusCodes: [200] } } },
+    async () => adapter.maintenanceState());
+  app.post(`${V}/maintenance`, { config: { manifest: { requestType: 'MaintenanceRequest', responseType: 'MaintenanceState', statusCodes: [200, 400] } } }, async (req, reply) => {
+    const parsed = MaintenanceSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+    const body: MaintenanceRequest = parsed.data;
+    adapter.setDraining(body.drain);
+    return adapter.maintenanceState();
+  });
+
   // Registered repos → target-repo picker.
   app.get(`${V}/repos`, async () => ({ repos: await adapter.listRepos() }));
+
+  app.delete(`${V}/repos/:id`, { config: { manifest: { responseType: 'UnregisterRepoResponse', statusCodes: [200, 404, 409, 501] } } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const runIds = (await adapter.sessionsDetail())
+      .filter((v) => v.session.repo_ref === id && !TERMINAL_RUN_STATUSES.has(v.session.status))
+      .map((v) => v.session.id);
+    if (runIds.length > 0) return reply.code(409).send({ code: 'repo_in_use', error: `Repository ${id} is held by non-terminal runs: ${runIds.join(', ')}`, runIds });
+    if (!(await adapter.listRepos()).some((r) => r.id === id)) return reply.code(404).send({ code: 'repo_not_found' });
+    try {
+      if (!(await adapter.unregisterRepo(id))) return reply.code(404).send({ code: 'repo_not_found' });
+      audit.record('repo.unregistered', actorOf(req), { detail: { repoId: id } });
+      return { repoId: id, removed: true } satisfies UnregisterRepoResponse;
+    } catch (err) {
+      if (err instanceof RepoUnregisterUnsupportedError) return reply.code(501).send({ code: 'repo_unregister_unsupported', error: message(err) });
+      // The engine's refusal names the runs or projects in its text (a lease taken after crew's check, or a project).
+      const refused = /^(repo_in_use|repo_in_project): /u.exec(message(err));
+      if (refused !== null) return reply.code(409).send({ code: refused[1], error: message(err) });
+      throw err;
+    }
+  });
 
   /** Filing for an onboarding run: what `POST /runs` does for a launch, for the runs `POST /repos`
    *  and `POST /repos/:id/onboard` start (crew#496). The launch entry (`run.launched`, which dates
@@ -4205,6 +4237,7 @@ export function registerRoutes(
       if (!launched && staged?.published === true) freeStagedDocuments(input.sessionId, false);
       const msg = message(err);
       if (isReview) runtime.reviewLaunchRefused?.(input.sessionId, msg);
+      if (err instanceof MaintenanceDrainError) return reply.code(503).send(maintenanceDrainBody(err));
       // DES-TEAMING-002 T3: a plan on an engine without the plan approval gate is an "upgrade the
       // engine" 501 — never a free-text run launched in its place.
       if (err instanceof PlanLaunchUnsupportedError) {
@@ -4279,7 +4312,7 @@ export function registerRoutes(
           // existing run; 422: the base-skill intake refusal (`base_skill_refused`, crew#554);
           // 501: campaignId attach on an engine addon without the campaign bindings ("upgrade
           // the engine").
-          statusCodes: [201, 400, 404, 409, 422, 501],
+          statusCodes: [201, 400, 404, 409, 422, 501, 503],
         },
       },
     },
@@ -7707,6 +7740,7 @@ export function registerRoutes(
           },
         };
       } catch (err) {
+        if (err instanceof MaintenanceDrainError) return { code: 503, body: maintenanceDrainBody(err) };
         if (err instanceof PlanLaunchUnsupportedError || err instanceof PlanGateNoteUnsupportedError) {
           return { code: 501, body: { error: message(err) } };
         }
@@ -7757,7 +7791,7 @@ export function registerRoutes(
           responseType: 'GateDecisionResult',
           // 409 twice over: a run not awaiting a human gate, and an engine refusal at confirm.
           // 501: an edited plan on an addon without the plan approval gate (DES-TEAMING-002 T3).
-          statusCodes: [200, 400, 404, 409, 501],
+          statusCodes: [200, 400, 404, 409, 501, 503],
         },
       },
     },
@@ -7890,7 +7924,7 @@ export function registerRoutes(
 
   // Advance semantics (§11.8): a gated run advances via confirmGate; otherwise
   // resumeRun re-enters the cursor. Never resumeRun a gated run (it would re-pause).
-  app.post(`${V}/runs/:id/resume`, { config: { manifest: { requestType: 'ResumeRequest', statusCodes: [200, 400, 404, 409] } } }, async (req, reply) => {
+  app.post(`${V}/runs/:id/resume`, { config: { manifest: { requestType: 'ResumeRequest', statusCodes: [200, 400, 404, 409, 503] } } }, async (req, reply) => {
     const parsed = ResumeSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     const { id } = req.params as { id: string };
@@ -7977,6 +8011,7 @@ export function registerRoutes(
         ...(deliveryCheck !== undefined ? { delivery: deliveryCheck } : {}),
       });
     } catch (err) {
+      if (err instanceof MaintenanceDrainError) return reply.code(503).send(maintenanceDrainBody(err));
       const changed = await gateChangedRefusal(id, err);
       return reply.code(changed?.code ?? 409).send(changed?.body ?? { error: message(err) });
     }
@@ -8173,6 +8208,7 @@ export function registerRoutes(
       }
       return reply.send({ runId: id, ...st });
     } catch (err) {
+      if (err instanceof MaintenanceDrainError) return reply.code(503).send(maintenanceDrainBody(err));
       return powerError(reply, err);
     }
   });

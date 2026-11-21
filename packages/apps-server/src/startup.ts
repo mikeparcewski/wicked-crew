@@ -38,7 +38,7 @@ export class SiteState {
   }
 }
 
-export const REDESCRIBE_MS = 10 * 60 * 1000;
+export { REDESCRIBE_MS } from './crew.js';
 const DESCRIBE_DEADLINE_MS = 20_000;
 
 /** The environment names the manifest lists that are unset or empty, sorted. */

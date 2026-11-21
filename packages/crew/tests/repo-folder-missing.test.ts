@@ -72,9 +72,9 @@ describe('listRepos: the repo_folder_missing finding', () => {
     const gone = join(dir, 'target');
     const [a, b] = await withFolderFindings([repo('here', here), repo('tiny-math', gone)]);
     expect(repoFolderMissing(a!)).toBeNull();
-    expect(b!.findings).toEqual([{ code: REPO_FOLDER_MISSING, message: repoFolderMissingMessage(gone), path: gone }]);
+    expect(b!.findings).toEqual([{ code: REPO_FOLDER_MISSING, message: repoFolderMissingMessage(gone, 'tiny-math'), path: gone }]);
     expect(b!.findings![0]!.message).toBe(
-      `This repository's folder is missing: ${gone}. Re-link it: register it again under the same name at its folder's new place, or put the folder back.`,
+      `This repository's folder is missing: ${gone}. Re-link it: register it again under the same name at its folder's new place, or put the folder back. Or remove the registration (DELETE /api/v1/repos/tiny-math).`,
     );
   });
 
@@ -166,7 +166,7 @@ posixOnly('repo routes, launch and chat refuse a missing folder by name (409), s
 
   const expectRefused = (res: { statusCode: number; json: () => unknown }): void => {
     expect(res.statusCode).toBe(409);
-    expect(res.json()).toEqual({ code: REPO_FOLDER_MISSING, error: repoFolderMissingMessage(gone), path: gone });
+    expect(res.json()).toEqual({ code: REPO_FOLDER_MISSING, error: repoFolderMissingMessage(gone, 'tiny-math'), path: gone });
   };
 
   it.each([
@@ -200,7 +200,7 @@ posixOnly('repo routes, launch and chat refuse a missing folder by name (409), s
         entityCount: async () => 1,
       },
     );
-    expect(res).toEqual({ ok: false, status: 409, code: REPO_FOLDER_MISSING, error: repoFolderMissingMessage(gone), path: gone });
+    expect(res).toEqual({ ok: false, status: 409, code: REPO_FOLDER_MISSING, error: repoFolderMissingMessage(gone, 'tiny-math'), path: gone });
   });
 });
 
@@ -282,7 +282,7 @@ describe('xreview on #1228', () => {
       projectGet: async () => ({ id: 'p1', status: 'active' }),
       projectMembers: async () => [{ member_kind: 'crew.repo', member_ref: 'ok' }, { member_kind: 'crew.repo', member_ref: 'tiny-math' }],
     } as unknown as CoreAdapter;
-    const want = { ok: false, status: 409, code: REPO_FOLDER_MISSING, error: repoFolderMissingMessage(gone), path: gone };
+    const want = { ok: false, status: 409, code: REPO_FOLDER_MISSING, error: repoFolderMissingMessage(gone, 'tiny-math'), path: gone };
     expect(await resolveScopeRepos(adapter, { repoRefs: ['ok', 'tiny-math'] })).toEqual(want);
     expect(await resolveScopeRepos(adapter, { projectId: 'p1' })).toEqual(want);
     expect(await resolveScopeRepos(adapter, { repoRefs: ['ok'] })).toEqual({ ok: true, repos: [{ id: 'ok', name: 'ok' }] });
