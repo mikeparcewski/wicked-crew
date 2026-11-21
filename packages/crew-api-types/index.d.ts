@@ -1774,8 +1774,8 @@ export interface RepoEntry {
   root_path: string;
   default_branch: string;
   registered_at: number;
-  /** The repo's git remote, credentials and query removed: the address the engine recorded, else (`GET /repos`) the
-   *  checkout's `origin`. Absent when neither has one, or when the address can't be shown without its credentials. */
+  /** The repo's git remote. On `GET /repos`: the address the engine recorded, else the checkout's `origin`, credentials
+   *  and query removed; absent when neither has one or it can't be shown safely. Other responses carry the engine's record. */
   git_url?: string;
   /**
    * ABSOLUTE path of this repo's code graph, resolved by the engine (wicked-core#170).

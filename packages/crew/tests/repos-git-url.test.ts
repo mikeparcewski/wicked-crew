@@ -20,6 +20,14 @@ const TOKEN_URL = ['https://', 'ghp_SECRETTOKEN222', '@github.com/acme/token.git
 // Spellings `withoutCredentials` can't read: a remote-helper address and a query on an scp address (never shown at all).
 const HELPER_URL = ['https::https://', 'x-access-token', ':', 'ghp_SECRETHELPER555', '@github.com/acme/helper.git'].join('');
 const SCP_QUERY_URL = 'git@github.com:acme/scpq.git?access_token=SECRETSCPQ666';
+// URL-parseable spellings whose secret sits where no parser reads a login (round 2): never shown either.
+const UNSAFE = {
+  opaque: ['git+ssh:', 'alice', ':', 'SECRETOP1', '@git.example.com/team/r.git'].join(''),
+  hostScheme: ['github.com:', 'x-access-token', ':', 'ghp_SECRETHS2', '@acme/r.git'].join(''),
+  encodedLogin: ['ssh://', 'x-access-token', '%3A', 'ghp_SECRETENC3', '@github.com/acme/r.git'].join(''),
+  inPath: ['https://github.com/', 'x-access-token', ':', 'ghp_SECRETPATH4', '@acme/r.git'].join(''),
+  file: ['file:///srv/', 'x', ':', 'SECRETFILE5', '@h/r.git'].join(''),
+};
 
 let scratch: string;
 const apps: FastifyInstance[] = [];
@@ -79,6 +87,8 @@ describe('GET /api/v1/repos — git_url from the checkout origin', () => {
       entry('query', checkout('query', 'https://github.com/acme/query.git?access_token=SECRETQUERY333#SECRETFRAG777')),
       entry('helper', checkout('helper', HELPER_URL)),
       entry('scpq', checkout('scpq', SCP_QUERY_URL)),
+      entry('ipv6', checkout('ipv6', 'ssh://git@[2001:db8::1]/team/ipv6.git')),
+      ...Object.entries(UNSAFE).map(([id, url]) => entry(id, checkout(id, url))),
       entry('none', checkout('none', null)),
       entry('gone', join(scratch, 'not-there')),
     ];
@@ -95,10 +105,12 @@ describe('GET /api/v1/repos — git_url from the checkout origin', () => {
     // Fail closed: an address the stripper can't vouch for is not sent.
     expect(byId['helper']).not.toHaveProperty('git_url');
     expect(byId['scpq']).not.toHaveProperty('git_url');
+    for (const id of Object.keys(UNSAFE)) expect(byId[id], id).not.toHaveProperty('git_url');
+    expect(byId['ipv6']!['git_url']).toBe('ssh://git@[2001:db8::1]/team/ipv6.git');
     expect(byId['none']).not.toHaveProperty('git_url');
     expect(byId['gone']).not.toHaveProperty('git_url');
     // Every other field is the engine's own, unchanged.
-    expect(byId['none']).toEqual(repos[9]);
+    expect(byId['none']).toEqual(repos.find((r) => r.id === 'none'));
     expect(out).toHaveLength(repos.length);
     expect(raw).not.toMatch(/SECRET|ghp_|x-access-token|access_token/);
   });
@@ -107,10 +119,12 @@ describe('GET /api/v1/repos — git_url from the checkout origin', () => {
     const recorded = entry('recorded', checkout('recorded', 'https://github.com/acme/from-origin.git'), { git_url: ['https://', 'ghp_SECRETREC444', '@github.com/acme/recorded.git'].join('') });
     const blank = entry('blank', checkout('blank', 'https://github.com/acme/blank.git'), { git_url: '   ' });
     const unsafe = entry('unsafe', checkout('unsafe', 'https://github.com/acme/unsafe.git'), { git_url: HELPER_URL });
-    const { raw, repos: out } = await listed(routes([recorded, blank, unsafe]));
+    const opaque = entry('opaque-rec', checkout('opaque-rec', 'https://github.com/acme/opaque.git'), { git_url: UNSAFE.opaque });
+    const { raw, repos: out } = await listed(routes([recorded, blank, unsafe, opaque]));
     expect(out[0]!['git_url']).toBe('https://github.com/acme/recorded.git');
     expect(out[1]!['git_url']).toBe('https://github.com/acme/blank.git');
     expect(out[2]).not.toHaveProperty('git_url');
+    expect(out[3]).not.toHaveProperty('git_url');
     expect(raw).not.toMatch(/SECRET|ghp_|x-access-token/);
   });
 

@@ -3291,15 +3291,29 @@ export function registerRoutes(
 
   // Registered repos → target-repo picker. Each carries `git_url` (studio#1012: the repo page's "This repository"
   // tracker row reads it): the address the engine recorded, else — it records none for its own clones — the checkout's
-  // `origin` through `originOf` (the onboard card's own read), held a minute per checkout and read eight at a time, so a
-  // list never runs a `git` per repository per request. Shown through `shownGitUrl` (credentials and query removed, an
-  // address it can't vouch for dropped); none = no field.
+  // `origin` through `originOf` (the onboard card's own read), held a minute per checkout and read at most eight at a
+  // time across every list, so a list never runs a `git` per repository per request. Shown through `shownGitUrl`
+  // (credentials and query removed, an address it can't vouch for dropped); none = no field.
   const originCache = new Map<string, { at: number; url: Promise<string | null> }>();
+  let originReads = 0;
+  const originQueue: Array<() => void> = [];
+  const limitedOrigin = async (rootPath: string): Promise<string | null> => {
+    if (originReads < 8) originReads += 1;
+    else await new Promise<void>((go) => originQueue.push(go));
+    try {
+      return await originOf(rootPath);
+    } finally {
+      // The slot passes straight to the next waiter, so no new read can take it in between.
+      const next = originQueue.shift();
+      if (next !== undefined) next();
+      else originReads -= 1;
+    }
+  };
   const listedOrigin = (rootPath: string): Promise<string | null> => {
     const now = Date.now();
     const hit = originCache.get(rootPath);
     if (hit !== undefined && now - hit.at < 60_000) return hit.url;
-    const url = originOf(rootPath);
+    const url = limitedOrigin(rootPath);
     originCache.set(rootPath, { at: now, url });
     return url;
   };
@@ -3314,9 +3328,7 @@ export function registerRoutes(
     // A checkout no longer registered leaves the cache.
     const roots = new Set(listed.map((r) => r.root_path));
     for (const root of originCache.keys()) if (!roots.has(root)) originCache.delete(root);
-    const repos: RepoEntry[] = [];
-    for (let i = 0; i < listed.length; i += 8) repos.push(...await Promise.all(listed.slice(i, i + 8).map(withGitUrl)));
-    return { repos };
+    return { repos: await Promise.all(listed.map(withGitUrl)) };
   });
 
   app.delete(`${V}/repos/:id`, { config: { manifest: { responseType: 'UnregisterRepoResponse', statusCodes: [200, 404, 409, 501] } } }, async (req, reply) => {

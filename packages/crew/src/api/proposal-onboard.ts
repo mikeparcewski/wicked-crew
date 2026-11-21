@@ -64,21 +64,33 @@ export function withoutCredentials(raw: string): string {
   }
 }
 
+/** Transports `GET /repos` shows a `git_url` for. */
+const SHOWN_PROTOCOLS: ReadonlySet<string> = new Set(['https:', 'http:', 'git:', 'file:', ...SSH_PROTOCOLS]);
+/** An ssh login as an scp address spells it (no `%`, no `:`). */
+const SSH_USER = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
 /**
- * A recorded or checkout address as `GET /repos` may send it (`git_url`, studio#1012): {@link withoutCredentials}, failing
- * closed. A spelling it can't vouch for — a remote-helper `https::…`, a query or fragment left on an address no URL parser
- * reads (`git@host:o/r?access_token=…`), a user or password it could not remove — gives `null`, never the raw text.
+ * A recorded or checkout address as `GET /repos` may send it (`git_url`, studio#1012): {@link withoutCredentials}, then
+ * only a shape it can vouch for holds no secret — an scp address, an absolute local path, or a URL on a git transport with
+ * a parsed host (`file:` none), no password, no `@` in its path and at most an ssh login. Anything else (a remote-helper
+ * `https::…`, an opaque `scheme:user:token@…`, a query left on an scp address, an encoded login) gives `null`, never the
+ * raw text.
  */
 export function shownGitUrl(raw: string): string | null {
   const s = withoutCredentials(raw);
-  if (s === '' || s.includes('::') || /[?#\s]/.test(s)) return null;
+  if (s === '' || /[?#\s\\]/.test(s)) return null;
+  if (SCP.test(s)) return s;
+  if (s.startsWith('/')) return s.includes('@') ? null : s;
+  let u: URL;
   try {
-    const u = new URL(s);
-    return u.password === '' && (u.username === '' || SSH_PROTOCOLS.has(u.protocol)) ? s : null;
+    u = new URL(s);
   } catch {
-    // An scp address keeps its `user@`; any other non-URL (a local path) must carry no `@` at all.
-    return SCP.test(s) || !s.includes('@') ? s : null;
+    return null;
   }
+  if (!SHOWN_PROTOCOLS.has(u.protocol) || u.password !== '' || u.pathname.includes('@')) return null;
+  if (u.protocol === 'file:') return u.hostname === '' && !s.includes('@') ? s : null;
+  if (u.hostname === '') return null;
+  return u.username === '' || (SSH_PROTOCOLS.has(u.protocol) && SSH_USER.test(u.username)) ? s : null;
 }
 
 /**
