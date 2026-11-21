@@ -142,6 +142,18 @@
       ]
     },
     {
+      "method": "GET",
+      "path": "/api/v1/apps/:app/calls",
+      "requestType": null,
+      "responseType": "AppCallRecordsResponse",
+      "statusCodes": [
+        200,
+        403,
+        404,
+        501
+      ]
+    },
+    {
       "method": "POST",
       "path": "/api/v1/apps/:app/edits",
       "requestType": "AppEditsBody",
@@ -1343,6 +1355,7 @@
       "responseType": "McpServerTestResponse | McpServerTestAgentResponse",
       "statusCodes": [
         200,
+        403,
         404,
         409,
         503
@@ -1386,6 +1399,7 @@
         400,
         403,
         404,
+        409,
         503
       ]
     },
@@ -1646,6 +1660,31 @@
       "path": "/api/v1/projects/:id/graph/blast-radius",
       "requestType": null,
       "responseType": null,
+      "statusCodes": [
+        200,
+        400,
+        404,
+        501,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/projects/:id/graph/boundaries",
+      "requestType": null,
+      "responseType": "ProjectGraphBoundaries",
+      "statusCodes": [
+        200,
+        404,
+        501,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/projects/:id/graph/path",
+      "requestType": null,
+      "responseType": "ProjectGraphPath",
       "statusCodes": [
         200,
         400,

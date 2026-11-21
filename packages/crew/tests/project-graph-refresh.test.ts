@@ -604,6 +604,42 @@ describe.skipIf(!POSIX)('POST /projects/:id/graph/refresh — the build itself',
     expect(found.body['matches'][0]!['repo']).toBe(repoLabel('acme/widgets'));
   });
 
+  it('crew#1476: refresh rebuilds without detached labels and re-indexes every remaining member', async () => {
+    for (const n of ['alpha', 'beta']) register(n, makeRepo(n));
+    attach('alpha', 'beta');
+    await refresh();
+    for (const suffix of ['-wal', '-shm', '-journal']) writeFileSync(`${fx.dbPath}${suffix}`, 'old');
+    attach('alpha');
+    const res = await refresh();
+    expect(res.body).toMatchObject({ pruned: ['beta'], indexed: ['alpha'], skipped: [] });
+    expect(indexCalls().filter((argv) => argv[argv.indexOf('--repo') + 1] === 'alpha')).toHaveLength(2);
+    expect((await status()).staleRepos).toEqual([]);
+    expect(Object.keys((JSON.parse(readFileSync(fx.dbPath, 'utf8')) as { repos: object }).repos)).toEqual(['alpha']);
+    for (const suffix of ['-wal', '-shm', '-journal']) expect(existsSync(`${fx.dbPath}${suffix}`)).toBe(false);
+    expect(fx.logs.some((line) => line.includes('beta') && line.includes('rebuild'))).toBe(true);
+    attach();
+    const empty = await refresh();
+    expect(empty.body).toMatchObject({ pruned: ['alpha'], status: { staleRepos: [] } });
+    expect(existsSync(fx.dbPath)).toBe(false);
+  });
+
+  it('crew#1476: a pruning rebuild is not ready while remaining members are still re-indexing', async () => {
+    for (const n of ['alpha', 'beta', 'gamma']) register(n, makeRepo(n));
+    attach('alpha', 'beta', 'gamma');
+    await refresh();
+    expect(indexCalls()).toHaveLength(3);
+    attach('alpha', 'gamma');
+    process.env['STUB_INDEX_DELAY_MS'] = '250';
+    const rebuild = refresh();
+    await waitForIndexCalls(5); // alpha has rebuilt the db; gamma's index child is still asleep
+    const mid = await status();
+    expect(mid.state).not.toBe('ready');
+    expect(mid.repos.find((r) => r.label === 'gamma')?.indexed).toBe(false);
+    const done = await rebuild;
+    expect(done.body).toMatchObject({ pruned: ['beta'], indexed: ['alpha', 'gamma'] });
+    expect((await status()).state).toBe('ready');
+  });
+
   it('names a detached member as stale and stops answering about it', async () => {
     for (const n of ['alpha', 'beta']) register(n, makeRepo(n));
     attach('alpha', 'beta');

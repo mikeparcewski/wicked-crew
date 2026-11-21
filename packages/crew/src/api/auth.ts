@@ -668,13 +668,26 @@ const PROJECT_DETAIL_PATH = new RegExp(`^${API_PREFIX}/projects/[^/]+$`);
 const SOURCE_MANAGEMENT_READ = new RegExp(`^${API_PREFIX}/sources/[^/]+/(?:catalog|describe|privileges|check|safety|test)$`);
 const SOURCE_MANAGEMENT_ROUTES: ReadonlySet<string> = new Set(['catalog', 'describe', 'privileges', 'check', 'safety', 'test'].map((r) => `${API_PREFIX}/sources/:name/${r}`));
 
+const HUMAN_ONLY_RULES = [
+  {
+    routes: SOURCE_MANAGEMENT_ROUTES,
+    path: SOURCE_MANAGEMENT_READ,
+    reason: "a source's management reads are a human operator's only",
+  },
+  {
+    routes: new Set([`${API_PREFIX}/terminals`, `${API_PREFIX}/terminals/:id/resize`, `${API_PREFIX}/terminals/:id/close`, '/ws/terminals/:id']),
+    path: new RegExp(`^(?:${API_PREFIX}/terminals|/ws/terminals)(?:/|$)`),
+    reason: "a terminal runs programs on the daemon host: a human operator's only",
+  },
+];
+
 /**
- * Whether a request is a human actor's only (403 `human_only` for any other actor; see {@link SOURCE_MANAGEMENT_READ}).
+ * Why a request is a human actor's only (403 `human_only` for any other actor).
  * Judged on the route the router MATCHED (`routeUrl`, the registered pattern), so another spelling of the same path
  * (percent-encoding the router decodes) cannot slip past, and on the raw path as well.
  */
-export function humanOnlyRoute(routeUrl: string | undefined, path: string): boolean {
-  return (routeUrl !== undefined && SOURCE_MANAGEMENT_ROUTES.has(routeUrl)) || SOURCE_MANAGEMENT_READ.test(path);
+export function humanOnlyReason(routeUrl: string | undefined, path: string): string | null {
+  return HUMAN_ONLY_RULES.find((rule) => (routeUrl !== undefined && rule.routes.has(routeUrl)) || rule.path.test(path))?.reason ?? null;
 }
 
 /**
@@ -691,7 +704,8 @@ export function viewOf(actor: Actor | null | undefined): 'full' | 'agent' {
  * Minimum trust for a request. Minimal by design (the task's rule: no
  * deny-by-default registry over unknown routes):
  *
- * - `/ws/terminals` and any sub-path → `operator` (write-capable WS channel;
+ * - terminals are a human operator's only (kind checked separately).
+ *   `/ws/terminals` and any sub-path → `operator` (write-capable WS channel;
  *   inbound frames are raw PTY stdin regardless of the GET upgrade method)
  * - reads (GET/HEAD), the main `/ws` stream and `POST /apps/:app/query` (a named read) → `observer`
  * - governance writes, settings writes, project archive/restore → `admin`
@@ -802,8 +816,9 @@ async function deny401(reply: FastifyReply, error: string): Promise<void> {
  * `@fastify/websocket`) before the upgrade completes, so a bad token is an
  * HTTP 401 on the wire for REST and WS alike. Trust runs at `preHandler`,
  * where the parsed body exists (the one body-dependent rule is the project
- * archive). Both scope to {@link isProtectedPath}; the SPA shell and its
- * assets stay public so a hosted skin can load and ASK for a token.
+ * archive); terminals are a human operator's only. Both scope to
+ * {@link isProtectedPath}; the SPA shell and its assets stay public so a hosted
+ * skin can load and ASK for a token.
  */
 export function registerAuthHooks(app: FastifyInstance, auth: ResolvedAuth): void {
   app.decorateRequest('actor', null as unknown as Actor);
@@ -840,9 +855,9 @@ export function registerAuthHooks(app: FastifyInstance, auth: ResolvedAuth): voi
     // Spike 3: a plugin actor (observer) writes its OWN working-document lines; the route checks that it writes only
     // as itself and only its own section. Nothing else a plugin sends passes this boundary.
     if (req.actor?.kind === 'plugin' && req.method === 'POST' && WORKING_DOC_VERSIONS_PATH.test(path)) return;
-    // (DES-KNOWLEDGE-DATA-001 §5.2) A management read of a source is a human's, at any trust.
-    if (humanOnlyRoute(req.routeOptions?.url, path) && req.actor?.kind !== 'human') {
-      return reply.code(403).send({ error: `a source's management reads are a human operator's only; you are ${req.actor?.kind ?? 'unknown'}/${req.actor?.trust ?? 'none'}`, code: 'human_only' });
+    const humanOnly = humanOnlyReason(req.routeOptions?.url, path);
+    if (humanOnly !== null && req.actor?.kind !== 'human') {
+      return reply.code(403).send({ error: `${humanOnly}; you are ${req.actor?.kind ?? 'unknown'}/${req.actor?.trust ?? 'none'}`, code: 'human_only' });
     }
     const need = requiredTrust(req.method, path, req.body);
     if (!trustAtLeast(req.actor, need)) {

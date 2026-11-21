@@ -34,6 +34,7 @@ import { connect as netConnect, isIP, type Socket } from 'node:net';
 import { pipeline, Readable, Transform, type TransformCallback } from 'node:stream';
 import { constants as zlibConstants, createBrotliDecompress, createGunzip, createInflate, createInflateRaw } from 'node:zlib';
 
+import type { AddressConfirmationDetail } from '../core/types.js';
 import { UpstreamCallError } from '../mcp/upstream-error.js';
 
 // ── Addresses ────────────────────────────────────────────────────────────────────────────────
@@ -303,9 +304,16 @@ export class DialRefusedError extends UpstreamCallError {
   constructor(
     readonly code: DialRefusalCode,
     message: string,
+    readonly addresses?: AddressConfirmationDetail['addresses'],
+    readonly suggest?: string[],
   ) {
     super('boundary', false, message);
     this.name = 'DialRefusedError';
+  }
+
+  /** Structured confirmation data travels with the refusal, so callers need not parse its words. */
+  get detail(): AddressConfirmationDetail {
+    return { ...(this.addresses !== undefined ? { addresses: this.addresses } : {}), ...(this.suggest !== undefined ? { suggest: this.suggest } : {}) };
   }
 }
 
@@ -396,6 +404,8 @@ export async function resolveTarget(host: string, policy: AddressPolicy, resolve
   if (signal !== undefined && isAborted(signal)) throw abortError(signal);
   if (answers.length === 0) throw new DialRefusedError('unresolved', `${hostname} did not resolve, so crew could not check where it goes`);
   const checked = answers.map((a) => classifyAddress(a));
+  const unconfirmed = checked.filter((c): c is ClassifiedAddress & { cls: 'loopback' | 'private' } => (c.cls === 'loopback' || c.cls === 'private') && !confirmed(c, policy));
+  // Collect the whole confirmation before throwing, but keep the first refusal's words and order.
   for (const c of checked) {
     const named = literal ? c.address : `${hostname} (${c.address})`;
     if (c.cls === 'refused') throw new DialRefusedError('address_refused', `${named} is refused: ${c.why ?? 'not allowed'}; crew never connects there`);
@@ -403,6 +413,8 @@ export async function resolveTarget(host: string, policy: AddressPolicy, resolve
       throw new DialRefusedError(
         'address_unconfirmed',
         `${named} is a ${c.cls} address, which a source reaches only when the person confirms a range covering it for that source (e.g. ${suggestRange(c)})`,
+        unconfirmed.map((a) => ({ address: a.address, class: a.cls })),
+        unconfirmed.map(suggestRange),
       );
     }
   }

@@ -410,6 +410,20 @@ describe('the executor over the K1 test services and the crew source', () => {
     expect(last.hasMore).toBe(false);
   });
 
+  it('a landed REST query is contract_changed at the next read after acceptance is withdrawn', async () => {
+    expect((await query('page')).status).toBe(200);
+    const patch = async (readAccepted: boolean) => h.app.inject({ method: 'PATCH', url: `/api/v1/mcp/tools/${encodeURIComponent('mcp:tickets/listTickets')}`, headers: { authorization: 'Bearer priya' }, payload: { readAccepted } });
+    try {
+      expect((await patch(false)).statusCode).toBe(200);
+      const r = await query('page');
+      expect(r.status).toBe(409);
+      expect(r.body).toMatchObject({ code: 'contract_changed' });
+    } finally {
+      expect((await patch(true)).statusCode).toBe(200);
+    }
+    expect((await query('page')).status).toBe(200);
+  });
+
   it('an MCP read (structured content), a GraphQL read (variables = parameters) and a crew read as the viewer', async () => {
     const m = (await query('mcp_open')).body as unknown as AppQueryResponse;
     expect(m.rows.every((row) => row[1] === 'OPEN')).toBe(true);
@@ -535,6 +549,21 @@ describe('the executor over the K1 test services and the crew source', () => {
 });
 
 describe('the executor: a crew read that never answers, an MCP error with its own metadata (codex r1)', () => {
+  it('crew#1297: an oversized MCP answer is a 502 source_failed naming the read bound', async () => {
+    const h = await appsHarness();
+    try {
+      const fixture = fileURLToPath(new URL('./fixtures/mcp/response-bound-server.mjs', import.meta.url));
+      await h.register({ name: 'bounded', kind: 'mcp-stdio', command: process.execPath, args: [fixture] });
+      await h.newApp('desk');
+      const queries: AppQuery[] = [{ id: 'large', source: 'bounded', kind: 'mcp', output: [{ name: 'x', type: 'string' }] }];
+      const landed = await h.land('desk', specWith(queries), { large: JSON.stringify({ tool: 'answer', args: { big: { kind: 'literal', value: true } } }) });
+      expect(landed.status, JSON.stringify(landed.body)).toBe(200);
+      const res = await h.call('POST', '/apps/desk/query', { version: 2, query: 'large' });
+      expect(res.status).toBe(502);
+      expect(res.body).toMatchObject({ code: 'source_failed', error: "the source's answer passed the 10 MiB read bound" });
+    } finally { await h.close(); }
+  }, 30_000);
+
   it('a hung crew route releases its slot at the deadline (504); an MCP server’s error metadata never becomes crew’s words', async () => {
     const h = await appsHarness({
       crewDeadlineMs: 200,

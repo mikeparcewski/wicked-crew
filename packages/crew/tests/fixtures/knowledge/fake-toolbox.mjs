@@ -63,6 +63,11 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   // The reservation's check: the test leaves `remote-running` in the source's run directory while the remote work "runs".
   if (sql.includes('pg_stat_activity')) return ok([text({ n: existsSync(join(dirname(dirname(config)), 'remote-running')) ? 1 : 0 })]);
   if (sql.includes('pg_inherits')) return ok([]);
+  // crew#1320: touch resident pages and hold them until the supervisor kills this process.
+  if (sql.includes('GROW')) {
+    globalThis.grown = Buffer.alloc(300 * 1024 * 1024).fill(0x61);
+    return;
+  }
   if (sql.includes('HANG')) return;
   if (sql.includes('BIG')) return ok([text({ big: 'x'.repeat(2 * 1024 * 1024) })]);
   if (sql.includes('ERROR')) return send({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: `error processing request: unable to execute query: ERROR: invalid input syntax for type integer: "${source.password}" (SQLSTATE 22P02)` }], isError: true } });

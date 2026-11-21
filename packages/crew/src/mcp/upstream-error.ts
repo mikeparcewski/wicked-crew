@@ -4,7 +4,7 @@
  */
 
 /** Why an upstream call failed. `boundary` = a `rest` request would have left its pinned host (I6). */
-export type UpstreamErrorClass = 'transport' | 'timeout' | 'http' | 'protocol' | 'boundary';
+export type UpstreamErrorClass = 'transport' | 'timeout' | 'http' | 'protocol' | 'boundary' | 'too_large';
 
 export class UpstreamCallError extends Error {
   constructor(

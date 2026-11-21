@@ -15,6 +15,7 @@
 //   `{ type: "workerStalled", session, ord?, quietForMs }` — and logs it at warn.
 // - once per quiet period: after the frame fires, the run stays alerted until a NEW event for
 //   it arrives; a second quiet period then emits a second frame.
+// - host sleep advances quiet clocks by the wall/monotonic gap: sleep is not worker silence.
 //
 // THE ESCALATION LADDER (crew#341, armed by default since perf#4) — detection drives action:
 //
@@ -96,6 +97,9 @@ export function isHeartbeatFrame(event: { type?: unknown; state?: unknown; kind?
 
 /** Default sweep cadence — frequent enough that `quietForMs` is at most ~30s stale. */
 export const DEFAULT_SWEEP_INTERVAL_MS = 30_000;
+
+/** Ignore small wall/monotonic clock differences when accounting for host sleep. */
+export const SLEEP_SLACK_MS = 5_000;
 
 /**
  * Bound on a single sweep's engine round-trip (`listExecuting()`, `reassign()`), comfortably
@@ -234,6 +238,8 @@ export interface StallWatchdogDeps {
   busy?: (runIds: string[]) => Promise<ReadonlyMap<string, string>>;
   /** Clock (tests stub it). */
   now?: () => number;
+  /** Sleep-excluding clock. Defaults to performance.now only when `now` is not stubbed. */
+  monoNow?: () => number;
   /** Wired to the daemon's warn logger — a stall is an operator-attention signal. */
   log?: (m: string) => void;
 }
@@ -279,12 +285,15 @@ export class WorkerStallWatchdog {
    *  (crew#638), which is how an exhausted budget names a seat that produced nothing. */
   private readonly outputSinceDispatch = new Map<string, number>();
   private readonly now: () => number;
+  private readonly monoNow: (() => number) | undefined;
+  private previousSweepClocks: { wall: number; mono: number } | undefined;
   private readonly log: (m: string) => void;
   private handle: NodeJS.Timeout | null = null;
   private sweeping = false;
 
   constructor(private readonly deps: StallWatchdogDeps) {
     this.now = deps.now ?? Date.now;
+    this.monoNow = deps.monoNow ?? (deps.now === undefined ? () => performance.now() : undefined);
     this.log = deps.log ?? ((): void => undefined);
   }
 
@@ -356,6 +365,30 @@ export class WorkerStallWatchdog {
 
   /** One detection pass. Public so tests drive it directly; the armed interval calls it too. */
   async sweep(): Promise<void> {
+    // Account for sleep before any await or the in-flight guard: even a short DarkWake or a
+    // skipped/failed listing must move the quiet clocks. Save the pair synchronously so an
+    // overlapping sweep cannot apply the same gap twice. Evidence timestamps stay factual.
+    if (this.monoNow !== undefined) {
+      const wallNow = this.now();
+      const monoNow = this.monoNow();
+      const previous = this.previousSweepClocks;
+      this.previousSweepClocks = { wall: wallNow, mono: monoNow };
+      if (previous !== undefined) {
+        const wallElapsed = wallNow - previous.wall;
+        const monoElapsed = monoNow - previous.mono;
+        const slept = wallElapsed - monoElapsed;
+        if (slept > SLEEP_SLACK_MS) {
+          for (const [id, last] of this.lastEventAt) {
+            this.lastEventAt.set(id, Math.min(wallNow, last + slept));
+          }
+          this.log(
+            `[stall-watchdog] the host slept ~${Math.round(slept / 60_000)} min ` +
+              `(wall clock moved ${(wallElapsed / 60_000).toFixed(1)} min, the monotonic clock ${(monoElapsed / 1_000).toFixed(0)} s): ` +
+              'quiet clocks moved forward; sleep is not worker silence',
+          );
+        }
+      }
+    }
     if (this.sweeping) {
       // Loud, not silent (crew#442): with the timeout below, this should be rare and
       // self-resolving — but a stuck sweep with no signal at all is exactly what let the
