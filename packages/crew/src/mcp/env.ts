@@ -3,10 +3,12 @@
  * The ONE validator of a stdio MCP server's non-secret `env` map (chat-extend CX1). Settings, the
  * preview and every later writer call {@link validateServerEnv}; none re-implements it.
  *
- * A public value is stored, answered back on the Settings read and hashed into the preview, so it
- * may not be a credential (that value belongs in the server's secret field) and may not redirect how
- * the child process loads code or reaches the network. A refusal names the variable and a reason
- * code, never the value.
+ * The env saved on each server is its per-server allowlist, approved by a human operator (names
+ * AND values). The API requires that approval for every change, including removals. The denylist
+ * below stays the second line for everyone; the warning class is advice for the person approving it.
+ * A public value is stored, answered back on the Settings read and hashed into the preview, so a
+ * credential belongs in the server's secret field. A refusal names the variable and a reason code,
+ * never the value.
  */
 
 import { createHash } from 'node:crypto';
@@ -18,6 +20,26 @@ import { VALUE_PATTERNS } from './redact.js';
 
 export const ENV_MAX_NAMES = 16;
 export const ENV_MAX_VALUE_CHARS = 1024;
+
+const RUNTIME_CONTROL_NAMES: ReadonlySet<string> = new Set([
+  'GOCACHEPROG', 'GOWORK', 'GOMODCACHE', 'GOCACHE', 'CC', 'CXX', 'PKG_CONFIG', 'GODEBUG',
+  'ESBUILD_BINARY_PATH', 'NODE_COMPILE_CACHE', 'NODE_USE_SYSTEM_CA', 'ZDOTDIR', 'RUSTC_WRAPPER',
+  'RUSTFLAGS', 'R_PROFILE', 'R_PROFILE_USER', 'R_ENVIRON', 'R_ENVIRON_USER', 'VIRTUAL_ENV',
+  'RUBYPATH', 'RUBYSHELL', 'DLN_LIBRARY_PATH', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME',
+  'XDG_CONFIG_DIRS', 'XDG_DATA_DIRS',
+]);
+const RUNTIME_CONTROL_PREFIXES: readonly string[] = ['CGO_', 'TS_NODE_', 'TSX_', 'COREPACK_', 'CARGO_', 'R_LIBS', 'JULIA_', 'CONDA_'];
+
+/**
+ * Advice shown beside each name for the person approving the server's allowlist, not a gate.
+ * These names can change startup, code loading, package resolution or network trust; the gates
+ * are the person's approval of the names and values and the denylist in {@link validateServerEnv}.
+ */
+export function envWarningClass(name: string): 'runtime_control' | 'app_setting' {
+  const upper = name.toUpperCase();
+  return RUNTIME_CONTROL_NAMES.has(upper) || RUNTIME_CONTROL_PREFIXES.some((p) => upper.startsWith(p))
+    ? 'runtime_control' : 'app_setting';
+}
 
 export type EnvRefusalCode =
   | 'too_many'
