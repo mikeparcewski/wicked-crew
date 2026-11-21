@@ -577,6 +577,28 @@ describe('codex/pi r1 folds', () => {
     expect(v2.powerChoice).toBe(true);
   });
 
+  it.each([true, false])('the sketch promises only the stops kept with power choice %s (T11)', async (powerChoice) => {
+    const r = rig({
+      repos: [{ id: 'r-pay', name: 'payments-service' }],
+      ...(powerChoice ? { powerPresets: async () => new Set(['editor-plugin']) } : {}),
+    });
+    expect((await pick(r, 'studio-plugin', { option: 'editor' })).code).toBe(201);
+    const p = open(r);
+    expect(p.powerChoice === true).toBe(powerChoice);
+    const resolved = resolveOption('studio-plugin', 'editor', r.served)!;
+    expect(resolved.workflow).toBe('editor-plugin');
+    expect(p.sketch!.steps).toHaveLength(resolved.steps.length);
+    const human = resolved.steps.flatMap((s, i) => {
+      const gate = s['gate'];
+      return gate !== null && typeof gate === 'object' && ('human_confirm' in gate || 'human_confirm_if' in gate) ? [i] : [];
+    });
+    expect(human.length, 'human confirmation steps are served').toBeGreaterThan(0);
+    for (const i of human) expect(p.sketch!.steps[i]!.asks, resolved.steps[i]!.id).toBe(!powerChoice);
+    const consent = resolved.steps.flatMap((s, i) => s['gate'] === 'consent_before' ? [i] : []);
+    expect(consent.length, 'consent_before steps are served').toBeGreaterThan(0);
+    for (const i of consent) expect(p.sketch!.steps[i]!.asks, resolved.steps[i]!.id).toBe(true);
+  });
+
   it.each([
     ['> skip QE acceptance, a prototype nobody uses', 'a prototype nobody uses'],
     ['`skip QE acceptance` a prototype nobody uses', 'a prototype nobody uses'],
