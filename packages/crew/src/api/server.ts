@@ -12,6 +12,7 @@ import type { ConsiderationService } from '../decisions/consider.js';
 import { requestOrigin, shellCsp } from '../editors/csp.js';
 import { conformanceRuntimeRoot, exportEngineConformanceEnv, exportManagedChrome, managedChromium } from '../editors/conformance-runtime.js';
 import { launchRosterNaming, registerRoutes } from './routes.js';
+import { sweepStagedDocuments } from './run-documents.js';
 import { APPS_ACTIONS_STATE_FILENAME, AppActionStore } from '../apps/actions/store.js';
 import { AppsSourceStage } from '../apps/exec/source-stage.js';
 import { APPS_STATE_FILENAME, AppStore, defaultAppsRoot } from '../apps/store.js';
@@ -3360,6 +3361,12 @@ export async function startServer(
   options?: CreateServerOptions,
 ): Promise<StartedServer> {
   const app = await createServer(adapter, options);
+  // crew#1429: staged document folders whose run the engine never took (a launch that died after staging).
+  try {
+    sweepStagedDocuments(runDocumentsRootDir(), new Set(await adapter.sessions()));
+  } catch (err) {
+    app.log.warn(`[runs] staged documents sweep skipped: ${err instanceof Error ? err.message : String(err)}`);
+  }
   await app.listen({ port, host });
   const clock = app.bootStages ?? new BootStageClock();
   clock.lap('listen');
