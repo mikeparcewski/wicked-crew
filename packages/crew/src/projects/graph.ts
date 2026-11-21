@@ -1039,6 +1039,9 @@ async function refreshOnce(
       }
     }
     dbExisted = false;
+    // The old manifest describes the database just deleted. Left in place, the first member to re-index
+    // recreates the db and status reads every not-yet-rebuilt member as indexed (`ready` mid-rebuild).
+    await writeManifest(projectId, { version: 1, projectId, repos: [] }, env);
     log?.(`project graph ${projectId}: rebuild to prune removed labels ${pruned.join(', ')}`);
   }
   const priorByLabel = new Map((prior?.repos ?? []).map((r) => [r.label, r]));
