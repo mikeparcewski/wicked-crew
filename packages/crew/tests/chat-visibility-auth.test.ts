@@ -165,7 +165,9 @@ describe('chat visibility under auth: required (crew#1669)', () => {
     expect(refreshed.proposal.blocked).toBeNull();
     expect(refreshed.proposal.seats?.keys).toEqual(['claude', 'codex']);
     expect(readFileSync(transcript).equals(bytesBefore)).toBe(false);
-    expect(proposalFrames(chatId, p.pid)).toHaveLength(framesBefore + 1);
+    // The recheck's record is appended before the GET answers, but its frame goes out on the proposals' publishing
+    // chain after the seat pool is read (ChatProposals.write), so it is awaited like the first frame above (crew#1682).
+    await vi.waitFor(() => expect(proposalFrames(chatId, p.pid)).toHaveLength(framesBefore + 1));
     expect(proposalFrames(chatId, p.pid).at(-1)?.proposal.blocked).toBeNull();
     expect(launches).toHaveLength(launchesBefore);
     expect(continuations).toHaveLength(continuationsBefore);
