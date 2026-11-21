@@ -3645,6 +3645,11 @@ export interface RuleVerdict {
   /** (api-types 0.193.0) The council a dispute on this rule went to: its ruling (`status` is it, with
    *  `how: 'council'` or `cache`), or why there is none (`status: 'disputed'`). */
   council?: RuleCouncilRecord;
+  /** (crew#1455, core-ts 0.15.34) `true` on a `broken` row of a rule the person may waive with a written
+   *  reason (severity `warn` or `info`, not a process rule): the gate's `skip_rules` takes it. A broken
+   *  `error` or `critical` rule is reworked instead. ABSENT on every other row, and from an older engine;
+   *  never `false` or `null`. */
+  waivable?: true;
 }
 
 /** (api-types 0.193.0) One side's reading of a rule in a dispute. */
@@ -3704,6 +3709,12 @@ export interface RuleCouncilRecord {
   /** Why there is no ruling: `no_quorum`, `timeout`, `seats_benched`, `cap`, `error`,
    *  `incomplete_evidence` or `identity_unknown`, then the detail. ABSENT on a ruling. */
   reason?: string;
+  /** (crew#1658, core crew#972) Set when ONE arbiter sat in place of a council, because no three seats
+   *  distinct from every party could: the seat and its footing, in words (`claude (distinct from every
+   *  party)`). It says who sat, not that the dispute was settled: an arbiter's vote that did not count leaves
+   *  no `ruling` (the row stays `disputed`). ABSENT unless an arbiter sat and voted, and from an older
+   *  engine; never `null`. */
+  arbiter?: string;
 }
 
 /** (api-types 0.190.0) One skip in a `skip_rules` gate answer. */

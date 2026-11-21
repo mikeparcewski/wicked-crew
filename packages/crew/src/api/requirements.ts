@@ -40,6 +40,7 @@ import { WICKED_CORE_EXE_NAME } from '../core/adapter.js';
 import { execCapped } from '../core/exec.js';
 import { codeGraphDb, requirementsOverrides } from '../core/repoPaths.js';
 import type { RepoEntry } from '../core/types.js';
+import type { RequirementBusinessDomain, RequirementBusinessDomainCatalogEntry } from 'wicked-crew-api-types';
 
 interface ArtifactCorroboration {
   status?: unknown;
@@ -432,22 +433,9 @@ export function engineRowOf(
     : null;
 }
 
-/** A requirement's business domain (wicked-core#1425); `confidence` is `null` when the engine sent none usable. */
-export interface RequirementBusinessDomain {
-  id: string;
-  name: string;
-  confidence: number | null;
-}
-
-/** One entry of the graph's business-domain catalog (`metadata.business_domains`). */
-export interface RequirementBusinessDomainCatalogEntry {
-  id: string;
-  name: string;
-  purpose: string;
-  /** Requirement keys the domain holds. */
-  requirements: string[];
-  directories: string[];
-}
+// A requirement's business domain (wicked-core#1425) and one entry of the graph's business-domain catalog
+// (`metadata.business_domains`): the published wire shapes, never a route-local copy that could drift (crew#1510).
+export type { RequirementBusinessDomain, RequirementBusinessDomainCatalogEntry };
 
 function nonEmptyString(v: unknown): v is string {
   return typeof v === 'string' && v !== '';
