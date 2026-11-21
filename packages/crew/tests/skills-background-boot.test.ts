@@ -28,6 +28,19 @@ import { FIXTURE_PLUGIN } from './support/skills-fixture.js';
 const savedSnapshotEnv = process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
 const armedStateHome = crewStateHome();
 
+const qeAdmission = vi.hoisted(() => ({
+  sync: vi.fn(() => true),
+  batch: vi.fn(async (seats: Array<{ key: string }>) => new Map(seats.map(({ key }) => [key, true]))),
+}));
+vi.mock('../src/api/roster-standing.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/api/roster-standing.js')>();
+  return {
+    ...real,
+    rosterWithStandingFactory: (deps: Parameters<typeof real.rosterWithStandingFactory>[0]) =>
+      real.rosterWithStandingFactory({ ...deps, qeAdmitted: qeAdmission.sync, qeAdmittedBatch: qeAdmission.batch }),
+  };
+});
+
 describe('skills boot off the critical path (crew#1145)', () => {
   let dir: string;
   let adapter: CoreAdapter;
@@ -49,6 +62,42 @@ describe('skills boot off the critical path (crew#1145)', () => {
     else process.env[SKILLS_SNAPSHOT_ENGINE_ENV] = savedSnapshotEnv;
     setCrewStateHome(armedStateHome);
     removeScratch(dir);
+  });
+
+  it('health and setup roster reads defer QE admission until the background ladder settles (wicked-crew#1705)', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const provisioner: VenvProvisioner = async (baselineDir) => {
+      await held;
+      mkdirSync(join(baselineDir, '.venv', 'bin'), { recursive: true });
+      writeFileSync(join(baselineDir, '.venv', 'bin', 'python'), '#!/bin/sh\n');
+      return 'synced';
+    };
+    qeAdmission.sync.mockClear();
+    qeAdmission.batch.mockClear();
+    adapter.getSettings = async () => {
+      adapter.launchRoster();
+      return { ...DEFAULT_SETTINGS };
+    };
+    try {
+      const s = await startServer(adapter, 0, '127.0.0.1', {
+        projectEvents: { disabled: true }, interactiveWsRelay: { disabled: true },
+        stallWatchdog: { enabled: false }, auditPath: join(dir, 'audit.log'),
+        studioRoot: join(dir, 'no-studio'),
+        skills: { source: () => pluginSourceAt(FIXTURE_PLUGIN), provisionVenv: provisioner, background: true },
+      });
+      started.push(s);
+      expect((await s.app.inject({ method: 'GET', url: '/api/v1/health' })).statusCode).toBe(200);
+      expect(qeAdmission.sync).not.toHaveBeenCalled();
+      expect(qeAdmission.batch).not.toHaveBeenCalled();
+      release();
+      await s.app.skillsBootSettled?.();
+      expect((await s.app.inject({ method: 'GET', url: '/api/v1/health' })).statusCode).toBe(200);
+      expect(qeAdmission.batch).toHaveBeenCalled();
+      expect(qeAdmission.sync).not.toHaveBeenCalled();
+    } finally {
+      release();
+    }
   });
 
   it('the daemon listens while the ladder runs: skills read "publishing", a launch waits, and the first launch is handed the exported snapshot', async () => {

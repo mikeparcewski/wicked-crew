@@ -114,7 +114,7 @@ async function startSiteWith(opts: StartOptions, held: { claim: Claim | null }):
   // The routes put each request's verified viewer on its actor; crew's executor and write path read it here.
   const viewers = new WeakMap<Actor, Viewer>();
   const viewerOf = async (actor: Actor): Promise<Viewer> => viewers.get(actor) ?? { id: actor.id, email: null, name: null, groups: [] };
-  const executor = new AppExecutor({ store: files, registry, viewerOf, ...(opts.dial !== undefined ? { dial: opts.dial } : {}), snapshotDir: site.snapshotDir });
+  const executor = new AppExecutor({ store: files, registry, visibleSources: null, projectOf: () => null, viewerOf, ...(opts.dial !== undefined ? { dial: opts.dial } : {}), snapshotDir: site.snapshotDir });
   let writePath: AppWritePath | null = null;
   let actions: AppActionStore | null = null;
   // The grants the image enforces are the manifest's (revoking = publishing again without one). They are set
@@ -137,7 +137,7 @@ async function startSiteWith(opts: StartOptions, held: { claim: Claim | null }):
     // Every store step is fenced on the claim: a server whose volume was taken over writes nothing more, at once.
     actions = new FencedActionStore(join(opts.dataDir, 'apps-actions.json'), () => claim.held());
     await seedGrants();
-    writePath = new AppWritePath({ store: files, actions, registry, audit: auditSink(audit), viewerOf, executor, env, ...(opts.dial !== undefined ? { dial: opts.dial } : {}) });
+    writePath = new AppWritePath({ store: files, actions, registry, visibleSources: null, projectOf: () => null, audit: auditSink(audit), viewerOf, executor, env, ...(opts.dial !== undefined ? { dial: opts.dial } : {}) });
   }
   state.actions = actionsOff === null ? { on: true, reason: null } : { on: false, reason: actionsOff };
 

@@ -5,10 +5,11 @@
 import { writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { callMutation, capped, mutationField } from '../src/apps/actions/api-action.js';
+import { callMutation, callTool, capped, mutationField } from '../src/apps/actions/api-action.js';
 import { AppActionStore } from '../src/apps/actions/store.js';
+import * as pgSafety from '../src/sources/safety/postgres.js';
 import { AppWritePath } from '../src/apps/actions/write-path.js';
 import type { AppAction, AppActionPrepareResponse } from '../src/core/types.js';
 import { startGraphqlServer, startMcpServer, startOpenApiService } from './fixtures/apps-sources/servers.mjs';
@@ -365,12 +366,34 @@ describe('API actions (DES §7.3) over the K1 test services', () => {
     expect(later.record(record)?.state).toBe('unknown');
     // The recovered run gets its audit line when the write path starts over that store (codex r1).
     const lines: Array<[string, unknown]> = [];
-    void new AppWritePath({ store: h.store, actions: reborn, registry: h.registry, audit: { record: (a: string, _actor: unknown, f?: { detail?: unknown }) => lines.push([a, f?.detail]) as never }, viewerOf: async (a) => ({ id: a.id, email: null, name: null, groups: null }) });
+    void new AppWritePath({ store: h.store, actions: reborn, registry: h.registry, visibleSources: async () => new Set(), projectOf: (slug) => h.store.projectOf(slug), audit: { record: (a: string, _actor: unknown, f?: { detail?: unknown }) => lines.push([a, f?.detail]) as never }, viewerOf: async (a) => ({ id: a.id, email: null, name: null, groups: null }) });
     expect(lines).toEqual(expect.arrayContaining([['apps.action.ran', expect.objectContaining({ record, outcome: 'unknown', recovered: true })]]));
   });
 });
 
 describe('API outcomes (codex r1)', () => {
+  it('crew#1298: a deflate HTTP 500 whose body never starts is failed for mutations and REST actions', async () => {
+    const { createServer } = await import('node:http');
+    const server = createServer((_req, res) => {
+      res.writeHead(500, { 'content-encoding': 'deflate' });
+      res.flushHeaders();
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as { port: number }).port;
+    const config = { name: 'api', kind: 'graphql' as const, command: null, args: [], url: `http://127.0.0.1:${port}/`, auth: null, address: { ...LOOP, plaintext: false } };
+    try {
+      const [mutation, tool] = await Promise.all([
+        callMutation(config, null, 'mutation { assign { id } }', {}, 'assign'),
+        callTool({ ...config, kind: 'rest' }, null, 'assign', { method: 'POST', pathTemplate: '/', pathMap: {}, queryMap: {}, headerMap: {}, bodyMap: null, bodyArg: null, argAllowlist: [], timeoutMs: 200 }, {}),
+      ]);
+      expect(mutation).toMatchObject({ state: 'failed', reason: expect.stringContaining('HTTP 500') });
+      expect(tool).toMatchObject({ state: 'failed', reason: expect.stringContaining('HTTP 500') });
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  }, 40_000);
+
   it('a GraphQL 200 without a result is unknown; an error status with an HTML body is failed; a result is cut at 64 KB of UTF-8; the card names the root field', async () => {
     const { createServer } = await import('node:http');
     void 0;
@@ -439,4 +462,28 @@ describe('the record view and the human boundary', () => {
       await h.close();
     }
   });
+});
+
+it('crew#1533: a hidden SQL action is refused at grant before a safety query is sent', async () => {
+  let visible = new Set(['writer']);
+  const h = await appsHarness({ visibleSources: async () => visible });
+  const config = { name: 'writer', kind: 'sql' as const, command: null, args: [], url: null, auth: null, sql: { driver: 'postgres' as const, host: '127.0.0.1', port: 5432, database: 'test', user: 'writer', tls: 'disable' as const } };
+  const safety = vi.spyOn(pgSafety, 'pgTableSafety').mockRejectedValue(new Error('no query may be sent'));
+  try {
+    vi.spyOn(h.registry, 'snapshot').mockResolvedValue({ config, enabled: true } as never);
+    vi.spyOn(h.registry, 'source').mockResolvedValue({ config, enabled: true, allowWrites: true, description: null } as never);
+    // Model an already landed app: narrowing visibility must also stop its grant path.
+    vi.spyOn(h.store.sourceStage as unknown as { action: () => Promise<string> }, 'action').mockResolvedValue('contract');
+    await h.newApp('desk');
+    const landed = await h.land('desk', specWith([], [assign]));
+    expect(landed.status, JSON.stringify(landed.body)).toBe(200);
+    visible = new Set();
+    const grant = await h.call('POST', '/apps/desk/actions/assign/grant', { version: 2 });
+    expect(grant.status).toBe(409);
+    expect(grant.body).toMatchObject({ code: 'action_refused' });
+    expect(safety).not.toHaveBeenCalled();
+  } finally {
+    safety.mockRestore();
+    await h.close();
+  }
 });

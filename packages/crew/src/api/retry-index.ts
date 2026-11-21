@@ -46,16 +46,22 @@ export class RetryIndex {
    * and `GroupIndex` from ONE trail scan (the delivery-index consolidation note, crew#321).
    */
   hydrateFromLaunchEntries(entries: AuditEntry[]): void {
+    const seen = new Set<string>();
     for (const entry of entries) {
-      const retryOf = entry.detail?.['retryOf'];
-      if (typeof entry.runId === 'string' && typeof retryOf === 'string') {
-        this.runToRetryOf.set(entry.runId, retryOf);
-      }
-      const revises = revisesPrOf(entry.detail);
-      if (typeof entry.runId === 'string' && revises !== undefined) {
-        this.runToRevisesPr.set(entry.runId, revises);
-      }
+      if (typeof entry.runId !== 'string' || seen.has(entry.runId)) continue;
+      seen.add(entry.runId);
+      this.applyLaunchEntry(entry.runId, entry.detail);
     }
+  }
+
+  /** A relaunch replaces lineage, including an absent retry or revision. */
+  applyLaunchEntry(runId: string, detail: Record<string, unknown> | undefined): void {
+    this.runToRetryOf.delete(runId);
+    this.runToRevisesPr.delete(runId);
+    const retryOf = detail?.['retryOf'];
+    if (typeof retryOf === 'string') this.set(runId, retryOf);
+    const revises = revisesPrOf(detail);
+    if (revises !== undefined) this.setRevisesPr(runId, revises);
   }
 
   /**

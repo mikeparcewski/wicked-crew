@@ -211,11 +211,21 @@ wicked-crew serve --uninstall-service      # stop and remove it
 ```
 
 - **macOS:** a LaunchAgent at `~/Library/LaunchAgents/com.wickedagile.wicked-crew.plist` (RunAtLoad,
-  KeepAlive), loaded into your login session. Restart it with
+  restart on failure with a 30-second throttle), loaded into your login session. After an upgrade restart it with
   `launchctl kickstart -k gui/$(id -u)/com.wickedagile.wicked-crew`.
 - **Linux:** a systemd user unit at `~/.config/systemd/user/wicked-crew.service` (Restart=on-failure).
+  After an upgrade restart it with `systemctl --user restart wicked-crew.service`.
   Run `loginctl enable-linger $USER` so it starts at boot without a login session.
 - **Windows:** not automated; `--install-service` prints a Task Scheduler recipe.
+
+These names are for the default port, 7701. Other ports have separate services: port 7702 uses
+`com.wickedagile.wicked-crew.7702.plist` (label `com.wickedagile.wicked-crew.7702`),
+`wicked-crew-7702.service`, or the Windows task `wicked-crew-7702`. Use that label or unit in the
+restart commands, and pass `--port 7702` to install, uninstall, and status (or set `CREW_PORT`).
+
+To hand off a daemon started in a terminal, stop its pid, wait until its port is free, then run
+`wicked-crew serve --install-service` with the same port and options. Run `wicked-crew status`
+with that port to check the service has started.
 
 The service manager starts the daemon with an almost empty environment, so the install captures
 `PATH`, `HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `CREW_PORT`, `GH_ACCOUNT` and every `WICKED_*`

@@ -3756,20 +3756,26 @@ export interface QeAcceptanceRefusal {
 }
 
 /**
- * (crew ≥ 0.9.0, EX-01/EX-02) `LaunchRunResponse.assuranceNotice`: the run launched under FULL
- * assurance on a roster whose WORK seats (not benched, not ballot-only) all invoke ONE CLI binary
- * (the engine's judge identity), so no other seat can evaluate its work and no other identity can
- * judge it. If the run reviews or changes code, the engine refuses the review on its builder's seat
- * (`dead_seat` gate) or holds a gate that needs a judge (`judge_unavailable`), and the run waits.
- * The ways forward are explicit: sign a second CLI in, or relaunch with `retryWith` merged into the
- * launch body (the creator's seat then evaluates its own work, disclosed on every receipt). A client
- * shows `message` and asks its operator; crew never applies the opt-in by itself.
+ * A launch whose seats have no independent judge (api-types 0.217.0). `single_cli_roster` means
+ * every work seat (neither benched nor ballot-only) invokes one CLI binary, the engine's judge
+ * identity: no other seat can evaluate its work and no other CLI identity can judge it.
+ * `no_independent_judge` means another uncovered pool: the engine's coverage answer names
+ * seats using the same CLI, seats that cannot work on this run, and seats seen calling the same
+ * provider. The run starts under full assurance: the engine refuses a review on its builder's
+ * seat (`dead_seat`) and holds a gate without a judge (`judge_unavailable`), so work that needs
+ * review or judging waits for a distinct seat. A client shows `message` and lets the person
+ * sign in another CLI or relaunch with `retryWith`
+ * merged into the launch body to allow self-evaluation, disclosed on every receipt; crew never
+ * applies the opt-in itself.
  */
 export interface LaunchAssuranceNotice {
-  code: 'single_cli_roster';
+  /** One CLI identity across work seats, or another lack of independent judges. */
+  code: 'single_cli_roster' | 'no_independent_judge';
+  /** The engine's full-assurance limits and the person's ways to proceed. */
   message: string;
-  /** The work seats, all one CLI identity. */
+  /** The seats that can author work. */
   seats: string[];
+  /** An explicit reduced-assurance opt-in for a new launch linked to this run. */
   retryWith: { retryOf: string; reducedAssurance: true };
 }
 
@@ -10143,6 +10149,9 @@ export interface ChatProposalView {
 export interface ChatProposalDecisionBody {
   decision: 'go' | 'not_now';
   edits?: ProposalEdits;
+  /** Accept reduced assurance on a job's Go. Else 400 `reduced_assurance_not_applicable`.
+   * A refused launch's `retryWith: { reducedAssurance: true }` can be sent with Go again. */
+  reducedAssurance?: boolean;
   /**
    * (api-types 0.196.0, operator ruling 2026-11-06) How a JOB's Start runs: `true` = a power run (one orchestrator
    * session, no plan-approval gate; the deliver gate and what policy requires still hold), `false` = it stops at its
@@ -10151,8 +10160,9 @@ export interface ChatProposalDecisionBody {
    * run THIS job as a power run (a workflow run on a repository, a preset workflow, an engine with power mode) and its
    * Power mode for new jobs (`powerModeDefault`) is on: chat starts follow the setting. Else 409 `power_unavailable`
    * with the reason, and nothing is recorded or started. If that changes between this check and the engine call (the
-   * launcher checks again, as does the launch itself), the answer is 502 `launch_failed` with the reason and the
-   * proposal is interrupted: Go again resumes it with that press's choice. Never run phased silently. Where a job's
+   * launcher checks again, as does the launch itself), the launch's own refusal is answered (api-types 0.217.0: 409
+   * `power_unavailable`, the card reopened; a launcher-side refusal with no code stays 502 `launch_failed`, the
+   * proposal interrupted, and Go again resumes it with that press's choice). Never run phased silently. Where a job's
    * Start can choose (power mode and the setting on, the job fits), its `sentence` promises no plan review and its
    * `stops` is null: the client shows the choice beside Start.
    */
@@ -10172,7 +10182,9 @@ export interface ChatProposalDecisionBody {
  * correction is in flight), `proposal_reopened` (a gone turn's hold was released: look again), `catalog_changed` (the
  * refreshed proposal is the `view`), `card_not_available`, `proposal_stale`, and for a reshape the held plan's own
  * answers (`reshape_after_work`, `gate_changed`). (api-types 0.196.0) `power` adds 400 `power_not_applicable` and
- * 409 `power_unavailable`. A 409 carries the current `view` when there is one.
+ * 409 `power_unavailable`. (api-types 0.217.0) A typed 4xx launch refusal passes through its status, `code`,
+ * `error`, `excluded` and `retryWith`, with an open `view` so Start can be tried again. `reducedAssurance` adds
+ * 400 `reduced_assurance_not_applicable` on a non-job or with Not now. A 409 carries the current `view` when there is one.
  */
 export interface ChatProposalDecisionResponse {
   view: ChatProposalView;
@@ -11338,6 +11350,8 @@ export interface DiagnosticsSeatGovernance {
    * explicit `seat_eligible_for_work` (true or false) silences it. ABSENT on an older daemon.
    */
   roleFindings?: HealthWarning[];
+  /** Seats whose image cannot be built or obtained, also carried in `GET /health.warnings`. */
+  imageFindings?: HealthWarning[];
 }
 
 export interface DiagnosticsSeatGovernanceEntry {

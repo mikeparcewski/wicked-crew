@@ -28,7 +28,7 @@ import { canonicalJson, ESTATE_SERVER } from '../../mcp/classify.js';
 import type { McpToolRecord } from '../../mcp/registry-store.js';
 import { classifyAddress } from '../../sources/dialer.js';
 import { CREW_SOURCE, DEFAULT_PORT } from '../../sources/kinds.js';
-import { lookupSource, type AppSourceRegistry } from '../exec/sources.js';
+import { lookupSource, type AppSource, type AppSourceRegistry } from '../exec/sources.js';
 import { parseToolQueryText } from '../exec/texts.js';
 import { type ImageSources, secretEnvName } from './layout.js';
 
@@ -42,6 +42,11 @@ export interface ManifestInput {
   files: AppFiles;
   body: AppPublishBody;
   registry: AppSourceRegistry | null;
+  /**
+   * Whether the app's project may see `source` now (crew#1533). The published server does not ask again, so this is
+   * the check that stands for it: a source the project can't see never rides into an image.
+   */
+  maySee: (source: AppSource) => Promise<boolean>;
   grantOf: (action: string) => AppActionGrant | null;
   /**
    * The issuer's endpoints from its discovery document (fetched through the dialer by the caller), and the ID-token
@@ -191,6 +196,12 @@ export async function buildManifest(input: ManifestInput): Promise<ManifestOutco
     const src = await lookupSource(input.registry, name).catch(() => null);
     if (src === null || src.kind === 'crew' || src.kind === 'estate') {
       find('unknown_source', `${name} is not a source on this crew any more (used by ${usesOf.get(name)!.join(', ')})`);
+      continue;
+    }
+    // (crew#1533) An app that landed before the visibility check, or whose source was scoped to another project
+    // since, publishes nothing of that source: not its config, not its tools.
+    if (!(await input.maySee(src))) {
+      find('unknown_source', `${name} is no source this app's project may see (used by ${usesOf.get(name)!.join(', ')})`);
       continue;
     }
     if (src.kind === 'mcp-stdio') {

@@ -125,7 +125,8 @@ function rig(roster: string, pick: string, chatState: ChatState = 'claude', crea
   };
 }
 
-const NEEDS_TWO = 'Needs 2 seats that can work now (one builds, the others check it); sign another seat in';
+const NEEDS_TWO = 'Needs 2 seats that can work now, one to build it and one to check it, and only 1 can. Sign in another seat to start it.';
+const NEEDS_TWO_FROM_NONE = 'Needs 2 seats that can work now, one to build it and one to check it, and none can. Sign in 2 more seats to start it.';
 const STAYS = 'Not changed: Pi stays; this job needs 2 seats, so another seat checks the one that builds';
 const OFF = (rest: string) => `Pi is off this job; ${rest} work on it`;
 const NOT_ON = "Not changed: Pi isn't on this job";
@@ -155,6 +156,16 @@ describe('held job seats rechecked on read (crew#1484)', () => {
     expect((await r.go()).code).toBe(200);
     expect(r.launcher.launched).toHaveLength(1);
     expect(r.launcher.launched[0]!.resolution.seats?.keys).toEqual(['claude', 'codex']);
+  });
+
+  it('a card with no work seats redraws from its stored count after the pool is repaired', async () => {
+    const r = rig('Claude+Codex', 'none');
+    await r.pick('bug');
+    const p = r.open();
+    expect(p.blocked).toBe(NEEDS_TWO_FROM_NONE);
+    r.setPick('all');
+    expect(await r.svc.recheckHeldSeats(CHAT)).toBe(true);
+    expect(r.open()).toMatchObject({ pid: p.pid, blocked: null, seats: { keys: ['claude', 'codex'] } });
   });
 
   it('an ended chat\'s open card is redrawn from its own facts', async () => {
@@ -303,7 +314,7 @@ describe('the seats new work uses: one pool for the card, its edits and its Star
     const p = r.open();
     expect(p.seats!.keys).toEqual(seats);
     expectWords(p, seats);
-    expect(p.blocked).toBe(seats.length < 2 ? NEEDS_TWO : null);
+    expect(p.blocked).toBe(seats.length === 0 ? NEEDS_TWO_FROM_NONE : seats.length === 1 ? NEEDS_TWO : null);
 
     // removeSeats [pi]: applied when Pi is on the job and 2 seats stay; else the card says why not.
     const rm = rig(roster, pick, chatState);
@@ -313,7 +324,7 @@ describe('the seats new work uses: one pool for the card, its edits and its Star
     expect(pr.seats!.keys).toEqual(afterRemove);
     expectWords(pr, afterRemove);
     expect(pr.sentence!.notes).toEqual(removeNote === null ? [] : [removeNote]);
-    expect(pr.blocked).toBe(afterRemove.length < 2 ? NEEDS_TWO : null);
+    expect(pr.blocked).toBe(afterRemove.length === 0 ? NEEDS_TWO_FROM_NONE : afterRemove.length === 1 ? NEEDS_TWO : null);
 
     // addSeats [pi]: naming a seat is the opt-in, so an unpicked Pi joins; a Pi that can't work is refused in words.
     const add = rig(roster, pick, chatState);
@@ -323,7 +334,7 @@ describe('the seats new work uses: one pool for the card, its edits and its Star
     expect(pa.seats!.keys).toEqual(afterAdd);
     expectWords(pa, afterAdd);
     expect(pa.sentence!.notes).toEqual(addNote === null ? [] : [addNote]);
-    expect(pa.blocked).toBe(afterAdd.length < 2 ? NEEDS_TWO : null);
+    expect(pa.blocked).toBe(afterAdd.length === 0 ? NEEDS_TWO_FROM_NONE : afterAdd.length === 1 ? NEEDS_TWO : null);
   });
 
   // Every startable card (no edit, removeSeats [pi], addSeats [pi]): Start hands the engine exactly the card's seats.
