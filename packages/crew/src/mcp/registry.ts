@@ -1561,7 +1561,7 @@ export function agentServerView(s: McpServer): McpServerAgentView {
     enabled: s.enabled,
     health: { state: s.health.state },
     // (DES-PM-001 §3.1) A PM source's tools reach an agent only through the gate's scope-aware list: none here.
-    tools: s.pm !== undefined ? [] : s.tools.filter((t) => t.status !== 'gone').map((t) => ({ name: t.name, subject: t.subject, class: t.class, disclosure: t.disclosure, readAccepted: t.readAccepted, enabled: t.enabled, status: t.status })),
+    tools: s.pm !== undefined ? [] : s.tools.filter((t) => t.status !== 'gone').map((t) => ({ name: t.name, subject: t.subject, class: t.class, disclosure: t.disclosure, enabled: t.enabled, status: t.status })),
     ...(s.agents !== undefined ? { agents: { see: s.agents.see, query: s.agents.query } } : {}),
     ...(s.pm !== undefined ? { pm: { system: s.pm.system } } : {}),
   };

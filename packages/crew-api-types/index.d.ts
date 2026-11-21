@@ -14466,7 +14466,7 @@ export interface McpServerAgentView {
   enabled: boolean;
   health: { state: McpHealthState };
   /** The tools that are not `gone`. */
-  tools: Array<{ name: string; subject: string; class: McpToolClass; disclosure: McpToolDisclosure | null; readAccepted: boolean; enabled: boolean; status: McpToolStatus }>;
+  tools: Array<{ name: string; subject: string; class: McpToolClass; disclosure: McpToolDisclosure | null; enabled: boolean; status: McpToolStatus }>;
   /** Data sources only. */
   agents?: { see: boolean; query: boolean };
   /** (api-types 0.187.0) PM entries only. */
