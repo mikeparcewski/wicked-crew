@@ -11,7 +11,7 @@
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { createRequire } from 'node:module';
-import { createServer as createNetServer, type AddressInfo } from 'node:net';
+import { connect, createServer as createNetServer, type AddressInfo, type Server as NetServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -56,12 +56,36 @@ const HOSTILE_RUNTIME = `var wickedAppsStandalone = { boot: function (port, hell
   port.postMessage({ p: 'wicked.editor', v: 1, type: 'data.action', id: 'x1', payload: { action: 'assign', params: { id: 4821 } } });
 } };`;
 
-async function freePort(): Promise<number> {
-  const s = createNetServer();
-  await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
-  const p = (s.address() as AddressInfo).port;
-  await new Promise<void>((r) => s.close(() => r()));
-  return p;
+/** A site's address, held from the start (crew#1478). The site's origin is fixed in its manifest before it starts, so
+ *  its port must be known first; probing a free port, closing it and binding it again later let another suite take it
+ *  in between (EADDRINUSE). This listens on port 0 and keeps it: each connection is piped to the site, which itself
+ *  listens on port 0 (`to`, set once it serves). The bytes pass through unchanged, Host header included. */
+interface Front {
+  port: number;
+  to: number;
+  close(): Promise<void>;
+}
+async function front(): Promise<Front> {
+  const open = new Set<Socket>();
+  const f: Front = { port: 0, to: 0, close: async () => undefined };
+  const server: NetServer = createNetServer((client) => {
+    const site = connect(f.to, '127.0.0.1');
+    for (const s of [client, site]) {
+      open.add(s);
+      s.on('close', () => open.delete(s));
+    }
+    client.on('error', () => site.destroy());
+    site.on('error', () => client.destroy());
+    client.pipe(site).pipe(client);
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  f.port = (server.address() as AddressInfo).port;
+  f.close = () =>
+    new Promise<void>((r) => {
+      for (const s of open) s.destroy();
+      server.close(() => r());
+    });
+  return f;
 }
 
 const PAGES = [
@@ -84,6 +108,7 @@ describe.skipIf(PG === undefined)('the site page in a browser', () => {
   let parentPort = 0;
   let realPort = 0;
   let framedPort = 0;
+  const fronts: Front[] = [];
   let framedToken = '';
 
   const user = (sub: string, email: string, groups = ['support-ops']): Record<string, unknown> => ({ sub, email, email_verified: true, groups, name: sub });
@@ -100,31 +125,7 @@ describe.skipIf(PG === undefined)('the site page in a browser', () => {
     expect((await rig.grant('assign', head)).status).toBe(200);
     const body = (origin: string): AppPublishBody => ({ base: head, targets: ['site'], site: { origin }, identity: { profile: 'oidc', issuer: idp.issuer, clientId: 'desk-site', allowRanges: ['127.0.0.1/32'] }, audience: { kind: 'oidc-groups', groups: ['support-ops'] } });
 
-    parentPort = await freePort();
-    realPort = await freePort();
-    framedPort = await freePort();
-    const start = async (dir: string, port: number, hostJs: string): Promise<void> => {
-      const data = mkdtempSync(join(tmpdir(), 'apps-k6-bdata-'));
-      dirs.push(data);
-      sites.push(await startSite({ siteDir: dir, dataDir: data, hostJs, hostCss: readFileSync(join(SHIM, 'host.css'), 'utf8'), port, host: '127.0.0.1', env: ENV, dial: idp.dial, isMount: () => true, out: () => undefined }));
-    };
-    if (!existsSync(join(SHIM, 'host.js'))) throw new Error('build the server first: npm run build -w packages/apps-server');
-    // 1. The real runtime, top-level only (frame-ancestors 'none').
-    if (RUNTIME !== null) {
-      const { dir } = await publishSite(rig, body(`http://localhost:${realPort}`), idp.endpoints);
-      dirs.push(dir);
-      cpSync(join(RUNTIME, 'runtime.js'), join(dir, 'runtime', 'runtime.js'));
-      cpSync(join(RUNTIME, 'runtime.css'), join(dir, 'runtime', 'runtime.css'));
-      await start(dir, realPort, readFileSync(join(SHIM, 'host.js'), 'utf8'));
-    }
-    // 2. The hostile runtime on a site the test parent may frame (a test-only manifest edit), with the test host.
-    const { dir: framedDir } = await publishSite(rig, body(`http://localhost:${framedPort}`), idp.endpoints);
-    dirs.push(framedDir);
-    writeFileSync(join(framedDir, 'runtime', 'runtime.js'), HOSTILE_RUNTIME);
-    const m = JSON.parse(readFileSync(join(framedDir, 'manifest.json'), 'utf8')) as { embedOrigins: string[] };
-    writeFileSync(join(framedDir, 'manifest.json'), JSON.stringify({ ...m, embedOrigins: [`http://127.0.0.1:${parentPort}`] }));
-    await start(framedDir, framedPort, readFileSync(join(SHIM, 'host.test.js'), 'utf8'));
-
+    // Every address is bound once, on port 0, and kept (crew#1478): the test parent itself, and a front per site.
     framedToken = idp.token({ aud: 'desk-site', ...user('u-teams', 'teams@example.com') });
     parent = createServer((req, res) => {
       const target = new URL(req.url ?? '/', `http://127.0.0.1:${parentPort}`).searchParams.get('site') ?? '';
@@ -133,10 +134,40 @@ describe.skipIf(PG === undefined)('the site page in a browser', () => {
         window.addEventListener('message', function (e) { if (e.data && e.data.type === 'wk-test-token-request') e.source.postMessage({ type: 'wk-test-token', token: ${JSON.stringify(framedToken)} }, '*'); });
       </script></body>`);
     });
-    await new Promise<void>((r) => parent.listen(parentPort, '127.0.0.1', r));
+    await new Promise<void>((r) => parent.listen(0, '127.0.0.1', r));
+    parentPort = (parent.address() as AddressInfo).port;
+    const realFront = await front();
+    const framedFront = await front();
+    fronts.push(realFront, framedFront);
+    realPort = realFront.port;
+    framedPort = framedFront.port;
+    const start = async (dir: string, at: Front, hostJs: string): Promise<void> => {
+      const data = mkdtempSync(join(tmpdir(), 'apps-k6-bdata-'));
+      dirs.push(data);
+      const site = await startSite({ siteDir: dir, dataDir: data, hostJs, hostCss: readFileSync(join(SHIM, 'host.css'), 'utf8'), port: 0, host: '127.0.0.1', env: ENV, dial: idp.dial, isMount: () => true, out: () => undefined });
+      sites.push(site);
+      at.to = site.port;
+    };
+    if (!existsSync(join(SHIM, 'host.js'))) throw new Error('build the server first: npm run build -w packages/apps-server');
+    // 1. The real runtime, top-level only (frame-ancestors 'none').
+    if (RUNTIME !== null) {
+      const { dir } = await publishSite(rig, body(`http://localhost:${realPort}`), idp.endpoints);
+      dirs.push(dir);
+      cpSync(join(RUNTIME, 'runtime.js'), join(dir, 'runtime', 'runtime.js'));
+      cpSync(join(RUNTIME, 'runtime.css'), join(dir, 'runtime', 'runtime.css'));
+      await start(dir, realFront, readFileSync(join(SHIM, 'host.js'), 'utf8'));
+    }
+    // 2. The hostile runtime on a site the test parent may frame (a test-only manifest edit), with the test host.
+    const { dir: framedDir } = await publishSite(rig, body(`http://localhost:${framedPort}`), idp.endpoints);
+    dirs.push(framedDir);
+    writeFileSync(join(framedDir, 'runtime', 'runtime.js'), HOSTILE_RUNTIME);
+    const m = JSON.parse(readFileSync(join(framedDir, 'manifest.json'), 'utf8')) as { embedOrigins: string[] };
+    writeFileSync(join(framedDir, 'manifest.json'), JSON.stringify({ ...m, embedOrigins: [`http://127.0.0.1:${parentPort}`] }));
+    await start(framedDir, framedFront, readFileSync(join(SHIM, 'host.test.js'), 'utf8'));
   });
 
   afterAll(async () => {
+    for (const f of fronts) await f.close();
     for (const s of sites) await s.close();
     await new Promise<void>((r) => (parent === undefined ? r() : parent.close(() => r())));
     await rig?.h.close();
