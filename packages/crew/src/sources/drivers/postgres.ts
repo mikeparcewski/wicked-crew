@@ -132,7 +132,7 @@ export function pgClient(args: SqlConnectArgs, opts: { deadlineMs?: number; read
 /** Map a postgres.js / server error to a {@link SourceQueryError}. */
 export function pgError(err: unknown): SourceQueryError {
   if (err instanceof SourceQueryError) return err;
-  if (err instanceof DialRefusedError) return new SourceQueryError(null, 'refused', err.message, err.code);
+  if (err instanceof DialRefusedError) return new SourceQueryError(null, 'refused', err.message, err.code, err.detail);
   const e = err as { code?: unknown; message?: unknown };
   const code = typeof e?.code === 'string' ? e.code : null;
   const message = typeof e?.message === 'string' ? e.message : String(err);

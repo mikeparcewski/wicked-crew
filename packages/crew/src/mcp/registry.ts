@@ -29,6 +29,7 @@ import { isIP } from 'node:net';
 import { join } from 'node:path';
 
 import type {
+  AddressConfirmationDetail,
   McpAuthConfig,
   McpAuthState,
   McpDiscoveredServer,
@@ -49,7 +50,7 @@ import type {
   McpRegistryRestoreResponse,
   TrackerLink,
 } from '../core/types.js';
-import { agentAccessOf, effectiveDisclosure, hasPmMarker, legacyEntryId, pmOf, type PmSystem, proposedDisclosure, type ToolboxSourceEntry, type ToolDisclosure, type ToolDisclosureClass, trackersOf } from '../knowledge/registry/entry.js';
+import { agentAccessOf, effectiveDisclosure, effectiveReadAccepted, hasPmMarker, legacyEntryId, pmOf, type PmSystem, proposedDisclosure, type ToolboxSourceEntry, type ToolDisclosure, type ToolDisclosureClass, trackersOf } from '../knowledge/registry/entry.js';
 import { bindingFor, bindingInForce, bindingOnSave } from '../knowledge/trackers/bindings.js';
 import { PROJECTION_UNKNOWN, type TrackerProjectionLookup, trackerLinkViews } from '../knowledge/trackers/view.js';
 import { checkSourceDocument, DeploymentPolicyError, policyVersionOf } from '../knowledge/registry/policy.js';
@@ -81,6 +82,7 @@ export class McpRegistryError extends Error {
     message: string,
     /** (DES-APPS-001 §5.2) Fuller words that hold a source's own text: answered to a HUMAN only. */
     readonly humanMessage?: string,
+    readonly detail: AddressConfirmationDetail = {},
   ) {
     super(message);
   }
@@ -275,7 +277,7 @@ export class McpRegistry {
       // (DES-APPS-001 §5.2) The dialer refused the connection: a 409 naming why (an unconfirmed range
       // to confirm, an always-refused address, plaintext), not an upstream failure.
       const human = result.sourceDetail !== undefined ? `${what}: ${result.sourceDetail}` : undefined;
-      if (result.refusal !== undefined) throw new McpRegistryError(409, result.refusal, `${what}: ${result.error}`, human);
+      if (result.refusal !== undefined) throw new McpRegistryError(409, result.refusal, `${what}: ${result.error}`, human, result.detail);
       throw new McpRegistryError(502, 'probe_failed', `${what}: ${result.error}`, human);
     }
     const tools = result.tools.map((t) => ({ ...t, schemaHash: hashOf(config, t) }));
@@ -314,6 +316,7 @@ export class McpRegistry {
         schemaHash: t.schemaHash,
         enabledOnSave: enabledOnSave(was(t.name), t),
         disclosure: reviewed(t),
+        readAccepted: effectiveReadAccepted({ schemaHash: t.schemaHash, readAccepted: was(t.name)?.readAccepted ?? null }),
         ...(config.pm != null ? { binding: bindingOnSave(config.pm.system, t) === null ? null : { policy: bindingOnSave(config.pm.system, t)!.policy } } : {}),
         ...(config.kind === 'rest' ? { rest: t.rest ?? null } : {}),
       })),
@@ -343,8 +346,9 @@ export class McpRegistry {
    * (DES-KNOWLEDGE-DATA-001 §5.1) `disclosures` is the operator's review of each tool's disclosure class (human
    * operator only, like a write grant). A tool it does not name keeps its class while its schema is unchanged;
    * a tool of crew's own Toolbox configuration gets crew's class; any other tool has none until reviewed.
+   * `acceptedReads` records the human operator's Apps read acceptances, bound to each previewed schema.
    */
-  async save(previewHash: string | undefined, enabledWrites: readonly string[] = [], allowOrigin: string | null = null, disclosures: Readonly<Record<string, ToolDisclosureClass>> = {}): Promise<McpServer> {
+  async save(previewHash: string | undefined, enabledWrites: readonly string[] = [], allowOrigin: string | null = null, disclosures: Readonly<Record<string, ToolDisclosureClass>> = {}, acceptedReads: readonly string[] = []): Promise<McpServer> {
     if (previewHash === undefined) {
       throw new McpRegistryError(409, 'preview_required', 'saving a server needs the previewHash of a preview of it: POST /mcp/servers/preview first');
     }
@@ -357,7 +361,9 @@ export class McpRegistry {
     await this.checkWriteGrants(previewHash, enabledWrites);
     await this.checkEgress(previewHash, allowOrigin);
     this.checkDisclosures(previewHash, disclosures);
+    await this.checkAcceptedReads(previewHash, acceptedReads);
     const granted = new Set(enabledWrites);
+    const accepted = new Set(acceptedReads);
     this.previews.delete(previewHash);
     const stamp = new Date(this.now()).toISOString();
     // (crew#719) The staged secret and the registry row commit TOGETHER. Studio used to write the
@@ -409,6 +415,7 @@ export class McpRegistry {
           present: true,
           ...(t.rest != null ? { rest: t.rest } : {}),
           disclosure: disclosureOnSave(t, was, disclosures[t.name], held.config.kind, held.config.pm?.system ?? null),
+          readAccepted: accepted.has(t.name) ? { schemaHash: t.schemaHash } : was?.readAccepted?.schemaHash === t.schemaHash ? was.readAccepted : null,
           // (DES-PM-001 §3) A PM tool's binding: crew's current policy, bound to the schema this save registers.
           ...(held.config.pm != null ? { binding: bindingOnSave(held.config.pm.system, t) } : {}),
         };
@@ -570,6 +577,21 @@ export class McpRegistry {
     }
   }
 
+  /** Refuse acceptances outside the preview's effective reads before any approval is withdrawn or saved. */
+  async checkAcceptedReads(previewHash: string, acceptedReads: readonly string[]): Promise<void> {
+    const held = this.previews.get(previewHash);
+    if (held === undefined || held.expiresAt <= this.now() || acceptedReads.length === 0) return;
+    const prior = (await this.readFile()).servers.find((s) => s.name === held.config.name);
+    for (const name of acceptedReads) {
+      const t = held.tools.find((t) => t.name === name);
+      const was = prior?.tools.find((t) => t.name === name);
+      const override = t !== undefined && was?.schemaHash === t.schemaHash ? was.classOverride : null;
+      if (t === undefined || effectiveToolClass(deriveToolClass(t.annotations), override) !== 'read') {
+        throw new McpRegistryError(409, 'not_a_read', `${name} is not a read tool of this preview`);
+      }
+    }
+  }
+
   /**
    * (G2) Whether every saved tool of the `rest` server `name` has a hash that covers the server's
    * target. `false` for a registration saved before G2 (or whose url or auth header changed outside
@@ -637,8 +659,8 @@ export class McpRegistry {
    */
   async patchTool(
     subject: string,
-    patch: { enabled?: boolean | undefined; classOverride?: McpToolClass | null | undefined; disclosure?: ToolDisclosureClass | null | undefined },
-    opts: { mayGrantWrite?: boolean; mayReviewDisclosure?: boolean } = {},
+    patch: { enabled?: boolean | undefined; classOverride?: McpToolClass | null | undefined; disclosure?: ToolDisclosureClass | null | undefined; readAccepted?: boolean | undefined },
+    opts: { mayGrantWrite?: boolean; mayReviewDisclosure?: boolean; mayAcceptRead?: boolean } = {},
   ): Promise<{ tool: McpTool; grantedWrite: boolean }> {
     const parts = parseMcpSubject(subject);
     if (parts === null) throw new McpRegistryError(404, 'unknown_tool', `no tool ${subject}`);
@@ -653,6 +675,14 @@ export class McpRegistry {
         if (opts.mayReviewDisclosure !== true) throw new McpRegistryError(403, 'disclosure_review_human_only', `only a human operator reviews what ${subject} discloses`);
         if (t.schemaHash === null || t.schemaHash !== t.observedSchemaHash) throw new McpRegistryError(409, 'not_registered', `${subject}'s schema is not the saved one: preview and save the server again, then review it`);
       }
+      if (patch.readAccepted !== undefined) {
+        if (opts.mayAcceptRead !== true) throw new McpRegistryError(403, 'read_accept_human_only', `only a human operator accepts or withdraws ${subject} as an Apps read`);
+        if (patch.readAccepted) {
+          const override = patch.classOverride !== undefined ? patch.classOverride : t.classOverride;
+          if (effectiveToolClass(deriveToolClass(t.annotations), override) !== 'read') throw new McpRegistryError(409, 'not_a_read', `${subject} is not a read tool`);
+          if (t.schemaHash === null || t.schemaHash !== t.observedSchemaHash) throw new McpRegistryError(409, 'not_registered', `${subject}'s schema is not the saved one: preview and save the server again, then accept it`);
+        }
+      }
       const before = t.enabled && isWriteGrant(t.annotations, t.classOverride);
       const enabled = patch.enabled ?? t.enabled;
       const override = patch.classOverride !== undefined ? patch.classOverride : t.classOverride;
@@ -663,6 +693,7 @@ export class McpRegistry {
       t.enabled = enabled;
       t.classOverride = override;
       if (patch.disclosure !== undefined) t.disclosure = patch.disclosure === null || t.schemaHash === null ? null : { class: patch.disclosure, schemaHash: t.schemaHash };
+      if (patch.readAccepted !== undefined) t.readAccepted = patch.readAccepted && t.schemaHash !== null ? { schemaHash: t.schemaHash } : null;
       s.updatedAt = stamp;
       return { server: s, tool: t, grant };
     });
@@ -1385,6 +1416,7 @@ function toolView(s: McpServerRecord, t: McpToolRecord): McpTool {
     schemaHash: t.schemaHash,
     observedSchemaHash: t.observedSchemaHash,
     disclosure: effectiveDisclosure(t),
+    readAccepted: effectiveReadAccepted(t),
     ...(pm !== null ? { binding: t.binding == null ? null : { policy: t.binding.policy, schemaHash: t.binding.schemaHash, inForce: bindingInForce(pm.system, t) !== null } } : {}),
   };
 }
@@ -1458,6 +1490,17 @@ function entryOf(s: McpServerRecord): ToolboxSourceEntry | null {
  * Pure and idempotent: the first write after an upgrade persists the mapped form.
  */
 export function normalizeRegistryFile(file: McpRegistryFile): McpRegistryFile {
+  // Studio required the person's "Accept these as reads" tick before saving these legacy previews.
+  // Carry that decision forward once; after the marker, absent fields must never imply acceptance.
+  if (file.readAcceptance !== 1) {
+    for (const s of file.servers) {
+      for (const t of s.tools) {
+        t.readAccepted = ['rest', 'mcp-http', 'mcp-stdio'].includes(s.kind) && t.schemaHash !== null && effectiveToolClass(deriveToolClass(t.annotations), t.classOverride) === 'read'
+          ? { schemaHash: t.schemaHash } : null;
+      }
+    }
+    file.readAcceptance = 1;
+  }
   for (const [i, s] of file.servers.entries()) {
     if (s.id === undefined) s.id = legacyEntryId(s.name, s.registeredAt);
     if (s.kind !== 'sql' || s.sql?.driver !== 'postgres') continue;
@@ -1518,7 +1561,7 @@ export function agentServerView(s: McpServer): McpServerAgentView {
     enabled: s.enabled,
     health: { state: s.health.state },
     // (DES-PM-001 §3.1) A PM source's tools reach an agent only through the gate's scope-aware list: none here.
-    tools: s.pm !== undefined ? [] : s.tools.filter((t) => t.status !== 'gone').map((t) => ({ name: t.name, subject: t.subject, class: t.class, disclosure: t.disclosure, enabled: t.enabled, status: t.status })),
+    tools: s.pm !== undefined ? [] : s.tools.filter((t) => t.status !== 'gone').map((t) => ({ name: t.name, subject: t.subject, class: t.class, disclosure: t.disclosure, readAccepted: t.readAccepted, enabled: t.enabled, status: t.status })),
     ...(s.agents !== undefined ? { agents: { see: s.agents.see, query: s.agents.query } } : {}),
     ...(s.pm !== undefined ? { pm: { system: s.pm.system } } : {}),
   };

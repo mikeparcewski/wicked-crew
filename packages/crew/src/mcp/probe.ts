@@ -20,7 +20,7 @@ import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotoc
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
-import type { McpAuthConfig, McpRestMapping, McpToolAnnotations, McpUpstreamKind } from '../core/types.js';
+import type { AddressConfirmationDetail, McpAuthConfig, McpRestMapping, McpToolAnnotations, McpUpstreamKind } from '../core/types.js';
 import type { PmMarker, ToolboxSourceEntry } from '../knowledge/registry/entry.js';
 import { addressPolicyOf, type AddressPolicy, boundFetch, type DialOptions, DialRedirectRefusedError, DialRefusedError, type DialRefusalCode } from '../sources/dialer.js';
 import { SourceQueryError } from '../sources/drivers/types.js';
@@ -98,6 +98,7 @@ export type ProbeResult =
       error: string;
       /** (DES-APPS-001 §5.2) The dialer refused the connection: why, so the route can say so as a 409, not a 502. */
       refusal?: DialRefusalCode;
+      detail?: AddressConfirmationDetail;
       /**
        * (DES-APPS-001 §5.2) A source's own words (`sql`/`graphql`), scrubbed, for a HUMAN only; `error`
        * then holds only the error class and SQLSTATE, which is what health and every agent see.
@@ -169,7 +170,7 @@ async function probeSourceKind(config: McpUpstreamConfig, secret: string | null,
     const message = err instanceof Error ? err.message : String(err);
     // A dialer refusal keeps its code whether it arrives as itself or wrapped by a driver.
     const refusal = err instanceof DialRefusedError ? err.code : ((err as { refusal?: unknown })?.refusal as DialRefusalCode | null | undefined) ?? undefined;
-    const coded = refusal !== undefined && refusal !== null ? { refusal } : {};
+    const coded = refusal !== undefined && refusal !== null ? { refusal, ...((err instanceof DialRefusedError || err instanceof SourceQueryError) ? { detail: err.detail } : {}) } : {};
     // The dialer's own words can carry upstream text (a redirect's Location): the code only, words for a human.
     if (err instanceof DialRefusedError) {
       const where = err instanceof DialRedirectRefusedError && err.location !== null ? ` (to ${err.location})` : '';
@@ -246,13 +247,13 @@ export async function probeMcpServerWithin(config: McpUpstreamConfig, secret: st
       continue;
     }
     const message = retryable ? stillStartingMessage(budget.budgetMs, config.kind) : outcome.message;
-    return scrubSecrets({ ok: false, error: lastTail === '' ? message : `${message}; stderr: ${lastTail}`, ...(outcome.refusal !== undefined ? { refusal: outcome.refusal } : {}) }, secrets);
+    return scrubSecrets({ ok: false, error: lastTail === '' ? message : `${message}; stderr: ${lastTail}`, ...(outcome.refusal !== undefined ? { refusal: outcome.refusal, ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}) } : {}) }, secrets);
   }
 }
 
 type Attempt =
   | { ok: true; result: ProbeResult }
-  | { ok: false; message: string; tail: string; stillStarting: boolean; refusal?: DialRefusalCode };
+  | { ok: false; message: string; tail: string; stillStarting: boolean; refusal?: DialRefusalCode; detail?: AddressConfirmationDetail };
 
 /** One connect + `tools/list`, within `deadlineMs`. Secrets are scrubbed by the caller. */
 async function probeOnce(config: McpUpstreamConfig, secret: string | null, deadlineMs: number, dial: DialOptions): Promise<Attempt> {
@@ -289,7 +290,7 @@ async function probeOnce(config: McpUpstreamConfig, secret: string | null, deadl
   } catch (err) {
     work.catch(() => undefined);
     const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, message, tail: stderrTail().trim(), stillStarting: err instanceof StillStarting, ...(err instanceof DialRefusedError ? { refusal: err.code } : {}) };
+    return { ok: false, message, tail: stderrTail().trim(), stillStarting: err instanceof StillStarting, ...(err instanceof DialRefusedError ? { refusal: err.code, detail: err.detail } : {}) };
   } finally {
     clearTimeout(timer);
     await client.close().catch(() => undefined);

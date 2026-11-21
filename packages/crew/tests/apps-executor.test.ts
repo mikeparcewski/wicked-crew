@@ -408,6 +408,20 @@ describe('the executor over the K1 test services and the crew source', () => {
     expect(last.hasMore).toBe(false);
   });
 
+  it('a landed REST query is contract_changed at the next read after acceptance is withdrawn', async () => {
+    expect((await query('page')).status).toBe(200);
+    const patch = async (readAccepted: boolean) => h.app.inject({ method: 'PATCH', url: `/api/v1/mcp/tools/${encodeURIComponent('mcp:tickets/listTickets')}`, headers: { authorization: 'Bearer priya' }, payload: { readAccepted } });
+    try {
+      expect((await patch(false)).statusCode).toBe(200);
+      const r = await query('page');
+      expect(r.status).toBe(409);
+      expect(r.body).toMatchObject({ code: 'contract_changed' });
+    } finally {
+      expect((await patch(true)).statusCode).toBe(200);
+    }
+    expect((await query('page')).status).toBe(200);
+  });
+
   it('an MCP read (structured content), a GraphQL read (variables = parameters) and a crew read as the viewer', async () => {
     const m = (await query('mcp_open')).body as unknown as AppQueryResponse;
     expect(m.rows.every((row) => row[1] === 'OPEN')).toBe(true);

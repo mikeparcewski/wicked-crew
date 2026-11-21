@@ -13,6 +13,7 @@ import { requestOrigin, shellCsp } from '../editors/csp.js';
 import { conformanceRuntimeRoot, exportEngineConformanceEnv, exportManagedChrome, managedChromium } from '../editors/conformance-runtime.js';
 import { launchRosterNaming, registerRoutes } from './routes.js';
 import { APPS_ACTIONS_STATE_FILENAME, AppActionStore } from '../apps/actions/store.js';
+import { AppsRedescriber } from '../apps/exec/redescribe.js';
 import { AppsSourceStage } from '../apps/exec/source-stage.js';
 import { APPS_STATE_FILENAME, AppStore, defaultAppsRoot } from '../apps/store.js';
 import { agentMay } from '../knowledge/gate/access.js';
@@ -2849,6 +2850,10 @@ export async function createServer(
   } catch (err) {
     app.log.error(`[apps] the app store cannot be read, so Apps is off: ${err instanceof Error ? err.message : String(err)}`);
   }
+  // Like the tracker timer, descriptions refresh off the request path and stop with this daemon.
+  const appsRedescriber = new AppsRedescriber({ store: () => appStore, registry: mcpRegistry, log: (m) => app.log.warn(m) });
+  appsRedescriber.start();
+  app.addHook('onClose', async () => appsRedescriber.close());
   const appsVerifyUnitToken = appStore !== null && CoreAdapter.estateScopeResolver() !== null
     ? appsUnitResolver((req) => {
         const resolve = CoreAdapter.estateScopeResolver();

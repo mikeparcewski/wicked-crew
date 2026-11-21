@@ -38,3 +38,5 @@ export {
   type ImageSource,
   type ImageSources,
 } from '../../crew/src/apps/publish/layout.js';
+
+export { REDESCRIBE_MS } from '../../crew/src/apps/exec/redescribe.js';

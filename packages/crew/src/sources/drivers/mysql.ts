@@ -128,7 +128,7 @@ async function connectOn(args: SqlConnectArgs, stream: Socket, address: string, 
 
 export function mysqlError(err: unknown): SourceQueryError {
   if (err instanceof SourceQueryError) return err;
-  if (err instanceof DialRefusedError) return new SourceQueryError(null, 'refused', err.message, err.code);
+  if (err instanceof DialRefusedError) return new SourceQueryError(null, 'refused', err.message, err.code, err.detail);
   const e = err as { errno?: unknown; sqlState?: unknown; code?: unknown; message?: unknown };
   const message = typeof e?.message === 'string' ? e.message : String(err);
   const sqlstate = typeof e?.sqlState === 'string' ? e.sqlState : null;

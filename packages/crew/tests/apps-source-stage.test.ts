@@ -143,6 +143,13 @@ describe('the source stage over REST, MCP and GraphQL sources (the K1 test servi
   const tool = (id: string, source: string, kind: 'rest' | 'mcp'): AppQuery => ({ id, source, kind, rowPath: '$.data.items[*]', output: [{ name: 'id', type: 'integer' }] });
   const land = (queries: AppQuery[], texts: Record<string, string>, actions: AppAction[] = []) => h.land('desk', specWith(queries, actions), texts);
 
+  it('refuses a REST read not accepted on the source sheet', async () => {
+    await h.register({ name: 'unaccepted', kind: 'rest', url: `${api.origin}/v1`, openapiUrl: `${api.origin}/openapi.json`, address: LOOP }, []);
+    const r = await land([tool('unaccepted', 'unaccepted', 'rest')], { unaccepted: JSON.stringify({ tool: 'listTickets' }) });
+    expect(r.status, JSON.stringify(r.body)).toBe(422);
+    expect((r.body as unknown as Landed).findings).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'not_a_read', message: expect.stringContaining('is not accepted as a read on the source sheet') })]));
+  });
+
   it('a REST read, an MCP read and a GraphQL query land, each with its contract; a tool action and a one-field mutation too', async () => {
     const assignArgs = { id: { kind: 'param' as const, name: 'id' }, owner: { kind: 'viewer' as const, claim: 'email' as const } };
     const params = { type: 'object' as const, properties: { id: { type: 'integer' as const } }, required: ['id'] };

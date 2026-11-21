@@ -60,6 +60,8 @@ export interface McpToolRecord {
    * the tool to no agent.
    */
   disclosure?: ToolDisclosure | null;
+  /** The person's acceptance as an Apps read, bound to the saved schema; absent/null = not accepted. */
+  readAccepted?: { schemaHash: string } | null;
   /**
    * (DES-PM-001 §3, §3.1) PM entries only: crew's resource binding for the tool, bound to the schema hash it was
    * reviewed against. Absent/`null` = unbound: the gate offers the tool to no agent.
@@ -141,6 +143,8 @@ export interface McpServerRecord {
 
 export interface McpRegistryFile {
   version: 1;
+  /** Legacy Apps read acceptances have been migrated once; missing tool fields now mean unaccepted. */
+  readAcceptance?: 1;
   /** (DES-KNOWLEDGE-DATA-001 §5.5) Bumped by every write; absent = 0 (a file from before generations). */
   generation?: number;
   servers: McpServerRecord[];

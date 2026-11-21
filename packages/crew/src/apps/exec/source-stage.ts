@@ -24,6 +24,7 @@
 import { buildClientSchema, type IntrospectionQuery, Kind, parse, validate } from 'graphql';
 
 import type { AppAction, AppCheckFinding, AppParamSchema, AppParamsSchema, AppQuery, AppRowWriteAction, McpToolClass } from '../../core/types.js';
+import { effectiveReadAccepted } from '../../knowledge/registry/entry.js';
 import { canonicalJson, deriveToolClass, effectiveToolClass } from '../../mcp/classify.js';
 import { McpRegistryError, type McpRegistry } from '../../mcp/registry.js';
 import { describeMysql } from '../../sources/catalog/mysql.js';
@@ -283,7 +284,7 @@ export class AppsSourceStage implements AppSourceStage {
       const parsed = parseToolQueryText(text);
       if (!parsed.ok) throw new Refused('query_text', parsed.why, 'spec');
       const t = await this.tool(s, parsed.value.tool);
-      if (classOf(t) !== 'read') throw new Refused('not_a_read', `${s.name}/${parsed.value.tool} is not accepted as a read on the source sheet`);
+      if (classOf(t) !== 'read' || !effectiveReadAccepted(t)) throw new Refused('not_a_read', `${s.name}/${parsed.value.tool} is not accepted as a read on the source sheet`);
       checkToolArgs(providers(parsed.value.args, q.params), t.inputSchema);
       return toolQueryContract(s.kind, t, q.params);
     }

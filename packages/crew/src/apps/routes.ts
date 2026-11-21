@@ -4,6 +4,7 @@
  *  - `GET /apps[?project=][&archived=active|archived|all]` (observer), `POST /apps {slug, name?, projectId}` (operator):
  *    list (the active apps unless asked); add an app.
  *  - `GET /apps/:app` (observer): the spec at head, the versions with their receipts, the undo pointer.
+ *  - `GET /apps/:app/calls` (observer): up to 200 call records, newest last, memory only; a restart starts empty.
  *  - `GET /apps/:app/versions/:version` (observer, G3/G16): an accepted version's files as they were.
  *  - `POST /apps/:app/archive`, `/unarchive` (HUMAN operator, G16): hide the app from the list and refuse its version
  *    changes (edits, undo, redo, restore, new turns), or open it again; nothing is deleted. Reads, queries and the
@@ -205,6 +206,14 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
     } catch (err) {
       return fail(reply, err);
     }
+  });
+
+  // The executor's ring is for observing this daemon; durable history belongs in the audit log.
+  app.get(`${V}/apps/:app/calls`, { config: { manifest: { responseType: 'AppCallRecordsResponse', statusCodes: [200, 404, 501] } } }, async (req, reply) => {
+    const slug = slugOf(req, reply);
+    if (slug === null) return reply;
+    if (deps.executor === undefined) return refuse(reply, 501, { code: 'not_implemented', error: 'this daemon has no app query executor' });
+    return { app: slug, records: deps.executor.callRecords(slug) };
   });
 
   // (G3, G16b) An accepted version as it was: a version number, or a commit of the app's repo.
