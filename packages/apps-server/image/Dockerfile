@@ -7,7 +7,7 @@
 # an app with actions, a volume at /data (its action records, audit and decision logs):
 #   docker run -p 8080:8080 -e APPS_SRC_SUPPORT_PG_PASSWORD=… -v escalations-data:/data <image>
 # One server per volume: a second container on the same volume stops, naming the first. A graceful stop
-# (docker stop / restart), a crash, or `docker rm -f` releases the SQLite exclusive lock at once, so a restart
+# (docker stop / restart), a crash, or `docker rm -f` releases the SQLite owner lock at once, so a restart
 # needs no wait. The volume's filesystem must support POSIX locks (NFS without lockd is unsupported).
 FROM node:24-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c
 
