@@ -1377,7 +1377,7 @@ export interface RuntimeDeps {
    *  registered; absent (no draft seam armed) = `create` stays off. */
   launchBoundDraft?: (spec: BoundDraft) => Promise<void>;
   /** A3: remove a bound document's earlier attempt folders before a new attempt reads its base. */
-  fenceBoundDraft?: (documentId: string, runIds: readonly string[]) => void;
+  fenceBoundDraft?: (documentId: string, runIds: readonly string[], mount: string) => void;
   /** A5: the chat seam's proposal-bound refine. With {@link docBindings}, `refine` is advertised and its launcher
    *  registered; absent (no chat seam armed) = `refine` stays off. */
   launchBoundRefine?: (spec: BoundRefine) => Promise<void>;
@@ -11911,6 +11911,27 @@ export function registerRoutes(
     actorOf: (req) => actorOf(req).id,
     log: (m) => app.log.warn(m),
   });
+  const proposalPacketDeps: import('../interactive/source-packet.js').PacketDeps = {
+    runs: chatContextDeps.runs,
+    brief: (view) => buildRunBrief(view, { workOutput: chatContextDeps.workOutput, ...(chatContextDeps.acceptanceLine !== undefined ? { acceptanceLine: chatContextDeps.acceptanceLine } : {}) }),
+    docsRoot: chatContextDeps.docsRoot,
+    attachment: (chatId, id) => {
+      const hit = chatAttachments.resolve(chatId, [id])[0];
+      return hit === undefined ? null : { name: hit.name, path: hit.path };
+    },
+    // The exact brief a turn was given, from the live chat's scratch root, beneath it (no link followed), only when
+    // its bytes still hash to what the turn recorded (A1's binding). Gone after the chat ends or the daemon restarts.
+    contextBrief: (chatId, relPath, sha) => {
+      const cwd = chatScopes.get(chatId)?.cwd;
+      if (cwd === undefined) return null;
+      try {
+        const data = readBeneath(realpathSync(cwd), relPath, BRIEF_COPY_MAX).data;
+        return sha256Hex(data) === sha ? data : null;
+      } catch {
+        return null;
+      }
+    },
+  };
   // A3: the real `create` launcher (§4.3 steps 2-3): one document and one run per proposal identity.
   if (realRefine) {
     // A5 (DES §6): the refine launcher — the attempt on the document's binding, then the chat seam's bound refine with the
@@ -11920,6 +11941,8 @@ export function registerRoutes(
       runExists: async (runId) => (await adapter.sessions()).includes(runId),
       docsRoot: (projectId) => projectDocsRoot(adapter, projectSettings, projectId),
       launchBound: runtime.launchBoundRefine!,
+      packetDeps: proposalPacketDeps,
+      chatIdOf: (chatId, instance) => (chatHistory === null ? chatId : chatHistory.idOfInstance(chatId, instance)),
       ...(runtime.fenceBoundDraft !== undefined ? { fence: runtime.fenceBoundDraft } : {}),
       records: (chatId) => chatHistory?.messages(chatId) ?? chatTranscripts?.read(chatId) ?? [],
       instanceOf: (chatId) => chatHistory?.stateOf(chatId)?.instance ?? null,
@@ -11966,27 +11989,7 @@ export function registerRoutes(
         const seed = CATALOG_SEEDS.find((c) => c.id === entry);
         return seed !== undefined && seed.launch.kind === 'document' ? seed.launch.style : 'web';
       },
-      packetDeps: {
-        runs: chatContextDeps.runs,
-        brief: (view) => buildRunBrief(view, { workOutput: chatContextDeps.workOutput, ...(chatContextDeps.acceptanceLine !== undefined ? { acceptanceLine: chatContextDeps.acceptanceLine } : {}) }),
-        docsRoot: chatContextDeps.docsRoot,
-        attachment: (chatId, id) => {
-          const hit = chatAttachments.resolve(chatId, [id])[0];
-          return hit === undefined ? null : { name: hit.name, path: hit.path };
-        },
-        // The exact brief a turn was given, from the live chat's scratch root, beneath it (no link followed), only when
-        // its bytes still hash to what the turn recorded (A1's binding). Gone after the chat ends or the daemon restarts.
-        contextBrief: (chatId, relPath, sha) => {
-          const cwd = chatScopes.get(chatId)?.cwd;
-          if (cwd === undefined) return null;
-          try {
-            const data = readBeneath(realpathSync(cwd), relPath, BRIEF_COPY_MAX).data;
-            return sha256Hex(data) === sha ? data : null;
-          } catch {
-            return null;
-          }
-        },
-      },
+      packetDeps: proposalPacketDeps,
       log: (m) => app.log.warn(m),
     }));
   }

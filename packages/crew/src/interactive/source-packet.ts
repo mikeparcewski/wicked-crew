@@ -304,9 +304,10 @@ export interface DocumentPathEntry {
  * are retained (two 512 KB files per PDF); large originals are never retained. */
 const documentPlanCache = new Map<string, DocumentPathEntry>();
 const DOCUMENT_PLAN_CACHE_MAX = 64;
+const PDF_SCAN_NOTE = 'no extractable text (a scan?); the original PDF can be read, not cited by line';
 const PDF_TEXT_ONLY_NOTE = 'only its extracted text is staged; the original pdf is over 512 KB';
 
-async function documentPathEntry(token: string, chatId: string, deps: Pick<PacketDeps, 'attachment' | 'docsRoot'>, cache: boolean): Promise<DocumentPathEntry> {
+async function documentPathEntry(token: string, chatId: string, deps: Pick<PacketDeps, 'attachment' | 'docsRoot'>, cache: boolean, allowScans = false): Promise<DocumentPathEntry> {
   let got: { name: string; bytes: Buffer };
   if (token.startsWith('attachment:')) {
     const id = token.slice(11);
@@ -326,7 +327,7 @@ async function documentPathEntry(token: string, chatId: string, deps: Pick<Packe
   } else if (token.startsWith('doc:')) {
     got = await readStagedDocument(token.slice(4), null, deps.docsRoot, PACKET_FILE_MAX_BYTES);
   } else throw new Refused('a document draft reads files and documents only');
-  const key = JSON.stringify([chatId, token, got.name, sha256(got.bytes)]);
+  const key = JSON.stringify([chatId, token, got.name, sha256(got.bytes), allowScans]);
   const previous = cache ? documentPlanCache.get(key) : undefined;
   if (previous !== undefined) {
     documentPlanCache.delete(key);
@@ -340,11 +341,17 @@ async function documentPathEntry(token: string, chatId: string, deps: Pick<Packe
     let note: string | undefined;
     if (/\.pdf$/i.test(got.name)) {
       const text = pdfTextDerivative(got.bytes, got.name, PACKET_FILE_MAX_BYTES, PACKET_FILE_MAX_BYTES);
-      if (text.kind === 'scan') throw new Refused('no extractable text (a scan?)');
-      if (text.kind !== 'text' || text.cut) throw new Refused('its text is over 512 KB');
-      add(`${got.name}.txt`, text.bytes);
-      if (got.bytes.length <= PACKET_FILE_MAX_BYTES) add(got.name, got.bytes);
-      else note = PDF_TEXT_ONLY_NOTE;
+      if (text.kind === 'scan') {
+        if (!allowScans) throw new Refused('no extractable text (a scan?)');
+        if (got.bytes.length > PACKET_FILE_MAX_BYTES) throw new Refused('its original PDF is over 512 KB and has no extractable text');
+        add(got.name, got.bytes);
+        note = PDF_SCAN_NOTE;
+      } else {
+        if (text.kind !== 'text' || text.cut) throw new Refused('its text is over 512 KB');
+        add(`${got.name}.txt`, text.bytes);
+        if (got.bytes.length <= PACKET_FILE_MAX_BYTES) add(got.name, got.bytes);
+        else note = PDF_TEXT_ONLY_NOTE;
+      }
     } else add(got.name, got.bytes);
     entry = { token, status: 'ok', files, ...(note !== undefined ? { note } : {}) };
   } catch (err) {
@@ -405,6 +412,13 @@ export async function documentPathPlan(
   return out;
 }
 
+/** A drawer proposal has no turn id; freeze its conversation at the last turn before that card. */
+export function packetCutoff(records: readonly ChatTranscriptRecord[], pid: string, turnId: string | null): string | null {
+  if (turnId !== null) return turnId;
+  const card = records.findIndex((r) => r.kind === 'proposal' && r.proposal.pid === pid);
+  return records.slice(0, Math.max(0, card)).reverse().find((r) => r.kind === 'user')?.turnId ?? null;
+}
+
 /**
  * Build the packet for one attempt. Throws only for a broken invariant (two contents under one name); a source that
  * cannot be read or does not fit is struck with the reason, with nothing of it in the packet, and the rest goes on.
@@ -428,6 +442,7 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
   });
   const documentTokens = new Set(documents.map((d) => d.token));
   const documentNotes = new Map<string, string>();
+  const attachmentNotes = new Map<string, string>();
   let total = 0;
   /** The files' own bytes (`total` also books each manifest entry's estimated cost). */
   let fileBytes = 0;
@@ -506,9 +521,13 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
     return true;
   };
   /** A chat attachment as a packet file, read beneath its own folder (crew's state), by id. */
-  const attachmentFile = (stage: Stage, id: string): PacketFile => {
-    const got = readStagedAttachment(id, () => deps.attachment(storage, id), PACKET_FILE_MAX_BYTES);
-    return stage.add(got.name, got.bytes);
+  const attachmentFiles = async (stage: Stage, id: string): Promise<string[]> => {
+    const entry = await documentPathEntry(`attachment:${id}`, storage, deps, false, true);
+    if (entry.status === 'struck') throw new Refused(entry.reason);
+    if (entry.note !== undefined) {
+      for (const file of entry.files) attachmentNotes.set(file.name, `${file.name}: ${entry.note}`);
+    }
+    return entry.files.map((f) => stage.add(f.name, f.bytes).name);
   };
   /** A document version as a packet file, read beneath its docs root (the head when `version` is null). */
   const docFile = async (stage: Stage, refText: string, version: number | null): Promise<PacketFile> => {
@@ -519,7 +538,7 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
    *  version of the document it had open. */
   /** The files the person attached to a turn, as packet files; one that cannot join is named in the note, never dropped
    *  silently. */
-  const turnAttachments = (stage: Stage, turn: string): { names: string[]; note: string } => {
+  const turnAttachments = async (stage: Stage, turn: string): Promise<{ names: string[]; note: string }> => {
     const names: string[] = [];
     let note = '';
     const asked = records.find((r): r is Extract<ChatTranscriptRecord, { kind: 'user' }> => r.kind === 'user' && r.turnId === turn);
@@ -529,7 +548,7 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
         continue;
       }
       try {
-        names.push(attachmentFile(stage, att.id).name);
+        names.push(...await attachmentFiles(stage, att.id));
       } catch (err) {
         if (!(err instanceof Refused)) throw err;
         note += ` (the file ${mdLabel(att.name)} attached to that turn is not in the packet: ${err.message})`;
@@ -551,7 +570,7 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
     // turn's files once itself, answered or not.)
     let attachNote = '';
     if (withAttachments) {
-      const att = turnAttachments(stage, turn);
+      const att = await turnAttachments(stage, turn);
       names.push(...att.names);
       attachNote = att.note;
     }
@@ -608,7 +627,7 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
       let names: string[];
       if (token === 'chat') {
         const cutoff = input.cutoffTurnId;
-        if (cutoff === null || !TURN_ID.test(cutoff)) throw new Refused('no conversation to snapshot');
+        if (cutoff !== null && !TURN_ID.test(cutoff)) throw new Refused('no conversation to snapshot');
         const lines: string[] = [
           '# The conversation',
           '',
@@ -617,9 +636,10 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
           'run brief, a source document, a repository or an attachment confirms it.',
           '',
         ];
+        if (cutoff === null) lines.push('(There were no conversation turns before this card.)', '');
         const extra: string[] = [];
         const turns: string[] = [];
-        for (const r of records) {
+        for (const r of cutoff === null ? [] : records) {
           if (r.kind === 'user' && !turns.includes(r.turnId)) turns.push(r.turnId);
           if (r.kind === 'user' && r.turnId === cutoff) break;
         }
@@ -631,7 +651,7 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
           if (user !== undefined) {
             lines.push(`## ${user.owner === true ? 'The person' : 'Another sender (not the person)'} · turn ${turn}`, '', fenced(user.text), '');
             // The turn's files ride whether or not an answer to it succeeded (xreview r5): the person's own evidence.
-            const att = turnAttachments(stage, turn);
+            const att = await turnAttachments(stage, turn);
             extra.push(...att.names);
             if (att.names.length > 0 || att.note !== '') {
               lines.push(`Files attached to this turn:${att.names.length > 0 ? ` ${att.names.map((n) => `\`${n}\``).join(', ')}` : ''}${att.note}`, '');
@@ -650,7 +670,7 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
           }
         }
         if (leftOut > 0) struck.push({ token: 'chat', reason: `${leftOut} answer${leftOut === 1 ? '' : 's'} left out: records outside the target project` });
-        const f = stage.add(`conversation-${chatId}-to-${cutoff}.md`, Buffer.from(lines.join('\n'), 'utf8'));
+        const f = stage.add(`conversation-${chatId}-to-${cutoff ?? 'empty'}.md`, Buffer.from(lines.join('\n'), 'utf8'));
         names = [f.name, ...new Set(extra)];
       } else if (token.startsWith('message:')) {
         const turn = token.slice('message:'.length);
@@ -683,7 +703,7 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
       } else if (token.startsWith('doc:')) {
         names = [(await docFile(stage, token.slice(4), null)).name];
       } else if (token.startsWith('attachment:')) {
-        names = [attachmentFile(stage, token.slice('attachment:'.length)).name];
+        names = await attachmentFiles(stage, token.slice('attachment:'.length));
       } else {
         // `page`: studio's page summary rode with the message and is not kept after it (§5.1); never invented.
         throw new Refused(token === 'page' ? "studio's page summary is not kept after the message" : 'not a source crew can read');
@@ -713,11 +733,16 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
   if (briefFile.bytes.length > PACKET_BRIEF_RESERVE) throw new Error('the request brief is over its reserved room');
   const entries: PacketManifestEntry[] = [
     { token: 'brief', files: [{ file: `sources/${briefFile.name}`, sha256: briefFile.sha256, bytes: briefFile.bytes.length }] },
-    ...Object.entries(tokens).map(([token, names]) => ({
-      token,
-      ...(documentNotes.has(token) ? { note: documentNotes.get(token)! } : {}),
-      files: names.map((n) => ({ file: `${packetDirOf(n)}/${n}`, sha256: out.get(n)!.sha256, bytes: out.get(n)!.bytes.length })),
-    })),
+    ...Object.entries(tokens).map(([token, names]) => {
+      // Attachments can ride a chat/message token rather than their own source token. Disclose their limitations on
+      // that manifest entry too, so a scan is never silently presented as a citable text record.
+      const note = [...new Set([documentNotes.get(token), ...names.map((name) => attachmentNotes.get(name))])].filter(Boolean).join('; ');
+      return {
+        token,
+        ...(note !== '' ? { note } : {}),
+        files: names.map((n) => ({ file: `${packetDirOf(n)}/${n}`, sha256: out.get(n)!.sha256, bytes: out.get(n)!.bytes.length })),
+      };
+    }),
   ];
   const manifest = { run: runId, chat: chatId, proposal: pid, files: entries, struck };
   const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 1), 'utf8');
@@ -732,7 +757,7 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
  * where figures may come from and how to cite them, and gives the reviewing step the hashes crew holds, which the writer
  * cannot change.
  */
-export function packetClause(inboxDir: string, packet: SourcePacket, notesWhere: string): string {
+export function packetClause(inboxDir: string, packet: SourcePacket, notesWhere: string, opts: { recordsRepo?: boolean } = {}): string {
   const records = packet.files.filter((f) => packetDirOf(f.name) === 'records').map((f) => f.name);
   const sources = packet.files.filter((f) => packetDirOf(f.name) === 'sources' && !f.name.startsWith('MANIFEST-')).map((f) => f.name);
   const hashes = packet.files.map((f) => `${packetDirOf(f.name)}/${f.name}=${f.sha256}`).join(' ');
@@ -745,8 +770,11 @@ export function packetClause(inboxDir: string, packet: SourcePacket, notesWhere:
     `a record confirms it. An attachment that is not text (an image, a PDF) can be read but not cited by line: a figure from one needs ` +
     `the same figure in a text record or a repository. Where the request itself states a figure the records contradict, use the ` +
     `records' figure. Cite each figure ` +
-    `with data-source="<file>:<line>", the file's name as it is in records/ without the folder (records/ is one of the self-check's ` +
-    `--repo folders; sources/ is not, so nothing there can be cited). Leave out any claim nothing in ` +
+    `with data-source="<file>:<line>", the file's name as it is in records/ without the folder ` +
+    (opts.recordsRepo === false
+      ? `(sources/ cannot be cited; this revision's self-check runs without repository folders). `
+      : `(records/ is one of the self-check's --repo folders; sources/ is not, so nothing there can be cited). `) +
+    `Leave out any claim nothing in ` +
     `the packet supports, and list it ${notesWhere}. ` +
     `FOR THE REVIEWING STEP: before you review, compute the sha256 of every packet file (for example \`shasum -a 256 <file>\`, from ` +
     `${inboxDir}) and compare it with these, which crew holds outside the writer's reach: ${hashes}. ` +

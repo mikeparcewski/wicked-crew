@@ -91,6 +91,13 @@ jobs:
         with:
           path: wicked-crew
 
+      - name: Checkout wicked-garden (claims floor)
+        if: runner.os == 'Linux'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: mikeparcewski/wicked-garden
+          path: wicked-garden
+
       # crew#508: a LOCKSTEP PR — a wire event and its mirror, a workflow def and its served copy — may
       # name the wicked-core ref it is built against, so the three drift guards
       # (builtin-overlay-shadow, armed-workflow-served, deliver-phase) judge it against the paired core
@@ -269,6 +276,8 @@ jobs:
         working-directory: wicked-crew
         env:
           WICKED_EGRESS_PROBE: ${{ runner.os == 'Linux' && 'required' || '' }}
+          WICKED_CLAIMS_FLOOR: ${{ runner.os == 'Linux' && 'required' || '' }}
+          WICKED_GARDEN_ROOT: ${{ runner.os == 'Linux' && format('{0}/wicked-garden', github.workspace) || '' }}
         run: npm run -w packages/crew test
 
       # The server artifact builds on both platforms; its database and browser tests run in sources-db.

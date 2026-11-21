@@ -108,7 +108,7 @@ async function world(presets: 'sourced' | 'missing' | 'unreadable' = 'sourced') 
     .map((e) => ({ type: e.event_type, payload: JSON.parse(e.payload) as Record<string, unknown> }));
   return { dir, sub: sub!, launches, listPresets, go, bindings, events,
     fire: (event: CoreEvent) => { for (const listener of listeners) listener(event); },
-    outPath: join(dir, 'drafts', 'response', 'attempt-run-response', 'response-v1.html') };
+    outPath: join(dir, 'drafts', '_unfiled__response', 'attempt-run-response', 'response-v1.html') };
 }
 
 describe('CS5 proposal Go through the draft seam', () => {

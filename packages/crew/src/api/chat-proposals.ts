@@ -1134,10 +1134,7 @@ export class ChatProposals {
           }
         }
       }
-      // A5: a change works from the document and the person's words; extra sources do not reach its run yet, so the
-      // card says so instead of showing them as used (codex A5 r1).
-      const sources = (await this.resolveSources(block.sources, { chatId, turnId, records, binding, turnHas, chat, words, personNamed: false })).map((src) =>
-        src.status === 'ok' ? { ...src, status: 'struck' as const, reason: 'a change works from the document and your words; make a new document to use this source' } : src);
+      const sources = await this.resolveSources(block.sources, { chatId, turnId, records, binding, turnHas, chat, words, personNamed: false });
       const { helpers, block: helperBlock, seatsUnread } = await this.docHelpers(chat);
       if (helperBlock !== null) blocked.push(helperBlock);
       const title = target?.title ?? (ref !== null ? humanDoc(ref.doc) : block.refine);
@@ -1155,6 +1152,7 @@ export class ChatProposals {
         filedIn: await filedIn(projectId),
         ...(target !== undefined ? { target } : {}),
         ...(block.touches.length > 0 ? { touches: block.touches } : {}),
+        ...(binding?.artifact !== undefined && binding.artifact.ref === ref?.ref ? { anchors: [...binding.artifact.anchors] } : {}),
         ...(protectedList !== undefined ? { protected: protectedList } : {}),
         blocked: blocked[0] ?? null,
       };
@@ -1805,7 +1803,7 @@ export class ChatProposals {
   /** A5: a refine card re-resolved on a newer head: its protected edits are those of the new head (Keep preselected). */
   private async onNewHead(p: ArtifactProposal): Promise<ArtifactProposal> {
     if (p.kind !== 'refine' || p.target === undefined) return p;
-    const kept = await this.protectedOf(p.target.ref, p.target.base, p.touches ?? []);
+    const kept = await this.protectedOf(p.target.ref, p.target.base, [...(p.touches ?? []), ...(p.anchors ?? [])]);
     return 'error' in kept ? { ...p, protected: [], blocked: kept.error } : { ...p, protected: kept.entries, blocked: p.blocked };
   }
 
@@ -3429,11 +3427,11 @@ export class ChatProposals {
       // Named by the chat's own id (an ended chat's archive alias still holds the same proposals).
       const pid = `${base.chatId}:retry:${runId}`;
       if (folded.has(pid)) return pid;
-      // A5 (codex r1): a refine's retry is drawn on the document as it is now (a conflict moved its head), with the
-      // protected edits of that head, Keep preselected for every one.
+      // A retry keeps the accepted choices only for edit ids still present on the new head.
       const fresh = base.kind === 'refine' && base.target !== undefined ? await this.refreshTarget(base) : base;
       const retry: ArtifactProposal = {
         ...fresh,
+        ...(base.kind === 'refine' ? { allow: (failed.accepting?.edits?.allow ?? []).filter((id) => fresh.protected?.some((e) => e.id === id)) } : {}),
         pid,
         turnId: null,
         sourceRunId: runId,
