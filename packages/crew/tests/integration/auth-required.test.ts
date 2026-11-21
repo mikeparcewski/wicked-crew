@@ -34,6 +34,8 @@ const TOKENS = {
   observer: 'obs-token-1',
   operator: 'op-token-1',
   agent: 'agent-token-1',
+  system: 'system-token-1',
+  plugin: 'plugin-token-1',
   admin: 'admin-token-1',
 } as const;
 
@@ -60,6 +62,8 @@ beforeAll(async () => {
         { sha256: tokenHash(TOKENS.observer), actor: { id: 'watcher-1', kind: 'human', trust: 'observer' } },
         { sha256: tokenHash(TOKENS.operator), actor: { id: 'maria', kind: 'human', trust: 'operator' } },
         { sha256: tokenHash(TOKENS.agent), actor: { id: 'ci-runner', kind: 'agent', trust: 'operator' } },
+        { sha256: tokenHash(TOKENS.system), actor: { id: 'automation', kind: 'system', trust: 'operator' } },
+        { sha256: tokenHash(TOKENS.plugin), actor: { id: 'plugin:test@1.0.0', kind: 'plugin', trust: 'observer' } },
         { sha256: tokenHash(TOKENS.admin), actor: { id: 'root-op', kind: 'human', trust: 'admin' } },
       ],
     }),
@@ -67,6 +71,7 @@ beforeAll(async () => {
 
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
   // Stub the engine boundary: the matrix tests the HTTP layer's decisions.
+  adapter.openTerminal = async () => 't1';
   adapter.launchRun = async () => 'run-launched-1';
   adapter.sessionsDetail = async () => [view(PARKED, 'awaiting_human')];
   adapter.sessions = async () => [PARKED];
@@ -270,6 +275,43 @@ describe('operator — does the work, cannot govern', () => {
   it('but a project RENAME is operator work (the body-dependent rule cuts both ways)', async () => {
     const res = await call('PATCH', '/api/v1/projects/p1', TOKENS.operator, { name: 'renamed' });
     expect(res.status).toBe(200);
+  });
+});
+
+describe('terminals — only a human operator runs host programs (crew#1323)', () => {
+  const body = { cwd: '/tmp', cmd: ['sh'], cols: 80, rows: 24, governed: false };
+
+  it.each(['agent', 'system', 'plugin'] as const)('refuses a %s terminal before the trust check', async (as) => {
+    const res = await call('POST', '/api/v1/terminals', TOKENS[as], body);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      code: 'human_only',
+      error: `a terminal runs programs on the daemon host: a human operator's only; you are ${as}/${as === 'plugin' ? 'observer' : 'operator'}`,
+    });
+  });
+
+  it('requires operator trust for a human and rejects a unit token as a bearer', async () => {
+    const observer = await call('POST', '/api/v1/terminals', TOKENS.observer, body);
+    expect(observer.status).toBe(403);
+    expect(await observer.json()).toEqual({ error: "Insufficient trust: this action requires 'operator' (you are 'observer')" });
+    expect((await call('POST', '/api/v1/terminals', 'wmt_not_a_bound_unit_token', body)).status).toBe(401);
+    const operator = await call('POST', '/api/v1/terminals', TOKENS.operator, body);
+    expect(operator.status).toBe(201);
+    expect(await operator.json()).toEqual({ id: 't1' });
+  });
+
+  it.each(['resize', 'close'])('refuses an agent terminal %s', async (action) => {
+    const res = await call('POST', `/api/v1/terminals/t1/${action}`, TOKENS.agent, { cols: 80, rows: 24 });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ code: 'human_only' });
+  });
+
+  it('refuses non-human WS upgrades via header and query; a human operator reaches the route', async () => {
+    const url = `${base.replace('http', 'ws')}/ws/terminals/t1`;
+    expect(await wsAttempt(url, { Authorization: `Bearer ${TOKENS.agent}` })).toBe(403);
+    expect(await wsAttempt(`${url}?access_token=${TOKENS.agent}`)).toBe(403);
+    expect(await wsAttempt(url, { Authorization: `Bearer ${TOKENS.plugin}` })).toBe(403);
+    expect(await wsAttempt(url, { Authorization: `Bearer ${TOKENS.operator}` })).not.toBe(403);
   });
 });
 

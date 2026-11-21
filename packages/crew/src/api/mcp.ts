@@ -4,6 +4,7 @@
  *   GET    /mcp/servers                 upstreams, their tools (class, subject, status), health,
  *                                       auth state, and the servers discovered in CLI homes (names only)
  *   POST   /mcp/servers/preview         probe (45 s budget, hardened env): tools, classes and a previewHash
+ *                                       `mcp-stdio` runs on the daemon host: human operator only (403 `host_program_human_only`)
  *                                       (`kind: "rest"`, slice S5a: the tools of an OpenAPI 3 document,
  *                                       each pinned to the base `url`; see `mcp/rest.ts`)
  *   POST   /mcp/servers                 save: `{previewHash, enabledWrites?, allowOrigin?}`; missing, unknown or expired → 409.
@@ -24,12 +25,13 @@
  *                                       `env:` reference, a keychain entry crew already holds) probes with that
  *                                       secret: human operator only (403 `stored_secret_human_only`)
  *                                       (crew#1558) stdio env is a per-server allowlist approved by a human
- *                                       operator: any change of names or values at preview or save needs that
+ *                                       operator: any change of names or values at save needs that
  *                                       person (403 `env_human_only`). The denylist stays the second line;
  *                                       each name's warning class in `envNames` is advice for the approver.
  *   PATCH  /mcp/servers/:name           `{enabled}`
  *   DELETE /mcp/servers/:name           remove the server and the keychain secret it owns
  *   POST   /mcp/servers/:name/test      probe again: health plus the tool diff
+ *                                       `mcp-stdio` runs on the daemon host: human operator only (403 `host_program_human_only`)
  *   PATCH  /mcp/tools/:subject          `{enabled?, classOverride?}`; `:subject` is `mcp:<server>/<tool>`, URL-encoded.
  *                                       (G1) leaving a tool enabled AND a write when it was not both (turning
  *                                       a write on, or re-classing an enabled read) is a grant: human
@@ -565,6 +567,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       const parsed = McpServerConfigSchema.safeParse(req.body);
       if (!parsed.success) return invalidBody(reply, parsed.error);
       const actor = deps.actorOf(req);
+      if (parsed.data.kind === 'mcp-stdio' && !mayGrantWrite(actor)) return humanOperatorOnly(reply, actor, "run a program on the daemon host (an mcp-stdio server's preview)", 'host_program_human_only');
       // (DES-APPS-001 §5.2) The preview DIALS: a confirmed private range is used now, so only a
       // human operator may name one, here as at the save.
       if (confirmsAddress(parsed.data.address) && !mayGrantWrite(actor)) return addressConfirmRefused(reply, actor);
@@ -574,8 +577,6 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       // previews a save over one.
       const over = await r.get(parsed.data.name).catch(() => null);
       if ((parsed.data.pm !== undefined || over?.pm !== undefined) && !mayGrantWrite(actor)) return humanOperatorOnly(reply, actor, 'register a project-management source', 'pm_source_human_only');
-      // The preview spawns the program: only the exact names AND values already approved may be reused.
-      if (parsed.data.kind === 'mcp-stdio' && !mayGrantWrite(actor) && envFingerprint(parsed.data.env) !== envFingerprint(over?.env)) return envRefused(reply, actor);
       try {
         const full = await r.preview(toConfig(parsed.data), parsed.data.secret ?? null);
         // (DES-KNOWLEDGE-DATA-001 §5.2) A source's structure reaches an agent only through estate and the gate.
@@ -748,11 +749,14 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   app.post<{ Params: { name: string } }>(
     `${V}/mcp/servers/:name/test`,
-    { config: { manifest: { responseType: 'McpServerTestResponse | McpServerTestAgentResponse', statusCodes: [200, 404, 409, 503] } } },
+    { config: { manifest: { responseType: 'McpServerTestResponse | McpServerTestAgentResponse', statusCodes: [200, 403, 404, 409, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
       try {
+        const server = await r.get(req.params.name);
+        const actor = deps.actorOf(req);
+        if (server.kind === 'mcp-stdio' && !mayGrantWrite(actor)) return humanOperatorOnly(reply, actor, "run a program on the daemon host (an mcp-stdio server's test)", 'host_program_human_only');
         const t: McpServerTestResponse = await r.test(req.params.name);
         if (sees(deps.actorOf(req)) === 'full') return t;
         // A probe's error can name the host it could not reach: an agent gets that it failed.

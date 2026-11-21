@@ -137,9 +137,13 @@ describe('a PM entry under the source safeguards', () => {
     registerMcpRoutes(app, { registry, audit: new AuditLog(join(base, 'audit.log'), () => undefined), actorOf: () => actor } as never);
     await app.ready();
     const body = { name: 'jira-new', kind: 'mcp-stdio', command: '/bin/echo', args: ['z'], pm: { system: 'jira' } };
-    const r = await app.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload: body });
+    // An http PM source is refused for being a PM source; a stdio one already for running a host program (crew#1323).
+    const r = await app.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload: { name: 'jira-new', kind: 'mcp-http', url: 'https://x.example', pm: { system: 'jira' } } });
     expect(r.statusCode, r.body).toBe(403);
     expect(r.json()).toMatchObject({ code: 'pm_source_human_only' });
+    const stdio = await app.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload: body });
+    expect(stdio.statusCode, stdio.body).toBe(403);
+    expect(stdio.json()).toMatchObject({ code: 'host_program_human_only' });
     actor = { id: 'local', kind: 'human', trust: 'admin' };
     expect((await app.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload: body })).statusCode).toBe(200);
     expect((await app.inject({ method: 'POST', url: '/api/v1/mcp/servers/preview', payload: { ...body, kind: 'rest', command: undefined, url: 'https://x.example' } })).statusCode).toBe(400);

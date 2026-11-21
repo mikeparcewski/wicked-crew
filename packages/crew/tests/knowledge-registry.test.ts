@@ -316,8 +316,10 @@ describe('the one registry over its routes', () => {
     const patched = await call('PATCH', '/mcp/servers/wh', 'agent', { enabled: true });
     expect(patched.status).toBe(200);
     expect(patched.text).not.toContain('pg.internal.test');
+    // (crew#1323) Testing a stdio server runs its program on the daemon host: a human operator's only.
     const tested = await call('POST', '/mcp/servers/fx/test', 'agent');
-    expect(tested.status).toBe(200);
+    expect(tested.status).toBe(403);
+    expect(tested.body).toMatchObject({ code: 'host_program_human_only' });
     expect(tested.text).not.toContain(FIXTURE_SERVER);
     // Management reads: 403 for the agent whatever its trust; the human's catalog read answers.
     for (const [method, url, payload] of [
