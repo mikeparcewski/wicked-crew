@@ -689,11 +689,13 @@ export class DataGate {
       this.deps.onText?.(text);
       r = await proc.callTool('execute_sql', { sql: text }, UNIT_ADAPTER_BYTES, this.deadline);
     } catch (err) {
-      if (err instanceof ToolboxCallError && (err.code === 'deadline' || err.code === 'too_large')) {
+      if (err instanceof ToolboxCallError && (err.code === 'deadline' || err.code === 'too_large' || err.code === 'memory')) {
         // The process is gone. Respawn it warm, and without a source-side deadline hold the source closed until
         // its session is confirmed gone at the source.
         setEnd({ outcome: 'killed', ...(sourceDeadline ? {} : { remoteCheck: this.remoteCheck(s, doc, secret) }) });
         this.warm(s, doc, secret);
+        // crew#1320: a memory kill has the same reservation and warm-respawn path as a deadline.
+        if (err.code === 'memory') return { refused: 'too_large', reason: err.message };
         return err.code === 'deadline'
           ? { refused: 'deadline', reason: `the read ran past its ${Math.round(this.deadline / 1000)} s deadline and was stopped` }
           : { refused: 'too_large', reason: `the answer passed the ${UNIT_ADAPTER_BYTES / 1024} KiB read bound, so the read was stopped` };
