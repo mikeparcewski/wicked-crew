@@ -67,7 +67,7 @@ function rig(opts: { served?: typeof served } = {}) {
     clisJsonFor: () => '[{"key":"claude"},{"key":"codex"}]', styleOf: () => 'doc', packetDeps,
   }));
   const deps: ChatProposalDeps = {
-    flags: () => ({ context: true, proposals: true, create: true, refine: false, theme: false, demo: false }),
+    flags: () => ({ context: true, instructions: true, proposals: true, create: true, refine: false, theme: false, demo: false }),
     catalog: CATALOG_SEEDS, records: () => [...records], append: (_id, record) => { records.push(record); return true; },
     instanceOf: () => instance, projectOf: () => chat.projectId, chat: () => chat,
     rosterEligible: () => [{ key: 'claude', name: 'Claude' }, { key: 'codex', name: 'Codex' }],

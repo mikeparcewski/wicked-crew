@@ -121,6 +121,52 @@ describe('extractCitations — what is a citation, and what is prose', () => {
   });
 });
 
+// crew#1357: a body line need not repeat the symbol that introduced its citation.
+describe('verifyCitations — citations inside a symbol block (crew#1357)', () => {
+  const math = [
+    '// header', '// header', '', 'export function sum(xs) {',
+    '  let total = 0;', '  for (let i = 1; i < xs.length; i++) total += xs[i];',
+    '  return total;', '}', '', 'export function mean(xs) {',
+    "  if (!xs.length) throw new RangeError('mean of empty array');", '  return sum(xs) / xs.length;', '}',
+  ].join('\n');
+  const roots = [{ name: 'tiny-math', absRoot: '/repos/tiny-math' }];
+  const check = (body: string, symbol: string, ref: string, sentence = `\`${symbol}\` body at (\`${ref}\`).`) =>
+    verifyCitations(sentence, roots, {
+      ...chatCitationDeps(),
+      fileExists: (abs) => abs === '/repos/tiny-math/src/math.js',
+      readLines: () => body.split('\n'),
+      listFiles: async () => ['src/math.js'],
+    }, BIG_BUDGET);
+
+  it.each([
+    ['tiny-math for line', math, 'sum', 'tiny-math/src/math.js:6', 4, '`sum` loops from the second element (`tiny-math/src/math.js:6`).'],
+    ['body range', math, 'sum', 'src/math.js:5-7', 4, undefined],
+    ['Python body', 'def mean(xs):\n    total = 0\n    return total / len(xs)', 'mean', 'src/math.js:3', 1, undefined],
+    ['multi-line signature', 'function fun(\n  a,\n) {\n  body();\n}', 'fun', 'src/math.js:4', 1, undefined],
+    ['Allman brace and blank line', 'function fun()\n{\n\n  body();\n}', 'fun', 'src/math.js:4', 1, undefined],
+    ['typed signature close', 'function fun(\n  a,\n): number {\n  return a;\n}', 'fun', 'src/math.js:4', 1, undefined],
+    ['Python signature close', 'def fun(\n    a,\n) -> T:\n    return a', 'fun', 'src/math.js:4', 1, undefined],
+    ['nearest mention', 'function sum() {\n  const sum = () => {\n    body();\n  };\n}', 'sum', 'src/math.js:3', 2, undefined],
+  ])('verifies %s without moving the citation', async (_name, body, symbol, ref, from, sentence) => {
+    const got = await check(body, symbol, ref, sentence);
+    expect(got.items).toEqual([{ raw: ref, kind: 'line', status: 'verified', note: `inside ${symbol} (from line ${from})` }]);
+    expect(got.corrected).toBe(0);
+    expect(got.verified).toBe(1);
+    expect(got.items[0]).not.toHaveProperty('resolved');
+  });
+
+  it.each([
+    ['next function', 'src/math.js:11'],
+    ['above the symbol', 'src/math.js:2'],
+    ['closing brace', 'src/math.js:8'],
+    ['range past the block', 'src/math.js:5-11'],
+  ])('still corrects a citation at %s to the first mention', async (_name, ref) => {
+    const got = await check(math, 'sum', ref);
+    expect(got.items[0]).toMatchObject({ status: 'corrected', resolved: 'src/math.js:4' });
+    expect(got.corrected).toBe(1);
+  });
+});
+
 describe('verifyCitations — against two real repos (the RC1 Phase 6 defect)', () => {
   let scratch: string;
   let roots: CitationRoot[];

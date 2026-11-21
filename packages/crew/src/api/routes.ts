@@ -1,3 +1,4 @@
+import { RuleChangedError, ruleRevision } from '../governance/rule-revision.js';
 import { registerRedeliverRoutes, type CheckRunTree, type RedeliverExec } from './redeliver.js';
 import type { GhExec } from '../core/deliver.js';
 import { REVIEW_WORKFLOW } from '../insights/workflow.js';
@@ -1180,9 +1181,12 @@ const InjectSchema = z.strictObject({
   input: z.literal('voice').optional(),
 });
 
+export const ResumeSchema = z.strictObject({ ord: z.int().nonnegative().optional() });
+
 // The manual reassign lever (crew#442): `cli` omitted lets the engine's council re-pick, the
 // same shape the automatic stall-watchdog escalation uses for an unknown failover target.
 const ReassignSchema = z.strictObject({
+  ord: z.int().nonnegative().optional(),
   cli: z.string().min(1).optional(),
   /** crew#1153: an operator note that rides a GATED reassign as the approve's amendment. Trimmed in
    *  the route; blank counts as absent. The byte cap (on the raw note) is checked there too so the 400 names the limit. */
@@ -1315,6 +1319,7 @@ function withServedSeq(
 /** What `registerRoutes` hands back to the server assembly: the ONE gate decision path, for the
  *  daemon-side actors that answer gates (standing orders, behaviour 10). */
 export interface RegisteredRoutes {
+  exclusive: <T>(runId: string, fn: () => Promise<T>) => Promise<T>;
   decideGate: (
     id: string,
     decision: unknown,
@@ -1907,8 +1912,8 @@ export function registerRoutes(
     'demo',
   ];
   const chatArtifactFlags: import('../core/types.js').ChatArtifactsCapabilities = chatArtifactsStub
-    ? { context: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps, onboard: true }
-    : { context: true, proposals: true, create: realCreate, refine: realRefine, theme: true, demo: false, onboard: true };
+    ? { context: true, instructions: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps, onboard: true }
+    : { context: true, instructions: true, proposals: true, create: realCreate, refine: realRefine, theme: true, demo: false, onboard: true };
   const proposalLaunchers = new LaunchOnceRegistry();
   proposalLaunchers.register('theme', new ThemeLauncher());
   // crew-0182: what an onboard card is resolved and its Go is checked against (one set of reads for both).
@@ -7209,7 +7214,7 @@ export function registerRoutes(
     run: SessionView,
     namedOrd: number | undefined,
     opts: { declining?: boolean; versioned?: boolean } = {},
-  ): Promise<{ refusal: { code: number; body: unknown } } | { gated: WorkUnit | undefined; prompt: string | undefined; gateKind: string | undefined }> {
+  ): Promise<{ refusal: { code: number; body: unknown } } | { ord: number | undefined; gated: WorkUnit | undefined; prompt: string | undefined; gateKind: string | undefined }> {
     const decided = await gateOfRecord(run, namedOrd);
     // DES-CATALOG-002 §4.6 (codex r1): a plan held for a run launched from a chat proposal is approved only by an
     // answer bound to its version (`POST /runs/:id/gate` with `planRev`); every other approving path (a gated resume or
@@ -7235,7 +7240,7 @@ export function registerRoutes(
   async function gateOfRecord(
     run: SessionView,
     namedOrd: number | undefined,
-  ): Promise<{ refusal: { code: number; body: unknown } } | { gated: WorkUnit | undefined; prompt: string | undefined; gateKind: string | undefined }> {
+  ): Promise<{ refusal: { code: number; body: unknown } } | { ord: number | undefined; gated: WorkUnit | undefined; prompt: string | undefined; gateKind: string | undefined }> {
     const id = run.session.id;
     const unitAt = (ord: number): WorkUnit | undefined => (run.units ?? []).find((u) => u.ord === ord);
     const unknown = (why: string) => ({ refusal: { code: 409, body: { error: `Gate unknown: ${why} — refresh and decide again.`, code: 'gate_unknown' } } });
@@ -7254,7 +7259,7 @@ export function registerRoutes(
         } } };
       }
       const kind = recorded.row['gate_kind'];
-      return { gated: unitAt(recorded.ord), prompt: recorded.row.prompt, gateKind: typeof kind === 'string' && kind !== '' ? kind : undefined };
+      return { ord: recorded.ord, gated: unitAt(recorded.ord), prompt: recorded.row.prompt, gateKind: typeof kind === 'string' && kind !== '' ? kind : undefined };
     }
     if (namedOrd !== undefined) {
       return unknown(
@@ -7263,8 +7268,9 @@ export function registerRoutes(
       );
     }
     const open = await resolveOpenGate(id).catch(() => null);
-    if (isOpenGate(open)) return { gated: unitAt(open.ord), prompt: open.prompt, gateKind: open.gateKind };
-    return { gated: [...(run.units ?? [])].sort((a, b) => a.ord - b.ord)[run.session.unit_ix], prompt: undefined, gateKind: undefined };
+    if (isOpenGate(open)) return { ord: open.ord, gated: unitAt(open.ord), prompt: open.prompt, gateKind: open.gateKind };
+    const gated = [...(run.units ?? [])].sort((a, b) => a.ord - b.ord)[run.session.unit_ix];
+    return { ord: undefined, gated, prompt: undefined, gateKind: undefined };
   }
 
   /**
@@ -7300,21 +7306,10 @@ export function registerRoutes(
   /**
    * Run `fn` alone for the run (crew#1083 round 4; the `McpPolicies.exclusive` pattern of #1082):
    * after every earlier decision for the same run has settled, and before any later one starts.
-   * The row read and the confirm are separate engine commands and the confirm carries no ord, so
-   * two concurrent decisions could both read the sole open ord-3 row, the first confirm advance
-   * the run to its ord-4 (deliver) gate, and the second confirm answer THAT gate with the delivery
-   * checks evaluated for ord 3 — a studio double-click on Approve is enough. Serialized, the second
-   * re-reads inside the lock and meets ord 4: 409 `gate_changed`. Other runs are not blocked.
-   *
-   * Every crew API path that confirms a gate takes it and is judged by the record
-   * ({@link gateForDecision}) under it: `decideGate` (`POST /runs/:id/gate`, standing orders),
-   * `POST /runs/:id/resume`, `POST /runs/:id/reassign` (the re-seat included), `POST /runs/:id/plan`
-   * (team routes) and the chat ask path's continuation (which re-reads its run inside the lock).
-   * It serializes these paths; it does not bind a confirm to the gate the operator saw. A
-   * decision without an `ord` (`/resume`, `/reassign`, `/plan`) queued behind one that advanced the
-   * run answers the gate the record shows then, and the stall watchdog's `reassignUnit` runs
-   * outside this lock. Both need every confirm bound to the gate it answers: an ord on the engine's
-   * confirm (wicked-core#1038) and the skin sending it.
+   * Every confirming path reads the record and checks delivery under this lock. When supported,
+   * operator confirms carry a resolved gate ord for the engine to check. A body ord also binds
+   * a queued decision to the gate the operator saw. The watchdog shares the lock and re-reads
+   * the cursor before reassigning, so it cannot re-seat a unit between these checks and confirm.
    */
   function decideExclusively<T>(runId: string, fn: () => Promise<T>): Promise<T> {
     const result = (gateDecisionTails.get(runId) ?? Promise.resolve()).then(fn);
@@ -7491,9 +7486,9 @@ export function registerRoutes(
         // confirm, which records it as the judge when this approve answers a `judge_unavailable`
         // gate ("judged by operator").
         adapter.recordGateActor?.(id, `${actor.id} (${actor.kind})`);
-        // The expected ord and plan revision ride as the trailing argument only when sent (an answer without them keeps
-        // the confirm's existing arity; DES-CATALOG-002 §4.6).
-        const expect = parsed.data.planRev !== undefined ? { ...(gated !== undefined ? { ord: gated.ord } : parsed.data.ord !== undefined ? { ord: parsed.data.ord } : {}), planRev: parsed.data.planRev } : undefined;
+        const expect = parsed.data.planRev !== undefined
+          ? { ...expectFor(decided.ord), planRev: parsed.data.planRev }
+          : expectFor(decided.ord);
         const confirmArgs: Parameters<CoreAdapter['confirmGate']> = [
           id,
           parsed.data.approve,
@@ -7579,11 +7574,8 @@ export function registerRoutes(
         if (err instanceof PlanLaunchUnsupportedError || err instanceof PlanGateNoteUnsupportedError) {
           return { code: 501, body: { error: message(err) } };
         }
-        // DES-CATALOG-002 §4.6: the engine's own stale-answer refusal (`gate_changed: …`) is the typed 409, with the
-        // plan the gate holds now, so the person reads it again.
-        if (/^gate_changed\b/u.test(message(err))) {
-          return { code: 409, body: { code: 'gate_changed', error: `Gate changed: ${message(err).replace(/^gate_changed:?\s*/u, '')} — read the plan again and answer it.`, ...(await currentPlanOf(id)) } };
-        }
+        const changed = await gateChangedRefusal(id, err);
+        if (changed !== null) return changed;
         return { code: 409, body: { error: message(err) } };
       }
     });
@@ -7604,6 +7596,19 @@ export function registerRoutes(
   /** Whether the linked engine checks `expectOrd` / `expectPlanRev` (`Core.supportsPlanSendBack`). */
   function adapterSupportsPlanSendBack(): boolean {
     return typeof adapter.supportsPlanSendBack === 'function' && adapter.supportsPlanSendBack();
+  }
+
+  function expectFor(decidedOrd: number | undefined): { ord: number } | undefined {
+    return decidedOrd !== undefined && adapterSupportsPlanSendBack() ? { ord: decidedOrd } : undefined;
+  }
+
+  async function gateChangedRefusal(id: string, err: unknown): Promise<{ code: number; body: unknown } | null> {
+    if (!/^gate_changed\b/u.test(message(err))) return null;
+    return { code: 409, body: {
+      code: 'gate_changed',
+      error: `Gate changed: ${message(err).replace(/^gate_changed:?\s*/u, '')} — read the gate again and answer it.`,
+      ...(await currentPlanOf(id)),
+    } };
   }
 
   // The steering gate (§11.1). approve+amend = approve-with-steer; approve:false = reject (cancels).
@@ -7748,7 +7753,9 @@ export function registerRoutes(
 
   // Advance semantics (§11.8): a gated run advances via confirmGate; otherwise
   // resumeRun re-enters the cursor. Never resumeRun a gated run (it would re-pause).
-  app.post(`${V}/runs/:id/resume`, async (req, reply) => {
+  app.post(`${V}/runs/:id/resume`, { config: { manifest: { requestType: 'ResumeRequest', statusCodes: [200, 400, 404, 409] } } }, async (req, reply) => {
+    const parsed = ResumeSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     const { id } = req.params as { id: string };
     // A gated resume confirms the gate: one decision at a time per run (crew#1083 round 5).
     return decideExclusively(id, async () => {
@@ -7800,7 +7807,7 @@ export function registerRoutes(
       // A gated resume IS an approve, so it is judged by the record like every decision, passes the
       // same delivery checks (freeze, EX-03) — no side door around the deliver gate — and answers
       // with the gated unit's receipt.
-      const decided = gated ? await gateForDecision(run, undefined) : undefined;
+      const decided = gated ? await gateForDecision(run, parsed.data.ord) : undefined;
       if (decided !== undefined && 'refusal' in decided) return reply.code(decided.refusal.code).send(decided.refusal.body);
       const steeringPropose =
         gated && isSteeringAuthorRun(run);
@@ -7816,7 +7823,7 @@ export function registerRoutes(
         const who = actorOf(req);
         adapter.recordGateActor?.(id, `${who.id} (${who.kind})`);
       }
-      const status = gated ? await adapter.confirmGate(id, true) : await adapter.resumeRun(id);
+      const status = gated ? await adapter.confirmGate(id, true, undefined, undefined, undefined, undefined, expectFor(decided?.ord)) : await adapter.resumeRun(id);
       // A resume of a gated run IS a gate approval — audit it as one, so the
       // "who approved" trail has no side door (task #88).
       audit.record(gated ? 'gate.decided' : 'run.resumed', actorOf(req), {
@@ -7833,7 +7840,8 @@ export function registerRoutes(
         ...(deliveryCheck !== undefined ? { delivery: deliveryCheck } : {}),
       });
     } catch (err) {
-      return reply.code(409).send({ error: message(err) });
+      const changed = await gateChangedRefusal(id, err);
+      return reply.code(changed?.code ?? 409).send(changed?.body ?? { error: message(err) });
     }
     });
   });
@@ -8205,7 +8213,7 @@ export function registerRoutes(
     // A gated reassign APPROVES the gate, so it is judged by the record like every decision and passes
     // the same delivery checks (freeze, wicked-core#850 EX-03) when the gate holds the deliver unit
     // (codex r1 on the EX-03 PR).
-    const decided = gated ? await gateForDecision(run, undefined) : undefined;
+    const decided = gated ? await gateForDecision(run, parsed.data.ord) : undefined;
     if (decided !== undefined && 'refusal' in decided) return reply.code(decided.refusal.code).send(decided.refusal.body);
     if (decided !== undefined) {
       const gatedUnit = decided.gated;
@@ -8216,6 +8224,9 @@ export function registerRoutes(
     }
     const cursor = resolveCursorUnit(run);
     const ord = cursor?.ord ?? run.session.unit_ix;
+    if (!gated && parsed.data.ord !== undefined && parsed.data.ord !== ord) {
+      return reply.code(409).send({ code: 'gate_changed', error: `Run changed: this decision was made on cursor unit ${parsed.data.ord}, but the cursor is at unit ${ord}. Nothing was reassigned.` });
+    }
     // (crew#1512) A parked run's reassign APPROVES its gate, so it is the engine's list that says whether this gate
     // takes one and on which seats — checked before anything is re-seated or approved. An addon without the read keeps
     // the older rule (`approveAcceptsWork`, below); with the read, a failed or stale one changes nothing.
@@ -8247,7 +8258,7 @@ export function registerRoutes(
       if (typeof adapter.confirmGate !== 'function') return; // refused above for a gated run
       const who = actorOf(req);
       adapter.recordGateActor?.(id, `${who.id} (${who.kind})`);
-      const status = note !== undefined ? await adapter.confirmGate(id, true, note) : await adapter.confirmGate(id, true);
+      const status = await adapter.confirmGate(id, true, note, undefined, undefined, undefined, expectFor(decided?.ord));
       noteRode = note !== undefined;
       audit.record('gate.decided', actorOf(req), {
         runId: id,
@@ -8283,7 +8294,9 @@ export function registerRoutes(
         await approve();
       } catch (err) {
         reassigned(false);
+        const changed = await gateChangedRefusal(id, err);
         return reply.code(409).send({
+          ...(changed?.body as object | undefined),
           error: `unit ${ord} was re-seated on ${requestedCli}, but approving the gate failed: ${message(err)} — read the run's gate before answering again`,
         });
       }
@@ -8301,7 +8314,8 @@ export function registerRoutes(
         ...(gated ? { approved: true } : {}),
       });
     } catch (err) {
-      return reply.code(409).send({ error: message(err) });
+      const changed = await gateChangedRefusal(id, err);
+      return reply.code(changed?.code ?? 409).send(changed?.body ?? { error: message(err) });
     }
     });
     } finally {
@@ -8853,7 +8867,7 @@ export function registerRoutes(
           // Undated rules (every rule on a pre-bump core-ts) are excluded once a bound is set.
           withinDateRange(r.created_at, sinceSecs, untilSecs),
       );
-      return { rules };
+      return { rules: rules.map((r) => ({ ...r, revision: ruleRevision(r) })) };
     },
   );
 
@@ -9061,11 +9075,16 @@ export function registerRoutes(
           requestType: 'ConformanceRule',
           // 501: the body carries steering fields but the installed engine predates the
           // steering model (wicked-core-ts < 0.7.5) and would silently drop them.
-          statusCodes: [200, 400, 501],
+          statusCodes: [200, 400, 409, 501],
         },
       },
     },
     async (req, reply) => {
+      const header = req.headers['if-match'];
+      if (header !== undefined && (typeof header !== 'string' || !/^(?:"[a-f0-9]{16}"|[a-f0-9]{16})(?![\s\S])/u.test(header))) {
+        return reply.code(400).send({ error: 'If-Match must be one rule revision from GET /governance/rules' });
+      }
+      const expectedRevision = header?.replaceAll('"', '');
       try {
         const rule = req.body as import('../core/types.js').ConformanceRule;
         if (!adapter.steeringSupported() && rule !== null && typeof rule === 'object') {
@@ -9097,10 +9116,17 @@ export function registerRoutes(
             });
           }
         }
-        await adapter.upsertConformanceRule(rule);
+        await adapter.upsertConformanceRule(rule, expectedRevision);
         audit.record('governance.rule.upserted', actorOf(req), { detail: { id: rule?.id } });
-        return { status: 'ok' };
+        // The write succeeded even if its readback is unavailable; only report a revision we read.
+        let revision: string | undefined;
+        try {
+          const current = (await adapter.listConformanceRules()).find((r) => r.id === rule.id);
+          if (current !== undefined) revision = ruleRevision(current);
+        } catch { /* Readback failure does not undo the successful write. */ }
+        return { status: 'ok', revision };
       } catch (err) {
+        if (err instanceof RuleChangedError) return reply.code(409).send({ code: 'rule_changed', error: message(err), revision: err.revision });
         return reply.code(400).send({ error: message(err) });
       }
     },
@@ -11174,6 +11200,8 @@ export function registerRoutes(
   registerTeamRoutes(app, adapter, security, {
     exclusive: decideExclusively,
     judge: gateForDecision,
+    expect: expectFor,
+    changed: gateChangedRefusal,
     // crew#1157: a plan edit on an analysis run may not add a step that could write.
     readOnlyRefusal: (runId, plan) => analysisPlanRefusal(runId, { plan }),
   });
@@ -11987,5 +12015,5 @@ export function registerRoutes(
   const runEvalsPrepare = async (input: LaunchRunInput): Promise<void> => {
     await prepareRunEvalsLaunch(input, () => runAndRecord(defaultEvalDeps, { project: null, baseline: false, id: randomUUID(), now: new Date() }), runtime.evalRunsDir);
   };
-  return { decideGate, decisions, chatRecorder, considerations, search, decorateRun, runEvalsPrepare, chatProposals, proposalLaunchers };
+  return { exclusive: decideExclusively, decideGate, decisions, chatRecorder, considerations, search, decorateRun, runEvalsPrepare, chatProposals, proposalLaunchers };
 }

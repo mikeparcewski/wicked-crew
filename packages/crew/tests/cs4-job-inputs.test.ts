@@ -44,7 +44,7 @@ function rig(sources: Source[] | undefined = [WEB, SUPPORT], webReason?: string)
   registry.register('job', { find: async () => false, launch: async (d) => { launches.push(d); } });
   let request = 0;
   const deps: ChatProposalDeps = {
-    flags: () => ({ context: true, proposals: true, create: true, refine: false, theme: false, demo: false }),
+    flags: () => ({ context: true, instructions: true, proposals: true, create: true, refine: false, theme: false, demo: false }),
     catalog: CATALOG_SEEDS, records: () => [...records], append: (_id, record) => { records.push(record); return true; },
     instanceOf: () => 'instance', projectOf: () => chat?.projectId ?? null, chat: () => chat,
     rosterEligible: () => [{ key: 'claude', name: 'Claude' }, { key: 'codex', name: 'Codex' }],

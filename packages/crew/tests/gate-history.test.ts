@@ -12,6 +12,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { DecidedGatesResponse } from 'wicked-crew-api-types';
 
+import { decidedGates } from '../src/standing-orders/history.js';
+import type { AuditLog } from '../src/api/audit.js';
+import type { SessionView } from '../src/core/types.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
 import { removeScratch } from './setup/scratch.js';
@@ -134,4 +137,19 @@ describe('GET /gates/decided', () => {
     const res = await app.inject({ method: 'GET', url: '/api/v1/gates/decided?since=yesterday' });
     expect(res.statusCode).toBe(400);
   });
+});
+
+describe('re-check history', () => {
+  for (const action of ['rejudge', 'retry_rules', 'retry_qe', 'extend', undefined]) {
+    it(`preserves ${action ?? 'bare approve'} without counting a re-check as approval`, async () => {
+      const [row] = await decidedGates({
+        audit: { read: async () => [{ ts: NOW, action: 'gate.decided', runId: 'r', actor: HUMAN,
+          detail: { approve: true, ord: 4, ...(action === undefined ? {} : { action }) } }] } as unknown as Pick<AuditLog, 'read'>,
+        views: async () => [] as SessionView[], gateRows: async () => [], projectOf: () => undefined, landsDoctrine: () => false,
+      }, undefined);
+      expect(row?.decision).toBe(action !== undefined && action !== 'extend' ? 'recheck' : 'approve');
+      if (action === undefined) expect(row).not.toHaveProperty('action');
+      else expect(row).toHaveProperty('action', action);
+    });
+  }
 });

@@ -242,7 +242,7 @@ describe('crew#311 defect 2 — resume refuses terminal runs with the recovery n
       const { code, body } = await resume(app, 'run-g');
       expect(code).toBe(200);
       expect(body.status).toBe('executing');
-      expect(adapter.confirmGate).toHaveBeenCalledWith('run-g', true);
+      expect(adapter.confirmGate).toHaveBeenCalledWith('run-g', true, undefined, undefined, undefined, undefined, undefined);
       expect(adapter.resumeRun).not.toHaveBeenCalled();
     } finally {
       await app.close();
