@@ -829,6 +829,20 @@ describe('a GitHub tracker whose credential is the gh CLI (gh-cli:<login>), read
     for (const form of TOKEN_FORMS) for (const text of written) expect(text).not.toContain(form);
   });
 
+  it('reads as the pinned account while gh\'s active account is another: its own token, no switch, no leak', async () => {
+    active = 'bob';
+    const r = await call('wmt-p', 'mcp:gh/search_issues', { query: 'is:issue', owner: 'owner', repo: 'app' });
+    expect(r.body.outcome, JSON.stringify(r.body)).toBe('ok');
+    expect(items(r.answer)).toEqual(['owner/app#1', 'owner/app#2']);
+    expect(JSON.stringify(r.body)).toContain(SECRET_REDACTION);
+    expect(ghCalls.filter((c) => c[1] === 'token')).toEqual([['auth', 'token', '--hostname', 'github.com', '--user', 'alice']]);
+    expect(ghCalls.some((c) => c[1] === 'switch')).toBe(false);
+    await gateAudit.flush();
+    const written = [join(mcpDir, 'registry.json'), join(mcpDir, 'source-queries.ndjson'), join(base, 'audit.log')].filter(existsSync).map((f) => readFileSync(f, 'utf8'));
+    written.push(gateLog.join('\n'), JSON.stringify(r.body));
+    for (const form of TOKEN_FORMS) for (const text of written) expect(text).not.toContain(form);
+  });
+
   it('refuses a different active account by name: no token command, nothing reaches the upstream', async () => {
     active = 'bob';
     const r = await call('wmt-p', 'mcp:gh/search_issues', { query: 'is:issue', owner: 'owner', repo: 'app' });
