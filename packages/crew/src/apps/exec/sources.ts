@@ -65,6 +65,15 @@ export type AppSource =
   | { name: string; kind: 'graphql'; pin: AppLockSource; config: McpUpstreamConfig; description: StoredDescription | null; allowWrites: boolean; enabled: boolean }
   | { name: string; kind: 'rest' | 'mcp-http' | 'mcp-stdio'; pin: AppLockSource; config: McpUpstreamConfig; enabled: boolean };
 
+/**
+ * (crew#1533) Whether an app's project may use `source`. Only gated SQL sources have project controls (the
+ * knowledge package's `agentMay(…, 'see')`); REST, GraphQL and MCP servers and crew's own sources have none, so
+ * they are every project's. The visible set is read only for a SQL source (it reads every gated source).
+ */
+export async function projectMaySee(source: AppSource, visible: () => Promise<ReadonlySet<string>>): Promise<boolean> {
+  return source.kind !== 'sql' || (await visible()).has(source.name);
+}
+
 /** Look a source up now; `null` = no such source in the registry. */
 export async function lookupSource(registry: Pick<AppSourceRegistry, 'snapshot' | 'source'> | null, name: string): Promise<AppSource | null> {
   if (name === CREW_SOURCE) return { name: CREW_SOURCE, kind: 'crew', pin: CREW_PIN };

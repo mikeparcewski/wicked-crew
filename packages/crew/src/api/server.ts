@@ -2780,6 +2780,8 @@ export async function createServer(
   const unitVisible = (scope: EstateUnitScope): Promise<string[]> => projectVisible(scope.projectId, scope.repoId);
   // DES-KNOWLEDGE-DATA-001 §9.1: an app's knowledge query sees what a unit in the APP'S project sees (the same set).
   const appsKnowledgeVisible = (projectId: string): Promise<string[]> => projectVisible(projectId);
+  // One project predicate for the builder, governed check, live reads and action steps.
+  const appsVisibleSources = async (projectId: string | null): Promise<ReadonlySet<string>> => new Set((await dataGate.sources()).filter((s) => agentMay(s.access, s, projectId, 'see')).map((s) => s.name));
   // (DES-CATALOG-002 CS4/CS10) Each run's source pick: recorded at launch (POST /runs), read by the broker, the unit's
   // tool list and the estate relay, so a unit never reaches a registered source its job did not pick.
   const runSourcePicks = new RunSourcePicks(join(crewStateHome(), 'mcp', 'run-source-picks.json'));
@@ -2807,6 +2809,7 @@ export async function createServer(
       // so a version holding queries or actions lands when they pass (DES §9.2 step 3).
       sourceStage: new AppsSourceStage({
         registry: mcpRegistry,
+        visibleSources: appsVisibleSources,
         // (DES-KNOWLEDGE-DATA-001 §9.1) A `recall` query is checked against what its app's project may see.
         knowledge: { sources: () => dataGate.sources(), visible: appsKnowledgeVisible },
         projectOf: (slug) => appStore?.projectOf(slug) ?? null,
@@ -2858,7 +2861,7 @@ export async function createServer(
     : undefined;
   const mcpBroker = new McpBroker({
     ...(appStore !== null && appsVerifyUnitToken !== undefined ? { apps: new AppsSelfCheck(appStore, appsVerifyUnitToken, {
-      visibleSources: async (projectId) => new Set((await dataGate.sources()).filter((s) => agentMay(s.access, s, projectId, 'see')).map((s) => s.name)),
+      visibleSources: appsVisibleSources,
     }) } : {}),
     picks: runSourcePicks,
     registry: mcpRegistry,
@@ -2979,7 +2982,7 @@ export async function createServer(
       // Route tests drive `registerMcpRoutes` over their own registry (tests/mcp-registry.test.ts).
       mcp: mcpRegistry,
       // DES-APPS-001 (K2a): the app store (`daemon-apps.json` in the state home; repos under the apps root).
-      ...(appStore !== null ? { apps: appStore } : {}),
+      ...(appStore !== null ? { apps: appStore, appsVisibleSources } : {}),
       // (DES-APPS-001 K5) `POST /apps/check`: the engine resolves the unit's token; crew reads which step it is.
       ...(appsVerifyUnitToken !== undefined ? { appsVerifyUnitToken } : {}),
       ...(appStore !== null && appActions !== null ? { appsActions: appActions } : {}),

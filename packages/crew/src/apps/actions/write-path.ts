@@ -36,7 +36,7 @@ import { type AppExecutor, type AppFilesSource, graphqlVariablesProblem } from '
 import { AppLimits, RateLimited } from '../exec/limits.js';
 import { bindParams, ParamError, type Viewer } from '../exec/params.js';
 import { checkRowValues } from '../exec/source-stage.js';
-import { lookupSource, pinOf, type AppSource, type AppSourceRegistry } from '../exec/sources.js';
+import { lookupSource, pinOf, projectMaySee, type AppSource, type AppSourceRegistry } from '../exec/sources.js';
 import { callMutation, callTool, mutationField, type ApiOutcome } from './api-action.js';
 import { baseTypeSql, pgExactFitIn, type FitItem } from './pg-fit.js';
 import { generateStatement, runRowWrite, type WriteHooks } from './pg-write.js';
@@ -62,7 +62,11 @@ export class AppWriteError extends Error {
 export interface WritePathDeps {
   store: AppFilesSource;
   actions: AppActionStore;
+  /** The app's project now; null means it belongs to no project. */
+  projectOf: (app: string) => string | null;
   registry: AppSourceRegistry | null;
+  /** Rechecked at use time; null only on the published server, whose sources crew checked at publish. */
+  visibleSources: ((projectId: string | null) => Promise<ReadonlySet<string>>) | null;
   audit: Pick<AuditLog, 'record'>;
   viewerOf: (actor: Actor) => Promise<Viewer>;
   /** The read cache to invalidate after every outcome. */
@@ -125,10 +129,18 @@ export class AppWritePath {
     return { at, action, locked, pinned };
   }
 
+  /** Visibility can narrow after landing or preparing: refuse before describing or sending a write. */
+  private async source(app: string, name: string): Promise<AppSource | null> {
+    const source = await lookupSource(this.deps.registry, name);
+    const visibleSources = this.deps.visibleSources;
+    if (source !== null && visibleSources !== null && !(await projectMaySee(source, () => visibleSources(this.deps.projectOf(app))))) throw refuse(409, 'action_refused', `${name} is not visible to ${app}'s project now`);
+    return source;
+  }
+
   /** Recompute the action's contract against the source now (never executes it). */
-  private async resolve(action: AppAction, snapshot?: AppSource | null): Promise<Resolved> {
+  private async resolve(app: string, action: AppAction, snapshot?: AppSource | null): Promise<Resolved> {
     // ONE snapshot of the source for the check and the call (codex r1: two lookups could see two saves).
-    const source = snapshot !== undefined ? snapshot : await lookupSource(this.deps.registry, action.source);
+    const source = snapshot !== undefined ? snapshot : await this.source(app, action.source);
     if (source === null) throw refuse(409, 'contract_changed', `${action.source} is gone`);
     if (action.kind === 'row-write') {
       if (source.kind !== 'sql' || source.config.sql?.driver !== 'postgres') throw refuse(409, 'contract_changed', `${action.source} is not a Postgres source`);
@@ -181,9 +193,9 @@ export class AppWritePath {
 
   async grant(app: string, id: string, input: { version: number | string; actor: Actor }): Promise<AppActionGrant> {
     const { action, locked, pinned } = await this.actionAt(app, input.version, id);
-    const source = await lookupSource(this.deps.registry, action.source);
+    const source = await this.source(app, action.source);
     if (source !== null && source.kind === 'sql' && !source.allowWrites) throw refuse(409, 'writes_off', `${action.source}'s Allow writes switch is off: turn it on before granting a row write`);
-    const r = await this.resolve(action);
+    const r = await this.resolve(app, action);
     // The writer login must hold what the write needs (§7.4 "The writer login"): say exactly which GRANTs are missing.
     if (action.kind === 'row-write' && r.source.kind === 'sql') {
       const { schema, name } = splitTable(action.table);
@@ -210,7 +222,7 @@ export class AppWritePath {
     // Allow writes is read again under the lock, so a switch turned off meanwhile (its withdrawal waits for this lock) wins.
     await this.deps.actions.locked(async (tx) => {
       if (action.kind === 'row-write') {
-        const now = await lookupSource(this.deps.registry, action.source);
+        const now = await this.source(app, action.source);
         if (now === null || now.kind !== 'sql' || !now.allowWrites || now.pin.descriptorHash !== pinned.descriptorHash) throw refuse(409, 'writes_off', `${action.source}'s Allow writes switch is off`);
       }
       tx.setGrant(grant);
@@ -250,7 +262,7 @@ export class AppWritePath {
     if (grant.actionHash !== hash || (record !== undefined && (record.actionHash !== hash || record.actionHash !== grant.actionHash || record.contractHash !== grant.contractHash))) {
       throw refuse(409, 'not_granted', `this version of action ${action.id} is not the one granted: grant it again to use it`);
     }
-    const source = await lookupSource(this.deps.registry, action.source);
+    const source = await this.source(app, action.source);
     if (source === null || source.pin.descriptorHash !== grant.descriptorHash || (record !== undefined && record.descriptorHash !== source.pin.descriptorHash)) {
       return this.withdraw(app, action.id, 'source_changed', 'contract_changed', `${action.source}'s connection changed since the grant: the grant is withdrawn`, grant);
     }
@@ -260,7 +272,7 @@ export class AppWritePath {
     if (action.kind === 'row-write' && (source.kind !== 'sql' || !source.allowWrites)) throw refuse(409, 'writes_off', `${action.source}'s Allow writes switch is off`);
     let resolved: Resolved;
     try {
-      resolved = await this.resolve(action, source);
+      resolved = await this.resolve(app, action, source);
     } catch (err) {
       if (err instanceof AppWriteError && (err.code === 'table_changed' || err.code === 'contract_changed')) return this.withdraw(app, action.id, err.code, err.code, `${err.message}: the grant is withdrawn`, grant);
       throw err;
@@ -443,7 +455,7 @@ export class AppWritePath {
     // too. The awaited read of the source comes FIRST; every check after it is synchronous, right before the
     // step (codex r1: expiry or APPS_READ_ONLY could otherwise change during the await).
     const rec = await this.deps.actions.locked(async (tx) => {
-      const now = await lookupSource(this.deps.registry, action.source);
+      const now = await this.source(app, action.source);
       const r = tx.record(snap.id);
       if (r === null || r.state !== 'prepared') throw refuse(409, 'record_used', `record ${snap.id} already ran`);
       if (this.now() >= r.expiresAt) throw refuse(409, 'record_expired', `record ${snap.id} expired: prepare the action again`);
