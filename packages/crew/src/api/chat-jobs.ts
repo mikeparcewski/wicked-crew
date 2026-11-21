@@ -136,6 +136,7 @@ export interface JobChat {
 /** Everything a job proposal is resolved from (a fresh proposal, a merged revision, a reshape). */
 export interface JobFacts {
   card: string;
+  title: string | null;
   /** `undefined`: the card's default option. */
   option: string | null | undefined;
   depth: 'quick' | 'standard' | 'deep' | null;
@@ -232,16 +233,13 @@ function drawOrder(lead: string | null, ctx: { chat: JobChat; roster: JobContext
 
 /**
  * (F1/F2) What a revision's `removeSeats` did, said from the card as published: the seats that left it, and who works.
- * `after` is the published card's workers (a job's seats, a document's helpers). `job` false (the revision made it a
- * document, whose helpers are picked again): an asked seat that is still a helper is said to still work on it.
+ * `after` is the published card's workers (a job's seats, a document's helpers).
  */
-export function seatRemovalNote(asked: readonly string[] | undefined, before: readonly string[], after: readonly string[], nameOf: (k: string) => string, job = true): string[] {
+export function seatRemovalNote(asked: readonly string[] | undefined, before: readonly string[], after: readonly string[], nameOf: (k: string) => string): string[] {
   if (asked === undefined) return [];
   const notes: string[] = [];
   const off = before.filter((k) => asked.includes(k) && !after.includes(k));
   if (off.length > 0) notes.push(`${list(off.map(nameOf))} ${off.length === 1 ? 'is' : 'are'} off this job; ${after.length === 0 ? 'no seat works on it' : `${list(after.map(nameOf))} ${after.length === 1 ? 'works' : 'work'} on it`}`);
-  const still = job ? [] : asked.filter((k) => after.includes(k));
-  if (still.length > 0) notes.push(`Not changed: ${list(still.map(nameOf))} still ${still.length === 1 ? 'works' : 'work'} on it (its helpers are picked again; change them on the card)`);
   return notes;
 }
 
@@ -622,14 +620,15 @@ export function factsOf(p: ArtifactProposal): JobFacts {
   const shape = p.shape!;
   return {
     card: shape.card,
+    title: p.namedTitle ?? null,
     option: shape.option,
     depth: shape.depth,
     words: p.words ?? p.brief ?? '',
     details: [...(p.details ?? [])],
     repoRef: p.repoRefs?.[0] ?? null,
     projectId: p.filedIn.projectId,
-    lead: p.seats?.lead ?? null,
-    seats: p.seats !== undefined ? [...p.seats.keys] : null,
+    lead: p.seats?.lead ?? p.helpers?.seats[0] ?? null,
+    seats: p.seats !== undefined ? [...p.seats.keys] : p.helpers !== null ? [...p.helpers.seats] : null,
     inputs: inputsOfProposal(p),
     skipQe: p.skipQe ?? null,
     by: shape.by,
@@ -786,6 +785,7 @@ export function mergeRevision(
   //    workflow picks its own seat: a seat edit there changes nothing (codex r2).
   const card4 = CATALOG_V2_CARDS.find((c) => c.id === facts.card)!;
   const r4 = resolveOption(card4.id, optionFor(card4, facts.option), ctx.served);
+  if (r4 === null || proposalKindOf(r4) !== 'create') facts.title = null;
   if (r4?.workflow !== null && r4?.workflow !== undefined && SELF_SEATED.has(r4.workflow) && (edits.lead !== undefined || edits.addSeats !== undefined || edits.removeSeats !== undefined)) {
     notes.push(`Not changed: ${card4.title} picks its own seat`);
     edits = { ...edits };
@@ -809,7 +809,7 @@ export function mergeRevision(
   }
   if (edits.removeSeats !== undefined && edits.removeSeats.length > 0) {
     const r = resolveOption(facts.card, optionFor(CATALOG_V2_CARDS.find((c) => c.id === facts.card)!, facts.option), ctx.served);
-    const need = r === null ? 1 : seatsNeeded(r);
+    const need = r !== null && proposalKindOf(r) === 'create' ? 2 : r === null ? 1 : seatsNeeded(r);
     const current = facts.seats ?? drawOrder(facts.lead, ctx).filter((k) => can.has(k));
     // (F1/F2) A removal is applied or refused in the card's words; what WAS applied is said from the published card
     // (`seatRemovalNote`), never from this intermediate merge. The count reads only the seats that can work now.

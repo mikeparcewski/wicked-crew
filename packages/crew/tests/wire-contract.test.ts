@@ -1244,6 +1244,8 @@ accepts<z.input<typeof AppActionPrepareSchema>, Wire.AppActionPrepareBody>();
 accepts<z.input<typeof AppActionRunSchema>, Wire.AppActionRunBody>();
 accepts<z.input<typeof AppActionGrantSchema>, Wire.AppActionGrantBody>();
 respondsWith<Wire.AppQueryResponse, Awaited<ReturnType<AppExecutor['runQuery']>>>();
+respondsWith<Wire.AppCallRecord[], ReturnType<AppExecutor['callRecords']>>();
+respondsWith<Wire.AppCallRecordsResponse, { app: string; records: ReturnType<AppExecutor['callRecords']> }>();
 respondsWith<Wire.AppActionPrepareResponse, Awaited<ReturnType<AppWritePath['prepareAction']>>>();
 respondsWith<Wire.AppActionRunResponse, Awaited<ReturnType<AppWritePath['runAction']>>>();
 respondsWith<Wire.AppActionRecordView, ReturnType<AppWritePath['recordView']>>();

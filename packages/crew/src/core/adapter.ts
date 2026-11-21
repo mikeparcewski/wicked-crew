@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { Core as CoreHandle, LaunchOptions, Subscription } from 'wicked-core-ts';
-import type { GateAction, PowerPauseRequest, PowerState, Rigor } from 'wicked-crew-api-types';
+import type { GateAction, MaintenanceState, PowerPauseRequest, PowerState, Rigor } from 'wicked-crew-api-types';
 import { AskError, AskUnsupportedError, type AskRequest, type AskTicket, type AskUnit } from './types.js';
 import type {
   EditorGrantsResponse,
@@ -78,7 +78,8 @@ export interface IndexBudget {
   counted: 'git' | 'walk' | null;
 }
 
-const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(['completed', 'cancelled', 'failed']);
+export const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(['completed', 'cancelled', 'failed']);
+const ACTIVE_RUN_STATUSES: ReadonlySet<string> = new Set(['planning', 'distributing', 'executing']);
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { applyGovernanceStoreEnv, isStoreSpec, type GovernanceStoreLocation } from './governance-store.js';
 import { isCouncilSize, isCouncilStaggerMs } from './council-settings.js';
@@ -653,7 +654,7 @@ type CoreHandleFull = CoreHandle &
   ProjectMethods &
   PresetMethods &
   TeamMethods &
-  CampaignMethods;
+  CampaignMethods & { unregisterRepo?: (repoId: string) => Promise<string> };
 
 /**
  * crew#994: the engine bindings that read the store file directly, on a read-only connection of
@@ -1069,6 +1070,25 @@ function addonAtLeast(maj: number, min: number, pat: number): boolean {
 // No mirrors: the built-ins are the engine's built-in presets, read once at boot and laid over the
 // phase catalog (`core/builtin-catalog.ts`, `loadBuiltinCatalog`). One source; nothing to drift.
 
+/** Refusing new work while this daemon drains; restarting clears the in-memory state. */
+export class MaintenanceDrainError extends Error {
+  readonly code = 'maintenance_drain';
+  readonly hint = 'Wait for maintenance to finish, or POST /api/v1/maintenance with {"drain":false} to admit work again.';
+
+  constructor() {
+    super('This daemon is draining for maintenance and is refusing new work.');
+    this.name = 'MaintenanceDrainError';
+  }
+}
+
+/** The linked engine predates repository removal (wicked-core `unregisterRepo`). */
+export class RepoUnregisterUnsupportedError extends Error {
+  constructor() {
+    super('Removing a repository requires an engine with unregisterRepo; upgrade wicked-core-ts.');
+    this.name = 'RepoUnregisterUnsupportedError';
+  }
+}
+
 /**
  * Chat is not available in this deployment at all — a capability gap, never a bad request.
  *
@@ -1401,6 +1421,7 @@ export class CoreAdapter {
   /** crew#1145: what each engine launch awaits first (`setLaunchGate`); `null` = nothing. */
   private launchGate: (() => Promise<void>) | null = null;
   private closed = false;
+  private drainSince: number | null = null;
 
   /**
    * The estate db the Core actor was spawned over (`CoreAdapterOptions.dbPath` — the `--db`
@@ -1811,6 +1832,19 @@ export class CoreAdapter {
     if (failure !== null) throw failure.err instanceof Error ? failure.err : new Error(String(failure.err));
   }
 
+  /** Toggle admission without persisting a setting; repeated enable keeps the original time. */
+  setDraining(drain: boolean): void {
+    this.drainSince = drain ? (this.drainSince ?? Date.now()) : null;
+  }
+
+  /** Parked and human-held runs are idle for maintenance, but still hold their repository. */
+  async maintenanceState(): Promise<MaintenanceState> {
+    const active = (await this.sessionsDetail())
+      .filter((v) => ACTIVE_RUN_STATUSES.has(v.session.status))
+      .map((v) => ({ runId: v.session.id, status: v.session.status }));
+    return { draining: this.drainSince !== null, since: this.drainSince, idle: active.length === 0, active };
+  }
+
   /**
    * Hand a launch to the engine with its notices: `handed` BEFORE the call (the pin is open before
    * any spawn can read the env), `rejected` when the call throws (nothing will spawn — the pin is
@@ -1827,9 +1861,11 @@ export class CoreAdapter {
     id: string,
     call: () => Promise<T>,
     workflow?: string,
+    resumesWork = true,
   ): Promise<T> {
     // No gate, no extra turn: a launch without one is handed exactly as before.
     if (this.launchGate !== null) await this.launchGate();
+    if (resumesWork && this.drainSince !== null) throw new MaintenanceDrainError();
     try {
       this.notifyLaunch({ kind, id, status: 'handed', ...(workflow !== undefined ? { workflow } : {}) });
     } catch (err) {
@@ -2497,6 +2533,7 @@ export class CoreAdapter {
     // (operator ruling 2026-10-11) WHO answered — recorded by the gate route just before this call
     // (`recordGateActor`), consumed once. The engine records it when the answer is an operator
     // judgment ("judged by operator", core-ts ≥ 0.9.7); an older addon ignores the trailing argument.
+    const resumesWork = plan !== undefined || approve || (action !== undefined && action !== 'reject');
     const actorLabel = this.gateActors.get(runId);
     this.gateActors.delete(runId);
     if (expect !== undefined) {
@@ -2527,7 +2564,7 @@ export class CoreAdapter {
         return plan !== undefined
           ? core.confirmGate(runId, true, note ?? null, 'edit_plan', null, JSON.stringify(plan), actorLabel ?? null, expect.ord ?? null, expect.planRev ?? null)
           : core.confirmGate(runId, approve, amend ?? null, action ?? null, amendScope ?? null, null, actorLabel ?? null, expect.ord ?? null, expect.planRev ?? null);
-      });
+      }, undefined, resumesWork);
     }
     return this.handedToEngine('run', runId, () => {
       if (actorLabel !== undefined && plan === undefined) {
@@ -2585,7 +2622,7 @@ export class CoreAdapter {
         confirmGate(runId: string, approve: boolean, amend?: string, action?: string, amendScope?: string): Promise<string>;
       };
       return core.confirmGate(runId, approve, amend, action, amendScope);
-    });
+    }, undefined, resumesWork);
   }
 
   /** Cancel a run → the status token. */
@@ -2763,6 +2800,7 @@ export class CoreAdapter {
 
   /** (program DES-POWER-MODE) Answer a power run's checkpoint pause; resolves to its `PowerState`. */
   async answerPowerPause(runId: string, decision: PowerPauseRequest['decision'], note: string | null, actor: string): Promise<PowerState> {
+    if (decision !== 'stop' && this.drainSince !== null) throw new MaintenanceDrainError();
     if (typeof this.core.answerPowerPause !== 'function') throw new Error('refused: this wicked-core build has no power mode');
     return JSON.parse(await this.core.answerPowerPause(runId, decision, note, actor)) as PowerState;
   }
@@ -3437,6 +3475,12 @@ export class CoreAdapter {
   async registerRepo(name: string, rootPath: string): Promise<RepoEntry> {
     const real = await realpath(rootPath).catch(() => rootPath);
     return JSON.parse(await this.core.registerRepo(name, real)) as RepoEntry;
+  }
+
+  /** Remove only the engine registration; the checkout and graph stay on disk. */
+  async unregisterRepo(id: string): Promise<boolean> {
+    if (typeof this.core.unregisterRepo !== 'function') throw new RepoUnregisterUnsupportedError();
+    return parseEngineJson<boolean>(await this.core.unregisterRepo(id), 'unregisterRepo');
   }
 
   /**

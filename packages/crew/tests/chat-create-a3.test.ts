@@ -1027,7 +1027,7 @@ describe('xreview r4 folds (A3)', () => {
     expect(p.files.find((f) => f.name === 'attachment-rep1-report.txt')?.bytes.toString()).toBe('measured: 3585 of 5786');
   });
 
-  it('an archived chat’s retry is filed under the chat as it is kept now, never the chat that reused the id', async () => {
+  it('an archived chat’s retry carries the original instance for filing at the draft seam', async () => {
     const w = world();
     withChat(w, 'c1');
     await w.svc.decide('c1', 'c1:t2', { decision: 'go' }, ME, 'i1');
@@ -1041,7 +1041,7 @@ describe('xreview r4 folds (A3)', () => {
     ((w.registry as unknown as { dispatchers: Map<string, { deps: { chatIdOf: unknown } }> }).dispatchers.get('create')!.deps).chatIdOf = (c: string, inst: string | null) => (c === 'c1' && inst === 'i1' ? 'c1--1' : c);
     const retryPid = (await w.svc.appendRetry('c1--1', 'c1:t2', first.runId, first.artifactRef, 'the run was stopped', 'i1'))!;
     expect((await w.svc.decide('c1--1', retryPid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
-    expect(w.launches[1]!.chatId).toBe('c1--1');
+    expect(w.launches[1]).toMatchObject({ chatId: 'c1', chatInstance: 'i1' });
   });
 
   it('a person who cleared the repositories gets no graph either; attachments over the packet together are refused', async () => {

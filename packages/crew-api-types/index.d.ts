@@ -1743,6 +1743,30 @@ export interface SessionView {
  */
 export type RegisterRepoRefusalCode = 'repo_path_missing' | 'repo_path_relative' | 'repo_clone_denied';
 
+/** `POST /api/v1/maintenance` (api-types 0.220.0). Strict body; drain state lasts until restart. */
+export interface MaintenanceRequest {
+  drain: boolean;
+}
+
+/** `GET` and `POST /api/v1/maintenance` (api-types 0.220.0): admission and current work. */
+export interface MaintenanceState {
+  draining: boolean;
+  /** Unix milliseconds when drain was enabled; `null` while admitting work. */
+  since: number | null;
+  /** No run is planning, distributing or executing. Parked and human-held runs are idle. */
+  idle: boolean;
+  active: Array<{ runId: string; status: string }>;
+}
+
+/** `DELETE /api/v1/repos/:id` success (api-types 0.220.0). Checkout and graph files stay on disk.
+ *  Refusals: 404 `repo_not_found`; 409 `repo_in_use` (with `runIds` when crew's own check finds the
+ *  live runs; an engine refusal names them in `error`) or `repo_in_project` (the projects named in
+ *  `error`); 501 `repo_unregister_unsupported` on an older engine. */
+export interface UnregisterRepoResponse {
+  repoId: string;
+  removed: true;
+}
+
 /** A registered git repository (`RepoEntry`). */
 export interface RepoEntry {
   id: string;
@@ -2873,6 +2897,15 @@ export interface CoreEvent {
   writePlanOrd?: number;
   /** `awaitingHuman{gateKind: 'consent'}` (core#820): CLIs the plan leaves out, and why. */
   writeTargetsSkipped?: Array<{ cli: string; why: string }>;
+  /**
+   * `awaitingHuman{gateKind: 'consent'}` (crew#1424): what each editor or run plugin in an editor install plan
+   * asks to do (garden `install.py --dry-run` `asks`, passed on by wicked-core), in manifest order. ABSENT when the
+   * plan names none. Information for the person approving the install: the rows grant nothing, and each one is
+   * allowed later in Plugins. A permission the install consent itself grants (garden `INSTALL_GRANTED`, e.g.
+   * `mcp.session`, which has no Plugins switch) is never listed here: it is a `writeTargets` row on the
+   * `EDITOR-GRANTS` rule. Crew relays the frame verbatim.
+   */
+  consentAsks?: Array<{ editor: string; permission: string; why: string }>;
   /** `awaitingHuman{gateKind: 'consent'}` (core#820): why no write targets are listed (no dry run
    *  ran before the gate, or it printed no plan); the gate is then a plain approve / reject. */
   writeTargetsMissing?: string;
@@ -9352,7 +9385,7 @@ export interface ChatSingleSeatDegradation {
   message: string;
 }
 
-/** `POST /chats` → 201. */
+/** `POST /chats` → 201; a seeded retry → 200, or 410 `chat_gone` if its chat was deleted (api-types 0.222.0). */
 export interface ChatOpenResponse {
   chatId: string;
   seats: ChatSeatOutcome[];
@@ -9951,6 +9984,8 @@ export interface ArtifactProposal {
   seat: string;
   /** The "What" line: `label` is "Slides · Domain coverage for new engineers"; `outcome` is the catalog entry's. */
   what: { entry: string | null; title: string; label: string; outcome: string | null };
+  /** (api-types 0.222.0) A document job: the title in the person's words; absent = the catalog's name. */
+  namedTitle?: string;
   /** The brief (create), the ask (refine), or what to show (demo), as the seat wrote it. */
   brief: string | null;
   reason: string | null;
@@ -14484,6 +14519,8 @@ export interface McpTool {
   observedSchemaHash: string;
   /** (api-types 0.183.0) The disclosure class in force; `null` = none reviewed for the saved schema. */
   disclosure: McpToolDisclosure | null;
+  /** The person's Apps read acceptance is in force for this schema. */
+  readAccepted: boolean;
   /** (api-types 0.187.0) PM entries only: the tool's resource binding; `null` = unbound, so unavailable to agents. */
   binding?: McpToolBinding | null;
 }
@@ -14697,8 +14734,22 @@ export interface McpPreviewTool {
    * class while its schema is unchanged, crew's own class for a tool of crew's Toolbox configuration, else `null`.
    */
   disclosure: McpToolDisclosure | null;
+  /** The person's Apps read acceptance is in force for this schema. */
+  readAccepted: boolean;
   /** (api-types 0.187.0) PM entries only: the binding a save gives the tool; `null` = crew has none, so agents never get it. */
   binding?: { policy: string } | null;
+}
+
+/** Addresses still needing the person's confirmation; suggestions correspond in the same order. */
+export interface AddressConfirmationDetail {
+  addresses?: Array<{ address: string; class: 'loopback' | 'private' }>;
+  suggest?: string[];
+}
+
+/** A connector route's refusal, including the preview's 409 `address_unconfirmed`. */
+export interface McpErrorBody extends AddressConfirmationDetail {
+  error: string;
+  code: string;
 }
 
 /**
@@ -14806,6 +14857,12 @@ export interface SaveMcpServerBody {
    * `mcp.tool.disclosure_reviewed`.
    */
   disclosures?: Record<string, McpToolDisclosure>;
+  /**
+   * Accept these preview tool names as Apps reads, bound to their schema hashes. Human operator only
+   * (403 `read_accept_human_only`); a name outside the preview's effective reads is 409 `not_a_read`.
+   * Audited `mcp.tool.read_accepted`. Unlisted tools keep acceptance only for an unchanged schema.
+   */
+  acceptedReads?: string[];
 }
 
 /**
@@ -14866,6 +14923,12 @@ export interface PatchMcpToolBody {
    * offered to no agent).
    */
   disclosure?: McpToolDisclosure | null;
+  /**
+   * Accept the saved schema as an Apps read, or withdraw that acceptance. Both are human operator only
+   * (403 `read_accept_human_only`), audited `mcp.tool.read_accepted` / `mcp.tool.read_withdrawn`.
+   * Acceptance requires an effective read (409 `not_a_read`) and a registered schema (409 `not_registered`).
+   */
+  readAccepted?: boolean;
 }
 
 /**
@@ -18341,6 +18404,26 @@ export interface AppTurnBody {
 export interface AppTurnResponse {
   runId: string;
   turn: AppTurnState;
+}
+
+/** One call's metadata, never row values. Kept in memory only; a daemon restart starts empty. */
+export interface AppCallRecord {
+  at: number;
+  viewer: string;
+  app: string;
+  version: number | null;
+  tree: string;
+  query: string;
+  ms: number;
+  rows: number;
+  bytes: number;
+  outcome: string;
+}
+
+/** `GET /apps/:app/calls` (human operator; the records name viewers): at most 200 records, newest last. Not persisted across restarts. */
+export interface AppCallRecordsResponse {
+  app: string;
+  records: AppCallRecord[];
 }
 
 /** `POST /apps/:app/query` (observer): run one named query of an accepted version (DES §7.2). */

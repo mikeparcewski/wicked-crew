@@ -466,7 +466,7 @@ describe('two-seat jobs disclose the validator author as judge (crew#1587/#1588)
 });
 
 describe('removal words after a kind change or a sign-out (codex r2)', () => {
-  it('a job made a document with a seat removed: the helper still on it is said to still work on it, never "off"', async () => {
+  it('a job made a document with a seat removed: the seat is off its helpers, and the card says so (crew#1538)', async () => {
     const r = rig('Claude+Codex+Pi', 'null', 'admitted', true);
     await r.pick();
     expect((await r.swap({ card: 'document', option: 'presentation', removeSeats: ['claude'] } as ProposalRevisionEdits)).code).toBe(201);
@@ -480,9 +480,10 @@ describe('removal words after a kind change or a sign-out (codex r2)', () => {
     const notes = p.sentence?.notes ?? [];
     expect(confirm, 'the kind change asks before it drops checks').toBeDefined();
     expect(p.seats).toBeUndefined();
-    expect(workers).toContain('claude');
-    expect(notes.join(' ')).not.toMatch(/off this job/);
-    expect(notes).toContain('Not changed: Claude still works on it (its helpers are picked again; change them on the card)');
+    // A document's helpers are the seats the revision chose (crew#1538), never picked again behind the person's back.
+    expect(workers).not.toContain('claude');
+    expect(workers).toHaveLength(2);
+    expect(notes.join(' ')).toMatch(/Claude is off this job/);
   });
 
   it('removing a seat that signed out never says it stays: the card drops it and says so', async () => {

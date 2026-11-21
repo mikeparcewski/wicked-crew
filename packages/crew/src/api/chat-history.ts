@@ -93,6 +93,36 @@ export function decodeCursor(cursor: string): { updatedAt: number; id: string } 
   return null;
 }
 
+export interface SeedRequest {
+  instance: string;
+  digest: string;
+  actorId: string;
+  at: number;
+}
+
+/** A seeded open's identity survives closing or deleting its chat. */
+export class SeedRequestStore {
+  constructor(private readonly dir = join(crewStateHome(), 'chats', 'seed-requests')) {}
+
+  get(chatId: string): SeedRequest | null {
+    try {
+      const record = JSON.parse(readFileSync(join(this.dir, `${chatId}.json`), 'utf8')) as SeedRequest;
+      if (typeof record.instance !== 'string' || typeof record.digest !== 'string' || typeof record.actorId !== 'string' || typeof record.at !== 'number') {
+        throw new Error(`invalid seed request record for ${chatId}`);
+      }
+      return record;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw err;
+    }
+  }
+
+  set(chatId: string, record: SeedRequest): void {
+    mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(this.dir, `${chatId}.json`), JSON.stringify(record), { flag: 'wx', mode: 0o600 });
+  }
+}
+
 export class ChatHistoryStore {
   readonly dir: string;
   private readonly now: () => number;

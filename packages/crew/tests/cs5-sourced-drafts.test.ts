@@ -73,7 +73,7 @@ async function world(presets: 'sourced' | 'missing' | 'unreadable' = 'sourced') 
   } as unknown as CoreAdapter;
   const sub = await startInteractiveDraftSubscriber(adapter, {
     dbPath, ledgerPath: join(dir, 'ledger.json'), draftDir: join(dir, 'drafts'),
-    pollIntervalMs: 25, heartbeatMs: 60_000, bindings,
+    pollIntervalMs: 25, heartbeatMs: 60_000, bindings, chatIdOf: (id) => id,
     draftFloorIo: { gardenRoot: () => null }, log: () => {},
   });
   expect(sub).not.toBeNull();

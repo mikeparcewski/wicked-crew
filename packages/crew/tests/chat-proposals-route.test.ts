@@ -8,7 +8,7 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { ArtifactProposal, ChatMessagesResponse, ChatProposalView, ChatTranscriptRecord, HealthResponse } from 'wicked-crew-api-types';
 
@@ -18,7 +18,9 @@ import { ensureProjectInteractiveRoot } from '../src/interactive/bridge-root.js'
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, LaunchRunInput, SessionView } from '../src/core/types.js';
-import { proposalRunId } from '../src/api/chat-proposals.js';
+import { DocBindingStore } from '../src/interactive/doc-binding.js';
+import { ChatHistoryStore } from '../src/api/chat-history.js';
+import { RecordingStubDispatcher, proposalRunId } from '../src/api/chat-proposals.js';
 import { removeScratch } from './setup/scratch.js';
 import { withRunViews } from './support/run-views.js';
 
@@ -204,6 +206,104 @@ describe('chat proposals (server, A2)', () => {
       .toEqual({ context: true, instructions: true, proposals: true, create: false, refine: false, theme: true, demo: false, onboard: true });
     expect(((await stub.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse).capabilities?.chatArtifacts)
       .toEqual({ context: true, instructions: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps: ['create', 'refine', 'demo'], onboard: true });
+  });
+
+  it.each(['run', 'retire', 'close', 'delete'] as const)('%s waits for a held Go launch (#1279)', async (action) => {
+    const chatId = `admit-${action}`;
+    await turn(stub, stubListeners, chatId, 'Make a document on coverage', { entry: 'document-static', title: 'Admission', sources: ['chat'] }, { projectId: 'mikes' });
+    const p = await proposalOf(stub, chatId);
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const starting = new Promise<void>((resolve) => { entered = resolve; });
+    const launch = RecordingStubDispatcher.prototype.launch;
+    let ref: string | null = null;
+    let launched = false;
+    const launchSpy = vi.spyOn(RecordingStubDispatcher.prototype, 'launch').mockImplementation(async function (this: RecordingStubDispatcher, d) {
+      ref = d.identity.artifactRef;
+      entered();
+      await held;
+      await launch.call(this, d);
+      launched = true;
+    });
+    const liveSpy = vi.spyOn(RecordingStubDispatcher.prototype, 'live').mockImplementation(async () => launched);
+    const busy = DocBindingStore.prototype.busy;
+    const busySpy = vi.spyOn(DocBindingStore.prototype, 'busy').mockImplementation(function (this: DocBindingStore, asked) {
+      return asked === ref ? { pid: p.pid, runId: 'held-run', base: 0, at: 1, launchingAt: 1 } : busy.call(this, asked);
+    });
+    let go: ReturnType<typeof decide> | undefined;
+    let other: Promise<Awaited<ReturnType<typeof decide>>> | undefined;
+    let finished = false;
+    try {
+      go = decide(stub, chatId, p.pid, { decision: 'go' });
+      await starting;
+      const request = action === 'run'
+        ? stub.inject({ method: 'POST', url: '/api/v1/runs', payload: { chatId, problem: 'another job', clisJson: '[{"key":"claude"}]' } })
+        : action === 'retire'
+          ? stub.inject({ method: 'DELETE', url: `/api/v1/projects/mikes/interactive/docs/${ref!.split('/')[1]}` })
+          : stub.inject({ method: action === 'delete' ? 'DELETE' : 'POST', url: `/api/v1/chats/${chatId}${action === 'close' ? '/close' : ''}` });
+      other = request.then((response) => { finished = true; return response; });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(finished, 'the competing request must wait for Go to finish launching').toBe(false);
+      release();
+      expect((await go).statusCode).toBe(200);
+      const response = await other;
+      expect(response.statusCode, response.body).toBe(action === 'run' || action === 'retire' ? 409 : 200);
+      if (action === 'run' || action === 'retire') expect(response.json()).toMatchObject({ code: action === 'run' ? 'chat_busy' : 'document_busy' });
+    } finally {
+      release();
+      await go;
+      await other;
+      launchSpy.mockRestore();
+      liveSpy.mockRestore();
+      busySpy.mockRestore();
+    }
+  });
+
+  it.each(['close', 'delete'] as const)('a %s that waited for Go does not end a chat that reused the id meanwhile (coord r1 on #1720)', async (action) => {
+    const chatId = `reuse-${action}`;
+    await turn(stub, stubListeners, chatId, 'Make a document on coverage', { entry: 'document-static', title: 'Reuse', sources: ['chat'] }, { projectId: 'mikes' });
+    const p = await proposalOf(stub, chatId);
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const starting = new Promise<void>((resolve) => { entered = resolve; });
+    // While the close waits, the chat is closed by another route and a new chat opens on the same id: a new instance.
+    let reused = false;
+    const stateOf = ChatHistoryStore.prototype.stateOf;
+    const stateSpy = vi.spyOn(ChatHistoryStore.prototype, 'stateOf').mockImplementation(function (this: ChatHistoryStore, asked) {
+      const state = stateOf.call(this, asked);
+      return reused && asked === chatId && state !== null ? { ...state, instance: 'a-new-chat-on-this-id' } : state;
+    });
+    const removeSpy = vi.spyOn(ChatHistoryStore.prototype, 'remove');
+    const launch = RecordingStubDispatcher.prototype.launch;
+    const launchSpy = vi.spyOn(RecordingStubDispatcher.prototype, 'launch').mockImplementation(async function (this: RecordingStubDispatcher, d) {
+      entered();
+      await held;
+      await launch.call(this, d);
+      reused = true;
+    });
+    let go: ReturnType<typeof decide> | undefined;
+    let other: ReturnType<typeof decide> | undefined;
+    try {
+      go = decide(stub, chatId, p.pid, { decision: 'go' });
+      await starting;
+      other = stub.inject({ method: action === 'delete' ? 'DELETE' : 'POST', url: `/api/v1/chats/${chatId}${action === 'close' ? '/close' : ''}` });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      release();
+      await go;
+      const response = await other;
+      expect(response.statusCode, response.body).toBe(409);
+      expect(response.json()).toMatchObject({ code: 'chat_changed' });
+      expect(removeSpy.mock.calls.some(([id]) => id === chatId), 'the new chat history is not deleted').toBe(false);
+    } finally {
+      release();
+      await go;
+      await other;
+      launchSpy.mockRestore();
+      removeSpy.mockRestore();
+      stateSpy.mockRestore();
+    }
   });
 
   it('production: the seat is told nothing about making, and a block is cut from the reply but makes no card', async () => {

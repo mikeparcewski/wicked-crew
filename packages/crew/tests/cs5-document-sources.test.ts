@@ -464,8 +464,8 @@ describe('CS5 document input sources', () => {
     expect(p.inputs).toBeUndefined();
     expect(p.needs).toBeUndefined();
     expect(p.sentence).toMatchObject({
-      text: "I'll make {kind} from this conversation, filed in project-a, checked by {checks}.",
-      tokens: [{ id: 'kind' }, { id: 'checks' }], ask: 'Start?',
+      text: "I'll make {kind} from this conversation, filed in project-a, written by {seats}, checked by {checks}.",
+      tokens: [{ id: 'kind' }, { id: 'seats' }, { id: 'checks' }], ask: 'Start?',
     });
     expect((await r.svc.decide('chat', p.pid, { decision: 'go' }, ME, 'instance')).code).toBe(200);
     expect(sources(r.launches[0]!.resolution)).toEqual(['chat']);

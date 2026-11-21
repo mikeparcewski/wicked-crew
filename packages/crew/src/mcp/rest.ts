@@ -589,7 +589,7 @@ export async function probeRestServer(config: McpUpstreamConfig, secret: string 
     return scrubSecrets({ ok: true as const, serverInfo: imported.serverInfo, tools: imported.tools, skipped: imported.skipped, egress }, secrets);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return scrubSecrets({ ok: false as const, error: message, ...(err instanceof DialRefusedError ? { refusal: err.code } : {}) }, secrets);
+    return scrubSecrets({ ok: false as const, error: message, ...(err instanceof DialRefusedError ? { refusal: err.code, detail: err.detail } : {}) }, secrets);
   }
 }
 

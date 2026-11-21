@@ -212,8 +212,9 @@ export class CreateLauncher implements ProposalDispatcher {
       style: this.deps.styleOf(res.what.entry),
       runId: d.identity.runId,
       ...(res.shape !== undefined ? { shape: res.shape } : {}),
-      // Filed under the chat as it is kept now (an archive id after a reuse), never the other chat that took the id.
-      chatId: chatNow ?? binding.chatId,
+      // Resolve this instance when the draft seam records the launch, after its awaits.
+      chatId: binding.chatId,
+      chatInstance: binding.chatInstance,
       proposalId: d.pid,
       artifactRef: ref.ref,
       repos: binding.repos.map((r) => ({ repoRef: r.id, name: r.name, rootPath: r.rootPath })),
