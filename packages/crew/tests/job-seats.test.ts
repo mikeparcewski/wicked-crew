@@ -78,7 +78,7 @@ function rig(roster: string, pick: string, chatState: ChatState = 'claude', crea
     seats: chatState === 'claude' ? ['claude'] : ROSTERS[roster]!.map((s) => s.key),
   };
   const deps: ChatProposalDeps = {
-    flags: () => ({ context: true, proposals: true, create, refine: false, theme: false, demo: false }),
+    flags: () => ({ context: true, instructions: true, proposals: true, create, refine: false, theme: false, demo: false }),
     catalog: CATALOG_SEEDS,
     records: () => [...records],
     append: (_c, rec) => { records.push(rec); return true; },

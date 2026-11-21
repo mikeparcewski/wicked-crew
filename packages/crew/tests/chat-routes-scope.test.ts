@@ -143,7 +143,7 @@ beforeEach(async () => {
   holdReposOnce = null;
   base = mkdtempSync(join(tmpdir(), 'chat-routes-scope-'));
   graphFile = join(base, 'alpha-graph.db');
-  writeFileSync(graphFile, '');
+  writeFileSync(graphFile, 'graph fixture');
   applied = true;
   chatOpen.mockClear();
   signedIn = () => null;

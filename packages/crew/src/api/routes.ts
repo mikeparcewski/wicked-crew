@@ -1912,8 +1912,8 @@ export function registerRoutes(
     'demo',
   ];
   const chatArtifactFlags: import('../core/types.js').ChatArtifactsCapabilities = chatArtifactsStub
-    ? { context: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps, onboard: true }
-    : { context: true, proposals: true, create: realCreate, refine: realRefine, theme: true, demo: false, onboard: true };
+    ? { context: true, instructions: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps, onboard: true }
+    : { context: true, instructions: true, proposals: true, create: realCreate, refine: realRefine, theme: true, demo: false, onboard: true };
   const proposalLaunchers = new LaunchOnceRegistry();
   proposalLaunchers.register('theme', new ThemeLauncher());
   // crew-0182: what an onboard card is resolved and its Go is checked against (one set of reads for both).

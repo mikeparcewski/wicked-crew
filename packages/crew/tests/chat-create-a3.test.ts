@@ -388,7 +388,7 @@ function world(o: { bindingsDir?: string; records?: Map<string, ChatTranscriptRe
     packetDeps: packetDeps(runs),
   }));
   const deps: ChatProposalDeps = {
-    flags: () => ({ context: true, proposals: true, create: true, refine: false, theme: false, demo: false }),
+    flags: () => ({ context: true, instructions: true, proposals: true, create: true, refine: false, theme: false, demo: false }),
     catalog: CATALOG_SEEDS,
     records: (c) => [...(w.records.get(c) ?? [])],
     append: (c, rec) => {
