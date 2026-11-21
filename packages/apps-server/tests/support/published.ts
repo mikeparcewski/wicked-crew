@@ -30,6 +30,8 @@ export async function publishSite(rig: WriteRig, body: AppPublishBody, endpoints
     files: at.files,
     body,
     registry: rig.h.registry,
+    // The rig's app is in no project and its sources carry no project controls: every source is visible.
+    maySee: async () => true,
     grantOf: (id) => rig.h.writePath.getGrant('desk', id),
     endpoints,
   });
