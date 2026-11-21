@@ -3709,9 +3709,11 @@ export interface RuleCouncilRecord {
   /** Why there is no ruling: `no_quorum`, `timeout`, `seats_benched`, `cap`, `error`,
    *  `incomplete_evidence` or `identity_unknown`, then the detail. ABSENT on a ruling. */
   reason?: string;
-  /** (crew#1658, core crew#972) Set when ONE arbiter settled the dispute because no three seats distinct
-   *  from every party could sit: the seat and its footing, in words (`claude (distinct from every party)`).
-   *  ABSENT unless an arbiter sat, and from an older engine; never `null`. */
+  /** (crew#1658, core crew#972) Set when ONE arbiter sat in place of a council, because no three seats
+   *  distinct from every party could: the seat and its footing, in words (`claude (distinct from every
+   *  party)`). It says who sat, not that the dispute was settled: an arbiter's vote that did not count leaves
+   *  no `ruling` (the row stays `disputed`). ABSENT unless an arbiter sat and voted, and from an older
+   *  engine; never `null`. */
   arbiter?: string;
 }
 
