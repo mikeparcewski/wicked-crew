@@ -317,7 +317,7 @@ export class McpBroker {
       }
       secret = resolved.secret;
     } catch (err) {
-      // A gh credential refused by name (signed out, another active account): the refusal carries that code.
+      // A gh credential refused by name (not installed, signed out, no token): the refusal carries that code.
       if (err instanceof McpRegistryError && err.code.startsWith('gh_')) {
         return this.refuse(span, 'upstream_error', 'allow', verdict.ruleIds[0] ?? 'policy', verdict.ruleIds, err.message, 'the operator signs gh in as the pinned account', err.code);
       }

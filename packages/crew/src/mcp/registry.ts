@@ -1081,7 +1081,7 @@ export class McpRegistry {
   }
 
   /**
-   * `resolveSecret` for this registry: a gh refusal (not installed, signed out, another active account) is a named 409,
+   * `resolveSecret` for this registry: a gh refusal (not installed, signed out, no token) is a named 409,
    * so every route that reads a source's secret answers its code instead of a 500.
    */
   private async resolve(ref: string): Promise<string | null> {

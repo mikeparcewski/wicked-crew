@@ -90,18 +90,6 @@ describe('gh-cli references', () => {
     expect(store.sets).toBe(0);
   });
 
-  it('refuses another active account by name, without reading any token', async () => {
-    const gh = fakeGh({ statusText: status(block('alice', false), block('bob', true)) });
-    await expect(resolveSecret('gh-cli:alice', new MemorySecretStore(), {}, gh)).rejects.toMatchObject({ code: 'gh_account_mismatch' });
-    expect(tokenCalls(gh)).toEqual([]);
-  });
-
-  it('refuses several accounts with no provable active one', async () => {
-    const gh = fakeGh({ statusText: status(block('alice', null), block('bob', null)) });
-    await expect(resolveSecret('gh-cli:alice', new MemorySecretStore(), {}, gh)).rejects.toMatchObject({ code: 'gh_account_mismatch' });
-    expect(tokenCalls(gh)).toEqual([]);
-  });
-
   it('names signed-out, not-installed and no-token, and never falls back to GH_TOKEN', async () => {
     const env = { GH_TOKEN: 'ghp_env_token', GITHUB_TOKEN: 'ghp_env_token2' };
     const store = new MemorySecretStore();
@@ -134,7 +122,7 @@ describe('gh-cli references', () => {
   it('secretIsSet answers from the status alone', async () => {
     const gh = fakeGh({ statusText: status(block('alice', true)) });
     expect(await secretIsSet('gh-cli:alice', new MemorySecretStore(), {}, gh)).toBe(true);
-    gh.state.statusText = status(block('alice', false), block('bob', true));
+    gh.state.statusText = status(block('bob', true));
     expect(await secretIsSet('gh-cli:alice', new MemorySecretStore(), {}, gh)).toBe(false);
     expect(tokenCalls(gh)).toEqual([]);
   });
@@ -194,17 +182,6 @@ describe('a GitHub source saved with gh-cli', () => {
     const stored = JSON.stringify(await reread.list());
     expect(stored).toContain('gh-cli:alice');
     expect(stored).not.toContain('ghp_synthetic');
-  });
-
-  it('refuses a different active account on preview and on a read, and sends nothing', async () => {
-    const p = await registry.preview(config());
-    await registry.save(p.previewHash);
-    seen.length = 0;
-    gh.state.statusText = status(block('alice', false), block('bob', true));
-    await expect(registry.preview(config())).rejects.toMatchObject({ status: 409, code: 'gh_account_mismatch' });
-    await expect(registry.callSecret(config())).rejects.toMatchObject({ status: 409, code: 'gh_account_mismatch' });
-    expect(seen).toEqual([]);
-    expect(tokenCalls(gh).length).toBe(1); // the first preview's, none after the switch
   });
 
   it('tests and reads a source pinned to a non-active account with that account\'s credential, storing none', async () => {

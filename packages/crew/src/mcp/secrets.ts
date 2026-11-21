@@ -14,7 +14,7 @@
 
 import { execFile, spawn } from 'node:child_process';
 
-import { isGitHubLogin, parseGhActiveLogin, parseGhAuthStatusLogins } from '../core/deliver.js';
+import { isGitHubLogin, parseGhAuthStatusLogins } from '../core/deliver.js';
 import { ghChildEnv } from '../core/deliver-credentials.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 
@@ -52,7 +52,7 @@ export function parseSecretRef(ref: string): SecretRef | null {
 
 // ── The GitHub CLI's sign-in (`gh-cli:<login>`) ──────────────────────────────────────────────
 
-export type GhCliErrorCode = 'gh_not_installed' | 'gh_signed_out' | 'gh_account_mismatch' | 'gh_token_unavailable';
+export type GhCliErrorCode = 'gh_not_installed' | 'gh_signed_out' | 'gh_token_unavailable';
 
 /** A named refusal of the gh credential. The message carries logins only — never a token or gh's own output. */
 export class GhCliError extends Error {
@@ -89,16 +89,16 @@ export const defaultGhRunner: GhRunner = (args) =>
     });
   });
 
-/** The pinned account is signed in to gh and is the ACTIVE one, or a named refusal; never another account. */
+/**
+ * The pinned account is signed in to gh, or a named refusal. Which account is gh's ACTIVE one does not matter: the
+ * token is read with `--user <account>`, so it is always the pinned account's own credential, and gh's
+ * machine-wide active account is never read for identity nor switched.
+ */
 async function requirePinnedGhAccount(account: string, gh: GhRunner): Promise<void> {
   const r = await gh(['auth', 'status', '--hostname', 'github.com']);
   if (r.enoent === true) throw new GhCliError('gh_not_installed', 'the GitHub CLI (gh) is not installed on this machine');
-  const text = `${r.stdout}\n${r.stderr}`;
-  const logins = parseGhAuthStatusLogins(text);
+  const logins = parseGhAuthStatusLogins(`${r.stdout}\n${r.stderr}`);
   if (!logins.includes(account)) throw new GhCliError('gh_signed_out', `gh is not signed in to github.com as ${account}; run gh auth login as ${account}`);
-  const active = parseGhActiveLogin(text);
-  if (active === null) throw new GhCliError('gh_account_mismatch', `gh has several accounts signed in and the active one cannot be told; run gh auth switch --user ${account}`);
-  if (active !== account) throw new GhCliError('gh_account_mismatch', `this source is pinned to ${account} but gh's active account is ${active}; run gh auth switch --user ${account}`);
 }
 
 /** The OS secret store, behind a seam so tests never touch a real keychain. */
@@ -119,7 +119,8 @@ export async function resolveSecret(ref: string, store: SecretStore, env: NodeJS
   if (parsed === null) return null;
   if (parsed.kind === 'gh-cli') {
     await requirePinnedGhAccount(parsed.account, gh);
-    // The token is read for this call only: never memoised, never stored (the same command the deliver step uses).
+    // The pinned account's own token, whichever account is active; read for this call only: never memoised, never
+    // stored (the same command the deliver step uses).
     const r = await gh(['auth', 'token', '--hostname', 'github.com', '--user', parsed.account]);
     const token = r.stdout.trim();
     if (r.code !== 0 || token === '') throw new GhCliError('gh_token_unavailable', `gh holds no token for ${parsed.account}; run gh auth login as ${parsed.account}`);
@@ -138,7 +139,7 @@ export async function secretIsSet(ref: string, store: SecretStore, env: NodeJS.P
   const parsed = parseSecretRef(ref);
   if (parsed === null) return false;
   if (parsed.kind === 'gh-cli') {
-    // Signed in AND active, from `gh auth status` alone: the token is never read to answer this.
+    // Signed in as the pinned account (active or not), from `gh auth status` alone: the token is never read to answer this.
     try {
       await requirePinnedGhAccount(parsed.account, gh);
       return true;

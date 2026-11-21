@@ -14333,8 +14333,9 @@ export interface McpAuthConfig {
    * The secret reference: `keychain:wicked-mcp/<name>`, `env:<NAME>`, or (api-types 0.206.0, wicked-crew#1500; a GitHub project-management source over
    * `mcp-http` / `mcp-stdio` only) `gh-cli:<github login>` — the GitHub CLI's sign-in for that account. A `gh-cli`
    * reference stores the account name only: crew reads the token from gh at the moment of each call and never keeps
-   * it. The account is pinned: when gh's active account is another one, or gh is not installed or not signed in, the
-   * call is refused with a named 409 (`gh_account_mismatch`, `gh_not_installed`, `gh_signed_out`,
+   * it. The account is pinned: crew reads that account's own token (`gh auth token --user <login>`) whichever account
+   * is gh's active one, and never switches gh's active account. When gh is not installed, is not signed in as that
+   * account or holds no token for it, the call is refused with a named 409 (`gh_not_installed`, `gh_signed_out`,
    * `gh_token_unavailable`) and nothing is sent. A `gh-cli` ref on any other source is a 400 `gh_cli_not_allowed`.
    */
   ref: string;
