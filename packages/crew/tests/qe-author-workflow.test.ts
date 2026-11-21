@@ -450,7 +450,10 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     mkdirSync(join(root, 'node_modules', '.bin'), { recursive: true });
     mkdirSync(join(root, 'tests'), { recursive: true });
     writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'preexisting-fixture', private: true, devDependencies: { vitest: '^3.0.0' } }));
-    // Vitest shim: per-file run of the NEW produced file exits 0; full suite always exits 1 (broken pre-existing test)
+    // Vitest shim: per-file run of the NEW produced file exits 0; full suite always exits 1 (broken pre-existing test).
+    // The failing run names its failing test the way vitest does (` FAIL  <file> > <title>`): the engine's verify
+    // compares failing test identities at head and base (wicked-core#1320), so a failure it cannot name is not
+    // shown to be main's.
     writeFileSync(
       join(root, 'node_modules', '.bin', 'vitest'),
       [
@@ -460,6 +463,7 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
         '  echo "      Tests  1 passed (1)"',
         '  exit 0',
         'fi',
+        'echo " FAIL  tests/broken.test.ts > broken"',
         'echo "      Tests  0 passed, 1 failed (1)"',
         'exit 1',
       ].join('\n'),
