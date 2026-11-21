@@ -684,6 +684,7 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     const propose = park('fixed-binding');
     expect((await send('fixed-binding')).statusCode).toBe(202);
     expect(propose).toHaveBeenCalledOnce();
+    expect(adapter.confirmGate).toHaveBeenCalledExactlyOnceWith('run-p1', true);
     expect(launched).toHaveLength(1);
   });
 

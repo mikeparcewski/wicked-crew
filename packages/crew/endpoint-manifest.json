@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.216.0",
+  "apiTypesVersion": "0.217.0",
   "endpoints": [
     {
       "method": "GET",
@@ -848,6 +848,7 @@
       "statusCodes": [
         200,
         400,
+        409,
         501
       ]
     },
@@ -2428,9 +2429,14 @@
     {
       "method": "POST",
       "path": "/api/v1/runs/:id/resume",
-      "requestType": null,
+      "requestType": "ResumeRequest",
       "responseType": null,
-      "statusCodes": []
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409
+      ]
     },
     {
       "method": "POST",

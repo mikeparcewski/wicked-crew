@@ -2784,6 +2784,12 @@ export interface LaunchPlan {
   monitors?: { asked: number };
 }
 
+/** `POST /runs/:id/resume`. An absent or empty body remains valid. */
+export interface ResumeRequest {
+  /** The gate the decision was made on; mismatch 409 `gate_changed`. */
+  ord?: number;
+}
+
 /**
  * Body of `POST /runs/:id/reassign` — the manual operator lever that reassigns a wedged run's
  * cursor unit through the same engine path the stall-watchdog's automatic escalation uses
@@ -2793,6 +2799,8 @@ export interface LaunchPlan {
  * the engine refuses (see `WorkUnit.reassign_refused`) is a 409 with the gate still open.
  */
 export interface ReassignRequest {
+  /** The gate (or, for an executing reassign, the cursor unit) the decision was made on; mismatch 409 `gate_changed`. */
+  ord?: number;
   cli?: string;
   /**
    * An operator note that rides the retry as the gate approve's amendment (crew#1153). Only a run
@@ -4890,8 +4898,15 @@ export type SteeringType =
  * where absence reads as the serde defaults (`steering_type` architecture, `weight` 1.0, no
  * enforcement half). A rule WITHOUT `effect` is recall-only, exactly as before the merge; a rule
  * WITH one participates in decide()/select() the way a `GovernancePolicy` used to.
+ *
+ * `POST /governance/rules` accepts optional `If-Match: "<revision>"` (quotes optional).
+ * A missing rule or revision mismatch answers 409 `{ code: 'rule_changed', error, revision }`,
+ * with the current revision or `null` when absent. Success returns `{ status: 'ok', revision? }`;
+ * `revision` is included only when the saved rule can be read back.
  */
 export interface ConformanceRule {
+  /** Read-only, server-set content revision; ignored on write. */
+  readonly revision?: string;
   id: string;
   rule_type: 'pattern' | 'policy';
   statement: string;
@@ -13735,6 +13750,8 @@ export interface RunTeamResponse {
  * route answers {@link PlanProposalResponse}. A mid-run edit carries no `touch` / `override`.
  */
 export interface EditPlanBody {
+  /** The gate the decision was made on; mismatch 409 `gate_changed`. Ignored for an executing run. */
+  ord?: number;
   plan: LaunchPlan;
   /**
    * The caller's id for this edit: the engine's idempotency key for a mid-run edit, so a retried
@@ -13969,7 +13986,10 @@ export interface DecidedGate {
   ord: number | null;
   /** Unix millis. */
   decidedAt: number;
-  decision: 'approve' | 'request_changes' | 'reject' | 'edit_plan';
+  /** A re-check is not an approval; seat records and order previews must not count it as one. */
+  decision: 'approve' | 'request_changes' | 'reject' | 'edit_plan' | 'recheck';
+  /** The recorded decision arm, when present on the audit line. */
+  action?: string;
   /** Who decided: a person's actor id, or `standing-order:<id>`. */
   actor: string;
   /** A standing order decided it (the actor is `standing-order:<id>`). */
