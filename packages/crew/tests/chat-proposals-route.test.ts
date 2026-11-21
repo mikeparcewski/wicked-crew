@@ -19,6 +19,7 @@ import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, LaunchRunInput, SessionView } from '../src/core/types.js';
 import { DocBindingStore } from '../src/interactive/doc-binding.js';
+import { ChatHistoryStore } from '../src/api/chat-history.js';
 import { RecordingStubDispatcher, proposalRunId } from '../src/api/chat-proposals.js';
 import { removeScratch } from './setup/scratch.js';
 import { withRunViews } from './support/run-views.js';
@@ -256,6 +257,52 @@ describe('chat proposals (server, A2)', () => {
       launchSpy.mockRestore();
       liveSpy.mockRestore();
       busySpy.mockRestore();
+    }
+  });
+
+  it.each(['close', 'delete'] as const)('a %s that waited for Go does not end a chat that reused the id meanwhile (coord r1 on #1720)', async (action) => {
+    const chatId = `reuse-${action}`;
+    await turn(stub, stubListeners, chatId, 'Make a document on coverage', { entry: 'document-static', title: 'Reuse', sources: ['chat'] }, { projectId: 'mikes' });
+    const p = await proposalOf(stub, chatId);
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const starting = new Promise<void>((resolve) => { entered = resolve; });
+    // While the close waits, the chat is closed by another route and a new chat opens on the same id: a new instance.
+    let reused = false;
+    const stateOf = ChatHistoryStore.prototype.stateOf;
+    const stateSpy = vi.spyOn(ChatHistoryStore.prototype, 'stateOf').mockImplementation(function (this: ChatHistoryStore, asked) {
+      const state = stateOf.call(this, asked);
+      return reused && asked === chatId && state !== null ? { ...state, instance: 'a-new-chat-on-this-id' } : state;
+    });
+    const removeSpy = vi.spyOn(ChatHistoryStore.prototype, 'remove');
+    const launch = RecordingStubDispatcher.prototype.launch;
+    const launchSpy = vi.spyOn(RecordingStubDispatcher.prototype, 'launch').mockImplementation(async function (this: RecordingStubDispatcher, d) {
+      entered();
+      await held;
+      await launch.call(this, d);
+      reused = true;
+    });
+    let go: ReturnType<typeof decide> | undefined;
+    let other: ReturnType<typeof decide> | undefined;
+    try {
+      go = decide(stub, chatId, p.pid, { decision: 'go' });
+      await starting;
+      other = stub.inject({ method: action === 'delete' ? 'DELETE' : 'POST', url: `/api/v1/chats/${chatId}${action === 'close' ? '/close' : ''}` });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      release();
+      await go;
+      const response = await other;
+      expect(response.statusCode, response.body).toBe(409);
+      expect(response.json()).toMatchObject({ code: 'chat_changed' });
+      expect(removeSpy.mock.calls.some(([id]) => id === chatId), 'the new chat history is not deleted').toBe(false);
+    } finally {
+      release();
+      await go;
+      await other;
+      launchSpy.mockRestore();
+      removeSpy.mockRestore();
+      stateSpy.mockRestore();
     }
   });
 

@@ -6700,7 +6700,10 @@ export function registerRoutes(
     /** Runs right after the close fold, with NO await before it: the id cannot have been reopened
      *  yet, so a history operation here can never land on a replacement chat (xreview r1 on #1140). */
     afterFold?: () => void,
-  ): Promise<{ ok: true; cancelError?: { runId: string; error: string } } | { ok: false; error: string }> => {
+  ): Promise<{ ok: true; cancelError?: { runId: string; error: string } } | { ok: false; error: string; code?: 'chat_changed' }> => {
+    // crew#1279 (coord r1 on #1720): the instance the caller checked, read before the wait for a held Go. A chat closed
+    // by another route meanwhile whose id a new chat reused is not this close's to end (fence by generation).
+    const expected = chatHistory?.stateOf(id)?.instance ?? null;
     // DES-SYSTEM-CHAT: the answering CLI the history names is the path's PA, while it is known.
     const pa = askPaths.get(id)?.pa;
     if (pa !== undefined && pa !== null) chatHistory?.setCli(id, pa);
@@ -6710,7 +6713,13 @@ export function registerRoutes(
     // (nothing of the closed chat can land on a reuse — codex on #808 r5).
     // crew#1279: the close is committed under Go's admission of this chat, so it waits for a launch in flight. Only the
     // hold is under it: a second DELETE still joins the settling close at once.
-    const ticket = await chatProposals.admitChat(id, async () => chatScopes.holdClose(id));
+    const ticket = await chatProposals.admitChat(id, async () => {
+      const now = chatHistory?.stateOf(id)?.instance ?? null;
+      return now !== null && now !== expected ? ('changed' as const) : chatScopes.holdClose(id);
+    });
+    if (ticket === 'changed') {
+      return { ok: false as const, code: 'chat_changed' as const, error: `chat ${id} was closed while this request waited, and its id now belongs to a new chat; nothing was changed` };
+    }
     if (ticket === null) return { ok: true as const };
     chatTurns.closed(id);
     // ASK-C1: End cancels the path (`path.ended{status:"cancelled"}`); the engine holds no chat
@@ -6765,7 +6774,7 @@ export function registerRoutes(
       chatAttachments.removeChat(id);
     };
     const ended = await endChat(id, removeHistory);
-    if (!ended.ok) return reply.code(400).send({ error: ended.error });
+    if (!ended.ok) return ended.code !== undefined ? reply.code(409).send({ code: ended.code, error: ended.error }) : reply.code(400).send({ error: ended.error });
     // A chat the daemon no longer held (no fold ran): its kept history goes too.
     if (chatHistory?.entry(id) !== null && chatScopes.get(id) === undefined && askPaths.get(id) === undefined) removeHistory();
     return { ok: true };
@@ -6774,7 +6783,7 @@ export function registerRoutes(
   // DES-SYSTEM-CHAT (api-types 0.137.0): end the chat and KEEP its history and attachments.
   app.post(
     `${V}/chats/:id/close`,
-    { config: { manifest: { responseType: 'ChatCloseResponse', statusCodes: [200, 400, 404, 501, 502] } } },
+    { config: { manifest: { responseType: 'ChatCloseResponse', statusCodes: [200, 400, 404, 409, 501, 502] } } },
     async (req, reply) => {
       const { id } = req.params as { id: string };
       if (chatHistory === null) return reply.code(501).send({ error: 'this daemon keeps no chat history' });
@@ -6786,7 +6795,7 @@ export function registerRoutes(
       // The close fold archives it; closing here too (before the id is free) covers a route set
       // without the fold, and is a no-op after it.
       const ended = await endChat(id, () => chatHistory.closed(id));
-      if (!ended.ok) return reply.code(400).send({ error: ended.error });
+      if (!ended.ok) return ended.code !== undefined ? reply.code(409).send({ code: ended.code, error: ended.error }) : reply.code(400).send({ error: ended.error });
       const chat = chatHistory.entry(id);
       if (chat === null) return reply.code(404).send({ error: `chat ${id} has no history on this daemon` });
       if (ended.cancelError !== undefined) {
