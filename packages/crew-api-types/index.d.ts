@@ -10017,6 +10017,10 @@ export interface ArtifactProposal {
   target?: { ref: string; title: string; base: number };
   /** refine: the parts the seat pointed at (`data-wid`s); hand edits are kept unless the person says otherwise. */
   touches?: string[];
+  /** (api-types 0.223.0) refine: the person's selected anchors, kept on a head refresh. */
+  anchors?: string[];
+  /** (api-types 0.223.0) refine retry: ids preselected Let this change, from the failed attempt. */
+  allow?: string[];
   /**
    * (api-types 0.197.0, DES-CHAT-ARTIFACTS-001 §6.1-6.2, A5) refine: the person's own edits this revision keeps,
    * recomputed by crew from the document's version lineage on the proposal's `target.base`. Each is kept unless the

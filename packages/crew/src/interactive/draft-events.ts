@@ -83,7 +83,7 @@ import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
 import { emitOnBus, requireEngineBus, tapBus, type BusEvent } from '../core/bus.js';
 import type { DocBindingStore } from './doc-binding.js';
 import { recordLanding, type LandingRecordStore } from './landing-record.js';
-import { UNFILED_MOUNT } from '../api/chat-context.js';
+import { chatMount, parseArtifactRef, UNFILED_MOUNT } from '../api/chat-context.js';
 import { packetClause, packetDirOf, type SourcePacket } from './source-packet.js';
 
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
@@ -564,12 +564,10 @@ export function isAnotherProjectsDraftKey(key: string, documentId: string, proje
   return key === documentId && own !== documentId; // the unfiled document's row, when this one is filed
 }
 
-/** The per-run directory under the draft root is `<doc>` for every project — studio's run↔thread
- *  binding reads `interactive-drafts/<doc>` back off the run's write root and narrows by `project_id`
- *  (`wicked-studio src/interactive/runBinding.ts`), so the directory grammar cannot carry the
- *  partition. Residual, documented: two projects drafting the SAME slug at the SAME time share that
- *  per-doc directory (deliverable name and snapshot subdir); their keys, announces and ledger rows
- *  do not. */
+/** The per-document directory under the draft root is `<mount>__<doc>`: the chat's mount, or `_unfiled` for
+ *  Unfiled (including project id `default`). Studio's run↔thread binding accepts this grammar since
+ *  wicked-studio#1277 (`src/interactive/runBinding.ts`), so same-named documents in different mounts have
+ *  separate deliverables and snapshots. Proposal-bound attempts use `attempt-<run>` below that directory. */
 
 /** wicked-studio's brand-learn scratch document (`src/theming/scratchDoc.ts`): a FIXED name, kind
  *  `source`, a FIXED brief, one per project, created so a theme learn has a workspace to land tokens
@@ -797,7 +795,7 @@ export interface InteractiveDraftSubscription {
   /** A3: remove earlier attempts' folders of a bound document BEFORE a new attempt reads its base, so an announce of an
    *  earlier attempt still on the bus can no longer land (its file is gone). Throws when one could not be removed: the new
    *  attempt does not start. */
-  fenceBound(documentId: string, runIds: readonly string[]): void;
+  fenceBound(documentId: string, runIds: readonly string[], mount: string): void;
 }
 
 interface InFlight {
@@ -1370,7 +1368,7 @@ export async function startInteractiveDraftSubscriber(
     // A3: a document a chat proposal made is never answered with a fresh random-id launch. Its Go recorded the binding
     // BEFORE the create, so the trigger finds it and hands the document to the proposal's one launcher per run id,
     // which adopts the run Go already started (or starts the one a lost trigger never did).
-    const boundRef = `${doc.projectId ?? UNFILED_MOUNT}/${doc.documentId}`;
+    const boundRef = `${chatMount(doc.projectId) ?? UNFILED_MOUNT}/${doc.documentId}`;
     if (opts.bindings?.get(boundRef) != null) {
       log(`[interactive-draft] doc ${doc.documentId}${where} was made by a chat proposal — its launcher answers it`);
       // Not awaited: the launcher waits for Go's own launch (the run id's lock), which must not hold up other documents.
@@ -1407,7 +1405,9 @@ export async function startInteractiveDraftSubscriber(
     // snapshot — cross-project exposure through the governance boundary itself.
     // NOT created here (Copilot round 2): runDir is only mkdir'd after the snapshot helper's
     // containment check has ruled the location safe — see the pre-launch mkdir below.
-    const runDir = join(draftDir, doc.documentId);
+    const ref = parseArtifactRef(`${chatMount(doc.projectId) ?? UNFILED_MOUNT}/${doc.documentId}`);
+    if (ref === null) throw new Error('the draft names an invalid document mount');
+    const runDir = join(draftDir, `${ref.mount}__${doc.documentId}`);
     // A3: a proposal-bound attempt works in its own folder: its deliverable and packet never share a name with an
     // earlier attempt's (or a same-named document's in another project, once that attempt ended).
     const attemptDir = bound !== undefined ? join(runDir, attemptDirName(runId)) : runDir;
@@ -1883,8 +1883,12 @@ export async function startInteractiveDraftSubscriber(
         ...(opts.bindings?.all() ?? []).filter((b) => b.attempts.some((a) => a.outcome === undefined && (a.launchingAt !== undefined || a.launchedAt !== undefined || a.emittedAt !== undefined))).map((b) => b.doc),
       ]),
     ],
-    fenceBound: (documentId: string, runIds: readonly string[]) => {
-      const left = removeAttemptDirs(join(draftDir, documentId), runIds);
+    fenceBound: (documentId: string, runIds: readonly string[], mount: string) => {
+      // Fence pre-upgrade scratch too; no flight survives a restart.
+      const left = [
+        ...removeAttemptDirs(join(draftDir, `${mount}__${documentId}`), runIds),
+        ...removeAttemptDirs(join(draftDir, documentId), runIds),
+      ];
       if (left.length > 0) throw new Error(`an earlier attempt of this document could not be fenced (${left.join(', ')} is still there)`);
     },
     launchBound: async (spec: BoundDraft) => {

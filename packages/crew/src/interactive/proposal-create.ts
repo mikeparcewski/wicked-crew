@@ -20,7 +20,7 @@
 
 import type { ArtifactProposal, ChatTranscriptRecord, ProposalIdentity, SessionView } from '../core/types.js';
 import { parseArtifactRef, UNFILED_MOUNT } from '../api/chat-context.js';
-import { foldProposals, type ProposalDispatch, type ProposalDispatcher } from '../api/chat-proposals.js';
+import { LaunchRefusal, foldProposals, type ProposalDispatch, type ProposalDispatcher } from '../api/chat-proposals.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import { realpathSync } from 'node:fs';
 
@@ -28,7 +28,7 @@ import { readBeneath } from '../api/beneath.js';
 import { readDocHead } from './chat-events.js';
 import type { BoundRepo, DocBinding, DocBindingAttempt, DocBindingStore } from './doc-binding.js';
 import type { BoundDraft, BoundOutcome } from './draft-events.js';
-import { buildSourcePacket, type PacketDeps } from './source-packet.js';
+import { buildSourcePacket, packetCutoff, type PacketDeps, type SourcePacket } from './source-packet.js';
 
 export interface CreateLauncherDeps {
   bindings: DocBindingStore;
@@ -41,7 +41,7 @@ export interface CreateLauncherDeps {
   /** The draft seam's proposal-bound launch; `null` when the seam is not armed (nothing can draft). */
   launchBound: ((spec: BoundDraft) => Promise<void>) | null;
   /** Remove earlier attempts' folders of the document before this attempt reads its base (`fenceBound`). */
-  fence?: (documentId: string, runIds: readonly string[]) => void;
+  fence?: (documentId: string, runIds: readonly string[], mount: string) => void;
   /** The chat's records (live transcript or kept history). */
   records(chatId: string): ChatTranscriptRecord[];
   /** The chat's instance now (its history nonce), or `null`. */
@@ -59,6 +59,21 @@ export interface CreateLauncherDeps {
   styleOf(entry: string | null): string;
   packetDeps: PacketDeps;
   log?: (msg: string) => void;
+}
+
+/** Every source the card promised must reach the run. Partial chat notes still keep their token. */
+export function refuseLostSources(resolution: ArtifactProposal, packet: SourcePacket): void {
+  const promised = new Set([
+    ...resolution.sources.filter((s) => s.status === 'ok').map((s) => s.token),
+    ...(resolution.sentence?.tokens.flatMap((t) => t.kind === 'documents' ? (t.documents ?? []).filter((s) => s.status === 'ok').map((s) => s.token) : []) ?? []),
+  ]);
+  const lost = packet.struck.filter((s) => promised.has(s.token) && packet.tokens[s.token] === undefined);
+  if (lost.length === 0) return;
+  const overCap = lost.some((s) => /(?:too large|(?:over|pass) \d+ KB)/i.test(s.reason));
+  throw new LaunchRefusal(409, {
+    code: overCap ? 'packet_over_cap' : 'source_gone',
+    error: lost.map((s) => `${s.token} cannot be used (${s.reason})`).join('; '),
+  });
 }
 
 export class CreateLauncher implements ProposalDispatcher {
@@ -97,7 +112,7 @@ export class CreateLauncher implements ProposalDispatcher {
     const root = await this.deps.docsRoot(ref.projectId);
     if (root === null) throw new Error(`${projectId === null ? 'Unfiled' : `project ${projectId}`} is no longer on this daemon`);
     // An earlier attempt's folder goes BEFORE the base is read: an announce of it still on the bus can no longer land.
-    this.deps.fence?.(ref.doc, (this.deps.bindings.get(ref.ref)?.attempts ?? []).map((a) => a.runId).filter((id) => id !== d.identity.runId));
+    this.deps.fence?.(ref.doc, (this.deps.bindings.get(ref.ref)?.attempts ?? []).map((a) => a.runId).filter((id) => id !== d.identity.runId), ref.mount);
     const head = readDocHead(root, ref.doc);
 
     // 1. Recorded before anything is created or launched. A retry keeps the binding's repositories, graph, cutoff, chat
@@ -123,7 +138,7 @@ export class CreateLauncher implements ProposalDispatcher {
         chatInstance: this.deps.instanceOf(d.chatId),
         scopeProject,
         proposalId: d.pid,
-        cutoffTurnId: res.turnId,
+        cutoffTurnId: packetCutoff(this.deps.records(d.chatId), d.pid, res.turnId),
         repos,
         graphDb,
       },
@@ -182,10 +197,7 @@ export class CreateLauncher implements ProposalDispatcher {
       },
       this.deps.packetDeps,
     );
-    // Bytes can change after Go's authorization. A promised document lost at staging must hold the draft too.
-    const promised = new Set(res.sentence?.tokens.flatMap((t) => t.kind === 'documents' ? (t.documents ?? []).filter((s) => s.status === 'ok').map((s) => s.token) : []) ?? []);
-    const lost = packet.struck.find((s) => promised.has(s.token));
-    if (lost !== undefined) throw new Error(`${lost.token} cannot be used (${lost.reason})`);
+    refuseLostSources(res, packet);
     // Read again after the packet's awaits: a document retired meanwhile is refused here, not drafted (xreview r5).
     refuseUnanswerable();
     this.deps.bindings.addPacket(ref.ref, packet.canonical, packet.tokens);
@@ -246,9 +258,9 @@ export interface ReconcileDeps {
   bindings: DocBindingStore;
   sessions(): Promise<SessionView[]>;
   cancelRun(runId: string): Promise<unknown>;
-  /** The document's versions now: its head and, per version, the run that made it when interactive records that (the
-   *  I1 contract: `run_id` on each new entry). `provenance` = the manifest records runs at all. `null` = not readable. */
-  docVersions(projectId: string | null, doc: string): { head: number; byRun: Map<string, number>; provenance: boolean } | null;
+  /** The document's versions now: its head and, per version, the run that made it (the
+   *  I1 contract: `run_id` on each new entry). `null` = not readable. */
+  docVersions(projectId: string | null, doc: string): { head: number; byRun: Map<string, number> } | null;
   /** The id the binding's chat is kept under now (its own, or an archive id after a reuse), or `null`. */
   chatIdOf(chatId: string, instance: string | null): string | null;
   /** Decide an `accepting` proposal whose run exists (A2's adopt). */
@@ -275,8 +287,7 @@ const TERMINAL_STATUSES: ReadonlySet<string> = new Set(['completed', 'cancelled'
  * DES-CHAT-ARTIFACTS-001 §6.2 (A3): at daemon start, BEFORE the generic boot resume (which skips bound runs), every
  * proposal-bound attempt without a recorded outcome is settled. An `accepting` proposal whose run exists is decided, and
  * the run's launch facts are recorded again if a crash lost them. An attempt crew had announced landed when the
- * document's manifest names its run (the I1 contract); before that contract, when the head moved past its base (the
- * best evidence there is, said in the log). Every other attempt with a run lost its seam flight in the restart: its
+ * document's manifest names its run (the I1 contract). Every other attempt with a run lost its seam flight in the restart: its
  * engine run is cancelled to a CONFIRMED terminal state, then "interrupted by a restart" is recorded, and only then are
  * the chat and the document released and Try again offered, so an old attempt never runs beside a new one (a retry
  * also removes the old attempt's folder, so an announce of it still on the bus cannot land). Never a redispatch. An
@@ -309,9 +320,8 @@ export async function reconcileBoundAttempts(deps: ReconcileDeps): Promise<void>
     if (chatNow !== null) await deps.settleAccepting(chatNow, a.pid).catch(() => false);
     if (a.emittedAt !== undefined) {
       const v = deps.docVersions(b.projectId, b.doc);
-      const landedAt = v === null ? undefined : v.provenance ? v.byRun.get(a.runId) : v.head > a.base ? v.head : undefined;
+      const landedAt = v?.byRun.get(a.runId);
       if (landedAt !== undefined) {
-        if (v !== null && !v.provenance) deps.log(`[proposals] boot: ${b.ref} run ${a.runId}: v${landedAt} is past the attempt's base; this interactive records no run per version, so that is taken as its landing`);
         const landed: BoundOutcome = { kind: 'landed', version: landedAt };
         if (deps.bindings.setOutcome(b.ref, a.runId, landed)) deps.onOutcome(b.ref, a.runId, landed);
         continue;
@@ -344,8 +354,7 @@ export async function reconcileBoundAttempts(deps: ReconcileDeps): Promise<void>
 
 /**
  * A document's head and which run made each version, read from its `versions.json` beneath the docs root (no link
- * followed). `provenance` is whether the manifest records runs at all (interactive's I1 contract writes `run_id` on
- * every new entry; an older interactive writes none). `null` when the manifest cannot be read.
+ * followed). `null` when the manifest cannot be read.
  */
 /**
  * The chat a recovered attempt is filed under: the binding's own chat instance where it is kept now (its archive id after
@@ -371,20 +380,18 @@ export function recoveredLaunchDetail(
   return { deliver: 'none', channel: 'studio', actor: b.owner, ...(chatNow !== null ? { chatId: chatNow } : {}), proposalId: a.pid, artifactRef: b.ref, recoveredAtBoot: true };
 }
 
-export function docVersionsOf(docsRoot: string, doc: string): { head: number; byRun: Map<string, number>; provenance: boolean } | null {
+export function docVersionsOf(docsRoot: string, doc: string): { head: number; byRun: Map<string, number> } | null {
   if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(doc)) return null;
   try {
     const root = realpathSync(docsRoot);
     const m = JSON.parse(readBeneath(root, `${doc}/versions.json`, 2 * 1024 * 1024).data.toString('utf8')) as { head?: unknown; versions?: unknown };
     if (typeof m.head !== 'number' || !Number.isInteger(m.head) || m.head < 0) return null;
     const byRun = new Map<string, number>();
-    let provenance = false;
     for (const e of Array.isArray(m.versions) ? (m.versions as Array<Record<string, unknown>>) : []) {
       if (e === null || typeof e !== 'object' || !('run_id' in e)) continue;
-      provenance = true;
       if (typeof e['run_id'] === 'string' && typeof e['version'] === 'number') byRun.set(e['run_id'], e['version']);
     }
-    return { head: m.head, byRun, provenance };
+    return { head: m.head, byRun };
   } catch {
     return null;
   }
