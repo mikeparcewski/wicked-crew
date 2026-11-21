@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.218.0",
+  "apiTypesVersion": "0.219.0",
   "endpoints": [
     {
       "method": "GET",
@@ -139,6 +139,18 @@
         404,
         409,
         503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/apps/:app/calls",
+      "requestType": null,
+      "responseType": "AppCallRecordsResponse",
+      "statusCodes": [
+        200,
+        403,
+        404,
+        501
       ]
     },
     {
@@ -1368,6 +1380,7 @@
         400,
         403,
         404,
+        409,
         503
       ]
     },

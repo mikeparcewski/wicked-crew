@@ -21,7 +21,8 @@ import { createHash } from 'node:crypto';
 
 import { buildClientSchema, getVariableValues, type IntrospectionQuery, Kind, parse } from 'graphql';
 
-import type { Actor, AppCell, AppLock, AppQuery, AppQueryResponse, AppRecallQueryText } from '../../core/types.js';
+import type { Actor, AppCallRecord, AppCell, AppLock, AppQuery, AppQueryResponse, AppRecallQueryText } from '../../core/types.js';
+import { effectiveReadAccepted } from '../../knowledge/registry/entry.js';
 import { canonicalJson, deriveToolClass, effectiveToolClass } from '../../mcp/classify.js';
 import { McpRegistryError } from '../../mcp/registry.js';
 import { invokeMcpTool } from '../../mcp/invoke.js';
@@ -58,19 +59,7 @@ export class AppExecError extends Error {
   }
 }
 
-/** One call record (§7.2 step 6): never a row. */
-export interface AppCallRecord {
-  at: number;
-  viewer: string;
-  app: string;
-  version: number | null;
-  tree: string;
-  query: string;
-  ms: number;
-  rows: number;
-  bytes: number;
-  outcome: 'ok' | 'cached' | string;
-}
+export type { AppCallRecord } from '../../core/types.js';
 
 /**
  * The part of crew's app store the executor and the write path read: an accepted version's files, and
@@ -296,7 +285,7 @@ export class AppExecutor {
       const found = await this.deps.registry!.appTool(source.name, t.value.tool);
       // The tool as the PINNED config's server has it (a save between the two reads is a change, not a mix).
       if (found === null || !found.bound || pinOf(found.config).descriptorHash !== source.pin.descriptorHash) throw changed();
-      if (effectiveToolClass(deriveToolClass(found.tool.annotations), found.tool.classOverride) !== 'read') throw changed();
+      if (effectiveToolClass(deriveToolClass(found.tool.annotations), found.tool.classOverride) !== 'read' || !effectiveReadAccepted(found.tool)) throw changed();
       contract = toolQueryContract(source.kind, found.tool, q.params);
       plan = { kind: 'tool', source, tool: found.tool, args: t.value.args };
     }

@@ -1,5 +1,7 @@
 /** Shapes shared by the SQL drivers (DES-APPS-001 §5.1, §7.5). */
 
+import type { AddressConfirmationDetail } from '../../core/types.js';
+
 import type { AddressPolicy, DialOptions } from '../dialer.js';
 
 /** `verify-full` (Postgres) / `VERIFY_IDENTITY` (MySQL); `disable` only where the dialer allows plaintext. */
@@ -67,6 +69,7 @@ export class SourceQueryError extends Error {
     message: string,
     /** A dialer refusal's code (`address_unconfirmed`, …) when the dialer refused the connection. */
     readonly refusal: string | null = null,
+    readonly detail: AddressConfirmationDetail = {},
   ) {
     super(message);
     this.name = 'SourceQueryError';

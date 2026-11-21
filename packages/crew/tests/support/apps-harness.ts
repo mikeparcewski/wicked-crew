@@ -55,7 +55,7 @@ export interface Harness {
   env: Record<string, string>;
   call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: unknown, as?: keyof typeof TOKENS): Promise<{ status: number; body: Record<string, unknown> & { code?: string } }>;
   /** Save any server through the real preview/save (a REST origin the spec does not list is confirmed). */
-  register(config: Record<string, unknown>): Promise<McpServer>;
+  register(config: Record<string, unknown>, acceptedReads?: string[]): Promise<McpServer>;
   /** Save a Postgres source through the real preview/save, with its password in an env secret. */
   addPg(name: string, opts: { port: number; database: string; user: string; password: string }): Promise<McpServer>;
   /** A new app (priya's first version). */
@@ -138,11 +138,11 @@ export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick
     viewers,
     env,
     call,
-    async register(config) {
+    async register(config, acceptedReads) {
       const p = await call('POST', '/mcp/servers/preview', config);
       expect(p.status, JSON.stringify(p.body)).toBe(200);
       const preview = p.body as unknown as McpPreviewResponse;
-      const saved = await call('POST', '/mcp/servers', { previewHash: preview.previewHash, ...(preview.egress?.confirmRequired === true ? { allowOrigin: preview.egress.origin } : {}) });
+      const saved = await call('POST', '/mcp/servers', { previewHash: preview.previewHash, acceptedReads: acceptedReads ?? preview.tools.filter((t) => t.class === 'read').map((t) => t.name), ...(preview.egress?.confirmRequired === true ? { allowOrigin: preview.egress.origin } : {}) });
       expect(saved.status, JSON.stringify(saved.body)).toBe(201);
       return saved.body as unknown as McpServer;
     },

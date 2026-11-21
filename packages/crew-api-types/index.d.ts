@@ -14480,6 +14480,8 @@ export interface McpTool {
   observedSchemaHash: string;
   /** (api-types 0.183.0) The disclosure class in force; `null` = none reviewed for the saved schema. */
   disclosure: McpToolDisclosure | null;
+  /** The person's Apps read acceptance is in force for this schema. */
+  readAccepted: boolean;
   /** (api-types 0.187.0) PM entries only: the tool's resource binding; `null` = unbound, so unavailable to agents. */
   binding?: McpToolBinding | null;
 }
@@ -14693,8 +14695,22 @@ export interface McpPreviewTool {
    * class while its schema is unchanged, crew's own class for a tool of crew's Toolbox configuration, else `null`.
    */
   disclosure: McpToolDisclosure | null;
+  /** The person's Apps read acceptance is in force for this schema. */
+  readAccepted: boolean;
   /** (api-types 0.187.0) PM entries only: the binding a save gives the tool; `null` = crew has none, so agents never get it. */
   binding?: { policy: string } | null;
+}
+
+/** Addresses still needing the person's confirmation; suggestions correspond in the same order. */
+export interface AddressConfirmationDetail {
+  addresses?: Array<{ address: string; class: 'loopback' | 'private' }>;
+  suggest?: string[];
+}
+
+/** A connector route's refusal, including the preview's 409 `address_unconfirmed`. */
+export interface McpErrorBody extends AddressConfirmationDetail {
+  error: string;
+  code: string;
 }
 
 /**
@@ -14802,6 +14818,12 @@ export interface SaveMcpServerBody {
    * `mcp.tool.disclosure_reviewed`.
    */
   disclosures?: Record<string, McpToolDisclosure>;
+  /**
+   * Accept these preview tool names as Apps reads, bound to their schema hashes. Human operator only
+   * (403 `read_accept_human_only`); a name outside the preview's effective reads is 409 `not_a_read`.
+   * Audited `mcp.tool.read_accepted`. Unlisted tools keep acceptance only for an unchanged schema.
+   */
+  acceptedReads?: string[];
 }
 
 /**
@@ -14862,6 +14884,12 @@ export interface PatchMcpToolBody {
    * offered to no agent).
    */
   disclosure?: McpToolDisclosure | null;
+  /**
+   * Accept the saved schema as an Apps read, or withdraw that acceptance. Both are human operator only
+   * (403 `read_accept_human_only`), audited `mcp.tool.read_accepted` / `mcp.tool.read_withdrawn`.
+   * Acceptance requires an effective read (409 `not_a_read`) and a registered schema (409 `not_registered`).
+   */
+  readAccepted?: boolean;
 }
 
 /**
@@ -18337,6 +18365,26 @@ export interface AppTurnBody {
 export interface AppTurnResponse {
   runId: string;
   turn: AppTurnState;
+}
+
+/** One call's metadata, never row values. Kept in memory only; a daemon restart starts empty. */
+export interface AppCallRecord {
+  at: number;
+  viewer: string;
+  app: string;
+  version: number | null;
+  tree: string;
+  query: string;
+  ms: number;
+  rows: number;
+  bytes: number;
+  outcome: string;
+}
+
+/** `GET /apps/:app/calls` (human operator; the records name viewers): at most 200 records, newest last. Not persisted across restarts. */
+export interface AppCallRecordsResponse {
+  app: string;
+  records: AppCallRecord[];
 }
 
 /** `POST /apps/:app/query` (observer): run one named query of an accepted version (DES §7.2). */
