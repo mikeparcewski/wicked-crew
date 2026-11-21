@@ -7725,9 +7725,34 @@ export interface RequirementPatch {
 }
 
 // ── Blast radius (wicked-estate blast-radius --json via crew) ──
+/** crew#1555: studio can delete its hand-declared subset. Freshness is merged across pages by crew, crew#1556. */
+export interface BlastRadiusFreshness {
+  commits_behind?: number | null;
+  indexing?: string[];
+  roots?: unknown[];
+  stale_files?: Array<{ file: string; status: 'modified' | 'deleted' }>;
+  /** Per-page counts summed; a file spanning pages counts once per page (crew#1556). */
+  stale_files_total: number;
+  unindexed_files?: number | null;
+  checked_files: number;
+  not_file_backed: number;
+}
+
 export interface BlastRadius {
   target: string;
-  dependents: Array<{ id: string; name: string; kind: string; file: string; line: number }>;
+  /** crew#1555: estate's depth and drift; studio can delete its hand-declared subset. */
+  dependents: Array<{
+    id: string; name: string; kind: string; file: string; line: number;
+    /** Hops from the target; 1 = direct dependent. */
+    depth?: number;
+    stale?: 'modified' | 'deleted';
+    via_crossing?: string | null;
+  }>;
+  /** crew#1555: false means no symbol by that name. */
+  resolved?: boolean;
+  freshness?: BlastRadiusFreshness;
+  next_cursor?: string | null;
+  page?: { from: number; count: number; total: number };
   /**
    * References to the target that no resolver bound (ENGINE-CONTRACT §2.1). Repeat call-sites of
    * an already-bound relationship are NOT counted, so 0 is a legitimate value for a fully-resolved
@@ -10738,6 +10763,8 @@ export interface RepoReindexResult {
 }
 
 export interface ProjectGraphRefreshResult {
+  /** crew#1476: removed labels pruned by rebuilding the database on refresh. */
+  pruned?: string[];
   status: ProjectGraphStatus;
   /** Labels re-indexed this run. */
   indexed: string[];
@@ -10753,6 +10780,9 @@ export interface ProjectGraphRefreshResult {
 
 /** One hit, always attributed: a cross-repo answer that does not say WHERE is not an answer. */
 export interface ProjectGraphHit {
+  /** crew#1555: hops from the target, 1 = direct; absent when estate omits it. */
+  depth?: number;
+  stale?: 'modified' | 'deleted';
   /** The repo's registry id. */
   repoId: string;
   /** The repo's estate label. */
@@ -10786,6 +10816,11 @@ export interface ProjectGraphRepoCount {
 
 /** `GET /projects/:id/graph/blast-radius?name=` — dependents across every member repo. */
 export interface ProjectBlastRadius {
+  /** crew#1555: false means no symbol by that name. */
+  resolved?: boolean;
+  freshness?: ProjectBlastRadiusFreshness;
+  /** crew#1476: current members' link coverage, when estate names this project. */
+  coverage?: ProjectGraphMemberCoverage[];
   projectId: string;
   target: string;
   dependents: ProjectGraphHit[];
@@ -10829,6 +10864,85 @@ export interface ProjectBlastRadius {
    */
   link_stale?: boolean;
   link_stale_labels?: string[];
+}
+
+/** crew#1555, crew#1556: merged freshness with member attribution and no host roots. */
+export interface ProjectBlastRadiusFreshness extends Omit<BlastRadiusFreshness, 'roots' | 'stale_files'> {
+  stale_files?: Array<{ repoId: string; repo: string; file: string; status: 'modified' | 'deleted' }>;
+}
+
+/** crew#1476, crew#1477: estate's per-member link coverage; omitted numbers are unknown. */
+export interface ProjectGraphMemberCoverage {
+  repoId: string;
+  repo: string;
+  links_in?: number;
+  links_out?: number;
+  incomplete?: boolean;
+  package_imports?: number;
+  manifests?: number;
+  boundary_counts?: Record<string, number>;
+}
+
+/** crew#1476: one endpoint of a project path, attributed to a current member. */
+export interface ProjectGraphPathEnd {
+  repoId: string;
+  repo: string;
+  symbol: string;
+  name: string;
+  kind: string;
+  file: string;
+  /** estate's line_1based. */
+  line: number;
+}
+
+export interface ProjectGraphPathHop {
+  source: ProjectGraphPathEnd;
+  target: ProjectGraphPathEnd;
+  kind: string;
+  confidence?: number;
+}
+
+/** crew#1476: `GET /projects/:id/graph/path?from=&to=&maxDepth=`. */
+export interface ProjectGraphPath {
+  projectId: string;
+  from: string;
+  to: string;
+  found: boolean;
+  resolved?: boolean;
+  unresolved: 'from' | 'to' | null;
+  hops: ProjectGraphPathHop[];
+  depth_bounded: boolean;
+  node_bounded: boolean;
+  crossings?: ProjectGraphCrossing[];
+  reposSearched: string[];
+  missingRepos: string[];
+  linkage: ProjectGraphLinkage;
+  note: string;
+  /** The route crossed a detached repository; refresh to rebuild without it. */
+  excluded?: string;
+}
+
+/** crew#1477: an import estate could not prove is a member link; never an edge. */
+export interface ProjectGraphPossible {
+  repoId: string;
+  repo: string;
+  reason: string;
+  package: string;
+}
+
+/** crew#1477: `GET /projects/:id/graph/boundaries`. */
+export interface ProjectGraphBoundaries {
+  projectId: string;
+  linked: boolean;
+  generation?: number;
+  stale?: boolean;
+  stale_labels?: string[];
+  last_error?: string | null;
+  members: ProjectGraphMemberCoverage[];
+  possible: ProjectGraphPossible[];
+  possible_total?: number;
+  possible_truncated?: boolean;
+  note: string;
 }
 
 /** `GET /projects/:id/graph/search?name=` — exact-name symbol resolution across member repos. */
