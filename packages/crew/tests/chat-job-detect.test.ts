@@ -258,7 +258,7 @@ describe('a seat\'s job block → a detected job proposal (§2.3)', () => {
     const held = open(r)!;
     expect(held.shape!.guess).toBeDefined();
     await r.svc.decide(CHAT, held.pid, { decision: 'go' }, ME, 'i1');
-    const facts = { card: 'incident', option: undefined, depth: null, words: held.words!, details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person' as const, source: 'reshape' as const };
+    const facts = { card: 'incident', option: undefined, depth: null, title: null, words: held.words!, details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person' as const, source: 'reshape' as const };
     await r.svc.reshape(CHAT, { pid: `${CHAT}:reshape:run1:z`, oldRunId: 'run1', parentPid: held.pid, facts, edits: { card: 'incident' }, reducedAssurance: false, relaunch: { deliver: 'pr' as const }, request: { id: 'z', digest: 'dz' }, confirmLoss: ['qe-acceptance', 'distinctJudge', 'review', 'evidence-floor'] }, ME, 'i1');
     const reshaped = foldProposals(r.records).get(`${CHAT}:reshape:run1:z`)!.proposal;
     expect(reshaped.shape).toMatchObject({ card: 'incident', by: 'person' });

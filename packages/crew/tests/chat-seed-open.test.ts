@@ -12,6 +12,7 @@ import type { FastifyInstance } from 'fastify';
 import type { ChatMessagesResponse, ChatProposalView } from 'wicked-crew-api-types';
 
 import { createServer } from '../src/api/server.js';
+import { SeedRequestStore } from '../src/api/chat-history.js';
 import { onePersonUrl } from '../src/api/chat-proposals.js';
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
@@ -199,6 +200,44 @@ describe('a seeded chat open makes its proposal the first time (F36)', () => {
       error: 'could not start it: a demo records an app on this machine: use http://127.0.0.1:<port>/…, http://localhost:<port>/… or http://[::1]:<port>/… (the recorder reaches no other host), with no #fragment. Go again resumes the same job.',
     });
     expect(launches).toEqual([]);
+  });
+
+  it('a reused seed request refuses a changed digest (#1422)', async () => {
+    const requestId = randomUUID();
+    const made = (await seededOpen(requestId)).json() as OpenBody;
+    const record = new SeedRequestStore().get(made.chatId)!;
+    expect(record.digest).toBe(made.proposal!.proposal.request!.digest);
+    const again = await seededOpen(requestId, { card: 'bug', source: 'pick' });
+    expect(again.statusCode, again.body).toBe(409);
+    expect(again.json()).toMatchObject({ code: 'request_reused' });
+    expect(await proposalPids(made.chatId)).toEqual([made.proposal!.proposal.pid]);
+  });
+
+  it('a seed retry after close and id reuse answers the original archived instance (#1422)', async () => {
+    const requestId = randomUUID();
+    const made = (await seededOpen(requestId)).json() as OpenBody;
+    expect((await app.inject({ method: 'POST', url: `/api/v1/chats/${made.chatId}/close` })).statusCode).toBe(200);
+    const reused = await app.inject({ method: 'POST', url: '/api/v1/chats', payload: { chatId: made.chatId, accepts: ['job'] } });
+    expect(reused.statusCode, reused.body).toBe(201);
+    const again = await seededOpen(requestId);
+    expect(again.statusCode, again.body).toBe(200);
+    const adopted = again.json() as OpenBody;
+    expect(adopted.chatId).toMatch(new RegExp(`^${made.chatId}--`));
+    expect(adopted.proposal?.proposal.pid).toBe(made.proposal!.proposal.pid);
+    expect(await proposalPids(made.chatId)).toEqual([]);
+  });
+
+  it('a seed retry after deletion is gone and opens no new chat (#1422)', async () => {
+    const requestId = randomUUID();
+    const made = (await seededOpen(requestId)).json() as OpenBody;
+    const record = new SeedRequestStore().get(made.chatId);
+    expect(record).toMatchObject({ instance: expect.any(String), digest: expect.any(String), actorId: expect.any(String), at: expect.any(Number) });
+    expect((await app.inject({ method: 'DELETE', url: `/api/v1/chats/${made.chatId}` })).statusCode).toBe(200);
+    expect(new SeedRequestStore().get(made.chatId)).toEqual(record);
+    const again = await seededOpen(requestId);
+    expect(again.statusCode, again.body).toBe(410);
+    expect(again.json()).toMatchObject({ code: 'chat_gone' });
+    expect((await app.inject({ method: 'GET', url: `/api/v1/chats/${made.chatId}/messages` })).statusCode).toBe(404);
   });
 
   it('a retry after the chat was closed is adopted from its kept history: nothing reopened, no second proposal', async () => {

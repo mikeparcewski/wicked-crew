@@ -1808,6 +1808,7 @@ export async function createServer(
       groundingStore: docGrounding,
       // DES-CHAT-ARTIFACTS-001 §5.2 (A3): chat-made documents.
       bindings: docBindings,
+      chatIdOf: (chatId, instance) => chatHistory.idOfInstance(chatId, instance),
       onBoundDocCreated: (ref) => onBoundDocCreated(ref),
       onBoundOutcome,
       landings: docLandings,
