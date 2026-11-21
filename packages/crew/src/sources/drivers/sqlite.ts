@@ -38,6 +38,14 @@ interface RunnerAnswer {
   [k: string]: unknown;
 }
 
+/** The words of a runner that ended without a readable answer (a crash, out of memory, a kill). */
+const RUNNER_FAILED = 'the SQLite runner failed';
+
+/** Whether `err` is the runner's own failure (it ended without an answer), not a start or answer-size failure. */
+export function isRunnerFailure(err: unknown): boolean {
+  return err instanceof SourceQueryError && err.errorClass === 'source' && err.message.startsWith(RUNNER_FAILED);
+}
+
 /** Bytes of the runner's answer the parent reads at most. */
 const ANSWER_MAX_BYTES = 64 * 1024 * 1024;
 
@@ -101,7 +109,7 @@ async function runChild(request: Record<string, unknown>, deadlineMs: number, si
       try {
         finish(null, JSON.parse(stdout + decoder.end()) as RunnerAnswer);
       } catch {
-        finish(new SourceQueryError(null, 'source', `the SQLite runner failed${stderr === '' ? '' : `: ${stderr.trim()}`}`));
+        finish(new SourceQueryError(null, 'source', `${RUNNER_FAILED}${stderr === '' ? '' : `: ${stderr.trim()}`}`));
       }
     });
     child.stdin.end(JSON.stringify(request));
@@ -124,13 +132,20 @@ export interface SqliteInspection {
   catalog: SqlCatalog;
 }
 
-/**
- * Write a new snapshot at `path` from parsed rows (CSV/XLSX uploads), in the runner: one table, the
- * given column types, one transaction; ended at `deadlineMs`.
- */
-export async function sqliteCreate(path: string, table: string, names: string[], types: string[], rows: string[][], deadlineMs: number): Promise<void> {
-  const a = await runChild({ op: 'create', path, table, names, types, rows }, deadlineMs);
-  if (!a.ok) throw new SourceQueryError(null, 'source', a.error ?? 'the snapshot could not be written');
+export type SqliteIngestAnswer = {
+  ok: true;
+  table: string;
+  header: { detected: boolean; columns: string[] };
+  sample: string[][];
+} | { ok: false; refused: true; code: string; error: string }
+  | { ok: false; refused?: false; error: string };
+
+/** Parse and write in one killable child; rows never cross the daemon's pipe (crew#1289). */
+export async function sqliteIngest(
+  path: string, input: string, kind: 'csv' | 'xlsx', filename: string, header: 'yes' | 'no' | null,
+  limits: typeof import('../uploads.js').UPLOAD_LIMITS, deadlineMs: number,
+): Promise<SqliteIngestAnswer> {
+  return await runChild({ op: 'ingest', path, input, kind, filename, header, limits }, deadlineMs) as SqliteIngestAnswer;
 }
 
 /** Inspect a snapshot (schema objects and the catalog). No authorizer: crew's own fixed statements. */
