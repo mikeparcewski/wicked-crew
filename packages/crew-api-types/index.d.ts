@@ -14233,6 +14233,11 @@ export interface McpServerConfigBody {
    * *_PROXY, GIT_*, NPM_CONFIG_* and the like), the server's own secret variable, a name containing TOKEN,
    * SECRET, PASSWORD, CREDENTIAL, AUTH, API_KEY, ACCESS_KEY or PRIVATE_KEY, and a value shaped like a credential.
    * A refusal names the variable and a reason, never the value. Part of the preview hash.
+   * (api-types 0.218.0, crew#1558) The saved names AND values are this server's allowlist, approved by a
+   * human operator. Previewing any difference from the saved env (including removals, or setting env on a
+   * new server) requires a human operator, else 403 `env_human_only`, before the probe. Absent and empty
+   * env are equal. The denylist stays the second line for everyone; {@link McpPreviewResponse.envNames}
+   * advises the person approving the allowlist.
    */
   env?: Record<string, string>;
 }
@@ -14538,6 +14543,12 @@ export interface McpPreviewTool {
 export interface McpPreviewResponse {
   previewHash: string;
   expiresAt: string;
+  /**
+   * (api-types 0.218.0, crew#1558) Non-empty `mcp-stdio` env only, sorted by name and shown only in
+   * the full human operator view. Advice for approving the per-server allowlist; no values here.
+   * The gates are the person's approval of names and values and the denylist, not this class.
+   */
+  envNames?: McpEnvName[];
   server: {
     name: string;
     kind: McpUpstreamKind;
@@ -14584,7 +14595,22 @@ export interface McpPreviewResponse {
   policies?: McpPolicyPreviewResponse | null;
 }
 
-/** `POST /mcp/servers`. No `previewHash`, or one that is unknown or expired, is a 409. */
+/** (api-types 0.218.0) Advice for the human approving env: runtime controls can affect startup, code loading, package resolution or network trust. Not an authorization gate. */
+export type McpEnvWarningClass = 'runtime_control' | 'app_setting';
+
+/** (api-types 0.218.0) A name in the proposed per-server env allowlist, with advice for its human approver. */
+export interface McpEnvName {
+  name: string;
+  class: McpEnvWarningClass;
+}
+
+/**
+ * `POST /mcp/servers`. No `previewHash`, or one that is unknown or expired, is a 409.
+ * (api-types 0.218.0, crew#1558) A held stdio preview whose env names or values differ from the
+ * currently saved server's allowlist requires a human operator, else 403 `env_human_only`, before
+ * any approval is withdrawn or anything is saved. This includes removals and a new server's env;
+ * absent and empty env are equal. See {@link McpServerConfigBody.env}.
+ */
 export interface SaveMcpServerBody {
   previewHash?: string;
   /**
