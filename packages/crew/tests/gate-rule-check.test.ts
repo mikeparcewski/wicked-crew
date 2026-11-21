@@ -11,7 +11,7 @@ import { GateSchema, registerRoutes, skipRulesAmend } from '../src/api/routes.js
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import type { AuditLog } from '../src/api/audit.js';
-import { type CoreAdapter } from '../src/core/adapter.js';
+import { type CoreAdapter, type EngineGateActions } from '../src/core/adapter.js';
 import { aggregateReceipt, worstRulePerRule } from '../src/api/delivery-assurance.js';
 import { rulesLabel, rulesSummaryLine } from '../src/core/deliver-text.js';
 import type { RuleVerdict, SessionView } from '../src/core/types.js';
@@ -119,6 +119,7 @@ describe('POST /runs/:id/gate — the rule answers reach the engine; a skip is a
   const confirmCalls: unknown[][] = [];
   const audit = { record: vi.fn(() => Date.now()) } as unknown as AuditLog;
   const audited = (action: string) => (audit.record as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === action);
+  const readActions = vi.fn<(id: string) => Promise<EngineGateActions | null>>();
 
   beforeAll(async () => {
     const mockAdapter = {
@@ -126,7 +127,14 @@ describe('POST /runs/:id/gate — the rule answers reach the engine; a skip is a
       sessionsDetail: vi.fn().mockResolvedValue([
         view('run-rules'),
         view('run-fail', { source: 'evaluator_verdict', reason: 'FAIL' }),
+        view('run-adj'),
+        view('run-adj-no-intent'),
       ]),
+      interactionRequests: vi.fn(async (id: string) => id.startsWith('run-adj')
+        ? [{ kind: 'gate', ord: 4, prompt: 'Review adjudication', gate_kind: 'review_adjudication', created_at: 1 }]
+        : []),
+      runEvents: vi.fn(async () => []),
+      gateActions: readActions,
       listRepos: vi.fn().mockResolvedValue([]),
       listWorkflows: () => BUILTIN_WORKFLOWS,
       confirmGate: vi.fn(async (...args: unknown[]) => {
@@ -152,6 +160,19 @@ describe('POST /runs/:id/gate — the rule answers reach the engine; a skip is a
   beforeEach(() => {
     confirmCalls.length = 0;
     (audit.record as ReturnType<typeof vi.fn>).mockClear();
+    readActions.mockReset().mockImplementation(async (id) => id.startsWith('run-adj') ? {
+      ord: 4,
+      gateKind: 'review_adjudication',
+      actions: [
+        {
+          action: 'approve', intent: 'land_with_carried_items', note: 'required',
+          ...(id === 'run-adj' ? { noteIntent: 'skip_rules' } : {}),
+          rules: ['DEV-TINYMATH-2'],
+        },
+        { action: 'request_changes', intent: 'send_back', note: 'optional' },
+        { action: 'reject', intent: 'stop', note: 'none' },
+      ],
+    } : null);
   });
   afterAll(async () => {
     await app.close();
@@ -159,6 +180,100 @@ describe('POST /runs/:id/gate — the rule answers reach the engine; a skip is a
 
   const post = (body: Record<string, unknown>, actor = 'human/operator', run = 'run-rules') =>
     app.inject({ method: 'POST', url: `/api/v1/runs/${run}/gate`, headers: { 'x-test-actor': actor }, payload: body });
+
+  it('a human can land with a note that skips rules, confirmed unchanged and audited with the reason', async () => {
+    const amend = 'EACCES is the sandbox, not the code';
+    const res = await post({ approve: true, amend }, 'human/operator', 'run-adj');
+    expect(res.statusCode, res.body).toBe(200);
+    expect(confirmCalls).toEqual([['run-adj', true, amend, undefined, undefined, undefined]]);
+    const lines = audited('gate.rules_skipped');
+    expect(lines).toHaveLength(1);
+    expect(lines[0]![1]).toMatchObject({ kind: 'human', trust: 'operator' });
+    expect(lines[0]![2]).toEqual({
+      runId: 'run-adj',
+      detail: { skips: [{ id: 'DEV-TINYMATH-2', reason: amend }], ord: 4, status: 'executing', land: true },
+    });
+  });
+
+  it('a seat or standing order cannot land with a note that skips rules: 403, audited, nothing confirmed', async () => {
+    for (const actor of ['agent/operator', 'system/operator']) {
+      const res = await post({ approve: true, amend: 'EACCES is the sandbox, not the code' }, actor, 'run-adj');
+      expect(res.statusCode, res.body).toBe(403);
+      expect(res.json()).toEqual({
+        error: `only a human operator can skip a steering rule (you are ${actor}): landing with a note here skips DEV-TINYMATH-2`,
+        code: 'human_operator_only',
+      });
+    }
+    expect(confirmCalls).toEqual([]);
+    const lines = audited('gate.skip_rules_refused');
+    expect(lines).toHaveLength(2);
+    for (const line of lines) {
+      expect(line[2]).toEqual({ runId: 'run-adj', detail: { reason: 'human_operator_only', ord: 4 } });
+    }
+    expect(audited('gate.rules_skipped')).toHaveLength(0);
+  });
+
+  it('an explicit approve also guards a noted land, and its skip audit trims the note', async () => {
+    const amend = '  EACCES is the sandbox, not the code  ';
+    const refused = await post({ approve: true, action: 'approve', amend }, 'agent/operator', 'run-adj');
+    expect(refused.statusCode, refused.body).toBe(403);
+    expect(confirmCalls).toEqual([]);
+    const landed = await post({ approve: true, action: 'approve', amend }, 'human/operator', 'run-adj');
+    expect(landed.statusCode, landed.body).toBe(200);
+    expect(confirmCalls).toEqual([['run-adj', true, amend, 'approve', undefined, undefined]]);
+    const lines = audited('gate.rules_skipped');
+    expect(lines).toHaveLength(1);
+    expect(lines[0]![2]).toMatchObject({ detail: { skips: [{ id: 'DEV-TINYMATH-2', reason: amend.trim() }], land: true } });
+  });
+
+  it('negative control: an agent plain approve or blank note reaches confirmGate without a skip audit', async () => {
+    for (const amend of [undefined, '   ']) {
+      const res = await post({ approve: true, ...(amend !== undefined ? { amend } : {}) }, 'agent/operator', 'run-adj');
+      expect(res.statusCode, res.body).toBe(200);
+    }
+    expect(confirmCalls).toEqual([
+      ['run-adj', true, undefined, undefined, undefined, undefined],
+      ['run-adj', true, '   ', undefined, undefined, undefined],
+    ]);
+    expect(readActions).not.toHaveBeenCalled();
+    expect(audited('gate.skip_rules_refused')).toHaveLength(0);
+    expect(audited('gate.rules_skipped')).toHaveLength(0);
+  });
+
+  it('negative control: a noted approve whose listed approve has no noteIntent reaches confirmGate', async () => {
+    const amend = 'EACCES is the sandbox, not the code';
+    const res = await post({ approve: true, amend }, 'agent/operator', 'run-adj-no-intent');
+    expect(res.statusCode, res.body).toBe(200);
+    expect(confirmCalls).toEqual([['run-adj-no-intent', true, amend, undefined, undefined, undefined]]);
+    expect(audited('gate.skip_rules_refused')).toHaveLength(0);
+    expect(audited('gate.rules_skipped')).toHaveLength(0);
+  });
+
+  it('an unread gate list never lets a seat land with a note (503, nothing confirmed); a human still lands', async () => {
+    readActions.mockReset().mockRejectedValue(new Error('engine busy'));
+    const amend = 'EACCES is the sandbox, not the code';
+    const seat = await post({ approve: true, amend }, 'agent/operator', 'run-adj');
+    expect(seat.statusCode, seat.body).toBe(503);
+    expect(seat.json().retryable).toBe(true);
+    expect(confirmCalls).toEqual([]);
+    const human = await post({ approve: true, amend }, 'human/operator', 'run-adj');
+    expect(human.statusCode, human.body).toBe(200);
+    expect(confirmCalls).toEqual([['run-adj', true, amend, undefined, undefined, undefined]]);
+    expect(audited('gate.rules_skipped')).toHaveLength(0);
+  });
+
+  it('GET /runs/run-adj/gate marks the rule-skipping approve humanOnly', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-adj/gate' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().actions).toEqual([
+      {
+        action: 'approve', intent: 'land_with_carried_items', note: 'required',
+        noteIntent: 'skip_rules', rules: ['DEV-TINYMATH-2'], humanOnly: true,
+      },
+      { action: 'request_changes', intent: 'send_back', note: 'optional' },
+      { action: 'reject', intent: 'stop', note: 'none' },
+    ]);
+  });
 
   it('(rev 2) a skip of a disputed row reaches the engine, audited with its reason', async () => {
     const skipRules = [{ id: 'DEV-TINYMATH-2', reason: 'the council could not rule; I read the diff and the test is there' }];

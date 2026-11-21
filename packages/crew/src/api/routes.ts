@@ -7348,6 +7348,19 @@ export function registerRoutes(
     };
   }
 
+  /** (wicked-core#1683) The open steering rules a noted Land at this gate would skip (the engine's listed approve with
+   *  `noteIntent: 'skip_rules'`); `[]` when it skips none (or the engine predates the list); `null` when the list could
+   *  not be read. */
+  async function landSkipsRules(id: string): Promise<string[] | null> {
+    if (typeof adapter.gateActions !== 'function') return [];
+    try {
+      const listed = await adapter.gateActions(id);
+      return listed?.actions.find((a) => a.action === 'approve' && a.noteIntent === 'skip_rules')?.rules ?? [];
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * THE gate decision path. `POST /runs/:id/gate` answers with it, and so does a standing order
    * (behaviour 10) — the same awaiting check, the same ord check and 409 `gate_changed` /
@@ -7408,6 +7421,29 @@ export function registerRoutes(
       if ('refusal' in decided) {
         const r = decided.refusal.body as { code?: unknown } | undefined;
         return r?.code === 'gate_changed' ? { code: decided.refusal.code, body: { ...(await currentPlanOf(id, false)), ...(r as object) } } : decided.refusal;
+      }
+      // (wicked-core#1683) A noted Land that skips open steering rules is the same human-only
+      // decision as skip_rules. Read its rules under the decision lock and keep them for the audit.
+      const landNote = parsed.data.amend?.trim() ?? '';
+      const landRules = parsed.data.approve && (parsed.data.action === undefined || parsed.data.action === 'approve')
+        && landNote !== '' && decided.gateKind === 'review_adjudication'
+        ? await landSkipsRules(id) : [];
+      // A seat or a standing order is never let through on an unread list: it may be the skip it must not make.
+      if (landRules === null && !isHumanOperator(actor)) {
+        return { code: 503, body: { error: 'the gate\'s answers could not be read, so this Land could not be checked for a rule skip; read the gate and answer again', retryable: true } };
+      }
+      if (landRules !== null && landRules.length > 0 && !isHumanOperator(actor)) {
+        audit.record('gate.skip_rules_refused', actor, {
+          runId: id,
+          detail: { reason: 'human_operator_only', ...(decided.gated !== undefined ? { ord: decided.gated.ord } : {}) },
+        });
+        return {
+          code: 403,
+          body: {
+            error: `only a human operator can skip a steering rule (you are ${actor.kind}/${actor.trust}): landing with a note here skips ${landRules.join(', ')}`,
+            code: 'human_operator_only',
+          },
+        };
       }
       // DES-CATALOG-002 §4.6: a plan-gate answer is bound to the plan on screen. A run launched from a chat proposal
       // REQUIRES `planRev` there, whichever client answers; a send-back needs it on any run. The engine compares it
@@ -7516,6 +7552,12 @@ export function registerRoutes(
           audit.record('gate.rules_skipped', actor, {
             runId: id,
             detail: { skips: parsed.data.skipRules ?? [], ...(gated !== undefined ? { ord: gated.ord } : {}), status },
+          });
+        }
+        if (landRules !== null && landRules.length > 0) {
+          audit.record('gate.rules_skipped', actor, {
+            runId: id,
+            detail: { skips: landRules.map((id) => ({ id, reason: landNote })), ...(gated !== undefined ? { ord: gated.ord } : {}), status, land: true },
           });
         }
         audit.record('gate.decided', actor, {
@@ -8108,7 +8150,8 @@ export function registerRoutes(
     return actions
       .filter((a) => declines(a) || !(a.action === SKIP_QE_ACTION ? skipRefused : approveRefused))
       .filter((a) => !(steering && a.action === 'reassign'))
-      .map((a) => (a.action === SKIP_QE_ACTION || a.action === SKIP_RULES_ACTION ? { ...a, humanOnly: true as const } : a));
+      .map((a) => (a.action === SKIP_QE_ACTION || a.action === SKIP_RULES_ACTION || (a.action === 'approve' && a.noteIntent === 'skip_rules')
+        ? { ...a, humanOnly: true as const } : a));
   }
 
   /**
