@@ -24,6 +24,15 @@ export function pickAllows(picks: SourcePicks | undefined, runId: string, source
   }
 }
 
+/** Whether a run was launched with a source pick (an empty pick is one). A store that throws reads as a pick: the narrower reading. */
+export function runHasPick(picks: SourcePicks | undefined, runId: string): boolean {
+  try {
+    return (picks?.get(runId) ?? null) !== null;
+  } catch {
+    return true;
+  }
+}
+
 export const PICK_RULE = 'crew:source-pick';
 
 /**

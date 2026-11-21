@@ -72,15 +72,60 @@ export function redactString(value: string): string {
   return out;
 }
 
+/** The parsed value of a JSON object or array text; `undefined` for any other text (prose, a bare scalar, bad JSON). */
+function jsonTextValue(text: string): unknown {
+  const head = text.trimStart()[0];
+  if (head !== '{' && head !== '[') return undefined;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Layer 3 over every string of a parsed JSON value, keys included (the coverage a pass over its text had). */
+function redactShapes(v: unknown): unknown {
+  if (typeof v === 'string') return redactString(v);
+  if (Array.isArray(v)) return v.map(redactShapes);
+  if (v !== null && typeof v === 'object') {
+    // `fromEntries` defines each key as an own property, so a `__proto__` key stays a key.
+    return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, inner]) => [redactString(k), redactShapes(inner)]));
+  }
+  return v;
+}
+
+/**
+ * (crew#1520) An MCP text block that carries JSON (estate's records, most servers' answers) is redacted as JSON:
+ * parsed, layer 3 applied to its strings, serialized again. Run over the serialized text instead, a pattern can eat
+ * an escape (`"password=admin"` is `\"password=admin\"` there: `kv-secret` takes the `\` and leaves the quote bare),
+ * and the block stops parsing. The text is re-serialized only when a value changed, so a clean block is passed as
+ * it came. Layer 2 is not newly applied inside the text: what a block showed before, it still shows.
+ */
+function redactTextBlock(text: string): string {
+  const parsed = jsonTextValue(text);
+  if (parsed === undefined) return redactString(text);
+  const redacted = redactShapes(parsed);
+  const out = JSON.stringify(redacted);
+  return out === JSON.stringify(parsed) ? text : out;
+}
+
+/** Whether `v` is an MCP content block of type `text`. */
+function isTextBlock(v: Record<string, unknown>): boolean {
+  return v['type'] === 'text' && typeof v['text'] === 'string';
+}
+
 /** Layers 2 and 3 over any JSON value. Pure: returns a new value. */
 export function redactDeep<T>(value: T): T {
   const walk = (v: unknown): unknown => {
     if (typeof v === 'string') return redactString(v);
     if (Array.isArray(v)) return v.map(walk);
     if (v !== null && typeof v === 'object') {
+      const rec = v as Record<string, unknown>;
+      const textBlock = isTextBlock(rec);
       const out: Record<string, unknown> = {};
-      for (const [k, inner] of Object.entries(v as Record<string, unknown>)) {
-        out[k] = isDeniedFieldName(k) ? REDACTED(`field:${k}`) : walk(inner);
+      for (const [k, inner] of Object.entries(rec)) {
+        if (textBlock && k === 'text') out[k] = redactTextBlock(inner as string);
+        else out[k] = isDeniedFieldName(k) ? REDACTED(`field:${k}`) : walk(inner);
       }
       return out;
     }

@@ -15056,6 +15056,12 @@ export interface McpCallRecord {
     'wicked.carrier': 'shim';
     'bytes.out': number;
     retries: number;
+    /**
+     * (crew#1442) `mcp:estate/<tool>` knowledge reads: how many records the relay's release re-check withheld
+     * (outside what the step may see, or outside the run's source pick, which then names `crew:source-pick` in
+     * `decision.ruleIds`). Absent = none withheld.
+     */
+    'estate.withheld'?: number;
   };
 }
 

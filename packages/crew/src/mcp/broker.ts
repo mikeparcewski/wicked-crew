@@ -62,7 +62,7 @@ import {
 import { scrubResult } from './redact.js';
 import { UpstreamCallError } from './upstream-error.js';
 import { McpRegistryError, type McpRegistry } from './registry.js';
-import { FENCE_REASON, FENCE_REMEDY, FENCE_RULE, pickAllows, PICK_RULE, type RunFence, type SourcePicks } from './run-fence.js';
+import { FENCE_REASON, FENCE_REMEDY, FENCE_RULE, pickAllows, PICK_RULE, runHasPick, type RunFence, type SourcePicks } from './run-fence.js';
 import { scrubSecrets } from './secrets.js';
 import {
   ESTATE_PROPOSAL_TOOL,
@@ -468,6 +468,8 @@ export class McpBroker {
       const timedOut = /did not answer .* within/.test(failure.message);
       return this.refuse(span, 'upstream_error', 'allow', 'broker:estate', [], `mcp:estate/${tool} failed: ${failure.message}`, write ? 'keep the proposal in your output; it may or may not have landed' : 'continue without it, or try again later', timedOut ? 'timeout' : failure.errorClass, null);
     }
+    /** (crew#1442) How many records the release re-check withheld: recorded, so "withheld" never reads as "nothing found". */
+    let withheld = 0;
     if (gated) {
       // The release re-check, against a FRESH read: a switch turned off while estate answered holds now.
       let released: VisibleRelease;
@@ -479,6 +481,7 @@ export class McpBroker {
       }
       if (!released.ok) return this.refuse(span, 'withheld', 'deny', 'broker:estate-visible', ['estate:visible'], released.reason, 'work from what this step may see; a person decides which sources a project sees on the source sheet', null, null);
       result = released.result;
+      withheld = released.dropped;
     }
     // `rules.recall` is crew's own answer (the operator's rule text the judge reads), not an upstream's output: it is
     // released verbatim, so a seat reads the words it is judged on. The redactor works on the serialized text and
@@ -489,7 +492,10 @@ export class McpBroker {
     if (span.bytesOut > relay.maxResultBytes) {
       return this.refuse(span, 'withheld', 'deny', 'broker:estate-bound', ['estate:result-bound'], `mcp:estate/${tool} answered ${span.bytesOut} bytes, over the relay's ${relay.maxResultBytes}-byte bound`, tool === RULES_RECALL_TOOL ? 'pull fewer rules at once: name them in "ids", or page with "limit" and "offset"' : 'narrow the call (a lower limit or depth, a narrower query), or page it with cursor', null, null);
     }
-    const record = this.record(span, 'ok', 'allow', 'broker:estate', [], scrubbed['isError'] === true ? 'tool_error' : null, null);
+    // A run with a pick names the pick rule beside the count: its pick narrowed what this step may see (CS10).
+    const picked = withheld > 0 && runHasPick(this.deps.picks, scope.unit.runId);
+    const record = this.record(span, 'ok', 'allow', 'broker:estate', picked ? [PICK_RULE] : [], scrubbed['isError'] === true ? 'tool_error' : null, null);
+    if (withheld > 0) record.attrs['estate.withheld'] = withheld;
     try {
       await this.deps.records.append(record);
     } catch (err) {
