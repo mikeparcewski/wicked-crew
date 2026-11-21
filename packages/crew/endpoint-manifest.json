@@ -1324,6 +1324,7 @@
       "responseType": "McpServerTestResponse | McpServerTestAgentResponse",
       "statusCodes": [
         200,
+        403,
         404,
         409,
         503

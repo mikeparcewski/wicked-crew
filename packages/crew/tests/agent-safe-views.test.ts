@@ -32,7 +32,8 @@ const HUMAN: Actor = { id: 'priya', kind: 'human', trust: 'operator' };
 const AGENT: Actor = { id: 'seat-codex', kind: 'agent', trust: 'operator' };
 const PLUGIN: Actor = { id: 'plugin:x@1.0.0', kind: 'plugin', trust: 'observer' };
 const SYSTEM: Actor = { id: 'ci', kind: 'system', trust: 'admin' };
-const TOKENS: Record<string, Actor> = { human: HUMAN, agent: AGENT, system: SYSTEM };
+const OBSERVER: Actor = { id: 'watcher', kind: 'human', trust: 'observer' };
+const TOKENS: Record<string, Actor> = { human: HUMAN, agent: AGENT, system: SYSTEM, plugin: PLUGIN, observer: OBSERVER };
 
 class MemorySecrets implements SecretStore {
   readonly available = true;
@@ -173,18 +174,51 @@ describe('crew#1558: a stdio env is the human operator’s per-server allowlist'
     removeScratch(base);
   });
 
-  it.each(['agent', 'system'])('refuses a new env for %s before spawning a probe', async (as) => {
+  it.each(['agent', 'system'])('refuses a stdio preview with a new env for %s before spawning a probe', async (as) => {
     const r = await preview(as, approved);
     expect(r.statusCode, r.body).toBe(403);
-    expect(r.json()).toEqual({ code: 'env_human_only', error: `only a human operator can set or change a stdio server's environment variables (its allowlist); you are ${TOKENS[as]!.kind}/${TOKENS[as]!.trust}` });
+    expect(r.json()).toEqual({ code: 'host_program_human_only', error: `only a human operator can run a program on the daemon host (an mcp-stdio server's preview); you are ${TOKENS[as]!.kind}/${TOKENS[as]!.trust}` });
     expect(probe).not.toHaveBeenCalled();
   });
 
-  it.each([undefined, {}])('allows an agent to preview and save a new server with empty env (%j)', async (env) => {
-    const p = await preview('agent', env);
+  it.each([
+    ['agent', 403], ['system', 403], ['plugin', 403], ['observer', 403], ['a-unit-token-is-not-a-bearer', 401],
+  ] as const)('refuses an empty-env stdio preview for %s before probing', async (as, status) => {
+    const r = await preview(as);
+    expect(r.statusCode, r.body).toBe(status);
+    if (as === 'agent' || as === 'system') expect(r.json().code).toBe('host_program_human_only');
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it('allows a human stdio preview and an agent save with empty env', async () => {
+    const p = await preview('human');
     expect(p.statusCode, p.body).toBe(200);
     expect(p.json()).not.toHaveProperty('envNames');
     expect((await save('agent', p.json().previewHash)).statusCode).toBe(201);
+  });
+
+  it('refuses an agent stdio test before probing; a human can test it', async () => {
+    await register();
+    const r = await call('/mcp/servers/envy/test', 'agent', {});
+    expect([r.statusCode, r.json().code]).toEqual([403, 'host_program_human_only']);
+    expect(r.json().error).toBe("only a human operator can run a program on the daemon host (an mcp-stdio server's test); you are agent/operator");
+    expect(probe).not.toHaveBeenCalled();
+    for (const [as, status] of [['system', 403], ['plugin', 403], ['observer', 403], ['a-unit-token-is-not-a-bearer', 401]] as const) {
+      expect((await call('/mcp/servers/envy/test', as, {})).statusCode, as).toBe(status);
+    }
+    expect(probe).not.toHaveBeenCalled();
+    expect((await call('/mcp/servers/envy/test', 'human', {})).statusCode).toBe(200);
+    expect(probe).toHaveBeenCalledOnce();
+  });
+
+  it('allows an agent HTTP test and keeps an unknown server at 404', async () => {
+    const p = await call('/mcp/servers/preview', 'human', { name: 'http', kind: 'mcp-http', url: CHOSEN });
+    expect(p.statusCode, p.body).toBe(200);
+    expect((await save('human', p.json().previewHash)).statusCode).toBe(201);
+    probe.mockClear();
+    expect((await call('/mcp/servers/http/test', 'agent', {})).statusCode).toBe(200);
+    expect(probe).toHaveBeenCalledOnce();
+    expect((await call('/mcp/servers/unknown/test', 'agent', {})).statusCode).toBe(404);
   });
 
   it('shows sorted advisory classes only to a human operator with non-empty env', async () => {
@@ -196,10 +230,9 @@ describe('crew#1558: a stdio env is the human operator’s per-server allowlist'
     ]);
     expect((await preview('human')).json()).not.toHaveProperty('envNames');
     await register();
-    const agent = await preview('agent', { GOCACHEPROG: 'helper', LOG_LEVEL: 'debug' });
-    expect(agent.statusCode, agent.body).toBe(200);
-    expect(agent.json()).not.toHaveProperty('envNames');
-    expect((await save('agent', agent.json().previewHash)).statusCode).toBe(201);
+    const held = await preview('human', { GOCACHEPROG: 'helper', LOG_LEVEL: 'debug' });
+    expect(held.statusCode, held.body).toBe(200);
+    expect((await save('agent', held.json().previewHash)).statusCode).toBe(201);
   });
 
   it.each([
@@ -209,10 +242,10 @@ describe('crew#1558: a stdio env is the human operator’s per-server allowlist'
     { log_level: 'debug', GOCACHEPROG: 'helper' },
     {},
     undefined,
-  ])('refuses any change to a saved env before probing (%j)', async (env) => {
+  ])('refuses an agent stdio preview over a saved env before probing (%j)', async (env) => {
     await register();
     const r = await preview('agent', env);
-    expect([r.statusCode, r.json().code]).toEqual([403, 'env_human_only']);
+    expect([r.statusCode, r.json().code]).toEqual([403, 'host_program_human_only']);
     expect(probe).not.toHaveBeenCalled();
     expect((await registry.get('envy')).env).toEqual(approved);
   });
@@ -234,7 +267,7 @@ describe('crew#1558: a stdio env is the human operator’s per-server allowlist'
 
   it('rechecks the current saved env when an agent saves an earlier identical preview', async () => {
     await register();
-    const p = await preview('agent', approved);
+    const p = await preview('human', approved);
     const changed = await preview('human', { LOG_LEVEL: 'info' });
     expect((await save('human', changed.json().previewHash)).statusCode).toBe(201);
     const r = await save('agent', p.json().previewHash);
