@@ -88,6 +88,22 @@ describe('crew#1520: the scrub keeps a JSON text block valid JSON', () => {
     expect(scrubResult(clean, [])).toEqual(clean);
   });
 
+  it('a secret that starts a line (after an escaped newline or tab) is redacted (coord on #1733, C-1; fails before the fold)', () => {
+    const token = BEARER.split(' ')[1]!;
+    const record = { items: [{ id: 'k1', text: `the box notes:\npassword=hunter22\n${BEARER}\n\tsecret=opensesame` }] };
+    const out = textOf(scrubResult(envelope(record), []));
+    // Before the fold the leading \b never matched after the `n` of `\n`, so all three came through unchanged.
+    expect(out).not.toContain('hunter22');
+    expect(out).not.toContain(token);
+    expect(out).not.toContain('opensesame');
+    expect(parses(out), out).toBe(true);
+    const text = (JSON.parse(out) as typeof record).items[0]!.text;
+    expect(text).toMatch(/^the box notes:\npassword=\[REDACTED:kv\]/);
+    // A Bearer token alone at the start of a line, with nothing before it on the line.
+    const alone = textOf(scrubResult(envelope({ note: `first line\n${BEARER}` }), []));
+    expect((JSON.parse(alone) as { note: string }).note).toBe('first line\n[REDACTED:bearer]');
+  });
+
   it('a text block that is not a JSON document keeps the plain string pass', () => {
     const prose = { content: [{ type: 'text', text: 'STALENESS: 0 commits behind; password=hunter22 seen' }] };
     expect(textOf(scrubResult(prose, []))).toBe('STALENESS: 0 commits behind; password=[REDACTED:kv] seen');
