@@ -30,6 +30,9 @@ export const STATE_HOME_ENTRY_NAMES: ReadonlyArray<string> = [
   'gateway',
   // The engine's own cluster credential (k8s runner) — wicked-core `src/k8s/mod.rs` own_kubeconfig.
   'k8s',
+  // The k8s seats' replica .git builders, a disposable engine cache — wicked-core `src/k8s/seat.rs`
+  // GitBuild::build (core#1678; registered by core#1699).
+  'k8s-replica-git',
   'project-settings.json',
   // DES-learn-workflow §5: the learn schedules — `src/learn/schedule-store.ts`.
   'learn-schedules.json',
