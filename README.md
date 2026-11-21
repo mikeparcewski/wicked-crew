@@ -175,6 +175,10 @@ curl -X POST http://127.0.0.1:7701/api/v1/runs \
 wicked-crew start --problem "Fix the flaky retry test" --workflow bug
 ```
 
+Remove an unused repository registration with `DELETE /api/v1/repos/<id>`. Its checkout, graph
+and worktrees stay on disk. Non-terminal runs and project membership block removal (409);
+an older engine without repository removal answers 501.
+
 **With only one CLI signed in**, a governed run cannot be evaluated or judged by a seat other than the
 one that built it. Under the default (full) assurance the engine refuses a review on its builder's
 seat and holds a gate whose judge has no distinct seat, so the run waits for a second CLI; the launch
@@ -224,6 +228,12 @@ deliver phase then pushes with `GH_ACCOUNT`'s own gh token (read from gh's keyri
 
 `wicked-crew status` with no daemon answering exits 1 with one line: start it with
 `wicked-crew serve` (or `--install-service`), or, when the service is installed, read its log.
+
+**Drain before an upgrade.** Send `POST /api/v1/maintenance` with `{"drain":true}`, then poll
+`GET /api/v1/maintenance` until `idle` is true. The daemon refuses new launches, resumes and gate
+answers that start work (503 `maintenance_drain`); rejects and power-pause Stop remain available.
+`active` lists runs still planning, distributing or executing. Restart or upgrade once idle; drain
+state is in memory and clears on restart. To cancel maintenance, post `{"drain":false}`.
 
 The CLI surface is `wicked-crew serve|start|resume|gate|status|mcp|governance|version` — `mcp` runs a
 stdio MCP server (crew-as-a-tool for coding agents), `gate` answers a pending human gate from the

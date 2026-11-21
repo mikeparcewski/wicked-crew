@@ -105,13 +105,11 @@ export function requirementsOverrides(repo: RepoEntry): string {
  */
 export const REPO_FOLDER_MISSING = 'repo_folder_missing';
 
-/** What a person reads about a missing folder, and what fixes it. There is no way to unregister a
- *  repo (core has none, crew#753), so re-linking it is the remedy: registering the same name again
- *  at the folder's new place replaces the record (core upserts by the name's slug). */
-export function repoFolderMissingMessage(rootPath: string): string {
+/** Re-link a moved folder under the same name (the engine upserts by slug), or remove its registration. */
+export function repoFolderMissingMessage(rootPath: string, repoId: string): string {
   return (
     `This repository's folder is missing: ${rootPath}. Re-link it: register it again under the same ` +
-    'name at its folder\'s new place, or put the folder back.'
+    `name at its folder's new place, or put the folder back. Or remove the registration (DELETE /api/v1/repos/${repoId}).`
   );
 }
 
@@ -151,7 +149,7 @@ export async function withFolderFindings(
       }
       return {
         ...repo,
-        findings: [...others, { code: REPO_FOLDER_MISSING, message: repoFolderMissingMessage(repo.root_path), path: repo.root_path }],
+        findings: [...others, { code: REPO_FOLDER_MISSING, message: repoFolderMissingMessage(repo.root_path, repo.id), path: repo.root_path }],
       };
     }),
   );

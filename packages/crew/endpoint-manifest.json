@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.217.0",
+  "apiTypesVersion": "0.220.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1077,6 +1077,25 @@
       ]
     },
     {
+      "method": "GET",
+      "path": "/api/v1/maintenance",
+      "requestType": null,
+      "responseType": "MaintenanceState",
+      "statusCodes": [
+        200
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/maintenance",
+      "requestType": "MaintenanceRequest",
+      "responseType": "MaintenanceState",
+      "statusCodes": [
+        200,
+        400
+      ]
+    },
+    {
       "method": "POST",
       "path": "/api/v1/mcp-inspect/sessions",
       "requestType": "McpInspectStartBody",
@@ -1913,6 +1932,18 @@
       ]
     },
     {
+      "method": "DELETE",
+      "path": "/api/v1/repos/:id",
+      "requestType": null,
+      "responseType": "UnregisterRepoResponse",
+      "statusCodes": [
+        200,
+        404,
+        409,
+        501
+      ]
+    },
+    {
       "method": "GET",
       "path": "/api/v1/repos/:id/contributors",
       "requestType": null,
@@ -2077,7 +2108,8 @@
         404,
         409,
         422,
-        501
+        501,
+        503
       ]
     },
     {
@@ -2285,7 +2317,8 @@
         400,
         404,
         409,
-        501
+        501,
+        503
       ]
     },
     {
@@ -2435,7 +2468,8 @@
         200,
         400,
         404,
-        409
+        409,
+        503
       ]
     },
     {

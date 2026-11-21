@@ -1743,6 +1743,30 @@ export interface SessionView {
  */
 export type RegisterRepoRefusalCode = 'repo_path_missing' | 'repo_path_relative' | 'repo_clone_denied';
 
+/** `POST /api/v1/maintenance` (api-types 0.220.0). Strict body; drain state lasts until restart. */
+export interface MaintenanceRequest {
+  drain: boolean;
+}
+
+/** `GET` and `POST /api/v1/maintenance` (api-types 0.220.0): admission and current work. */
+export interface MaintenanceState {
+  draining: boolean;
+  /** Unix milliseconds when drain was enabled; `null` while admitting work. */
+  since: number | null;
+  /** No run is planning, distributing or executing. Parked and human-held runs are idle. */
+  idle: boolean;
+  active: Array<{ runId: string; status: string }>;
+}
+
+/** `DELETE /api/v1/repos/:id` success (api-types 0.220.0). Checkout and graph files stay on disk.
+ *  Refusals: 404 `repo_not_found`; 409 `repo_in_use` (with `runIds` when crew's own check finds the
+ *  live runs; an engine refusal names them in `error`) or `repo_in_project` (the projects named in
+ *  `error`); 501 `repo_unregister_unsupported` on an older engine. */
+export interface UnregisterRepoResponse {
+  repoId: string;
+  removed: true;
+}
+
 /** A registered git repository (`RepoEntry`). */
 export interface RepoEntry {
   id: string;
