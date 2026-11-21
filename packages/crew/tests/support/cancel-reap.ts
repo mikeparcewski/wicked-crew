@@ -14,8 +14,9 @@ export function cancelBooked(trail: readonly Frame[]): boolean {
   return at !== -1 && trail.slice(at + 1).every((e) => e['type'] === 'worktreeRetained');
 }
 
-/** The reap is done: the wire says the tree was retained, or the tree is no longer on disk. Until then, a tree on disk
- *  with no frame is a clean tree still being deleted, not a disagreement. */
+/** The reap is done: the cancel is on the trail, and the wire says the tree was retained or the tree is no longer on
+ *  disk. Until then, a tree on disk with no frame is a clean tree still being deleted, not a disagreement. Only the
+ *  cancel's presence is required here, so a stray frame after it still settles and fails `cancelBooked` at once. */
 export function reapSettled(trail: readonly Frame[], onDisk: boolean): boolean {
-  return !onDisk || trail.some((e) => e['type'] === 'worktreeRetained');
+  return trail.some((e) => e['type'] === 'runCancelled') && (!onDisk || trail.some((e) => e['type'] === 'worktreeRetained'));
 }

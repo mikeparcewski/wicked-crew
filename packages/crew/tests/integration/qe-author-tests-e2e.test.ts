@@ -678,9 +678,10 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
       // are compared once the reap has settled (tests/support/cancel-reap.ts), never mid-reap.
       const workdir = run.session['workdir'];
       const settled = await waitFor(async () => {
+        // The disk first, then the trail: the trail read is at least as fresh as what the disk showed.
+        const onDisk = typeof workdir === 'string' && existsSync(workdir);
         const { body: trailBody } = await getJson(`/api/v1/runs/${runId}/events`);
         const trail = trailBody['events'] as Array<Record<string, unknown>>;
-        const onDisk = typeof workdir === 'string' && existsSync(workdir);
         return reapSettled(trail, onDisk) ? { trail, onDisk } : null;
       }, 'the cancelled run\'s worktree reap to settle', 60_000);
       expect(cancelBooked(settled.trail), 'the cancel is booked; only a retention frame may follow it').toBe(true);

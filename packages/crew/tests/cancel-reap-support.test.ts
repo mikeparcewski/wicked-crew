@@ -55,6 +55,23 @@ describe('reapSettled on a reap slower than the cancel wait (crew#1509)', () => 
     expect(reapSettled([f('worktreeRetained'), f('runCancelled')], true)).toBe(true);
   });
 
+  it('nothing settles before runCancelled is on the trail, even with the reap already done', () => {
+    expect(reapSettled([f('unitStarted'), f('worktreeRetained')], true)).toBe(false);
+    expect(reapSettled([f('unitStarted')], false)).toBe(false);
+    const s = settle([
+      { trail: [f('unitStarted'), f('worktreeRetained')], onDisk: true },
+      { trail: [f('unitStarted'), f('worktreeRetained'), f('runCancelled')], onDisk: true },
+    ]);
+    expect(s.step).toBe(1);
+    expect(cancelBooked(s.trail)).toBe(true);
+  });
+
+  it('a stray frame after the cancel still settles, so the cancel check fails at once instead of timing out', () => {
+    const trail = [f('runCancelled'), f('sessionFailed')];
+    expect(reapSettled(trail, false)).toBe(true);
+    expect(cancelBooked(trail)).toBe(false);
+  });
+
   it('a real disagreement still fails: a retention claimed for a tree that is gone settles, and the check sees it', () => {
     const s = settle([{ trail: [f('runCancelled'), f('worktreeRetained')], onDisk: false }]);
     expect(retained(s.trail)).not.toBe(s.onDisk);
