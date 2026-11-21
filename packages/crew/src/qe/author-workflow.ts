@@ -45,6 +45,8 @@ export interface QeVerifiedFile {
   /** The package dir (worktree-relative, `.` = root) the harness was resolved in and run from. */
   pkg: string;
   status: 'passed' | 'failed' | 'not-executed';
+  /** crew#1393: the verify phase's classification against base. */
+  class?: NonNullable<QeVerifiedCheck['class']>;
   /** Why a `not-executed` file was not executed ("harness not available: pytest — …"). */
   reason?: string;
 }
@@ -67,6 +69,8 @@ export interface QeVerifyReport {
   passed: number;
   failed: number;
   notExecuted: number;
+  /** crew#1393: produced files whose failures also occur on base. */
+  failedOnBase: number;
   /** The produced `tests/PLAN-*.md` path, `null` when none was produced. */
   plan: string | null;
   checksFailed: number;
@@ -116,6 +120,8 @@ export function parseQeVerifyOutput(text: string): QeVerifyReport | null {
       // A file the runner ran but reported 0 tests for carries its exit code; a file never handed
       // to a runner has `exit=-` (→ null).
       const exit = f['exit'] === undefined || f['exit'] === '-' ? null : int(f['exit']);
+      const cls = f['class'] === 'produced-test-failure' || f['class'] === 'pre-existing-on-base' || f['class'] === 'unclassified'
+        ? f['class'] : undefined;
       files.push({
         path: f['file'],
         harness: f['harness'] ?? 'unknown',
@@ -124,6 +130,7 @@ export function parseQeVerifyOutput(text: string): QeVerifyReport | null {
         tests: int(f['tests']),
         pkg: f['pkg'] === undefined || f['pkg'] === '' ? '.' : f['pkg'],
         status,
+        ...(cls !== undefined ? { class: cls } : {}),
         ...(f['reason'] !== undefined && f['reason'] !== '' ? { reason: f['reason'] } : {}),
       });
     }
@@ -136,6 +143,7 @@ export function parseQeVerifyOutput(text: string): QeVerifyReport | null {
     executed: int(summary['executed']),
     passed: int(summary['passed']),
     failed: int(summary['failed']),
+    failedOnBase: int(summary['failed_on_base']),
     notExecuted: int(summary['not_executed']),
     plan: summary['plan'] === undefined || summary['plan'] === 'missing' ? null : summary['plan'],
     checksFailed: int(summary['checks_failed']),

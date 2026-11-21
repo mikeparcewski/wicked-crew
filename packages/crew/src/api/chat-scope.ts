@@ -1106,12 +1106,8 @@ export function chatWorkRequestLines(scope: Pick<ChatScope, 'kind' | 'repos'>, o
   if (scope.kind === 'repos' && scope.repos.length === 1) {
     return [
       ...head,
-      'Then propose it on ONE line of its own. Replace each placeholder: `touch` lists the real',
-      'repository-relative paths the work will change, from your plan.',
-      '',
-      '    PLAN+ {"steps":[{"catalog":"build"}],"touch":["<path>"],"reason":"<one line>"}',
-      '',
-      'The operator approves it as Continue in Build; the line itself is not shown to them.',
+      'Then tell the operator to start the work as a job: a feature or bug job runs QE acceptance',
+      'before its pull request. This chat cannot take on a change it would deliver without it.',
       ...commands,
     ];
   }

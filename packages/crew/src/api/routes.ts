@@ -197,6 +197,7 @@ import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, Fil
 import { registerTestingRoutes } from './testing.js';
 import { registerDefaultEvalRoutes, runAndRecord, type DefaultEvalDeps } from '../evals/routes.js';
 import { prepareRunEvalsLaunch, RUN_EVALS_WORKFLOW } from '../evals/workflow.js';
+import { DOMAIN_MAPPING } from '../projects/repo-watch.js';
 import { defaultReplaySet } from '../evals/replay.js';
 import type { DefaultEvalStore } from '../evals/store.js';
 import type { DecisionLike, EventLike, RunLike } from '../evals/capture.js';
@@ -453,6 +454,7 @@ import { gardenConformance, gardenPackCheck, type ConformanceRunner, type PackCh
 import { conformanceProvisioner, conformanceRuntimeReady, conformanceRuntimeRoot, conformanceVenvDir, editorPluginLaunchListener, venvPython } from '../editors/conformance-runtime.js';
 import { EditorRegistry } from '../editors/registry.js';
 import { registerEditorRoutes, unitTokenProbe, type UnitTokenVerdict } from '../editors/routes.js';
+import { broadcast } from '../events/bus.js';
 import type { AppActionStore } from '../apps/actions/store.js';
 import { AppWritePath } from '../apps/actions/write-path.js';
 import { AppExecutor } from '../apps/exec/executor.js';
@@ -2091,6 +2093,7 @@ export function registerRoutes(
   registerEditorRoutes(app, {
     registry: editorRegistry,
     adapter,
+    broadcast,
     packCheck: runtime.packCheck ?? gardenPackCheck(discoverLivePlugin()?.path ?? null),
     conformance: runtime.editorConformance ?? gardenConformance(discoverLivePlugin()?.path ?? null, () => process.env['WICKED_CREW_URL'] ?? null, { provision: editorConformanceRuntime }),
     // F37: the grant write's §6.4 tripwire asks the engine whether a bearer is a governed unit's token.
@@ -3696,8 +3699,6 @@ export function registerRoutes(
         return reply.code(400).send({ error: 'a review posts nothing and never delivers' });
       }
       if (b.repoRef === undefined) return reply.code(400).send({ error: 'review-change needs repoRef' });
-      deliver = 'none';
-      delete input.deliver;
       const root = await repoRootOf(b.repoRef);
       if (root === undefined) return reply.code(404).send({ error: `repoRef names an unknown repo: ${b.repoRef}` });
       const ex = await reviewChangeExclusion(envelopeWords, reviewChangeDeps(b.repoRef, root));
@@ -3900,7 +3901,6 @@ export function registerRoutes(
       } catch (err) {
         return reply.code(409).send({ error: `the default evals could not be prepared: ${message(err)}` });
       }
-      deliver = 'none';
     }
     const isReview = b.workflow !== undefined && reviewPrepared(b.workflow);
     if (isReview) {
@@ -3909,7 +3909,10 @@ export function registerRoutes(
       } catch (err) {
         return reply.code(409).send({ error: `the review could not be prepared: ${message(err)}` });
       }
+    }
+    if (b.workflow !== undefined && postureFacts.preparationDropsDelivery(b.workflow)) {
       deliver = 'none';
+      delete input.deliver;
     }
     // DES-CHAT-ARTIFACTS-001 §4.3 (A3): one live job per chat, work and artifact runs together. A work launch filed under
     // a chat whose proposal's document attempt has no outcome yet is refused, as Go is refused the other way round.
@@ -7229,10 +7232,10 @@ export function registerRoutes(
     }
     // crew#1157: every APPROVING path (the gate route, standing orders, a gated resume or reassign, a
     // plan edit at the gate, the next message of a chat) is judged here, so no path approves a held
-    // plan change on an analysis run. Declining stays open.
+    // plan change on an analysis or delivering chat run. Declining stays open.
     if (!('refusal' in decided) && opts.declining !== true) {
-      const analysis = analysisPlanRefusal(run.session.id, { gateKind: decided.gateKind });
-      if (analysis !== null) return { refusal: analysis };
+      const chatRefusal = chatPlanRefusal(run.session.id, { gateKind: decided.gateKind });
+      if (chatRefusal !== null) return { refusal: chatRefusal };
     }
     return decided;
   }
@@ -7322,21 +7325,30 @@ export function registerRoutes(
   }
 
   /**
-   * crew#1157 (xreview on #1160): an ANALYSIS chat's run never takes on work. Its seat is told not to
+   * crew#1157 / crew#1259: an analysis or delivering ask-path chat's run never takes on work. Its seat is told not to
    * propose any, but a `PLAN+` line in an answer would still hold a creator addition at a
    * `plan_approval` gate; approving it (or approving with an edited plan) would let the run write.
    * Refused here, for every decision path, by the durable launch record: declining stays allowed.
    */
-  function analysisPlanRefusal(
+  function chatPlanRefusal(
     runId: string,
     held: { gateKind?: string | undefined; plan?: { steps: ReadonlyArray<{ catalog: string; id?: string | undefined; [k: string]: unknown }> } | undefined },
   ): { code: number; body: unknown } | null {
     const workflow = runTimingIndex.chatWorkflowOf(runId);
-    if (workflow === undefined) return null;
+    const deliveringChat = workflow === undefined && runTimingIndex.isAskPath(runId) && runTimingIndex.launchDeliverFor(runId) === 'pr';
+    if (workflow === undefined && !deliveringChat) return null;
     // A held plan change (the gate the engine opens on a `PLAN+` line), or a plan edit with any step
     // that could write (the same read-only predicate the chat open applies to the workflow).
     const writes = held.plan?.steps.some((s) => writeCapableStep(s) !== null) === true;
     if (held.gateKind !== 'plan_approval' && !writes) return null;
+    if (deliveringChat) return {
+      code: 409,
+      body: {
+        code: 'chat_build_needs_job',
+        error: `run ${runId}: the chat's run has no QE acceptance, so it cannot take on a change it would deliver. ` +
+          'Decline it here and start a job (a feature or bug job runs QE acceptance before its pull request).',
+      },
+    };
     return {
       code: 409,
       body: {
@@ -7346,6 +7358,19 @@ export function registerRoutes(
           'the work its answer proposed. Decline it here, and start a job for the change.',
       },
     };
+  }
+
+  /** (wicked-core#1683) The open steering rules a noted Land at this gate would skip (the engine's listed approve with
+   *  `noteIntent: 'skip_rules'`); `[]` when it skips none (or the engine predates the list); `null` when the list could
+   *  not be read. */
+  async function landSkipsRules(id: string): Promise<string[] | null> {
+    if (typeof adapter.gateActions !== 'function') return [];
+    try {
+      const listed = await adapter.gateActions(id);
+      return listed?.actions.find((a) => a.action === 'approve' && a.noteIntent === 'skip_rules')?.rules ?? [];
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -7409,6 +7434,29 @@ export function registerRoutes(
         const r = decided.refusal.body as { code?: unknown } | undefined;
         return r?.code === 'gate_changed' ? { code: decided.refusal.code, body: { ...(await currentPlanOf(id, false)), ...(r as object) } } : decided.refusal;
       }
+      // (wicked-core#1683) A noted Land that skips open steering rules is the same human-only
+      // decision as skip_rules. Read its rules under the decision lock and keep them for the audit.
+      const landNote = parsed.data.amend?.trim() ?? '';
+      const landRules = parsed.data.approve && (parsed.data.action === undefined || parsed.data.action === 'approve')
+        && landNote !== '' && decided.gateKind === 'review_adjudication'
+        ? await landSkipsRules(id) : [];
+      // A seat or a standing order is never let through on an unread list: it may be the skip it must not make.
+      if (landRules === null && !isHumanOperator(actor)) {
+        return { code: 503, body: { error: 'the gate\'s answers could not be read, so this Land could not be checked for a rule skip; read the gate and answer again', retryable: true } };
+      }
+      if (landRules !== null && landRules.length > 0 && !isHumanOperator(actor)) {
+        audit.record('gate.skip_rules_refused', actor, {
+          runId: id,
+          detail: { reason: 'human_operator_only', ...(decided.gated !== undefined ? { ord: decided.gated.ord } : {}) },
+        });
+        return {
+          code: 403,
+          body: {
+            error: `only a human operator can skip a steering rule (you are ${actor.kind}/${actor.trust}): landing with a note here skips ${landRules.join(', ')}`,
+            code: 'human_operator_only',
+          },
+        };
+      }
       // DES-CATALOG-002 §4.6: a plan-gate answer is bound to the plan on screen. A run launched from a chat proposal
       // REQUIRES `planRev` there, whichever client answers; a send-back needs it on any run. The engine compares it
       // (and `ord`) inside its own serialized decision, so a re-plan landing after this read still loses.
@@ -7437,8 +7485,8 @@ export function registerRoutes(
       ) {
         return { code: 501, body: { error: message(new PlanGateNoteUnsupportedError()) } };
       }
-      const analysis = parsed.data.approve ? analysisPlanRefusal(id, { plan: parsed.data.plan }) : null;
-      if (analysis !== null) return analysis;
+      const chatRefusal = parsed.data.approve ? chatPlanRefusal(id, { plan: parsed.data.plan }) : null;
+      if (chatRefusal !== null) return chatRefusal;
       // The gated unit and its receipt as it stands when the person decides (wicked-core#850: every
       // gate answer carries it). An APPROVE that would run the deliver unit passes the delivery
       // checks first.
@@ -7516,6 +7564,12 @@ export function registerRoutes(
           audit.record('gate.rules_skipped', actor, {
             runId: id,
             detail: { skips: parsed.data.skipRules ?? [], ...(gated !== undefined ? { ord: gated.ord } : {}), status },
+          });
+        }
+        if (landRules !== null && landRules.length > 0) {
+          audit.record('gate.rules_skipped', actor, {
+            runId: id,
+            detail: { skips: landRules.map((id) => ({ id, reason: landNote })), ...(gated !== undefined ? { ord: gated.ord } : {}), status, land: true },
           });
         }
         audit.record('gate.decided', actor, {
@@ -7941,9 +7995,9 @@ export function registerRoutes(
       const codeWork = def !== null && def.phases.some((p) => p.executes_code === true && p.role !== 'evaluator');
       return codeWork && (await adapter.getSettings()).deliverDefault !== 'none' ? 'pr' : 'none';
     },
-    // The launch route removes a change review's delivery (it posts nothing), and a run review's preparation removes it
-    // (`ReviewService.prepareLaunch`). The default evals' preparation keeps whatever delivery was resolved.
-    preparationDropsDelivery: (workflow) => workflow === REVIEW_CHANGE_WORKFLOW || reviewPrepared(workflow),
+    // crew#1418 / crew#1585: prepared reviews, evals and maps never deliver.
+    preparationDropsDelivery: (workflow) => workflow === REVIEW_CHANGE_WORKFLOW || reviewPrepared(workflow) ||
+      workflow === RUN_EVALS_WORKFLOW || workflow === DOMAIN_MAPPING,
   };
 
   // ── Power mode (program DES-POWER-MODE; api-types 0.149.0) ─────────────────────────────────────
@@ -8097,8 +8151,8 @@ export function registerRoutes(
    */
   async function crewGateActions(run: SessionView, gated: WorkUnit | undefined, gateKind: string, actions: GateAction[]): Promise<GateAction[]> {
     const declines = (a: GateAction): boolean => a.action === 'reject' || a.action === 'request_changes';
-    // crew#1157: an analysis run's held plan change is never approved (`gateForDecision`): only the declines stay.
-    let approveRefused = analysisPlanRefusal(run.session.id, { gateKind }) !== null;
+    // crew#1157 / crew#1259: an analysis or delivering chat run's held plan change is never approved (`gateForDecision`): only the declines stay.
+    let approveRefused = chatPlanRefusal(run.session.id, { gateKind }) !== null;
     let skipRefused = approveRefused;
     if (!approveRefused && gated !== undefined && isDeliverUnit(gated)) {
       approveRefused = 'refusal' in (await deliverApprovalRefusal(run, gated));
@@ -8108,7 +8162,8 @@ export function registerRoutes(
     return actions
       .filter((a) => declines(a) || !(a.action === SKIP_QE_ACTION ? skipRefused : approveRefused))
       .filter((a) => !(steering && a.action === 'reassign'))
-      .map((a) => (a.action === SKIP_QE_ACTION || a.action === SKIP_RULES_ACTION ? { ...a, humanOnly: true as const } : a));
+      .map((a) => (a.action === SKIP_QE_ACTION || a.action === SKIP_RULES_ACTION || (a.action === 'approve' && a.noteIntent === 'skip_rules')
+        ? { ...a, humanOnly: true as const } : a));
   }
 
   /**
@@ -10022,6 +10077,9 @@ export function registerRoutes(
           .send({ error: 'workerStallMaxEscalations must be an integer between 1 and 10' });
       }
     }
+    if (Object.hasOwn(patch, 'deliverAuthorNoreply') && typeof patch.deliverAuthorNoreply !== 'boolean') {
+      return reply.code(400).send({ error: 'deliverAuthorNoreply must be a boolean' });
+    }
     // deliverIdentityLogin (crew#549): the login the deliver phase must push as. A typo here
     // would be an identity the script can never match — every delivery would refuse — so an
     // invalid value is a 400, never a silently-dropped key. `''` clears it (back to GH_ACCOUNT).
@@ -10192,6 +10250,7 @@ export function registerRoutes(
       'newWorkSeats',
       'onboardingAutoCapture',
       'deliverIdentityLogin',
+      'deliverAuthorNoreply',
       'deliverIdentityByRepo',
       'baseSkillRef',
       'baseSkillPolicy',
@@ -11202,8 +11261,8 @@ export function registerRoutes(
     judge: gateForDecision,
     expect: expectFor,
     changed: gateChangedRefusal,
-    // crew#1157: a plan edit on an analysis run may not add a step that could write.
-    readOnlyRefusal: (runId, plan) => analysisPlanRefusal(runId, { plan }),
+    // crew#1157 / crew#1259: these chat runs may not add a step that could write.
+    readOnlyRefusal: (runId, plan) => chatPlanRefusal(runId, { plan }),
   });
 
   // ── Campaigns (crew#342 + TH-9) — the engine's durable Run-DAG scheduler over REST ──────────

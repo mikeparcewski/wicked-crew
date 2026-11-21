@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { ConformanceRule, EditorConformanceSummary, EditorGrantsResponse, EditorView, InstallEditorResponse, ListEditorsResponse } from '../src/core/types.js';
+import type { ConformanceRule, CoreEvent, EditorConformanceSummary, EditorGrantsResponse, EditorView, InstallEditorResponse, ListEditorsResponse } from '../src/core/types.js';
 import { conformanceCapMs, DEFAULT_CONFORMANCE_LOAD_S, gardenConformance, installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from '../src/editors/pack-install.js';
 import { EditorRegistry, EDITORS_STATE_FILENAME, PluginManifestSchema, RUN_PLUGIN_CASES, sha256Of, validRunTopic } from '../src/editors/registry.js';
 import { registerEditorRoutes } from '../src/editors/routes.js';
@@ -71,6 +71,18 @@ function makePluginPack(opts: { name?: string; id?: string; html?: string; versi
 }
 
 const passCheck: PackCheckRunner = async () => ({ ok: true, errors: [], warnings: [] });
+
+/** Two versions in separate directories: the old entries stay on disk, so only the registry's
+ * reconciliation can stop serving them. The update keeps notes and drops both the writer and the plugin. */
+function shrinkingPack(update = false): string {
+  const root = makePluginPack({ name: 'acme-suite', editorToo: true });
+  const file = join(root, 'wicked-pack.json');
+  const m = JSON.parse(readFileSync(file, 'utf8')) as { editors: Array<Record<string, unknown>>; plugins?: unknown[] };
+  if (update) delete m.plugins;
+  else m.editors.push({ ...m.editors[0], id: 'acme-writer' });
+  writeFileSync(file, JSON.stringify(m));
+  return root;
+}
 
 /** The editor-side conformance for whatever `editors[]` the pack holds (cases 0-12 + 18), per garden's report. */
 function editorRows(packRoot: string): EditorConformanceSummary['editors'] {
@@ -147,6 +159,36 @@ describe('the plugin manifest schema (CS7 C1/C2, zod strict)', () => {
 });
 
 describe('pack install admits run plugins (CS7 C4/C5)', () => {
+  it.each(['acme-writer', 'acme-times'])('#1430: a pack update removes dropped %s from memory and persisted state, keeping another pack', async (dropped) => {
+    const { reg, home } = registry();
+    const deps = { check: passCheck, conformance: conformantPlugins(), registry: reg };
+    await installPack(shrinkingPack(), undefined, deps);
+    await installPack(makePluginPack({ id: 'other-times', name: 'other-pack' }), undefined, deps);
+    reg.setEnabled(dropped, false);
+    // Reopen first so the dropped id has a boot-time flag as well as a live record.
+    const booted = new EditorRegistry({ stateHome: home });
+    const res = await installPack(shrinkingPack(true), undefined, { ...deps, registry: booted });
+    expect(booted.list().map((r) => r.manifest.id)).toEqual(['acme-notes', 'other-times']);
+    expect(booted.isInstalled(dropped)).toBe(false);
+    expect(res).toMatchObject({ updated: true, removed: ['acme-times', 'acme-writer'] });
+    const state = JSON.parse(readFileSync(join(home, EDITORS_STATE_FILENAME), 'utf8')) as { installed: Record<string, unknown>; enabled: Record<string, boolean> };
+    expect(state.installed).not.toHaveProperty(dropped);
+    expect(state.enabled).not.toHaveProperty(dropped);
+    const again = new EditorRegistry({ stateHome: home });
+    expect(again.get(dropped)).toBeNull();
+    expect(again.isInstalled(dropped)).toBe(false);
+    expect(again.isInstalled('other-times')).toBe(true);
+  });
+
+  it('#1430: replacing every id of the same pack is still an update', async () => {
+    const { reg } = registry();
+    const deps = { check: passCheck, conformance: conformantPlugins(), registry: reg };
+    await installPack(makePluginPack({ name: 'acme-suite' }), undefined, deps);
+    const res = await installPack(makePluginPack({ name: 'acme-suite', id: 'acme-new' }), undefined, deps);
+    expect(res).toMatchObject({ updated: true, removed: ['acme-times'] });
+    expect(reg.list().map((r) => r.manifest.id)).toEqual(['acme-new']);
+  });
+
   it('a plugin-only pack whose report has every run case installs and reads back', async () => {
     const { reg, home } = registry();
     const root = makePluginPack();
@@ -308,12 +350,73 @@ describe('the run-plugin routes (CS7 C3/C4)', () => {
       }
     });
     const logs: string[] = [];
-    registerEditorRoutes(app, { registry: reg, adapter, packCheck: passCheck, conformance: conformantPlugins(), log: (m) => logs.push(m) });
+    const broadcast = vi.fn<(frame: CoreEvent) => void>();
+    registerEditorRoutes(app, { registry: reg, adapter, packCheck: passCheck, conformance: conformantPlugins(), broadcast, log: (m) => logs.push(m) });
     await app.ready();
     apps.push(app);
-    return { app, reg, home, adapter, evaluateEditorGrants, upsertConformanceRule, logs };
+    return { app, reg, home, adapter, evaluateEditorGrants, upsertConformanceRule, logs, broadcast };
   }
   const HUMAN = { 'x-actor': 'human:operator' };
+
+  it('#1430: one ledger edit withdraws dropped editor and plugin grants and resets the retained editor', async () => {
+    const ledger = { excludes: [] as string[] };
+    const h = await harness({ ledger });
+    const post = (packRoot: string) => h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot } });
+    expect((await post(shrinkingPack())).statusCode).toBe(200);
+    ledger.excludes.push('editor:acme-writer@0.1.0#old/artifact.write', 'editor:acme-notes@0.1.0#old/artifact.write', 'mcp:unrelated');
+    h.upsertConformanceRule.mockClear();
+    const res = await post(shrinkingPack(true));
+    expect(res.statusCode, res.body).toBe(200);
+    expect(ledger.excludes).toEqual(['mcp:unrelated']);
+    expect(h.upsertConformanceRule).toHaveBeenCalledTimes(1);
+    expect(res.json()).toMatchObject({ updated: true, removed: ['acme-times', 'acme-writer'] });
+    expect(h.logs.some((l) => l.includes('removed acme-times, acme-writer'))).toBe(true);
+  });
+
+  it('#1423: a shrinking pack emits one update frame for the retained editor and one removed frame per dropped id', async () => {
+    const h = await harness({ ledger: { excludes: [] } });
+    const post = (packRoot: string) => h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot } });
+    expect((await post(shrinkingPack())).statusCode).toBe(200);
+    h.broadcast.mockClear();
+    expect((await post(shrinkingPack(true))).statusCode).toBe(200);
+    const r = h.reg.get('acme-notes')!;
+    expect(h.broadcast.mock.calls.map(([f]) => f)).toEqual([
+      { type: 'editorGrantsChanged', id: 'acme-notes', reason: 'update', version: r.manifest.version, sha256: r.sha256 },
+      { type: 'editorGrantsChanged', id: 'acme-times', reason: 'removed' },
+      { type: 'editorGrantsChanged', id: 'acme-writer', reason: 'removed' },
+    ]);
+  });
+
+  it('#1430/#1423: a failed withdrawal with nothing to add names dropped ids and still announces the changed builds', async () => {
+    const h = await harness({ ledger: { excludes: [] } });
+    const post = (packRoot: string) => h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot } });
+    expect((await post(shrinkingPack())).statusCode).toBe(200);
+    h.upsertConformanceRule.mockRejectedValueOnce(new Error('ledger locked'));
+    h.broadcast.mockClear();
+    const res = await post(shrinkingPack(true));
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ grantError: expect.stringContaining('and the grants of the removed acme-times, acme-writer were not withdrawn') });
+    expect(h.reg.isInstalled('acme-times')).toBe(false);
+    expect(h.broadcast.mock.calls.map(([f]) => [f.id, f.reason])).toEqual([
+      ['acme-notes', 'update'], ['acme-times', 'removed'], ['acme-writer', 'removed'],
+    ]);
+  });
+
+  it('#1423: plugin install, update and DELETE announce grants; a refused plugin grant write announces nothing', async () => {
+    const h = await harness({ ledger: { excludes: [] } });
+    for (const [version, reason] of [['0.1.0', 'install'], ['0.2.0', 'update']] as const) {
+      h.broadcast.mockClear();
+      const res = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: makePluginPack({ version }) } });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(h.broadcast.mock.calls.map(([f]) => f)).toEqual([{ type: 'editorGrantsChanged', id: 'acme-times', reason, version, sha256: h.reg.get('acme-times')!.sha256 }]);
+    }
+    h.broadcast.mockClear();
+    const r = h.reg.get('acme-times')!;
+    expect((await h.app.inject({ method: 'POST', url: '/api/v1/editors/acme-times/grants', headers: HUMAN, payload: { version: r.manifest.version, sha256: r.sha256, permission: 'observe:wicked.run.unit.*', allow: false } })).statusCode).toBe(409);
+    expect(h.broadcast).not.toHaveBeenCalled();
+    expect((await h.app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-times', headers: HUMAN })).statusCode).toBe(200);
+    expect(h.broadcast.mock.calls.map(([f]) => f)).toEqual([{ type: 'editorGrantsChanged', id: 'acme-times', reason: 'removed' }]);
+  });
 
   it('install writes one observe token per declared topic and drops the earlier build\'s tokens; DELETE drops them', async () => {
     const ledger = { excludes: ['mcp:unrelated'] };

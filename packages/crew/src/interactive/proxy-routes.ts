@@ -2,7 +2,7 @@
  * `/api/v1/projects/:projectId/interactive/*` — crew reverse-proxies the wicked-interactive
  * bridge (DES-MERGE-001 §5.3, §7.2; slice 1).
  *
- * PURE TRANSPORT. Nothing user-visible moves in this slice: what changes is that interactive's
+ * Most traffic is pure transport: interactive's
  * HTTP surface becomes reachable through crew's OWN origin, so the studio client never learns a
  * second origin, never needs CORS, and never carries a bridge port literal — ADR-0022's dynamic
  * port is honored rather than worked around, and the bridge stops being browser-reachable at all.
@@ -13,14 +13,17 @@
  *
  * Two things are deliberately hand-rolled over `node:http` rather than delegated to `fetch`:
  *
- *  1. UNBUFFERED STREAMING BOTH WAYS. Interactive's generation surface is SSE; a proxy that
- *     buffers turns a live narration into a single blob delivered at stream close. Piping raw
+ *  1. UNBUFFERED STREAMING BOTH WAYS, except HTML documents (guarded below). Interactive's generation surface is SSE;
+ *     buffering turns a live narration into a single blob delivered at stream close. Piping raw
  *     sockets keeps every chunk flowing as it arrives, in both directions.
  *  2. VERBATIM FORWARDING. The path remainder and query string are taken from `req.raw.url`,
  *     not from Fastify's decoded wildcard param, so percent-encoding survives the hop intact.
  *
- * THE ONE EXCEPTION TO PURE TRANSPORT — the doc CREATE (acceptance finding F-046). `POST
- * <prefix>/api/docs` is read before it is forwarded, because two things the bridge cannot do have
+ * Agent-authored HTML documents are also buffered (bounded), decoded and served with the editor WebRTC guard and a
+ * closed network policy (#1277). Downloads remain the person's file, never rewritten; SSE remains unbuffered.
+ *
+ * The doc CREATE exception (acceptance finding F-046): `POST <prefix>/api/docs` is read before it is forwarded,
+ * because two things the bridge cannot do have
  * to happen at the daemon: (a) a document may name the repository (or repositories) it is ABOUT
  * (`repo_ref` / `repo_refs`), which only crew can validate against the project's members and
  * only crew can remember — the bridge's create wire builds `doc.created` explicitly and never
@@ -37,7 +40,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { InteractiveDocCreateRequest } from 'wicked-crew-api-types';
 import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage } from 'node:http';
 import { brotliDecompressSync, gunzipSync, inflateSync } from 'node:zlib';
-import { requestOrigin } from '../editors/csp.js';
+import { documentCsp, INLINE_ONLY_POLICY, requestOrigin } from '../editors/csp.js';
+import { guardBundle, MAX_INLINE_SCRIPTS } from '../editors/webrtc-guard.js';
 import { API_PREFIX } from '../api/api-prefix.js';
 import { keepFrameGuard } from '../api/frame-guard.js';
 import { internalErrorBody, sanitizeServerErrorBody } from '../api/server-error-body.js';
@@ -62,6 +66,8 @@ import { DOC_NAME } from './draft-events.js';
 export const DOC_CREATE_PATH = '/api/docs';
 /** Create bodies are a brief plus a few fields; anything bigger is not a create crew should buffer. */
 export const DOC_CREATE_BODY_MAX = 4 * 1024 * 1024;
+/** Bound both the wire bytes and decoded HTML before scanning: an upstream document must not exhaust daemon memory. */
+export const DOCUMENT_BODY_MAX = 16 * 1024 * 1024;
 
 /** Shared with `api/testing.ts` — same message, different entry point (#631). */
 export const PROXY_SEAT_UNAVAILABLE_REASON =
@@ -1077,6 +1083,7 @@ function forward(
       },
       (res) => {
         reply.hijack();
+        let documentFinished = false;
         const headers: Record<string, string | string[]> = {};
         for (const [name, value] of Object.entries(res.headers)) {
           if (HOP_BY_HOP.has(name) || value === undefined) continue;
@@ -1085,16 +1092,35 @@ function forward(
         // crew#1048: a document is untrusted HTML served on the daemon's origin. Sandbox it in the
         // response itself, so opening it directly (not in studio's sandboxed iframe) gives its
         // scripts an opaque origin, never the daemon's API. Any upstream CSP still applies too.
-        if (String(res.headers['content-type'] ?? '').toLowerCase().includes('text/html')) {
+        const contentType = String(res.headers['content-type'] ?? '');
+        const html = contentType.split(';')[0]?.trim().toLowerCase() === 'text/html';
+        const document = html && !/^attachment/i.test(String(res.headers['content-disposition'] ?? '').trimStart());
+        if (html) {
           const upstreamCsp = headers['content-security-policy'];
           headers['content-security-policy'] = [
             ...(upstreamCsp === undefined ? [] : Array.isArray(upstreamCsp) ? upstreamCsp : [upstreamCsp]),
             'sandbox allow-scripts',
           ];
         }
-        // The daemon's clickjacking guard (frame-guard.ts) stays beside whatever policy this writes.
-        const csp = keepFrameGuard(reply.raw, headers['content-security-policy']);
-        if (csp !== undefined) headers['content-security-policy'] = csp;
+        const baseCsp = headers['content-security-policy'];
+        const setCsp = (hashes: readonly string[] = []): void => {
+          const policy = document ? [
+            ...(baseCsp === undefined ? [] : Array.isArray(baseCsp) ? baseCsp : [baseCsp]),
+            documentCsp(hashes), INLINE_ONLY_POLICY,
+          ] : baseCsp;
+          // The daemon's clickjacking guard stays beside every upstream and document policy, including refusals.
+          const csp = keepFrameGuard(reply.raw, policy);
+          if (csp !== undefined) headers['content-security-policy'] = csp;
+        };
+        setCsp();
+        if (document) {
+          delete headers['etag'];
+          delete headers['last-modified'];
+          headers['cache-control'] = 'no-store';
+          headers['x-dns-prefetch-control'] = 'off';
+          headers['referrer-policy'] = 'no-referrer';
+          headers['x-content-type-options'] = 'nosniff';
+        }
         const status = res.statusCode ?? 502;
         if (status >= 500) {
           // crew#1359: a hijacked reply skips the daemon's onSend hook. An upstream server error is read whole (bounded)
@@ -1113,6 +1139,65 @@ function forward(
             reply.raw.end(out);
             resolvePromise();
           });
+        } else if (document && req.method !== 'HEAD') {
+          // No headers or partial bytes leave until the whole document is safe to serve. Cap compressed input AND
+          // decompressed output so neither an endless upstream nor a compression bomb can grow this buffer unbounded.
+          let chunks: Buffer[] = [];
+          let size = 0;
+          delete headers['content-encoding'];
+          delete headers['transfer-encoding'];
+          delete headers['content-length'];
+          const finish = (body: Buffer, code = status): void => {
+            documentFinished = true;
+            chunks = [];
+            headers['content-length'] = String(body.length);
+            reply.raw.writeHead(code, headers);
+            reply.raw.end(body);
+            resolvePromise();
+          };
+          const refuse = (error: string): void => {
+            headers['content-type'] = 'application/json; charset=utf-8';
+            finish(Buffer.from(JSON.stringify({ code: 'document_refused', error })), 502);
+            res.destroy();
+          };
+          res.on('data', (c: Buffer) => {
+            if (documentFinished) return;
+            size += c.length;
+            if (size > DOCUMENT_BODY_MAX) refuse(`document body exceeds ${DOCUMENT_BODY_MAX} bytes`);
+            else chunks.push(c);
+          });
+          res.on('end', () => {
+            if (documentFinished) return;
+            const encoding = String(res.headers['content-encoding'] ?? '').trim().toLowerCase();
+            let body: Buffer = Buffer.concat(chunks);
+            try {
+              const opts = { maxOutputLength: DOCUMENT_BODY_MAX };
+              if (encoding === 'gzip') body = gunzipSync(body, opts);
+              else if (encoding === 'deflate') body = inflateSync(body, opts);
+              else if (encoding === 'br') body = brotliDecompressSync(body, opts);
+              else if (encoding !== '' && encoding !== 'identity') {
+                refuse(`unsupported document content-encoding: ${encoding}`);
+                return;
+              }
+            } catch (err) {
+              refuse((err as NodeJS.ErrnoException).code === 'ERR_BUFFER_TOO_LARGE'
+                ? `decoded document body exceeds ${DOCUMENT_BODY_MAX} bytes`
+                : `could not decode document content-encoding: ${encoding}`);
+              return;
+            }
+            // A different charset cannot be hashed as UTF-8 safely: preserve its decoded bytes and render without JS.
+            const charset = /;\s*charset\s*=\s*(?:"([^"]*)"|'([^']*)'|([^;\s]*))/i.exec(contentType);
+            if (charset === null || ['utf-8', 'utf8'].includes((charset[1] ?? charset[2] ?? charset[3] ?? '').trim().toLowerCase())) {
+              const guarded = guardBundle(body, MAX_INLINE_SCRIPTS);
+              if (guarded.tooMany !== undefined) {
+                req.log.warn({ count: guarded.tooMany, limit: MAX_INLINE_SCRIPTS }, 'proxy: document has too many inline scripts; served with scripts disabled');
+              } else {
+                body = guarded.body;
+                setCsp(guarded.scriptHashes);
+              }
+            }
+            finish(body);
+          });
         } else {
           reply.raw.writeHead(status, headers);
           // No `pipeline` and no buffering layer: `pipe` forwards each chunk as it lands, and
@@ -1121,6 +1206,7 @@ function forward(
           res.on('end', () => resolvePromise());
         }
         res.on('error', (err) => {
+          if (documentFinished) return;
           if (clientGone && isClientGoneError(err)) {
             req.log.info({ method: req.method, url: req.url }, 'proxy: client disconnected before upstream finished');
             reply.raw.destroy();

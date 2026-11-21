@@ -348,4 +348,6 @@ export const DEFAULT_SETTINGS: CrewSystemSettings = {
   // operator who configures none keeps today's behaviour (the phase pushes as whatever login gh
   // holds, and refuses when gh and git's credential disagree with each other).
   deliverIdentityLogin: '',
+  // crew#1471: checking both commit emails against the push login is opt in.
+  deliverAuthorNoreply: false,
 };

@@ -603,11 +603,13 @@ export class McpRegistry {
     return s === undefined || s.tools.every((t) => targetBound(s, t));
   }
 
-  /** What a held preview would register: its server name and each tool's schema hash (S6). */
-  peekPreview(previewHash: string): { name: string; tools: Array<{ name: string; schemaHash: string }>; egress: McpRestEgress | null; target: HashedRestTarget | null; address: AddressPolicy | null; pm: { system: PmSystem } | null } | null {
+  /** What a held preview would register, including a copy of env so callers cannot change its approved values. */
+  peekPreview(previewHash: string): { name: string; kind: McpUpstreamConfig['kind']; env?: Record<string, string>; tools: Array<{ name: string; schemaHash: string }>; egress: McpRestEgress | null; target: HashedRestTarget | null; address: AddressPolicy | null; pm: { system: PmSystem } | null } | null {
     const held = this.previews.get(previewHash);
     if (held === undefined || held.expiresAt <= this.now()) return null;
     return {
+      kind: held.config.kind,
+      ...(held.config.env !== undefined ? { env: { ...held.config.env } } : {}),
       pm: held.config.pm ?? null,
       address: held.config.address ?? null,
       name: held.config.name,
