@@ -12,6 +12,7 @@ import type { ConsiderationService } from '../decisions/consider.js';
 import { requestOrigin, shellCsp } from '../editors/csp.js';
 import { conformanceRuntimeRoot, exportEngineConformanceEnv, exportManagedChrome, managedChromium } from '../editors/conformance-runtime.js';
 import { launchRosterNaming, registerRoutes } from './routes.js';
+import { sweepStagedDocuments } from './run-documents.js';
 import { APPS_ACTIONS_STATE_FILENAME, AppActionStore } from '../apps/actions/store.js';
 import { AppsRedescriber } from '../apps/exec/redescribe.js';
 import { AppsSourceStage } from '../apps/exec/source-stage.js';
@@ -648,8 +649,11 @@ export async function createServer(
   // `runtime.rosterWithStanding`), the four interactive seams (`roster`), and the adapter's own
   // launches (`setRosterProvider` → `seatsForWorkflow` / `wicked-crew start`). Read at call time,
   // so a seat signed in from the Agents page is eligible on the very next launch.
+  // wicked-crew#1705: hold roster admissions from setup until the background ladder settles.
+  let skillsLanded = options?.skills?.disabled === true || options?.skills?.background !== true;
   const rosterWithStanding = rosterWithStandingFactory({
     seatHealth,
+    skillsLanded: () => skillsLanded,
     ...(options?.seats?.signedIn !== undefined ? { signedIn: options.seats.signedIn } : {}),
     // The broker status cache reads the gateway the ENGINE arms (beside this adapter's store),
     // the same dir the sign-in routes pass (agy crew-r1).
@@ -799,7 +803,7 @@ export async function createServer(
       skillsBoot = skillsRuntime.startBoot((health, ms) => {
         const gen = health.current === null ? '' : ` (generation ${health.current.gen})`;
         app.log.info(`[skills] boot ladder landed in ${ms}ms: ${health.state}${gen} — launches held while it ran proceed now`);
-      });
+      }).finally(() => { skillsLanded = true; });
     } else {
       await skillsRuntime.apply();
       await skillsRuntime.autoRefreshOnBoot();
@@ -2781,6 +2785,8 @@ export async function createServer(
   const unitVisible = (scope: EstateUnitScope): Promise<string[]> => projectVisible(scope.projectId, scope.repoId);
   // DES-KNOWLEDGE-DATA-001 §9.1: an app's knowledge query sees what a unit in the APP'S project sees (the same set).
   const appsKnowledgeVisible = (projectId: string): Promise<string[]> => projectVisible(projectId);
+  // One project predicate for the builder, governed check, live reads and action steps.
+  const appsVisibleSources = async (projectId: string | null): Promise<ReadonlySet<string>> => new Set((await dataGate.sources()).filter((s) => agentMay(s.access, s, projectId, 'see')).map((s) => s.name));
   // (DES-CATALOG-002 CS4/CS10) Each run's source pick: recorded at launch (POST /runs), read by the broker, the unit's
   // tool list and the estate relay, so a unit never reaches a registered source its job did not pick.
   const runSourcePicks = new RunSourcePicks(join(crewStateHome(), 'mcp', 'run-source-picks.json'));
@@ -2808,6 +2814,7 @@ export async function createServer(
       // so a version holding queries or actions lands when they pass (DES §9.2 step 3).
       sourceStage: new AppsSourceStage({
         registry: mcpRegistry,
+        visibleSources: appsVisibleSources,
         // (DES-KNOWLEDGE-DATA-001 §9.1) A `recall` query is checked against what its app's project may see.
         knowledge: { sources: () => dataGate.sources(), visible: appsKnowledgeVisible },
         projectOf: (slug) => appStore?.projectOf(slug) ?? null,
@@ -2863,7 +2870,7 @@ export async function createServer(
     : undefined;
   const mcpBroker = new McpBroker({
     ...(appStore !== null && appsVerifyUnitToken !== undefined ? { apps: new AppsSelfCheck(appStore, appsVerifyUnitToken, {
-      visibleSources: async (projectId) => new Set((await dataGate.sources()).filter((s) => agentMay(s.access, s, projectId, 'see')).map((s) => s.name)),
+      visibleSources: appsVisibleSources,
     }) } : {}),
     picks: runSourcePicks,
     registry: mcpRegistry,
@@ -2984,7 +2991,7 @@ export async function createServer(
       // Route tests drive `registerMcpRoutes` over their own registry (tests/mcp-registry.test.ts).
       mcp: mcpRegistry,
       // DES-APPS-001 (K2a): the app store (`daemon-apps.json` in the state home; repos under the apps root).
-      ...(appStore !== null ? { apps: appStore } : {}),
+      ...(appStore !== null ? { apps: appStore, appsVisibleSources } : {}),
       // (DES-APPS-001 K5) `POST /apps/check`: the engine resolves the unit's token; crew reads which step it is.
       ...(appsVerifyUnitToken !== undefined ? { appsVerifyUnitToken } : {}),
       ...(appStore !== null && appActions !== null ? { appsActions: appActions } : {}),
@@ -3365,6 +3372,12 @@ export async function startServer(
   options?: CreateServerOptions,
 ): Promise<StartedServer> {
   const app = await createServer(adapter, options);
+  // crew#1429: staged document folders whose run the engine never took (a launch that died after staging).
+  try {
+    sweepStagedDocuments(runDocumentsRootDir(), new Set(await adapter.sessions()));
+  } catch (err) {
+    app.log.warn(`[runs] staged documents sweep skipped: ${err instanceof Error ? err.message : String(err)}`);
+  }
   await app.listen({ port, host });
   const clock = app.bootStages ?? new BootStageClock();
   clock.lap('listen');

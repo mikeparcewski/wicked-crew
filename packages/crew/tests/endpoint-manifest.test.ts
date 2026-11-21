@@ -52,6 +52,7 @@ describe('endpoint-manifest.json (TH-11)', () => {
     expect(byKey.get('POST /api/v1/runs/:id/redeliver')).toMatchObject({
       responseType: 'RedeliverRunResult', statusCodes: [200, 404, 409, 500, 501],
     });
+    expect(byKey.get('POST /api/v1/chats/:id/proposals/:pid')?.statusCodes).toEqual([200, 400, 403, 404, 409, 422, 502]);
     const gate = byKey.get('POST /api/v1/runs/:id/gate');
     expect(gate?.requestType).toBe('GateDecision');
     expect(gate?.statusCodes).toEqual([200, 400, 404, 409, 501]);

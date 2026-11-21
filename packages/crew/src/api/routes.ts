@@ -237,7 +237,7 @@ import { REQUIRED_GARDEN_VERSION } from '../skills/plugin-source.js';
 import type { EvalRunStore } from './eval-store.js';
 import { isSeatKeyList } from '../core/job-seats.js';
 import { engineRosterJson, noEligibleSeatBody, parseNoEligibleSeat, toEngineSeat } from '../core/engine-roster.js';
-import { launchAssuranceNotice } from '../core/assurance.js';
+import { launchAssuranceNotice, readJudgeCoverage } from '../core/assurance.js';
 import { launchPosture, type PostureFacts } from '../core/launch-posture.js';
 import { launchRequiresQe, mayRequireQe, qeAcceptanceMode, qeSettingSkipReason } from '../core/qe-acceptance-setting.js';
 import {
@@ -319,10 +319,10 @@ import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.j
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
 import { crewStateHome, stateHomeOfDb, wickedWorkRoot } from '../projects/state-home.js';
 import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, jobLaunchRoster, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
-import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
+import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, removeStagedDocuments, stagedDocumentsRemoved, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
 import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks, webScopeReason } from './run-sources.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
-import { ChatProposals, LaunchOnceRegistry, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
+import { LaunchRefusal, ChatProposals, LaunchOnceRegistry, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
 import { CATALOG_SEEDS } from '../workflow-catalog/catalog-data.js';
 import { registerInteractiveDocList } from '../interactive/doc-list-routes.js';
 import { REVIEWS_DIRNAME } from '../interactive/review-ledger.js';
@@ -575,6 +575,16 @@ export class LaunchReply {
     this.payload = payload;
     return this;
   }
+}
+
+/** Keep correctable launch refusals typed, and preserve error codes in other launch failures. */
+export function jobRefusal(status: number, payload: unknown): Error {
+  const b = payload as { error?: unknown; code?: unknown } | undefined;
+  if (status >= 400 && status < 500 && typeof b?.code === 'string') {
+    return new LaunchRefusal(status, b as Record<string, unknown> & { code: string });
+  }
+  const error = typeof b?.error === 'string' ? b.error : 'The launch was refused.';
+  return new Error(`${error}${typeof b?.code === 'string' ? ` (${b.code})` : ''}`);
 }
 
 /** Who launches, and where the launch logs. The rest is crew's own and never a client field. */
@@ -1347,7 +1357,7 @@ export interface RegisteredRoutes {
   proposalLaunchers: LaunchOnceRegistry;
 }
 
-export interface RuntimeDeps {
+interface RuntimeServices {
   /** Recheck the rebased tree before redelivery; default reads Core.checkRunTree at call time. */
   checkRunTree?: CheckRunTree;
   /** Run a refresh script; tests supply a temp HOME with stub gh and a local origin. */
@@ -1539,6 +1549,7 @@ export interface RuntimeDeps {
    *  same seats (F-RECON-002/003); a directly-driven route set builds one over `seatHealth` +
    *  `signedIn` above. */
   rosterWithStanding?: RosterWithStanding;
+  judgeCoverage?: typeof CoreAdapter.judgeCoverage;
   /** Injectable so container-login route tests never spawn the engine or a login container. */
   seatLoginExec?: ExecLike;
   /** The `/ws` fan-out, for the few routes that say something to a thread themselves (a refused
@@ -1583,10 +1594,6 @@ export interface RuntimeDeps {
   editorUnitTokenProbe?: (token: string) => Promise<UnitTokenVerdict>;
   /** EP-C1 (tests): where `daemon-editors.json` lives; default = the crew state home. */
   editorsStateHome?: string;
-  /** DES-APPS-001 (K2a): the app store behind `/apps` and `POST /repos {create}`. `createServer` builds it over
-   *  the state home's `daemon-apps.json` and the apps root; a directly-driven route set gets the routes only when it
-   *  injects one (so a test never makes a repo under the real `~/.wicked/apps`). */
-  apps?: AppStore;
   /** (DES-APPS-001 K5) A unit token → its run and step, for `POST /apps/check`; absent = that route answers 503. */
   appsVerifyUnitToken?: (token: string) => Promise<{ runId: string; phase: string } | null>;
   /** (K2b) Grants and action records (`daemon-apps-actions.json`); with `apps`, the action routes serve for real. */
@@ -1666,6 +1673,15 @@ export interface RuntimeDeps {
    *  its own default (shells `estate stats --db`). */
   entityCount?: (dbPath: string) => Promise<number>;
 }
+
+/** An Apps runtime always supplies project visibility; a route set without Apps needs neither. */
+export type RuntimeDeps = RuntimeServices & ({
+  /** DES-APPS-001 (K2a): the app store behind `/apps` and `POST /repos {create}`. `createServer` builds it over
+   *  the state home's `daemon-apps.json` and the apps root; a directly-driven route set gets the routes only when it
+   *  injects one (so a test never makes a repo under the real `~/.wicked/apps`). */
+  apps: AppStore;
+  appsVisibleSources: (projectId: string | null) => Promise<ReadonlySet<string>>;
+} | { apps?: undefined; appsVisibleSources?: never });
 
 /**
  * The daemon REST surface. Every endpoint is a thin wrapper over one adapter /
@@ -2122,6 +2138,7 @@ export function registerRoutes(
       ? new AppExecutor({
           store: runtime.apps,
           registry: runtime.mcp ?? null,
+          visibleSources: runtime.appsVisibleSources,
           ...(appsKnowledge !== undefined ? { knowledge: appsKnowledge } : {}),
           projectOf: (slug) => runtime.apps!.projectOf(slug),
           crewInject: async (r) => {
@@ -2138,6 +2155,8 @@ export function registerRoutes(
           store: runtime.apps,
           actions: runtime.appsActions,
           registry: runtime.mcp ?? null,
+          visibleSources: runtime.appsVisibleSources,
+          projectOf: (slug) => runtime.apps!.projectOf(slug),
           audit,
           viewerOf: runtime.appsViewerOf ?? localViewerOf,
           ...(appsExecutor !== undefined ? { executor: appsExecutor } : {}),
@@ -2154,6 +2173,8 @@ export function registerRoutes(
           return JSON.stringify(launchRosterNaming(rosterWithStanding({ launch: true }), undefined));
         },
         registry: runtime.mcp ?? null,
+        visibleSources: runtime.appsVisibleSources,
+        projectOf: (slug) => runtime.apps!.projectOf(slug),
         grantOf: (slug, action) => appsWritePath?.getGrant(slug, action) ?? null,
       },
       ...(appsExecutor !== undefined ? { executor: appsExecutor } : {}),
@@ -2489,7 +2510,7 @@ export function registerRoutes(
       // boundary, are named before any run starts.
       ...(() => {
         const gov = seatGovernanceSnapshot();
-        return seatGovernanceWarnings(gov.diagnostics, hostSandboxLauncher(), gov.workEligible);
+        return [...seatGovernanceWarnings(gov.diagnostics, hostSandboxLauncher(), gov.workEligible), ...gov.imageFindings];
       })(),
       // crew 0.15.2 (#916): a custom seat written council-off with no work flag is now work-eligible
       // by the engine default; each is named once, so the operator can keep it off work.
@@ -2668,6 +2689,7 @@ export function registerRoutes(
         governanceDiagnostics.health(),
         floorCacheCache.get(),
       ]);
+      const seatGovernance = seatGovernanceSnapshot();
       const uptimeMs = Math.round(process.uptime() * 1000);
       const addr = app.server.address();
       const port = typeof addr === 'object' && addr !== null ? addr.port : 7701;
@@ -2705,9 +2727,10 @@ export function registerRoutes(
         seatGovernance: {
           rosterFile: seatRosterFile(),
           hostBoundary: hostSandboxLauncher(),
-          seats: seatGovernanceSnapshot().diagnostics,
+          seats: seatGovernance.diagnostics,
           // The same `seat.work_default` findings `/health.warnings` carries (api-types 0.133.0).
           roleFindings: seatWorkDefaultNow(),
+          imageFindings: seatGovernance.imageFindings,
         },
         // crew#740: which memory store this daemon reads and writes, and the isolation notice.
         memoryStore: memoryStoreInfo(),
@@ -2823,17 +2846,20 @@ export function registerRoutes(
   );
   /** crew#742: the seats' governance standing, read from the standing roster (empty when the
    *  roster cannot be read — the roster route reports that failure itself). */
-  const seatGovernanceSnapshot = (): { diagnostics: SeatGovernanceDiagnostic[]; workEligible: ReadonlySet<string> } => {
+  const seatGovernanceSnapshot = (): { diagnostics: SeatGovernanceDiagnostic[]; workEligible: ReadonlySet<string>; imageFindings: Array<{ kind: string; severity: 'warning'; message: string }> } => {
     try {
       // One roster read feeds both: the warnings follow the work role flag (not the council flag, and
       // not the runtime-gated `work_eligible`), which the published diagnostics do not carry.
       const roster = rosterWithStanding();
       return {
         diagnostics: seatGovernanceDiagnostics(roster as unknown as DiagnosticSeatInput[]),
+        imageFindings: roster.filter((seat) => seat.seat_image_unavailable !== undefined).map((seat) => ({
+          kind: 'seat.image_unavailable', severity: 'warning', message: `${seat.display_name ?? seat.key}: ${seat.seat_image_unavailable}`,
+        })),
         workEligible: new Set(roster.filter((seat) => seat.seat_eligible_for_work !== false).map((seat) => String(seat.key))),
       };
     } catch {
-      return { diagnostics: [], workEligible: new Set() };
+      return { diagnostics: [], workEligible: new Set(), imageFindings: [] };
     }
   };
 
@@ -3480,13 +3506,24 @@ export function registerRoutes(
     const p = chatScopes.get(chatId)?.projectId ?? chatHistory?.stateOf(chatId)?.projectId ?? null;
     return p === null || p === DEFAULT_PROJECT_ID ? null : p;
   };
+  /** crew#1429: a run's staged documents folder goes with the run (a refused launch, an archive). Logged, never fatal:
+   *  the run's own outcome stands. */
+  const freeStagedDocuments = (runId: string, archived: boolean): void => {
+    if (runtime.runDocumentsRoot === undefined) return;
+    try {
+      removeStagedDocuments(runId, runtime.runDocumentsRoot, archived);
+    } catch (err) {
+      app.log.warn(`[runs] staged documents of ${runId} not removed: ${message(err)}`);
+    }
+  };
   /**
    * (CS4) The documents an earlier run was given, to be authorised and staged again for its retry: its tokens and chat
    * from its staged manifest, hash-checked. `null` = it had none; `'unreadable'` = it had some that can't be read back.
    */
-  const stagedTokensOf = (runId: string, root: string): { chatId: string; tokens: string[] } | null | 'unreadable' => {
+  const stagedTokensOf = (runId: string, root: string): { chatId: string; tokens: string[] } | null | 'unreadable' | 'removed' => {
     const staged = stagedDocumentsOf(runId, root);
     if (staged === null) {
+      if (stagedDocumentsRemoved(runId, root)) return 'removed';
       try {
         readFileSync(join(root, runId, 'records', 'MANIFEST.json'));
       } catch {
@@ -3835,12 +3872,17 @@ export function registerRoutes(
     // only (a named workflow or an explicit plan); best-effort: an unreadable store launches without it.
     const briefRules = async (workflow: string | null): Promise<void> => {
       try {
+        // wicked-crew#1706: the registered checkout root lets the engine judge pack fit from the repo's manifests;
+        // an unreadable registry leaves it unknown (the rule still matches, as before).
+        const repoRoot = b.repoRef !== undefined ? await repoRootOf(b.repoRef).catch(() => undefined) : undefined;
         const read = await considerations.inForceFor(b.projectId ?? null);
         const def = workflow === null ? null : adapter.getWorkflow(workflow);
         const kinds = def === null ? null : def.phases.map((p) => String(p.kind ?? 'build'));
         const rules = read.source === 'unavailable' ? [] : read.rules;
         // (coord, E7 rerun) The job's repository: a rule that names it (its statement or its source doc) applies.
-        const job = { workflow, steps: null, kinds, project: b.projectId ?? null, repo: b.repoRef ?? null };
+        const job = { workflow, steps: null, kinds, project: b.projectId ?? null, repo: b.repoRef ?? null,
+          ...(repoRoot !== undefined ? { repoRoot } : {}),
+        };
         const matches = await matchRulesForJob(rules, job, runtime.matchRules ?? CoreAdapter.ruleMatcher(), (m) => req.log.warn(m));
         const briefed = withRulesBrief(input.problem, rules, matches);
         input.problem = briefed.problem;
@@ -3946,7 +3988,7 @@ export function registerRoutes(
     // chat, its project, the document's version now) and staged whole, read-only, in the run's own folder outside the
     // state home; a retry or reshape that sends none reuses the earlier run's staged folder (hash-checked). The folder
     // is a READ root only: the run can read its documents and never write there. The brief says where they are.
-    let staged: StagedDocuments | null = null;
+    let staged: (StagedDocuments & { published: boolean }) | null = null;
     // What to stage: the documents sent, or (a retry that sends none) the earlier run's tokens under the earlier run's
     // chat, authorised again now; never the earlier folder mounted as it is. `[]` = none, inherit nothing.
     let docTokens: { chatId: string; tokens: string[] } | null = null;
@@ -3954,6 +3996,9 @@ export function registerRoutes(
       if (b.documents.length > 0 && b.chatId !== undefined) docTokens = { chatId: b.chatId, tokens: b.documents };
     } else if (b.retryOf !== undefined && runtime.runDocumentsRoot !== undefined) {
       const earlier = stagedTokensOf(b.retryOf, runtime.runDocumentsRoot);
+      if (earlier === 'removed') {
+        return reply.code(409).send({ code: 'documents_unavailable', error: `the documents of run ${b.retryOf} were removed when it was archived; start the job again from its chat` });
+      }
       if (earlier === 'unreadable') {
         return reply.code(409).send({ code: 'documents_unavailable', error: `the documents of run ${b.retryOf} can't be read again; start the job again from its chat` });
       }
@@ -4002,8 +4047,10 @@ export function registerRoutes(
       input.extraReadRoots = [...(input.extraReadRoots ?? []), staged.root];
       input.problem = `${input.problem.trimEnd()}\n\n${documentsClause(staged)}`;
     }
+    let launched = false;
     try {
       const runId = await adapter.launchRun(input);
+      launched = true;
       // crew#641/#642 (item 5): when a run is promoted from a chat, record how many seats
       // participated and whether the chat was grounded — so an intent authored by a single
       // ungrounded model is distinguishable from one that survived a disagreement.
@@ -4100,8 +4147,7 @@ export function registerRoutes(
       if (chatSeatCount !== undefined && chatGrounded !== undefined) {
         runTimingIndex.setChatPromotion(runId, chatSeatCount, chatGrounded);
       }
-      if (b.retryOf !== undefined) retryIndex.set(runId, b.retryOf);
-      if (revisesPr !== undefined) retryIndex.setRevisesPr(runId, revisesPr);
+      retryIndex.applyLaunchEntry(runId, { retryOf: b.retryOf, revisesPr });
       // (DES-PM-001 §3.2, §4) The issues this run addresses, as its tracker set resolved them: delivery links them
       // back, the deliver gate's actions are offered for them, and the projection draws the trail.
       if (linkedAddresses !== undefined && runtime.trackerAddresses !== undefined) {
@@ -4148,12 +4194,13 @@ export function registerRoutes(
       const skillsWarning = skillsAhead === null ? {} : { skillsWarning: { kind: skillsAhead.kind, severity: skillsAhead.severity, message: skillsAhead.message } };
       // wicked-core#850: a full-assurance run on a one-CLI roster will wait at a gate for a seat that
       // can evaluate or judge it; the answer names the explicit opt-in to relaunch with.
-      const notice = launchAssuranceNotice({ runId, reducedAssurance: b.reducedAssurance, engineClisJson: engineRosterJson(input.clisJson) });
+      const notice = launchAssuranceNotice({ runId, reducedAssurance: b.reducedAssurance, coverage: readJudgeCoverage(engineRosterJson(input.clisJson), input.repoRef !== undefined, runtime.judgeCoverage ?? CoreAdapter.judgeCoverage) });
       const assuranceNotice = notice === null ? {} : { assuranceNotice: notice };
       // (program DES-POWER-MODE) Whether the run is in power mode, and why not when it was wanted.
       const power = { ...(input.power === true ? { power: true } : {}), ...(powerNotice !== null ? { powerNotice } : {}), ...(humanConfirmNotice !== null ? { humanConfirmNotice } : {}) };
       return reply.code(201).send({ runId, ...(linkedIssues !== undefined ? { linkedIssues } : {}), ...freeText, ...skillsWarning, ...assuranceNotice, ...power });
     } catch (err) {
+      if (!launched && staged?.published === true) freeStagedDocuments(input.sessionId, false);
       const msg = message(err);
       if (isReview) runtime.reviewLaunchRefused?.(input.sessionId, msg);
       // DES-TEAMING-002 T3: a plan on an engine without the plan approval gate is an "upgrade the
@@ -4279,16 +4326,6 @@ export function registerRoutes(
   );
 
   /**
-   * (DES-CATALOG-002 §4.6) The `job` launcher: a chat job proposal's Go, one launcher per launch kind, each with the
-   * identity derived from the proposal (`sessionId` = its run id, so a retry finds and adopts it), the chat filing, the
-   * shape, and the plan held: a job launched from a chat stops at its first plan unless the person's Start chose a
-   * power run (`power: true`, api-types 0.196.0), which is refused unless this daemon can run that job as one.
-   */
-  const jobRefusalText = (payload: unknown): string => {
-    const b = payload as { error?: unknown; code?: unknown } | undefined;
-    return `${typeof b?.error === 'string' ? b.error : 'the launch was refused'}${typeof b?.code === 'string' ? ` (${b.code})` : ''}`;
-  };
-  /**
    * (operator ruling 2026-11-06) Why a chat job can't run as a power run on this daemon now, else `null`: only a
    * workflow run on a repository whose workflow is a preset, on an engine with power mode (launchRun's own rule, which
    * would otherwise run it phased and only say so), with Power mode for new jobs on (chat starts follow the setting).
@@ -4318,6 +4355,12 @@ export function registerRoutes(
     if (!(await namesPreset(resolved.workflow, scoped))) return `${p.what.label} can't run as a power run (its workflow is not a preset); ${askPlan}`;
     return null;
   };
+  /**
+   * (DES-CATALOG-002 §4.6) The `job` launcher: a chat job proposal's Go, one launcher per launch kind, each with the
+   * identity derived from the proposal (`sessionId` = its run id, so a retry finds and adopts it), the chat filing, the
+   * shape, and the plan held: a job launched from a chat stops at its first plan unless the person's Start chose a
+   * power run (`power: true`, api-types 0.196.0), which is refused unless this daemon can run that job as one.
+   */
   proposalLaunchers.register('job', {
     find: async (identity) => (await adapter.sessions()).includes(identity.runId),
     live: async (runId) => {
@@ -4376,7 +4419,7 @@ export function registerRoutes(
           },
           { ...ctx, fromProposal: d.pid, ...(d.power === true ? { powerRequired: true } : {}) },
         );
-        if (out.statusCode !== 201) throw new Error(jobRefusalText(out.payload));
+        if (out.statusCode !== 201) throw jobRefusal(out.statusCode, out.payload);
         return;
       }
       if (p.launch === 'compose') {
@@ -4387,7 +4430,7 @@ export function registerRoutes(
           humanConfirm: 'before:1',
           common,
         });
-        if (out.code !== 202) throw new Error(jobRefusalText(out.body));
+        if (out.code !== 202) throw jobRefusal(out.code, out.body);
         return;
       }
       if (p.launch === 'demo') {
@@ -4403,7 +4446,7 @@ export function registerRoutes(
           fromProposal: d.pid,
           common,
         }, demoDeps);
-        if (out.code !== 201) throw new Error(jobRefusalText(out.body));
+        if (out.code !== 201) throw jobRefusal(out.code, out.body);
         return;
       }
       throw new Error(`a ${p.launch} job does not start from a chat`);
@@ -4488,6 +4531,7 @@ export function registerRoutes(
     try {
       const found = await adapter.archiveRun(id, parsed.data.archived, parsed.data.note);
       if (!found) return reply.code(404).send({ error: 'Run not found' });
+      if (parsed.data.archived) freeStagedDocuments(id, true);
       return { runId: id, archived: parsed.data.archived };
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -4540,6 +4584,7 @@ export function registerRoutes(
           }
           const found = await adapter.archiveRun(id, true, note);
           if (!found) return { code: 404, body: { error: 'Run not found' } };
+          freeStagedDocuments(id, true);
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           return { code: /only a terminal run/i.test(msg) ? 409 : 500, body: { error: msg } };
@@ -4568,6 +4613,7 @@ export function registerRoutes(
     for (const id of parsed.data.ids) {
       try {
         const found = await adapter.archiveRun(id, true, parsed.data.note);
+        if (found) freeStagedDocuments(id, true);
         results.push(found ? { id, ok: true } : { id, ok: false, error: 'not found' });
       } catch (e: unknown) {
         results.push({ id, ok: false, error: e instanceof Error ? e.message : String(e) });
@@ -5739,6 +5785,11 @@ export function registerRoutes(
       return { ok: true, name: scope.repos[0]!.name };
     },
     rosterEligible: () => proposalRoster(rosterWithStanding()),
+    coverage: (keys, bound, relaunch) => {
+      const p = { seats: { keys: [...keys], lead: keys[0] ?? null, label: '' }, ...(relaunch !== undefined ? { relaunch } : {}) };
+      const { roster } = jobLaunchRoster(launchRosterNaming(rosterWithStanding({ launch: true }), p.seats.lead ?? undefined, keys), p);
+      return readJudgeCoverage(engineRosterJson(JSON.stringify(roster)), bound, runtime.judgeCoverage ?? CoreAdapter.judgeCoverage);
+    },
     // (F1/F2) Agents › "Use <seat> for new work": the pool every new chat job and document is drawn from.
     newWorkSeats: readNewWorkSeats,
     runs: async () => (await adapter.sessionsDetail()).map((v) => decorateRun(v)),
@@ -6315,6 +6366,7 @@ export function registerRoutes(
     // (api-types 0.196.0, operator ruling 2026-11-06) a job's Start chooses how it runs: `true` = a power run (no plan
     // gate), `false` = it stops at its plan. Absent = it stops at its plan, as before.
     power: z.boolean().optional(),
+    reducedAssurance: z.boolean().optional(),
   });
   /** (api-types 0.192.0) `POST /chats/:id/proposals`: a person-made proposal, or a revision of the open one. */
   const PersonProposalSchema = z.union([
@@ -6367,7 +6419,7 @@ export function registerRoutes(
   );
   app.post(
     `${V}/chats/:id/proposals/:pid`,
-    { config: { manifest: { requestType: 'ChatProposalDecisionBody', responseType: 'ChatProposalDecisionResponse', statusCodes: [200, 400, 403, 404, 409, 502] } } },
+    { config: { manifest: { requestType: 'ChatProposalDecisionBody', responseType: 'ChatProposalDecisionResponse', statusCodes: [200, 400, 403, 404, 409, 422, 502] } } },
     async (req, reply) => {
       const { id, pid } = req.params as { id: string; pid: string };
       if (!chatArtifactFlags.proposals) return reply.code(404).send({ error: 'this daemon does not answer chat proposals' });
@@ -6395,6 +6447,7 @@ export function registerRoutes(
         decision: parsed.data.decision,
         ...(edits !== undefined ? { edits } : {}),
         ...(parsed.data.power !== undefined ? { power: parsed.data.power } : {}),
+        ...(parsed.data.reducedAssurance !== undefined ? { reducedAssurance: parsed.data.reducedAssurance } : {}),
       }, actor, instance);
       return reply.code(out.code).send(out.body);
     },

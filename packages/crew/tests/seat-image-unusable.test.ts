@@ -2,6 +2,11 @@
 // its remedy), and the engine is handed it unusable, so work stays off it. ONE rule (`unbuildableSeatImages`) for the
 // roster and the Nerve Center `seat_images` row.
 
+import Fastify from 'fastify';
+import { registerRoutes } from '../src/api/routes.js';
+import { GateCache } from '../src/api/gate-cache.js';
+import { ElicitationCache } from '../src/api/elicitation-cache.js';
+import type { CoreAdapter } from '../src/core/adapter.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -127,6 +132,25 @@ describe('the roster: a seat whose image cannot be built is unusable, and the en
     expect(claude).toMatchObject({ health: { status: 'active' }, work_eligible: true, council_eligible: true });
     expect(claude).not.toHaveProperty('seat_image_unavailable');
     expect(usable(claude)).toMatchObject({ usable: true });
+  });
+
+  it('health, system and diagnostics name the unbuildable seat image', async () => {
+    const roster = await primed(reading);
+    const app = Fastify();
+    registerRoutes(app, { ping: async () => 'ok', getSettings: async () => ({}) } as unknown as CoreAdapter,
+      new GateCache(), new ElicitationCache(), undefined, undefined, { rosterWithStanding: roster });
+    try {
+      const expected = { kind: 'seat.image_unavailable', severity: 'warning', message: `codex: ${reason}` };
+      const health = await app.inject({ method: 'GET', url: '/api/v1/health' });
+      expect(health.statusCode, health.body).toBe(200);
+      expect(health.json().warnings).toContainEqual(expected);
+      const diagnostics = await app.inject({ method: 'GET', url: '/api/v1/diagnostics' });
+      expect(diagnostics.statusCode, diagnostics.body).toBe(200);
+      expect(diagnostics.json().seatGovernance.imageFindings).toContainEqual(expected);
+      const system = await app.inject({ method: 'GET', url: '/api/v1/system' });
+      expect(system.statusCode, system.body).toBe(200);
+      expect(system.body).toContain('seat.image_unavailable');
+    } finally { await app.close(); }
   });
 
   it('a pending login check does not hide the image: the seat still reads unusable', () => {

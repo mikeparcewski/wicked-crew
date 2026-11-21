@@ -53,7 +53,7 @@ function routes(withStore = true) {
     new ElicitationCache(),
     { bus: null, index: new MembershipIndex(), log: () => undefined },
     { audit: AuditLog.noop(), authMode: 'off' },
-    withStore ? { apps: store } : {},
+    withStore ? { apps: store, appsVisibleSources: async () => new Set() } : {},
   );
   apps.push(app);
   return { app, adapter, dir };

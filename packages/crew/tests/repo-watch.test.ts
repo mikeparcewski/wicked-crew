@@ -97,6 +97,17 @@ function harness(opts: { views?: SessionView[]; failIndex?: string | null; enabl
 }
 
 describe('the poll', () => {
+  it('crew#1465 waits for a run on an off alias of the same checkout', async () => {
+    const alias = { id: 'r2', name: 'alias', root_path: repo, default_branch: 'main', registered_at: 2, code_graph_db: graphDb } as RepoEntry;
+    const h = harness({ views: [view('alias-run', 'executing', 'build', 'r1')], extra: [alias] });
+    await h.w.syncRepos();
+    await h.w.setEnabled('r1', false);
+    await h.tick();
+    await h.tick(QUIET_MS);
+    expect(h.row('r2')).toMatchObject({ state: 'waiting-runs', waitingOn: [{ runId: 'alias-run', reason: 'executing' }] });
+    expect(h.indexed).toEqual([]);
+  });
+
   it('is git status with no fsmonitor daemon, nested untracked files and dirty submodules ignored', () => {
     expect(POLL_ARGS).toEqual(['-c', 'core.fsmonitor=false', 'status', '--porcelain=v2', '-z', '--branch', '--untracked-files=all', '--ignore-submodules=dirty']);
   });
@@ -947,6 +958,6 @@ describe('holdsOf', () => {
     expect(holdsOf([
       view('a', 'planning', 'feature'), view('b', 'awaiting_human', 'bug'), view('c', 'executing', 'chat'),
       view('d', 'failed', 'domain-extraction'), view('e', 'executing', 'feature', 'other'), view('f', 'awaiting_human', 'domain-extraction'),
-    ], 'r1')).toEqual([{ runId: 'a', reason: 'executing' }, { runId: 'f', reason: 'domain-mapping' }]);
+    ], ['r1'])).toEqual([{ runId: 'a', reason: 'executing' }, { runId: 'f', reason: 'domain-mapping' }]);
   });
 });

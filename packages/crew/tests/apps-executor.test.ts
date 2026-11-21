@@ -3,20 +3,22 @@
 // the lock → the read → projection, coercion, row and more paths → cache with generation. Against the K1
 // test services (REST, MCP, GraphQL), the built-in crew source and, when set, real Postgres 16 and 17.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { AppReadCache } from '../src/apps/exec/cache.js';
 import { AppLimits, RateLimited } from '../src/apps/exec/limits.js';
 import { coerceCell, morePathSays, projectRows, selectPath } from '../src/apps/exec/project.js';
 import type { AppQuery, AppQueryResponse } from '../src/core/types.js';
+import { ingestUpload } from '../src/sources/uploads.js';
 import { SECRET_REDACTION } from '../src/mcp/secrets.js';
 import { startGraphqlServer, startMcpServer, startOpenApiService } from './fixtures/apps-sources/servers.mjs';
 import { appsHarness, type Harness, specWith } from './support/apps-harness.js';
-import { DB_REQUIRED, type FreshPg, freshPgDatabase, PG_TARGETS } from './support/sources-db.js';
+import { DB_REQUIRED, type FreshPg, freshPgDatabase, freshMysqlDatabase, MYSQL_TARGETS, PG_TARGETS } from './support/sources-db.js';
 
 type Fixture = { origin: string; hits: Array<{ method: string; path: string }>; close: () => Promise<void> };
 const LOOP = { allow: ['127.0.0.0/8'] };
@@ -721,4 +723,58 @@ for (const target of PG_TARGETS) {
       expect((await query('nosuch')).body).toMatchObject({ code: 'unknown_query' });
     });
   });
+}
+
+// A real snapshot read keeps this visibility/cache regression runnable without a database service.
+it('crew#1533: narrowing a landed SQL source refuses the next read before a cached answer', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'apps-visible-'));
+  let projects = ['p1'];
+  const h = await appsHarness({ snapshotDir: dir, visibleSources: async (project) => new Set(projects.includes(project!) ? ['snapshot'] : []) });
+  try {
+    const up = await ingestUpload('tickets.csv', Buffer.from('id\n1\n2\n'), { dir });
+    const config = { name: 'snapshot', kind: 'sql' as const, command: null, args: [], url: null, auth: null, sql: { driver: 'sqlite' as const, snapshot: up.digest } };
+    vi.spyOn(h.registry, 'snapshot').mockResolvedValue({ config, enabled: true } as never);
+    vi.spyOn(h.registry, 'source').mockResolvedValue({ config, enabled: true, allowWrites: false, description: { catalog: up.catalog } } as never);
+    await h.newApp('desk');
+    const landed = await h.land('desk', specWith([{ id: 'q', kind: 'sql', source: 'snapshot', output: [{ name: 'id', type: 'integer' }] }]), { q: 'SELECT id FROM tickets' });
+    expect(landed.status, JSON.stringify(landed.body)).toBe(200);
+    const read = () => h.call('POST', '/apps/desk/query', { version: 2, query: 'q' });
+    expect((await read()).body).toMatchObject({ rows: [[1], [2]], cachedAt: null });
+    expect((await read()).body.cachedAt).not.toBeNull();
+    expect(h.executor.callRecords('desk').at(-1)?.outcome).toBe('cached');
+    projects = ['other'];
+    const refused = await read();
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({ code: 'query_refused' });
+  } finally {
+    await h.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+if (MYSQL_TARGETS.length === 0) {
+  describe('the executor on a real MySQL', () => {
+    it.skipIf(!DB_REQUIRED)('needs APPS_MYSQL8_URL (CI sets it)', () => {
+      throw new Error('WICKED_SOURCES_DB=required, but APPS_MYSQL8_URL is not set');
+    });
+  });
+}
+for (const target of MYSQL_TARGETS) {
+  it(`crew#1290: a registered MySQL source is queried live on ${target.label}`, async () => {
+    const db = await freshMysqlDatabase(target);
+    const h = await appsHarness();
+    try {
+      h.env['APPS_MYSQL_READER'] = 'apps-reader';
+      await h.register({ name: 'refunds', kind: 'sql', sql: { driver: 'mysql', host: '127.0.0.1', port: db.port, database: db.database, user: 'apps_reader', tls: 'disable' }, auth: { ref: 'env:APPS_MYSQL_READER' }, address: LOOP });
+      await h.newApp('refunds');
+      const landed = await h.land('refunds', specWith([{ id: 'q', kind: 'sql', source: 'refunds', output: [{ name: 'id', type: 'integer' }] }]), { q: 'SELECT id FROM refunds ORDER BY id' });
+      expect(landed.status, JSON.stringify(landed.body)).toBe(200);
+      const read = await h.call('POST', '/apps/refunds/query', { version: 2, query: 'q' });
+      expect(read.status, JSON.stringify(read.body)).toBe(200);
+      expect(read.body).toMatchObject({ rows: [[1], [2], [3]] });
+    } finally {
+      await h.close();
+      await db.drop();
+    }
+  }, 60_000);
 }

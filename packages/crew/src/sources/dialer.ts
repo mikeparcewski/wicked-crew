@@ -31,7 +31,7 @@ import { lookup as dnsLookup } from 'node:dns/promises';
 import { request as httpRequest, type IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { connect as netConnect, isIP, type Socket } from 'node:net';
-import { pipeline, Readable, Transform } from 'node:stream';
+import { pipeline, Readable, Transform, type TransformCallback } from 'node:stream';
 import { constants as zlibConstants, createBrotliDecompress, createGunzip, createInflate, createInflateRaw } from 'node:zlib';
 
 import type { AddressConfirmationDetail } from '../core/types.js';
@@ -555,28 +555,45 @@ const ZLIB_LENIENT = { flush: zlibConstants.Z_SYNC_FLUSH, finishFlush: zlibConst
 /** The most content codings undone on one answer (fetch/undici's limit). */
 const MAX_CODINGS = 5;
 
-/** The first byte of a stream, put back unread; `null` = the stream ended empty. */
-async function peekFirstByte(src: Readable): Promise<number | null> {
-  for (;;) {
-    const chunk = src.read() as Buffer | null;
-    if (chunk !== null) {
-      src.unshift(chunk);
-      return chunk[0] ?? null;
+/**
+ * Choose deflate's wrapper on the first chunk, so decoding never delays the HTTP status. The inner
+ * inflater follows the outer stream's backpressure; cancelling either side tears the inflater down.
+ * An empty body needs no inflater and ends empty, as fetch does.
+ */
+class DeflateDecoder extends Transform {
+  private inflater: Transform | null = null;
+  private flushed: TransformCallback | null = null;
+
+  override _transform(chunk: Buffer, encoding: BufferEncoding, callback: TransformCallback): void {
+    if (this.inflater === null) {
+      if (chunk.length === 0) return callback();
+      this.inflater = (chunk[0]! & 0x0f) !== 0x08 ? createInflateRaw(ZLIB_LENIENT) : createInflate(ZLIB_LENIENT);
+      this.inflater.on('data', (data: Buffer) => {
+        if (!this.push(data)) this.inflater!.pause();
+      });
+      this.inflater.once('error', (err: Error) => this.destroy(err));
+      this.inflater.once('end', () => {
+        this.flushed?.();
+        this.flushed = null;
+      });
     }
-    if (src.readableEnded || src.destroyed) return null;
-    await new Promise<void>((resolve) => {
-      const done = (): void => {
-        src.off('readable', done);
-        src.off('end', done);
-        src.off('error', done);
-        src.off('close', done);
-        resolve();
-      };
-      src.on('readable', done);
-      src.on('end', done);
-      src.on('error', done);
-      src.on('close', done);
-    });
+    this.inflater.write(chunk, encoding, callback);
+  }
+
+  override _read(size: number): void {
+    this.inflater?.resume();
+    super._read(size);
+  }
+
+  override _flush(callback: TransformCallback): void {
+    if (this.inflater === null) return callback();
+    this.flushed = callback;
+    this.inflater.end();
+  }
+
+  override _destroy(err: Error | null, callback: (err: Error | null) => void): void {
+    this.inflater?.destroy();
+    callback(err);
   }
 }
 
@@ -600,10 +617,7 @@ async function decoded(res: IncomingMessage): Promise<{ stream: Readable; encode
     let decoder: Transform;
     if (c === 'gzip' || c === 'x-gzip') decoder = createGunzip(ZLIB_LENIENT);
     else if (c === 'br') decoder = createBrotliDecompress({ flush: zlibConstants.BROTLI_OPERATION_FLUSH, finishFlush: zlibConstants.BROTLI_OPERATION_FLUSH });
-    else {
-      const first = await peekFirstByte(current);
-      decoder = first !== null && (first & 0x0f) !== 0x08 ? createInflateRaw(ZLIB_LENIENT) : createInflate(ZLIB_LENIENT);
-    }
+    else decoder = new DeflateDecoder();
     // pipeline: backpressure end to end, and an error or destroy anywhere tears every stage down.
     pipeline(current, decoder, () => undefined);
     current = decoder;
@@ -739,8 +753,7 @@ export async function dialFetch(input: string | URL, init: DialRequestInit = {},
     return new Response(null, { status, statusText: res.statusMessage ?? '', headers: out });
   }
   let stream: Readable;
-  // An abort while the decoders are being set up (a deflate answer's first byte may be slow to come)
-  // tears the wire down at once; the body's own abort handling takes over after.
+  // An abort during decoder setup tears the wire down at once; the body's own handling takes over after.
   const onEarlyAbort = (): void => {
     res.destroy(abortError(signal as AbortSignal));
   };

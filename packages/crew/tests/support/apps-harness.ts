@@ -65,7 +65,7 @@ export interface Harness {
   close(): Promise<void>;
 }
 
-export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick<Harness, 'registry' | 'store' | 'audit' | 'executor'>) => void | Promise<void>; now?: () => number; crewDeadlineMs?: number; knowledge?: AppKnowledgeDeps; routes?: Pick<AppRoutesDeps, 'publish' | 'verifyUnitToken'> } = {}): Promise<Harness> {
+export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick<Harness, 'registry' | 'store' | 'audit' | 'executor'>) => void | Promise<void>; now?: () => number; crewDeadlineMs?: number; snapshotDir?: string; visibleSources?: (projectId: string | null) => Promise<ReadonlySet<string>>; knowledge?: AppKnowledgeDeps; routes?: Pick<AppRoutesDeps, 'publish' | 'verifyUnitToken'> } = {}): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'apps-k2b-'));
   const env: Record<string, string> = {};
   const secrets: SecretStore = { available: false, get: async () => null, has: async () => false, set: async () => undefined, delete: async () => undefined };
@@ -82,7 +82,8 @@ export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick
   // (DES-KNOWLEDGE-DATA-001 §9.1) With `knowledge`, recall queries are checked and read against it, in the app's project.
   let storeRef: AppStore | null = null;
   const projectOf = (slug: string): string | null => storeRef?.projectOf(slug) ?? null;
-  const store = new AppStore({ stateFile: join(dir, 'daemon-apps.json'), appsRoot: join(dir, 'apps'), registry: repoRegistry, sourceStage: new AppsSourceStage({ registry, ...(opts.knowledge !== undefined ? { knowledge: opts.knowledge, projectOf } : {}) }) });
+  const visibleSources = opts.visibleSources ?? (async () => new Set((await registry.listForAgents()).servers.map((s) => s.name)));
+  const store = new AppStore({ stateFile: join(dir, 'daemon-apps.json'), appsRoot: join(dir, 'apps'), registry: repoRegistry, sourceStage: new AppsSourceStage({ registry, visibleSources, projectOf, ...(opts.snapshotDir !== undefined ? { snapshotDir: opts.snapshotDir } : {}), ...(opts.knowledge !== undefined ? { knowledge: opts.knowledge } : {}) }) });
   storeRef = store;
   const app = Fastify({ logger: false });
   const viewers: Record<string, Viewer> = {};
@@ -90,6 +91,9 @@ export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick
   const executor = new AppExecutor({
     store,
     registry,
+    visibleSources,
+    projectOf,
+    ...(opts.snapshotDir !== undefined ? { snapshotDir: opts.snapshotDir } : {}),
     crewInject: async (r) => {
       const res = await app.inject({ method: r.method, url: r.url, headers: r.headers });
       return { statusCode: res.statusCode, body: res.body };
@@ -97,12 +101,12 @@ export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick
     viewerOf,
     ...(opts.now !== undefined ? { now: opts.now } : {}),
     ...(opts.crewDeadlineMs !== undefined ? { crewDeadlineMs: opts.crewDeadlineMs } : {}),
-    ...(opts.knowledge !== undefined ? { knowledge: opts.knowledge, projectOf } : {}),
+    ...(opts.knowledge !== undefined ? { knowledge: opts.knowledge } : {}),
   });
   const actions = new AppActionStore(join(dir, 'daemon-apps-actions.json'), opts.now);
   const writeEnv: Record<string, string> = {};
   const hooks: WriteHooks = {};
-  const writePath = new AppWritePath({ store, actions, registry, audit, viewerOf, executor, env: writeEnv, hooks, ...(opts.now !== undefined ? { now: opts.now } : {}) });
+  const writePath = new AppWritePath({ store, actions, registry, visibleSources, projectOf, audit, viewerOf, executor, env: writeEnv, hooks, ...(opts.now !== undefined ? { now: opts.now } : {}) });
   registerAuthHooks(app, { mode: 'required', verifiers: [{ name: 'test', verify: async (t) => TOKENS[t] ?? null }], allowedOrigins: null });
   const actorOf = (req: { actor?: Actor | null }): Actor => req.actor ?? LOCAL_ACTOR;
   registerMcpRoutes(app, { registry, audit, actorOf });

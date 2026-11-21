@@ -23,7 +23,7 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, realpathSync, renameSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { ProposalSource } from '../core/types.js';
@@ -226,6 +226,50 @@ export function stagedDocumentsOf(runId: string, stateRoot: string): StagedDocum
   return { root: join(base, runId), records: join(base, runId, 'records'), files: manifest.files, notes: manifest.notes };
 }
 
+/** Remove only a real run directory under the real staging root; never follow a linked directory. */
+export function removeStagedDocuments(runId: string, stateRoot: string, archived = false): void {
+  if (!RUN_ID.test(runId)) throw new Error('invalid staged run id');
+  if (!existsSync(stateRoot)) return;
+  const base = realpathSync(stateRoot);
+  const root = join(base, runId);
+  let st;
+  try { st = lstatSync(root); } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw err;
+  }
+  if (!st.isDirectory() || st.isSymbolicLink()) throw new Error('refusing a linked or non-directory staged run');
+  if (archived) {
+    try { writeFileSync(join(base, `${runId}.removed`), 'documents removed when archived\n', { flag: 'wx', mode: 0o600 }); } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+  }
+  const writable = (path: string): void => {
+    const entry = lstatSync(path);
+    if (entry.isSymbolicLink()) return;
+    chmodSync(path, entry.mode | 0o200);
+    if (entry.isDirectory()) for (const name of readdirSync(path)) writable(join(path, name));
+  };
+  writable(root);
+  rmSync(root, { recursive: true, force: true });
+}
+
+/** A removed packet is different from a run that never had documents. */
+export function stagedDocumentsRemoved(runId: string, stateRoot: string): boolean {
+  return RUN_ID.test(runId) && existsSync(join(stateRoot, `${runId}.removed`));
+}
+
+/** At boot, forget only old run directories that the engine does not know. */
+export function sweepStagedDocuments(stateRoot: string, known: ReadonlySet<string>, now = Date.now()): void {
+  if (!existsSync(stateRoot)) return;
+  const base = realpathSync(stateRoot);
+  for (const name of readdirSync(base)) {
+    if (!RUN_ID.test(name) || known.has(name)) continue;
+    const st = lstatSync(join(base, name));
+    if (st.isSymbolicLink() || !st.isDirectory() || now - st.mtimeMs <= 60 * 60 * 1000) continue;
+    removeStagedDocuments(name, base);
+  }
+}
+
 /** An already-staged run reused only when its manifest's run and chat equal this call's, its token set equals these
  *  tokens, and every hash still verifies. `null` otherwise (a different set, a different chat, a tampered file). */
 function reuseStaging(stateRoot: string, runId: string, chatId: string, wanted: readonly string[]): StagedDocuments | null {
@@ -264,7 +308,7 @@ async function serializePerRun<T>(runId: string, fn: () => Promise<T>): Promise<
  * already-staged run whose documents differ. Idempotent: a retried launch with the same run id, chat and tokens gets the
  * earlier staging back (after re-authorising).
  */
-export async function stageRunDocuments(runId: string, chatId: string, tokens: readonly string[], deps: RunDocumentsDeps): Promise<StagedDocuments> {
+export async function stageRunDocuments(runId: string, chatId: string, tokens: readonly string[], deps: RunDocumentsDeps): Promise<StagedDocuments & { published: boolean }> {
   if (!RUN_ID.test(runId) || !CHAT_ID.test(chatId)) throw new Error('refusing to stage documents for an invalid run or chat id');
   // Dedup keeping order, on the canonical form (so `doc:default/x` and `doc:_unfiled/x` are one token).
   const wanted: string[] = [];
@@ -302,7 +346,7 @@ export async function stageRunDocuments(runId: string, chatId: string, tokens: r
     // call's, whose token set equals these tokens, and whose hashes all verify; otherwise a different set is refused.
     if (existsSync(finalRoot)) {
       const reuse = reuseStaging(deps.stateRoot, runId, chatId, wanted);
-      if (reuse !== null) return reuse;
+      if (reuse !== null) return { ...reuse, published: false };
       throw new Error('a different set of documents is already staged for this run');
     }
 
@@ -423,7 +467,7 @@ export async function stageRunDocuments(runId: string, chatId: string, tokens: r
       if (!published) {
         const reuse = reuseStaging(deps.stateRoot, runId, chatId, wanted);
         rmSync(tmp, { recursive: true, force: true });
-        if (reuse !== null) return reuse;
+        if (reuse !== null) return { ...reuse, published: false };
         throw new Error('a different set of documents is already staged for this run');
       }
     } catch (err) {
@@ -436,9 +480,9 @@ export async function stageRunDocuments(runId: string, chatId: string, tokens: r
     chmodSync(finalRoot, 0o555);
 
     const back = stagedDocumentsOf(runId, deps.stateRoot);
-    if (back !== null) return back;
+    if (back !== null) return { ...back, published: true };
     const base = realpathSync(deps.stateRoot);
-    return { root: join(base, runId), records: join(base, runId, 'records'), files: manifestFiles, notes };
+    return { root: join(base, runId), records: join(base, runId, 'records'), files: manifestFiles, notes, published: true };
   });
 }
 

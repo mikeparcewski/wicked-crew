@@ -15,6 +15,7 @@
  */
 import { createHash } from 'node:crypto';
 
+import { coverageNote, type JudgeCoverage } from '../core/assurance.js';
 import { SEAT_STANDING_FIELDS } from '../core/engine-roster.js';
 import type {
   ArtifactProposal,
@@ -153,6 +154,8 @@ export interface JobFacts {
 }
 
 export interface JobContext {
+  /** The engine's judge coverage for the card's seats and repository binding; absent means unknown. */
+  coverage?: (keys: readonly string[], bound: boolean) => JudgeCoverage | null;
   /** The seat pool was drawn without a readable newWorkSeats setting. */
   seatsUnread?: boolean;
   chatId: string;
@@ -204,8 +207,9 @@ export function seatsNeeded(r: ResolvedOption): number {
   return 1 + (r.resolved.seats.distinctEvaluator ? 1 : 0);
 }
 
-export function seatsShortLine(r: ResolvedOption): string {
-  return `Needs ${seatsNeeded(r)} seats that can work now (one builds, the others check it); sign another seat in`;
+export function seatsShortLine(r: ResolvedOption, have: number): string {
+  if (seatsNeeded(r) === 1) return 'Needs a seat that can work now to build it, and none can. Sign in a seat to start it.';
+  return `Needs 2 seats that can work now, one to build it and one to check it, and ${have === 0 ? 'none' : `only ${have}`} can. ${have === 0 ? 'Sign in 2 more seats' : 'Sign in another seat'} to start it.`;
 }
 
 /** At the minimum seat count, disclose that the judge is the validator's author. */
@@ -413,7 +417,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     blockedBy.push('What to show is over 4000 characters with your corrections: say it shorter');
   }
   // A self-seated workflow picks its own seat at launch: the roster's count is not its requirement (codex r3).
-  if (short && coming === undefined && !(r.workflow !== null && SELF_SEATED.has(r.workflow))) blockedBy.push(seatsShortLine(r));
+  if (short && coming === undefined && !(r.workflow !== null && SELF_SEATED.has(r.workflow))) blockedBy.push(seatsShortLine(r, seats.keys.length));
   // The one question: the first required need that is missing.
   let question: ProposalQuestion | null = null;
   const missing = needs.find((n) => n.required && n.status === 'missing');
@@ -460,7 +464,9 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     swap: ctx.chat.repos.length > 1 ? { choices: ctx.chat.repos.filter((x) => x.id !== repo.id).slice(0, 4).map((x) => ({ label: x.name, edit: { repoRef: x.id } })) } : null,
   });
   const selfSeated = r.workflow !== null && SELF_SEATED.has(r.workflow);
-  const disclosure = !short && !selfSeated ? judgeDisclosure(r, seats.keys.length) : null;
+  const disclosure = !short && !selfSeated
+    ? coverageNote(ctx.coverage?.(seats.keys, repo !== null) ?? null, (key) => ctx.roster.find((s) => s.key === key)?.name ?? key) ?? judgeDisclosure(r, seats.keys.length)
+    : null;
   if (disclosure !== null) notes.push(disclosure);
   // Lead swaps come from the pool work is drawn from; the row shows only when it offers a choice (crew#1590).
   const swapChoices = (ctx.pool ?? ctx.roster).filter((x) => x.key !== seats.lead).slice(0, 4).map((x) => ({ label: `${x.name} leads`, edit: { lead: x.key } }));

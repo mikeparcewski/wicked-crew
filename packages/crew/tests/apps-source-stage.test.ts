@@ -3,7 +3,7 @@
 // and is refused with findings, in crew's words, when it does not. The real-database half runs on Postgres
 // 16 and 17 (CI job sources-db); locally it skips without APPS_PG16_URL / APPS_PG17_URL.
 
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { AppAction, AppDetail, AppQuery, AppVersion } from '../src/core/types.js';
 import { AppsSourceStage } from '../src/apps/exec/source-stage.js';
@@ -21,6 +21,32 @@ describe('the source stage without a database', () => {
   let h: Harness;
   afterEach(async () => {
     await h?.close();
+  });
+
+  it('crew#1533: hidden SQL queries and actions are unknown sources before any describe; the app project passes', async () => {
+    const config = { name: 'support', kind: 'sql' as const, command: null, args: [], url: null, auth: null, sql: { driver: 'postgres' as const, host: '127.0.0.1', port: 5432, database: 'test', user: 'reader', tls: 'disable' as const } };
+    const record = { agents: { projects: ['other'] } };
+    const registry = {
+      snapshot: async () => ({ config, enabled: true }),
+      source: async () => ({ config, enabled: true, allowWrites: true, description: null }),
+    } as unknown as McpRegistry;
+    const stage = new AppsSourceStage({ registry, projectOf: () => 'p1', visibleSources: async (project) => new Set(record.agents.projects.includes(project!) ? ['support'] : []) });
+    // The transport seams stand in for a describe: a hidden source must never reach either one.
+    const query = vi.spyOn(stage as unknown as { query: () => Promise<string> }, 'query').mockResolvedValue('query-contract');
+    const action = vi.spyOn(stage as unknown as { action: () => Promise<string> }, 'action').mockResolvedValue('action-contract');
+    const q: AppQuery = { id: 'q', kind: 'sql', source: 'support', output: [{ name: 'id', type: 'integer' }] };
+    const a: AppAction = { id: 'a', kind: 'row-write', source: 'support', table: 's.tickets', op: 'delete', key: { id: { kind: 'param', name: 'id' } }, params: { type: 'object', properties: { id: { type: 'integer' } }, required: ['id'] } };
+    const input = { app: 'desk', spec: specWith([q], [a]), queryText: { q: 'SELECT id FROM s.tickets' }, queries: ['q'], actions: ['a'] };
+    expect((await stage.check(input)).findings).toEqual([
+      { stage: 'source', code: 'unknown_source', path: '$.queries[0]', message: "query q: support is no source this app's project may see" },
+      { stage: 'source', code: 'unknown_source', path: '$.actions[0]', message: "action a: support is no source this app's project may see" },
+    ]);
+    expect(query).not.toHaveBeenCalled();
+    expect(action).not.toHaveBeenCalled();
+    record.agents.projects = ['p1'];
+    expect((await stage.check(input)).findings).toEqual([]);
+    expect(query).toHaveBeenCalledOnce();
+    expect(action).toHaveBeenCalledOnce();
   });
 
   it('a version holding a query lands once the stage is wired; without it, 409 source_check_unavailable (the seam K2a left)', async () => {
@@ -75,7 +101,7 @@ describe('the source stage without a database', () => {
       expect((r.body as unknown as Landed).findings?.[0], JSON.stringify(decl)).toMatchObject({ code: 'crew_route' });
     }
     expect(await first('{"route": "/runs", "query": {"__proto__": {"kind": "param", "name": "missing"}}}')).toMatchObject({ code: 'query_text' });
-    const stage = new AppsSourceStage({ registry: null });
+    const stage = new AppsSourceStage({ registry: null, visibleSources: async () => new Set(), projectOf: () => null });
     const r = await stage.check({ app: 'x', spec: specWith([]), queryText: {}, queries: ['ghost'], actions: ['phantom'] });
     expect(r.findings.map((f) => f.code)).toEqual(['unknown_query', 'unknown_action']);
   });
@@ -89,7 +115,7 @@ describe('the source stage without a database', () => {
       get: async () => ({ enabled: true }),
       snapshot: async () => ({ config: config('https://a.example/v1'), enabled: true }),
     } as unknown as McpRegistry;
-    const stage = new AppsSourceStage({ registry });
+    const stage = new AppsSourceStage({ registry, visibleSources: async () => new Set(['api']), projectOf: () => null });
     const q: AppQuery = { id: 'q', source: 'api', kind: 'rest', rowPath: '$.items[*]', output: [{ name: 'id', type: 'integer' }] };
     const r = await stage.check({ app: 'x', spec: specWith([q]), queryText: { q: JSON.stringify({ tool: 'list' }) }, queries: ['q'], actions: [] });
     expect(r.findings[0]).toMatchObject({ code: 'source_changed' });

@@ -1,18 +1,31 @@
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { RunTimingIndex, recordRunLaunched } from '../src/api/run-timing-index.js';
+import { RetryIndex } from '../src/api/retry-index.js';
+import Fastify from 'fastify';
+import { AuditLog } from '../src/api/audit.js';
+import { ChatAttachmentStore } from '../src/api/chat-attachments.js';
+import { ChatProposals } from '../src/api/chat-proposals.js';
+import { ElicitationCache } from '../src/api/elicitation-cache.js';
+import { GateCache } from '../src/api/gate-cache.js';
+import { registerRoutes } from '../src/api/routes.js';
+import { MembershipIndex } from '../src/projects/membership-index.js';
+import type { AuditEntry } from '../src/core/types.js';
 import type { ArtifactProposal, ProposalSource } from '../src/core/types.js';
 import {
   DocumentsRefused,
   RUN_DOCS_PACKET_MAX_BYTES,
   RUN_DOC_FILE_MAX_BYTES,
   documentsClause,
+  removeStagedDocuments,
   stageRunDocuments,
   stagedDocumentsOf,
+  sweepStagedDocuments,
   type RunDocumentsDeps,
 } from '../src/api/run-documents.js';
 import { buildSourcePacket, pdfTextDerivative, readStagedAttachment, readStagedDocument, type PacketDeps } from '../src/interactive/source-packet.js';
@@ -644,5 +657,115 @@ describe('CS4 slice A: stage a job\'s documents into the run', () => {
     expect(clause).toContain('records/');
     // The exact pairing: the real derivative filename, described as extracted text from the real original filename.
     expect(clause).toContain('`attachment-p1-report.pdf.txt` from `attachment-p1-report.pdf`');
+  });
+});
+
+
+describe('crew#1264 reused run launch facts', () => {
+  it('keeps only the newest launch facts when hydrating a reused id', () => {
+    const timing = new RunTimingIndex();
+    const retry = new RetryIndex();
+    const entries = [
+      { action: 'run.launched', runId: 'reused', ts: 2000, actor: { kind: 'system', id: 'daemon', trust: 'operator' }, detail: { channel: 'studio' } },
+      { action: 'run.launched', runId: 'reused', ts: 1000, actor: { kind: 'human', id: 'A', trust: 'operator' }, detail: { retryOf: 'old', revisesPr: { number: 1, headRef: 'branch', url: '' }, channel: 'cli', actor: 'A', chatId: 'chat', askPath: true } },
+    ] as AuditEntry[];
+    timing.hydrateFromLaunchEntries(entries);
+    retry.hydrateFromLaunchEntries(entries);
+    expect(timing.createdAtFor('reused')).toBe(2);
+    expect(timing.channelFor('reused')).toBe('studio');
+    expect(timing.launchActorFor('reused')).toBeUndefined();
+    expect(timing.chatIdFor('reused')).toBeUndefined();
+    expect(timing.isAskPath('reused')).toBe(false);
+    expect(retry.retryOfFor('reused')).toBeUndefined();
+    expect(retry.revisesPrFor('reused')).toBeUndefined();
+  });
+
+  it('clears absent launch facts on a live relaunch', () => {
+    const timing = new RunTimingIndex();
+    const audit = { record: () => 2000 } as unknown as AuditLog;
+    recordRunLaunched(audit, timing, { kind: 'system', id: 'daemon', trust: 'operator' }, 'reused', { actor: 'A', chatId: 'chat', askPath: true, chatSeatCount: 2, chatGrounded: true });
+    recordRunLaunched(audit, timing, { kind: 'system', id: 'daemon', trust: 'operator' }, 'reused', { channel: 'studio' });
+    expect(timing.launchActorFor('reused')).toBeUndefined();
+    expect(timing.chatIdFor('reused')).toBeUndefined();
+    expect(timing.chatSeatCountFor('reused')).toBeUndefined();
+    expect(timing.isAskPath('reused')).toBe(false);
+    const retry = new RetryIndex();
+    retry.hydrateFromLaunchEntries([{ action: 'run.launched', ts: 1000, actor: { kind: 'system', id: 'daemon', trust: 'operator' }, runId: 'reused', detail: { retryOf: 'old' } }]);
+    retry.applyLaunchEntry('reused', {});
+    expect(retry.retryOfFor('reused')).toBeUndefined();
+  });
+});
+
+
+describe('crew#1429 document lifecycle', () => {
+  it('marks publication only for the call that publishes a staging', async () => {
+    const stateRoot = tmp('cs4-life-');
+    const deps: RunDocumentsDeps = { stateRoot, authorize: okAuth, attachment: () => null, docsRoot: async () => null };
+    expect((await stageRunDocuments('run', 'chat', [], deps)).published).toBe(true);
+    expect((await stageRunDocuments('run', 'chat', [], deps)).published).toBe(false);
+  });
+
+  it('sweeps only old unknown run folders and refuses a linked run directory', async () => {
+    const root = tmp('cs4-sweep-');
+    const deps: RunDocumentsDeps = { stateRoot: root, authorize: okAuth, attachment: () => null, docsRoot: async () => null };
+    for (const id of ['old', 'known', 'fresh']) await stageRunDocuments(id, 'chat', [], deps);
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    for (const id of ['old', 'known']) utimesSync(join(root, id), old, old);
+    sweepStagedDocuments(root, new Set(['known']));
+    expect(existsSync(join(root, 'old'))).toBe(false);
+    expect(existsSync(join(root, 'known'))).toBe(true);
+    expect(existsSync(join(root, 'fresh'))).toBe(true);
+    const outside = tmp('cs4-outside-');
+    symlinkSync(outside, join(root, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
+    expect(() => removeStagedDocuments('linked', root)).toThrow();
+    expect(existsSync(outside)).toBe(true);
+  });
+
+  it('removes a failed launch publication and archives with a retry refusal', async () => {
+    const root = tmp('cs4-routes-');
+    const stateRoot = join(root, 'inputs');
+    const attachments = new ChatAttachmentStore({ dir: join(root, 'attachments') });
+    const id = attachments.add('chat', [{ filename: 'file.txt', declaredType: 'text/plain', data: Buffer.from('hello') }])[0]!.id;
+    const authorize = vi.spyOn(ChatProposals.prototype, 'authorizeDocuments').mockImplementation(okAuth);
+    let refuse = true;
+    const known = new Set<string>();
+    const launchRun = vi.fn(async (input: { sessionId: string }) => {
+      if (refuse) throw new Error('launch refused');
+      known.add(input.sessionId);
+      return input.sessionId;
+    });
+    const app = Fastify();
+    registerRoutes(app, {
+      launchRun, ping: async () => 'ok', getSettings: async () => ({}), sessionsDetail: async () => [], sessions: async () => [...known], listWorkflows: () => [], listRepos: async () => [], projectMembers: async () => [],
+      archiveRun: async () => true,
+      runView: async (runId: string) => known.has(runId) ? { session: { id: runId, status: 'completed' }, units: [] } : undefined,
+    } as unknown as import('../src/core/adapter.js').CoreAdapter, new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: AuditLog.noop(), authMode: 'off' }, { chatAttachments: attachments, runDocumentsRoot: stateRoot });
+    const launch = (body: Record<string, unknown>) => app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'Read these', ...body } });
+    try {
+      const failed = await launch({ chatId: 'chat', documents: [`attachment:${id}`] });
+      expect(failed.statusCode).toBe(400);
+      const failedId = launchRun.mock.calls[0]![0].sessionId;
+      expect(existsSync(join(stateRoot, failedId))).toBe(false);
+      refuse = false;
+      expect((await launch({ chatId: 'chat', documents: [`attachment:${id}`] })).statusCode).toBe(201);
+      const first = launchRun.mock.calls[1]![0].sessionId;
+      expect((await launch({ retryOf: first })).statusCode).toBe(201);
+      const retry = launchRun.mock.calls[2]![0].sessionId;
+      expect((await app.inject({ method: 'POST', url: `/api/v1/runs/${first}/archive`, payload: { archived: true } })).statusCode).toBe(200);
+      expect(existsSync(join(stateRoot, first))).toBe(false);
+      expect(stagedDocumentsOf(retry, stateRoot)).not.toBeNull();
+      const unavailable = await launch({ retryOf: first });
+      expect(unavailable.statusCode).toBe(409);
+      expect(unavailable.json()).toMatchObject({ code: 'documents_unavailable', error: expect.stringContaining('removed when it was archived') });
+      expect((await app.inject({ method: 'POST', url: `/api/v1/runs/${retry}/resolve`, payload: { action: 'archive', reason: 'done' } })).statusCode).toBe(200);
+      expect(existsSync(join(stateRoot, retry))).toBe(false);
+      expect((await launch({ sessionId: 'reused-docs', chatId: 'chat', documents: [`attachment:${id}`] })).statusCode).toBe(201);
+      refuse = true;
+      expect((await launch({ sessionId: 'reused-docs', chatId: 'chat', documents: [`attachment:${id}`] })).statusCode).toBe(400);
+      expect(stagedDocumentsOf('reused-docs', stateRoot)).not.toBeNull();
+    } finally {
+      authorize.mockRestore();
+      await app.close();
+    }
   });
 });

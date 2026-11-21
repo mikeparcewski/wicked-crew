@@ -35,6 +35,25 @@ for (const target of MYSQL_TARGETS) {
       await db?.drop();
     });
 
+    it.each([undefined, 1])('crew#1290: a table swapped for a view after the check is refused (maxRows %s)', async (maxRows) => {
+      await db.admin.query(`CREATE TABLE ${db.database}.swap_read (id INT)`);
+      await db.admin.query(`INSERT INTO ${db.database}.swap_read VALUES (1), (2), (3)`);
+      let swapped = false;
+      try {
+        await expect(mysqlRead(reader(), 'SELECT id FROM swap_read', [], {
+          expect: [{ schema: db.database, name: 'swap_read', kinds: ['table'] }],
+          ...(maxRows !== undefined ? { maxRows } : {}),
+          afterExpect: async () => {
+            await db.admin.query(`DROP TABLE ${db.database}.swap_read; CREATE VIEW ${db.database}.swap_read AS SELECT 99 AS id UNION ALL SELECT 100 UNION ALL SELECT 101`);
+            swapped = true;
+          },
+        })).rejects.toMatchObject({ errorClass: 'refused', message: expect.stringContaining('changed at the source') });
+        expect(swapped).toBe(true);
+      } finally {
+        await db.admin.query(`DROP ${swapped ? 'VIEW' : 'TABLE'} IF EXISTS ${db.database}.swap_read`);
+      }
+    });
+
     it('describes the catalog: tables, a view, ENUM literals, keys; never a row value', async () => {
       const cat = await describeMysql(reader());
       const refunds = cat.relations.find((r) => r.name === 'refunds');

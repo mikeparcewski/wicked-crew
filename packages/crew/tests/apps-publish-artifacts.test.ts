@@ -217,6 +217,7 @@ describe('the apps.publish health capability', () => {
     try {
       registerRoutes(app, { ping: async () => 'ok' } as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, undefined, {
         apps: { turns: null, sourceStage: null } as unknown as AppStore,
+        appsVisibleSources: async () => new Set(),
       });
       const response = await app.inject({ method: 'GET', url: '/api/v1/health' });
       expect(response.statusCode, response.body).toBe(200);
