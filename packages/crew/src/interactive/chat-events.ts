@@ -65,7 +65,10 @@ import {
   docScope,
   type SeamStatusPayload,
   narrationStamps,
+  writePacketCopy,
+  packetChanged,
 } from './draft-events.js';
+import { packetClause, type SourcePacket } from './source-packet.js';
 import { InteractiveHandoffLedger } from './ledger.js';
 import { WORKING_DOC_KIND, WORKING_DOC_SIDECAR } from '../working-doc/store.js';
 import { draftQualityClause, logDraftSkillArmLine, notesPathOf, type DraftFloorIo, type SkillHeld } from './draft-skill.js';
@@ -406,6 +409,8 @@ export interface BoundRefine {
   base: number;
   /** The protected-edit ids the person let this refine change. */
   allow: string[];
+  packet: SourcePacket;
+  graphDb: string | null;
   /** The card's two helpers, as the launch's roster. */
   clisJson: string;
   actor?: string | undefined;
@@ -529,7 +534,7 @@ interface InFlight {
   failureDetail?: string | undefined;
   /** A5: the proposal-bound refine this flight is: its document, the head it revises (`expect_head`), what the person
    *  let it change, and the docs root its lineage is read from. */
-  bound?: { ref: string; base: number; allow: string[]; docsRoot: string } | undefined;
+  bound?: { ref: string; base: number; allow: string[]; docsRoot: string; files: Array<{ name: string; sha256: string; bytes: number }> } | undefined;
 }
 
 /** One ask parked behind a busy doc (contract (c): FIFO per doc). In-memory on purpose: the
@@ -982,6 +987,8 @@ export async function startInteractiveChatSubscriber(
       ok = false;
     }
     if (!ok) return refuse('the run finished without writing the revised document');
+    const changed = packetChanged(chatDir, `refine-${runId}`, bound.files);
+    if (changed !== null) return refuse(`the source packet changed during the run (${changed})`);
     // The bytes that are checked are the bytes that land: the revision and its notes are copied into crew's own folder
     // (no run's write root) and only that copy is judged, recorded and announced.
     let landedOut: string;
@@ -1078,7 +1085,7 @@ export async function startInteractiveChatSubscriber(
       heartbeat: setInterval(() => {
         emitStatus({ ...docScope(flight.documentId, flight.projectId), state: 'working', message: flight.narration, ...narrationStamps(flight) });
       }, heartbeatMs),
-      bound: { ref: spec.artifactRef, base: spec.base, allow: [...spec.allow], docsRoot },
+      bound: { ref: spec.artifactRef, base: spec.base, allow: [...spec.allow], docsRoot, files: spec.packet.files.map((f) => ({ name: f.name, sha256: f.sha256, bytes: f.bytes.length })) },
     };
     flight.heartbeat.unref?.();
     inFlight.set(spec.runId, flight);
@@ -1089,7 +1096,8 @@ export async function startInteractiveChatSubscriber(
       if (steps === null) throw new Error(`the versions of ${spec.artifactRef} could not be read`);
       const mapped = await protectedEdits(steps, [], opts.gardenIo ?? {});
       if (!mapped.ok) throw new Error(`your edits could not be read on this host (${mapped.error}); nothing was started`);
-      mkdirSync(runDir, { recursive: true });
+      mkdirSync(chatDir, { recursive: true });
+      writePacketCopy(chatDir, `refine-${spec.runId}`, spec.packet);
       copyFileSync(doc.headHtmlPath, currentPath);
       writeFileSync(mapPath, JSON.stringify(mapped.map));
       rmSync(notesPath, { force: true });
@@ -1108,13 +1116,15 @@ export async function startInteractiveChatSubscriber(
       await adapter.launchRun({
         problem:
           boundRefineProblem(spec, { current: currentPath, out: outPath, notes: notesPath, map: mapPath }, kept) +
+          ' ' + packetClause(runDir, spec.packet, notesPath, { recordsRepo: false }) +
           ' ' +
           draftQualityClause(outPath, { pages: null, exact: false, source: 'unknown' }, [], { revision: true, notes: notesPath, runId: spec.runId }),
         sessionId: spec.runId,
         clisJson: spec.clisJson,
         workflow: INTERACTIVE_CHAT_WORKFLOW,
         ...(spec.projectId !== undefined ? { projectId: spec.projectId } : {}),
-        // CREW-UX-8: no repoRef, no snapshot, one write root (see the generic launch above).
+        ...(spec.graphDb !== null ? { projectGraph: { dbPath: spec.graphDb } } : {}),
+        // No repository snapshot; only the packet and this revision are writable.
         extraWriteRoots: [runDir],
         requireDeliverables: [outPath],
       });

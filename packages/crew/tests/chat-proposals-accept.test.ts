@@ -169,6 +169,33 @@ describe('the resolver', () => {
     expect(r.docsRootCalls).not.toContain('other');
   });
 
+  it('#1406: refine keeps authorized sources, anchors on refresh, and unchanged allow on retry', async () => {
+    const r = rig();
+    const t = chatWith(r, 'c1', { open: 'mikes/coverage-deck', namedRuns: ['source-run'] });
+    r.runs.push(run('source-run'));
+    const context = r.records.get('c1')!.find((rec) => rec.kind === 'context')!;
+    if (context.kind === 'context' && context.artifact !== undefined) context.artifact.anchors = ['heading'];
+    const deps = (r.svc as unknown as { deps: ChatProposalDeps }).deps;
+    deps.protectedEdits = async (_ref, _head, touches) => ({ ok: true, entries: [
+      { id: 'text:heading#12345678', kind: 'text', label: 'heading', wid: 'heading', touched: touches.includes('heading') },
+      { id: 'text:changed#87654321', kind: 'text', label: 'changed', wid: 'changed', touched: false },
+    ] });
+    const p = (await propose(r, 'c1', t, { refine: 'mikes/coverage-deck', ask: 'tighten it', sources: ['run:source-run'] }))!;
+    expect(p.sources).toContainEqual(expect.objectContaining({ token: 'run:source-run', status: 'ok' }));
+    expect(p).toHaveProperty('anchors', ['heading']);
+    doc('mikes', 'coverage-deck', 3);
+    await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    const refreshed = foldProposals(r.records.get('c1')!).get(p.pid)!.proposal;
+    expect(refreshed.protected?.find((e) => e.wid === 'heading')?.touched).toBe(true);
+    await r.svc.decide('c1', p.pid, { decision: 'go', edits: { allow: ['text:heading#12345678', 'text:changed#87654321'] } }, ME, 'i1');
+    deps.protectedEdits = async () => ({ ok: true, entries: [
+      { id: 'text:heading#12345678', kind: 'text', label: 'heading', wid: 'heading', touched: true },
+      { id: 'text:changed#00000000', kind: 'text', label: 'changed', wid: 'changed', touched: false },
+    ] });
+    const pid = await r.svc.appendRetry('c1', p.pid, proposalRunId(p.pid), 'mikes/coverage-deck', 'failed');
+    expect(foldProposals(r.records.get('c1')!).get(pid!)?.proposal).toHaveProperty('allow', ['text:heading#12345678']);
+  });
+
   it('a document the person typed by its ref counts as named; words from another sender do not', async () => {
     const r = rig();
     const t = chatWith(r, 'c1', { words: 'Change mikes/coverage-deck: slide 1 as a timeline' });

@@ -12,9 +12,6 @@
  *     refine's protected-edits walk releases only what the person let THIS run change, and only once it landed.
  *  3. The chat seam launches it with the card's two helpers and the derived run id; crew's landing guard and the head's
  *     CAS decide whether anything lands.
- *
- * Not carried yet: the document's canonical source packet and the refine's authorized `sources` (DES §6.1 "grounding
- * carries forward"); a refine revises from the current document and the person's ask.
  */
 
 import type { ChatTranscriptRecord, ProposalIdentity } from '../core/types.js';
@@ -22,6 +19,8 @@ import { parseArtifactRef, UNFILED_MOUNT } from '../api/chat-context.js';
 import { foldProposals, type ProposalDispatch, type ProposalDispatcher } from '../api/chat-proposals.js';
 import { readDocHead, type BoundRefine } from './chat-events.js';
 import type { DocBindingStore } from './doc-binding.js';
+import { buildSourcePacket, packetCutoff, type PacketDeps } from './source-packet.js';
+import { refuseLostSources } from './proposal-create.js';
 
 export interface RefineLauncherDeps {
   bindings: DocBindingStore;
@@ -32,11 +31,13 @@ export interface RefineLauncherDeps {
   launchBound: ((spec: BoundRefine) => Promise<void>) | null;
   records(chatId: string): ChatTranscriptRecord[];
   instanceOf(chatId: string): string | null;
+  chatIdOf(chatId: string, instance: string | null): string | null;
+  packetDeps: PacketDeps;
   /** The launch roster of two seats, as `clisJson`; `null` when either can no longer work. */
   clisJsonFor(seats: readonly string[]): string | null;
   /** The draft seam's fence: earlier attempts' draft folders go before this one starts, so an announce of an earlier
    *  create still on the bus can no longer land over the refine (codex A5 r2). */
-  fence?: (documentId: string, runIds: readonly string[]) => void;
+  fence?: (documentId: string, runIds: readonly string[], mount: string) => void;
   log?: (msg: string) => void;
 }
 
@@ -79,8 +80,10 @@ export class RefineLauncher implements ProposalDispatcher {
     if (clisJson === null) throw new Error('a helper on the card can no longer work; choose two helpers and Go again');
     const projectId = ref.mount === UNFILED_MOUNT ? null : ref.mount;
     const instance = this.deps.instanceOf(d.chatId);
+    const chatNow = this.deps.chatIdOf(d.chatId, instance);
+    const records = chatNow === null ? [] : this.deps.records(chatNow);
     const held = this.deps.bindings.get(ref.ref);
-    this.deps.bindings.begin(
+    const binding = this.deps.bindings.begin(
       held ?? {
         ref: ref.ref,
         mount: ref.mount,
@@ -91,25 +94,42 @@ export class RefineLauncher implements ProposalDispatcher {
         chatInstance: instance,
         scopeProject: d.resolution.filedIn.projectId,
         proposalId: d.pid,
-        cutoffTurnId: d.resolution.turnId,
+        cutoffTurnId: packetCutoff(records, d.pid, d.resolution.turnId),
         repos: [],
         graphDb: null,
       },
       { pid: d.pid, runId: d.identity.runId, base: target.base, allow, op: 'refine', chatId: d.chatId, chatInstance: instance },
     );
-    this.deps.fence?.(ref.doc, (this.deps.bindings.get(ref.ref)?.attempts ?? []).map((a) => a.runId).filter((id) => id !== d.identity.runId));
+    this.deps.fence?.(ref.doc, (this.deps.bindings.get(ref.ref)?.attempts ?? []).map((a) => a.runId).filter((id) => id !== d.identity.runId), ref.mount);
+    const resolution = {
+      ...d.resolution,
+      sources: [
+        ...d.resolution.sources.filter((s) => binding.tokens[s.token] === undefined),
+        ...Object.keys(binding.tokens).map((token) => ({ token, label: token, status: 'ok' as const })),
+      ],
+    };
+    const packet = await buildSourcePacket({
+      runId: d.identity.runId, chatId: d.chatId, pid: d.pid, cutoffTurnId: packetCutoff(records, d.pid, d.resolution.turnId),
+      resolution, records,
+      ...(chatNow !== null ? { storageChatId: chatNow } : {}),
+      held: { tokens: binding.tokens, bytes: (name) => this.deps.bindings.packetBytes(ref.ref, name) },
+    }, this.deps.packetDeps);
+    refuseLostSources(resolution, packet);
+    this.deps.bindings.addPacket(ref.ref, packet.canonical, packet.tokens);
     this.deps.log?.(`[proposals] ${d.pid}: refine ${ref.ref} v${target.base} run ${d.identity.runId} — ${allow.length} edit(s) let change`);
     await launchBound({
       documentId: ref.doc,
       ...(projectId !== null ? { projectId } : {}),
       runId: d.identity.runId,
-      chatId: d.chatId,
+      chatId: chatNow ?? d.chatId,
       proposalId: d.pid,
       artifactRef: ref.ref,
       ask: d.resolution.brief ?? d.resolution.what.title,
       base: target.base,
       allow,
       clisJson,
+      packet,
+      graphDb: binding.graphDb,
       actor: d.actor.id,
     });
   }
