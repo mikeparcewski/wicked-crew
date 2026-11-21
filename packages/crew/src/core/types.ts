@@ -114,6 +114,12 @@ export interface LaunchRunInput {
    * the tip, comments the run record on the PR (`gh pr comment`) and prints the PR URL last.
    */
   revisesPr?: { number: number; headRef: string; url: string };
+  /**
+   * (crew#1352) The issues the launch resolved through the tracker set (`owner/repo#N`, a Jira key, and the reference
+   * as the intent spelled it). Crew-INTERNAL, never on the wire: the composed deliver phase's EMBEDDED fallback text
+   * links them back, so a delivery whose daemon read fails still names them.
+   */
+  trackerRefs?: Array<{ system: 'github' | 'jira' | 'gitlab' | 'ado'; ref: string; asked?: string }>;
   /** Workflow def id to drive (e.g. `domain-extraction`). Omit ⇒ free-text planning. */
   workflow?: string;
   /**

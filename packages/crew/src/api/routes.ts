@@ -3945,7 +3945,11 @@ export function registerRoutes(
         if (linked.block !== null) input.problem = `${intent.trimEnd()}\n\n${linked.block}`;
         // crew#825: an all-excluded intent appends nothing but still answers what it left out.
         if (linked.issues.length > 0) linkedIssues = linked.issues;
-        if (linked.addresses !== undefined && linked.addresses.length > 0) linkedAddresses = linked.addresses;
+        if (linked.addresses !== undefined && linked.addresses.length > 0) {
+          linkedAddresses = linked.addresses;
+          // crew#1352: known before the engine is called, so the deliver script's embedded fallback links them back.
+          input.trackerRefs = linked.addresses.map((a) => ({ system: a.system, ref: a.ref, ...(a.asked !== undefined ? { asked: a.asked } : {}) }));
+        }
       } catch (err) {
         req.log.warn(`linked-issue resolution failed; launching on the intent alone: ${message(err)}`);
       }
@@ -4152,6 +4156,12 @@ export function registerRoutes(
         ...(b.actor !== undefined ? { actor: b.actor } : {}),
         // crew#627: which linked issues the daemon read into the problem, and which it could not.
         ...(linkedIssues !== undefined ? { linkedIssues } : {}),
+        // crew#1352: the issues the run addresses, as its tracker set resolved them. The trail is the durable record for
+        // the run's lifetime (the tracker-addresses store is a bounded cache, and its write may fail); the run-timing
+        // index reads them back, live and after a restart.
+        ...(linkedAddresses !== undefined ? { trackerAddresses: linkedAddresses } : {}),
+        // crew#1442: the run's source pick, so a pick store that loses the run still narrows it (fail closed).
+        ...(sourcePick !== null ? { sourcePick } : {}),
         // DES-CATALOG-002 §4.4: the shape it was launched as, what it was launched with, and the proposal behind it.
         ...(b.shape !== undefined ? { shape: launchShapeOf(b.shape) } : {}),
         ...(ctx.fromProposal !== undefined ? { fromProposal: ctx.fromProposal } : {}),

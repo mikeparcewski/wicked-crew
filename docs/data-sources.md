@@ -190,6 +190,11 @@ A tracker is one project inside one issue tracker: a GitHub repository's issues,
 - **Bounded calls.** Every tracker call an agent makes is held to that set: crew sets the site, refuses a project
   outside the set, and drops items outside it from the answer. Issue text is untrusted input, kept as background
   and never read as instructions.
+- **Jira: one site per token for agent reads.** Atlassian's server answers issues and comments without their
+  address, so crew proves an item's site only when the token reaches exactly one site (the one the tracker is
+  linked on). For a token that reaches several sites, agent reads are refused as `site_unproven`, and the refusal
+  says so. Linking and the link picker still work. For agent reads, register Jira with a token, or an account,
+  limited to one site.
 - **Start a job from an issue**, and the delivery's pull request names the issues it closes in each tracker's
   own form. At delivery, you can have crew comment on an issue the job addresses, or move it to another state:
   crew shows the card first (the issue, the exact text, the identity it acts as, the from and to states, the link

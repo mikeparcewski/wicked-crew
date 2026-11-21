@@ -2081,6 +2081,8 @@ export interface DeliverLaunchContext {
    *  with exactly them and the card names the author. `null` = none could be resolved (the card
    *  says so; git decides at commit time); absent = not read (no sentence, e.g. a post-hoc delivery). */
   commitIdents?: { author: GitIdent; committer: GitIdent } | null;
+  /** (crew#1352) The issues the launch resolved through the tracker set, for the embedded fallback's link-back. */
+  trackerRefs?: DeliverTextFacts['trackerRefs'];
 }
 
 /**
@@ -2111,6 +2113,7 @@ export function deliverPresetStep(
     phases,
     runUrl: runUrlFor(configuredPublicOrigin(), runId),
     revisesPr: revisesPr === null ? null : { number: revisesPr.number, url: revisesPr.url },
+    ...(launch.trackerRefs !== undefined ? { trackerRefs: launch.trackerRefs } : {}),
   });
   const phase = deliverPrPhase([], intent, {
     runId,
@@ -2163,6 +2166,7 @@ export function composeDeliverWorkflow(
     phases: base.phases,
     runUrl: runUrlFor(configuredPublicOrigin(), runId),
     revisesPr: revisesPr === null ? null : { number: revisesPr.number, url: revisesPr.url },
+    ...(launch.trackerRefs !== undefined ? { trackerRefs: launch.trackerRefs } : {}),
   });
   const anchor = base.phases[installAnchorIndex(base.phases)];
   const deliver = deliverPrPhase(anchor !== undefined ? [...anchor.depends_on] : last !== undefined ? [last.id] : [], intent, {

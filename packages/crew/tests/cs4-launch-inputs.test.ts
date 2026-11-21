@@ -345,6 +345,22 @@ describe('POST /runs: a job’s documents and source pick (CS4)', () => {
     expect(new RunSourcePicks(join(scratch, 'mcp', 'run-source-picks.json')).get(second)).toEqual(['web']);
   });
 
+  it('(crew#1442) the run.launched trail entry carries the pick, so a store that loses the run still narrows it', async () => {
+    const record = vi.spyOn(AuditLog.prototype, 'record');
+    try {
+      expect((await launch({ sources: ['web'] })).statusCode).toBe(201);
+      const runId = (launchRun.mock.calls[0]![0] as LaunchRunInput).sessionId;
+      const launched = record.mock.calls.find((c) => c[0] === 'run.launched' && c[2]?.runId === runId);
+      expect(launched?.[2]?.detail?.['sourcePick']).toEqual(['web']);
+      // A run launched with no pick records none (it reads what the switches allow).
+      expect((await launch({})).statusCode).toBe(201);
+      const open = (launchRun.mock.calls[1]![0] as LaunchRunInput).sessionId;
+      expect(record.mock.calls.find((c) => c[0] === 'run.launched' && c[2]?.runId === open)?.[2]?.detail).not.toHaveProperty('sourcePick');
+    } finally {
+      record.mockRestore();
+    }
+  });
+
   it('an empty pick is a pick (none), not "no pick"', async () => {
     expect((await launch({ sources: [] })).statusCode).toBe(201);
     expect(picks.get((launchRun.mock.calls[0]![0] as LaunchRunInput).sessionId)).toEqual([]);

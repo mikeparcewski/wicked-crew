@@ -86,7 +86,11 @@ function object(value: unknown): value is Record<string, unknown> {
 export class RunSourcePicks {
   private readonly runs = new Map<string, StoredPick>();
 
-  constructor(private readonly file: string) {
+  /**
+   * `launched` (crew#1442): the pick a run's `run.launched` trail entry recorded. A run this store no longer holds (its
+   * file deleted or replaced) keeps that exact pick rather than reading as "no pick", which would widen it.
+   */
+  constructor(private readonly file: string, private readonly launched?: (runId: string) => string[] | null) {
     let raw: string;
     try {
       raw = readFileSync(file, 'utf8');
@@ -112,7 +116,9 @@ export class RunSourcePicks {
   get(runId: string): string[] | null {
     const pick = this.runs.get(runId);
     // Callers must not be able to widen the cached pick by mutating its array.
-    return pick === undefined ? null : [...pick.ids];
+    if (pick !== undefined) return [...pick.ids];
+    const recorded = this.launched?.(runId) ?? null;
+    return recorded === null ? null : [...recorded];
   }
 
   set(runId: string, ids: readonly string[]): void {

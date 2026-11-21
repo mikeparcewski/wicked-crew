@@ -2755,7 +2755,8 @@ export async function createServer(
   void sourceProjector.backfill();
   // DES-PM-001 §3.4: every linked tracker (and every retired one) projected into estate, reconciled; a tracker's
   // link state shows on its TrackerLink. The boot backfill sends what estate may not hold yet.
-  const trackerAddresses = new TrackerAddresses();
+  // crew#1352: the store is a bounded cache; each run's `run.launched` entry is the durable record of its addresses.
+  const trackerAddresses = new TrackerAddresses(undefined, { launched: { of: (runId) => runTimingIndex.addressesOf(runId), all: () => runTimingIndex.allAddresses() } });
   const trackerProjector = new TrackerProjector({ store: mcpRegistryStore, addresses: () => trackerAddresses.all(), delivered: (runId) => deliveryIndex.urlFor(runId), log: (m) => app.log.warn(m) });
   // A delivered PR joins the trail (`closes`) at the next reconcile; this one runs every ten minutes as well.
   const trackerTimer = setInterval(() => trackerProjector.changed(), 10 * 60_000);
@@ -2790,7 +2791,8 @@ export async function createServer(
   const appsVisibleSources = async (projectId: string | null): Promise<ReadonlySet<string>> => new Set((await dataGate.sources()).filter((s) => agentMay(s.access, s, projectId, 'see')).map((s) => s.name));
   // (DES-CATALOG-002 CS4/CS10) Each run's source pick: recorded at launch (POST /runs), read by the broker, the unit's
   // tool list and the estate relay, so a unit never reaches a registered source its job did not pick.
-  const runSourcePicks = new RunSourcePicks(join(crewStateHome(), 'mcp', 'run-source-picks.json'));
+  // crew#1442: a run the store no longer holds keeps the pick its launch recorded (fail closed, never widened).
+  const runSourcePicks = new RunSourcePicks(join(crewStateHome(), 'mcp', 'run-source-picks.json'), (runId) => runTimingIndex.sourcePickOf(runId));
   /** Every registered source and PM tracker id with its owning source's name: how the relay maps `source:<id>` to a pick. */
   const sourceOwnerNames = async (): Promise<Array<{ id: string; name: string }>> => {
     const out = (await dataGate.sources()).map((s) => ({ id: s.id, name: s.name }));
