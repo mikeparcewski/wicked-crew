@@ -38,7 +38,7 @@ import { triageDeliverFailure, trustedDeliverOutcome, trustedOutcomeIn } from '.
 /** (crew#739) The sentinel nonce every composed script in this file carries. */
 const TEST_NONCE = '0123456789abcdef0123456789abcdef';
 import { committedScrubReason, deliverExclusionReason } from '../src/core/deliver-exclusions.js';
-import { DELIVER_TITLE_MAX, commitSubject, composeDeliverText, deliverTitle, factsFromWorkflow, framedDeliverText, redactHostPaths } from '../src/core/deliver-text.js';
+import { CLOSING_REFERENCE_MARKER, DELIVER_TITLE_MAX, commitSubject, composeDeliverText, deliverTitle, factsFromWorkflow, framedDeliverText, redactHostPaths } from '../src/core/deliver-text.js';
 
 const RUN_ID = '1bc72c20-0457-425f-b4cb-215a40e68e1e';
 
@@ -1705,7 +1705,7 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(r.output).not.toContain('composed from the run record');
     // …but the output still SAYS which text was used (Copilot on #525).
     expect(r.output).toContain('deliver: no daemon origin was known when this run launched — using the launch-time PR text');
-    expect(r.pr!.title).toBe('fix the thing (closes #3)');
+    expect(r.pr!.title).toBe(`fix the thing (closes${CLOSING_REFERENCE_MARKER} #3)`);
     expect(r.pr!.body).toContain('Fixes #3');
     expect(r.pr!.body).toContain(`- Run: \`${RUN_ID}\``);
   }, 60_000);

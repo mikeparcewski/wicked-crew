@@ -6279,6 +6279,8 @@ export interface TestSetFile {
   /** `playwright` | `playwright-python` | `vitest` | `jest` | `pytest` | `python` | `unknown`. */
   harness: string;
   status: 'passed' | 'failed' | 'not-executed';
+  /** crew#1393: the verify phase's classification against base. */
+  class?: 'produced-test-failure' | 'pre-existing-on-base' | 'unclassified';
 }
 
 /**
@@ -6312,6 +6314,8 @@ export interface TestSet {
   executed: number;
   passed: number;
   failed: number;
+  /** crew#1393: produced files whose failures also occur on base; absent on sets registered before crew#1393. */
+  failed_on_base?: number;
   not_executed: number;
   /** The produced `tests/PLAN-*.md`, `null` when none was produced. */
   plan: string | null;
@@ -7327,6 +7331,9 @@ export interface SystemSettings {
    * `GH_TOKEN`; `GET /settings` returns this login and no secret ever.
    */
   deliverIdentityLogin?: string;
+  /** (crew#1471) Opt in to requiring both commit emails to be the push login's GitHub noreply
+   *  address before staging a delivery. Off by default; applies to GitHub deliveries only. */
+  deliverAuthorNoreply?: boolean;
   /**
    * (crew#737) A PUSH IDENTITY PER REGISTERED REPOSITORY: repo id → the GitHub login its deliveries
    * push as, winning over {@link deliverIdentityLogin}. The deliver phase reads that account's OWN
