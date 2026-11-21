@@ -212,6 +212,17 @@ describe('A5: a refine of the open document', () => {
     }
   });
 
+  it('W24: an Unfiled refine never sends projectGraph without its projectId (its binding holds the chat\'s repo graph)', async () => {
+    const outcomes: Array<{ runId: string; outcome: unknown }> = [];
+    const w = await start({ keep: 'kept', argv: [] }, outcomes);
+    bindings.begin({ ref: '_unfiled/deck', mount: '_unfiled', doc: 'deck', projectId: null, owner: 'mike', chatId: 'c1', chatInstance: null, scopeProject: null, proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [], graphDb: '/graphs/chat.db' }, { pid: 'c1:t1', runId: RUN, base: 3, op: 'refine' });
+    await w.sub.launchBound(spec({ graphDb: '/graphs/chat.db' }));
+    expect(w.launches).toHaveLength(1);
+    // core/adapter.ts refuses projectGraph without projectId: the launch would fail and the refine could never start.
+    expect(w.launches[0]!.projectGraph).toBeUndefined();
+    expect('projectId' in w.launches[0]!).toBe(false);
+  });
+
   it('lands a refine with existing repository citations without passing --repo to the floor', async () => {
     const cited = '<html><body><h2 data-wid="h">Release 0.17</h2><p data-source="src/x.ts:12">Coverage reached 80%.</p></body></html>';
     writeFileSync(join(docsRoot, 'deck', '_v3.html'), cited);
