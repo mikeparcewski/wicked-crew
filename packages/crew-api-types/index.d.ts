@@ -16271,6 +16271,9 @@ export interface InstallEditorResponse {
   /** The pack was installed before; its editors were replaced (a new hash asks for its grants again). */
   updated: boolean;
   editors: EditorView[];
+  /** Sorted ids of editors and run plugins this pack no longer declares, removed in the update's
+   *  registry commit. Absent when none were removed; `grantError` reports a failed grant withdrawal. */
+  removed?: string[];
   check: PackCheckResult;
   conformance: EditorConformanceSummary;
   /**
@@ -16284,6 +16287,23 @@ export interface InstallEditorResponse {
    */
   granted?: string[];
   grantError?: string;
+}
+
+/**
+ * Crew's editor routes emit this `/ws` frame after an install, update, removal or successful grant
+ * edit (an unchanged grant list still emits). An open host for `id` must re-read
+ * `GET /editors/:id/grants` and call `setGrants`; a 404 means drop every grant. The installed build's
+ * version and hash accompany install, update and grant frames; removal frames carry neither.
+ * An install or update emits even when the ledger edit fails, because the installed build changed.
+ * Governance rule writes outside the editor routes, including `POST /governance/rules` changes to
+ * EDITOR-GRANTS or EDITOR-BUILTIN, do not emit this frame.
+ */
+export interface EditorGrantsChangedFrame {
+  type: 'editorGrantsChanged';
+  id: string;
+  version?: string;
+  sha256?: string;
+  reason: 'install' | 'update' | 'removed' | 'grant';
 }
 
 /** What the install-time conformance run found (garden `scripts/editor/conformance.py`). */

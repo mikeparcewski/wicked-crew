@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { ConformanceRule, EditorConformanceSummary, EditorGrantsResponse, EditorView, InstallEditorRefusal, InstallEditorResponse, ListEditorsResponse } from '../src/core/types.js';
+import type { ConformanceRule, CoreEvent, EditorConformanceSummary, EditorGrantsResponse, EditorView, InstallEditorRefusal, InstallEditorResponse, ListEditorsResponse } from '../src/core/types.js';
 import { registerFrameGuard } from '../src/api/frame-guard.js';
 import { BUNDLE_CSP_BASE, bundleHeaders, requestOrigin, shellCsp } from '../src/editors/csp.js';
 import { CONFORMANCE_CASES, gardenConformance, gardenPackCheck, installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from '../src/editors/pack-install.js';
@@ -486,10 +486,11 @@ describe('the routes', () => {
       }
     });
     const logs: string[] = [];
-    registerEditorRoutes(app, { registry, adapter, packCheck: opts.packCheck ?? (async () => ({ ok: true, errors: [], warnings: [] })), conformance: opts.conformance ?? conformant(), ...(opts.isUnitToken !== undefined ? { isUnitToken: opts.isUnitToken } : {}), log: (m) => logs.push(m) });
+    const broadcast = vi.fn<(frame: CoreEvent) => void>();
+    registerEditorRoutes(app, { registry, adapter, packCheck: opts.packCheck ?? (async () => ({ ok: true, errors: [], warnings: [] })), conformance: opts.conformance ?? conformant(), ...(opts.isUnitToken !== undefined ? { isUnitToken: opts.isUnitToken } : {}), broadcast, log: (m) => logs.push(m) });
     await app.ready();
     apps.push(app);
-    return { app, registry, root, home, evaluateEditorGrants, logs, upsertConformanceRule };
+    return { app, registry, root, home, evaluateEditorGrants, logs, upsertConformanceRule, broadcast };
   }
   const HUMAN = { 'x-actor': 'human:operator' };
   const AGENT = { 'x-actor': 'agent:operator' };
@@ -714,6 +715,48 @@ describe('the routes', () => {
     return h.app.inject({ method: 'POST', url: `/api/v1/editors/${id}/grants`, headers, payload: { ...shown, ...payload } });
   };
   const decisionOf = (body: EditorGrantsResponse, p: string): string | undefined => body.grants.find((g) => g.permission === p)?.decision;
+
+  it('#1423: allow, revoke and an unchanged revoke each emit one grant frame for the installed build', async () => {
+    const h = await harness({ ledger: { excludes: [] }, ledgerDecides: true });
+    const sha256 = await installed(h);
+    for (const allow of [true, false, false]) {
+      h.broadcast.mockClear();
+      const res = await grant(h, { permission: 'artifact.write', allow });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(h.broadcast.mock.calls.map(([f]) => f)).toEqual([{ type: 'editorGrantsChanged', id: 'acme-check', version: '0.1.0', sha256, reason: 'grant' }]);
+    }
+  });
+
+  it.each([false, true])('#1423: editor install, update and DELETE emit one frame even when the ledger write is unchanged or fails (%s)', async (fails) => {
+    const h = await harness({ ledger: { excludes: [] } });
+    for (const [version, reason] of [['0.1.0', 'install'], ['0.2.0', 'update']] as const) {
+      h.broadcast.mockClear();
+      if (fails) h.upsertConformanceRule.mockRejectedValueOnce(new Error('ledger locked'));
+      const permissions = fails ? [...WRITER, { id: 'mcp.session', why: 'to inspect' }] : WRITER;
+      await installed(h, { version, permissions });
+      expect(h.broadcast.mock.calls.map(([f]) => f)).toEqual([{ type: 'editorGrantsChanged', id: 'acme-check', reason, version, sha256: h.registry.get('acme-check')!.sha256 }]);
+    }
+    h.broadcast.mockClear();
+    const res = await h.app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-check', headers: HUMAN });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(h.broadcast.mock.calls.map(([f]) => f)).toEqual([{ type: 'editorGrantsChanged', id: 'acme-check', reason: 'removed' }]);
+  });
+
+  it('#1423: refused grant and install requests emit no frame (400/403/404/409/503 before a write)', async () => {
+    const h = await harness({ ledger: { excludes: [] }, isUnitToken: async () => 'unknown' });
+    await installed(h);
+    h.broadcast.mockClear();
+    expect((await grant(h, { permission: 'artifact.write', allow: true }, AGENT)).statusCode).toBe(403);
+    expect((await grant(h, { permission: 'artifact.write', allow: true, version: 'old' })).statusCode).toBe(409);
+    expect((await grant(h, { permission: 'unknown', allow: true })).statusCode).toBe(400);
+    expect((await grant(h, { permission: 'artifact.write', allow: true }, HUMAN, 'nope')).statusCode).toBe(404);
+    expect((await grant(h, { permission: 'artifact.write', allow: true }, { authorization: 'Bearer unknown' })).statusCode).toBe(503);
+    h.upsertConformanceRule.mockRejectedValueOnce(new Error('ledger locked'));
+    expect((await grant(h, { permission: 'artifact.write', allow: true })).statusCode).toBe(503);
+    expect((await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: AGENT, payload: { packRoot: makePack() } })).statusCode).toBe(403);
+    expect((await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: makePack({ id: 'acme-check', name: 'other-pack' }) } })).statusCode).toBe(409);
+    expect(h.broadcast).not.toHaveBeenCalled();
+  });
 
   it('F37: a person allows artifact.write: this build\'s token lands in EDITOR-GRANTS, GET then says allow, revoke makes it ask again', async () => {
     const ledger = { excludes: ['mcp:unrelated'] };

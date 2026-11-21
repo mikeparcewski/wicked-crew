@@ -47,7 +47,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from '../zod.js';
 
 import { LOCAL_ACTOR, trustAtLeast } from '../api/auth.js';
-import type { Actor, ConformanceRule, EditorGrantsResponse, EditorView, ListEditorsResponse } from '../core/types.js';
+import type { Actor, ConformanceRule, CoreEvent, EditorGrantsChangedFrame, EditorGrantsResponse, EditorView, ListEditorsResponse } from '../core/types.js';
 import { bundleHeaders } from './csp.js';
 import { installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from './pack-install.js';
 import { EDITOR_ID, EDITOR_VERSION, EditorRegistry, HOST_BUNDLE_CAP_BYTES, notRealEntry, readCapped, type EditorRecord, type PluginRecord, type RegisteredRecord } from './registry.js';
@@ -91,7 +91,7 @@ export function pluginToken(id: string, version: string, sha256: string, topic: 
 }
 
 /**
- * Rewrite the ledger's tokens for the editors `builds` just installed: EVERY token of those editors is
+ * Rewrite the ledger's tokens for the editors `builds` just installed or removed: EVERY token of those editors is
  * dropped (F37: an install or update asks again for what the person allowed, the same build included,
  * and nothing piles up), and `add` (this install's `mcp.session` consent tokens, for the builds that
  * declare it) is written. One read-modify-write;
@@ -207,6 +207,8 @@ export interface EditorRoutesDeps {
   conformance: ConformanceRunner;
   /** The §6.4 tripwire: is this bearer a governed unit's token? Absent = no engine to ask (nothing refused on it). */
   isUnitToken?: (token: string) => Promise<UnitTokenVerdict>;
+  /** Tell open hosts to read the decided grants again after an editor-route change. */
+  broadcast?: (frame: CoreEvent) => void;
   log?: (msg: string) => void;
 }
 
@@ -290,31 +292,42 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
       try {
         return await serial(async () => {
           const installed = await installPack(parsed.data.packRoot, parsed.data.enabled, { check: deps.packCheck, conformance: deps.conformance, registry });
-          deps.log?.(`[editors] installed ${installed.editors.map((e) => `${e.id}@${e.version}`).join(', ')}${installed.updated ? ' (update)' : ''}`);
+          const removed = installed.removed ?? [];
+          deps.log?.(`[editors] installed ${installed.editors.map((e) => `${e.id}@${e.version}`).join(', ')}${installed.updated ? ' (update)' : ''}${removed.length > 0 ? `; removed ${removed.join(', ')}` : ''}`);
           // The install consent IS the grant (DES-MCP-INSPECTOR-001 §6; CS7 C3): this human-only call, after
           // the operator approved the install, writes each declaring editor's per-build `mcp.session` token AND
           // one `observe:<topic>` token per declared topic of each installed run plugin. Every installed
           // editor's / plugin's earlier tokens are dropped first (codex r1: an update that no longer declares it
-          // keeps none), in the same read-modify-write as today's mcp.session edit.
+          // keeps none), in the same read-modify-write as today's mcp.session edit. Include the ids
+          // dropped from this pack so no editor or plugin keeps a consent the new manifest removed.
           const declaring = installed.editors.filter((e) => e.inline !== 'run-thread' && e.permissions.some((p) => p.id === INSTALL_GRANTED));
           const editorTokens = declaring.map((e) => grantToken(e.id, e.version, e.sha256, INSTALL_GRANTED));
           const plugins = installed.editors.filter((e) => e.inline === 'run-thread');
           const pluginTokens = plugins.flatMap((p) => (p.observe ?? []).map((o) => pluginToken(p.id, p.version, p.sha256, o.topic)));
           const tokens = [...editorTokens, ...pluginTokens];
           try {
-            await editInstallGrants(deps.adapter, installed.editors, tokens);
+            await editInstallGrants(deps.adapter, [...installed.editors, ...removed.map((id) => ({ id, version: '', sha256: '' }))], tokens);
             if (tokens.length === 0) return installed;
             if (declaring.length > 0) deps.log?.(`[editors] install consent granted ${INSTALL_GRANTED} to ${declaring.map((e) => `${e.id}@${e.version}`).join(', ')}`);
             if (plugins.length > 0) deps.log?.(`[editors] install consent granted ${pluginTokens.length} observe topic(s) to ${plugins.map((e) => `${e.id}@${e.version}`).join(', ')}`);
             return { ...installed, granted: tokens };
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            deps.log?.(`[editors] installed, but the grants were not written: ${msg}`);
+            deps.log?.(`[editors] installed, but the grants were not written${removed.length > 0 ? ` (removed ${removed.join(', ')})` : ''}: ${msg}`);
             // Said either way (codex r2): with nothing to grant, an earlier build's token was not withdrawn.
             const what = tokens.length > 0
               ? `the install consent's grants were not written (it asks), and its earlier grants were not withdrawn`
               : `its earlier grants (any permission you allowed) were not withdrawn`;
-            return { ...installed, grantError: `installed, but ${what}: ${msg}` };
+            const withdrawal = removed.length > 0 ? `, and the grants of the removed ${removed.join(', ')} were not withdrawn` : '';
+            return { ...installed, grantError: `installed, but ${what}${withdrawal}: ${msg}` };
+          } finally {
+            // The registry has committed even if the ledger edit failed or changed nothing. An
+            // open host must forget its cached grants and ask about the build now installed; a
+            // dropped id must hear the removal too. One frame per affected id, after the edit.
+            for (const e of installed.editors) {
+              deps.broadcast?.({ type: 'editorGrantsChanged', id: e.id, version: e.version, sha256: e.sha256, reason: installed.updated ? 'update' : 'install' } satisfies EditorGrantsChangedFrame);
+            }
+            for (const id of removed) deps.broadcast?.({ type: 'editorGrantsChanged', id, reason: 'removed' } satisfies EditorGrantsChangedFrame);
           }
         });
       } catch (err) {
@@ -348,6 +361,7 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
           return reply.code(503).send({ error: `${id} was not removed: its grants could not be withdrawn (${err instanceof Error ? err.message : String(err)}); try again` });
         }
         if (!registry.removeInstalled(id)) return reply.code(404).send({ error: `no editor '${id}' is installed` });
+        deps.broadcast?.({ type: 'editorGrantsChanged', id, reason: 'removed' } satisfies EditorGrantsChangedFrame);
         return { removed: true, id };
       });
     },
@@ -488,6 +502,9 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
           return reply.code(503).send({ error: `not ${allow ? 'allowed' : 'revoked'}: ${err instanceof Error ? err.message : String(err)}` });
         }
         deps.log?.(`[editors] ${allow ? 'allowed' : 'revoked'} ${permission} for ${id}@${record.manifest.version}`);
+        // An unchanged allow or revoke still tells a host to re-read: it may have missed an earlier
+        // frame, and the ledger's decided answer, including project denies, is the only authority.
+        deps.broadcast?.({ type: 'editorGrantsChanged', id, version: record.manifest.version, sha256: record.sha256, reason: 'grant' } satisfies EditorGrantsChangedFrame);
         return decide(record, projectOf(parsed.data.project), reply);
       });
     },
