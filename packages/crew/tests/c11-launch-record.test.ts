@@ -162,8 +162,9 @@ describe('RunSourcePicks: a lost store entry keeps the launch record\'s pick (cr
 
   it('the store stays the authority for a run it holds', () => {
     const file = join(dir(), 'mcp', 'run-source-picks.json');
+    new RunSourcePicks(file).set('run-q', ['support-pg']);
+    // A reader whose launch record says otherwise still answers the store's pick for a run the store holds.
     const picks = new RunSourcePicks(file, () => ['other-pg']);
-    picks.set('run-q', ['support-pg']);
     expect(picks.get('run-q')).toEqual(['support-pg']);
   });
 });
