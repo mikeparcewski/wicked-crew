@@ -2229,12 +2229,33 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
       { runs: async () => [view], brief: async () => ({ runId: 'run-src', status: 'completed', title: 't', markdown: 'Coverage: 80%', sha256: 'f'.repeat(64) }), docsRoot: async () => null, attachment: () => null },
     );
     const spec: BoundDraft = {
-      documentId: doc, brief: 'a release note', style: 'doc', runId: `run-${doc}`, chatId: 'c1', proposalId: 'c1:t2', artifactRef: ref,
+      documentId: doc, brief: 'a release note', style: 'doc', runId: `run-${doc}`, chatId: 'c1', chatInstance: 'i1', proposalId: 'c1:t2', artifactRef: ref,
       repos: [{ repoRef: 'repo-crew', name: 'wicked-crew', rootPath: repoRoot }], graphDb: '/graphs/chat.db',
       clisJson: '[{"key":"claude"},{"key":"codex"}]', packet, base: 0,
     };
     return { bindings, spec, repoRoot };
   }
+
+  it.each(['c1--1', null])('files a bound launch under its current chat instance after the engine await: %s (#1279)', async (currentId) => {
+    const { bindings, spec, repoRoot } = await boundWorld('instance-note');
+    const engine = fakeAdapter({ repos: [{ id: 'repo-crew', root_path: repoRoot }] });
+    const adapter = engine.asAdapter();
+    const launch = adapter.launchRun.bind(adapter);
+    let resolvedId: string | null = 'c1';
+    adapter.launchRun = async (input) => { const id = await launch(input); resolvedId = currentId; return id; };
+    const launched: Record<string, unknown>[] = [];
+    const sub = await startInteractiveDraftSubscriber(adapter, {
+      dbPath: busDb, pollIntervalMs: 25, heartbeatMs: 60_000, ledgerPath: join(dir, 'ledger.json'),
+      draftDir: join(dir, 'drafts'), clisJson: SEATS, bindings,
+      chatIdOf: (id: string, instance: string | null) => { expect([id, instance]).toEqual(['c1', 'i1']); return resolvedId; },
+      onRunLaunched: (_id, detail) => launched.push(detail), log: () => {},
+    });
+    subs.push(sub!);
+    await sub!.launchBound({ ...spec, chatInstance: 'i1' });
+    expect(launched).toHaveLength(1);
+    if (currentId === null) expect(launched[0]).not.toHaveProperty('chatId');
+    else expect(launched[0]).toHaveProperty('chatId', currentId);
+  });
 
   it('A3: a proposal-bound draft launches with the DERIVED run id, its packet in the inbox and the hashes in the task, grounded on the chat\'s repo though Unfiled, filed under the chat', async () => {
     const { bindings, spec, repoRoot } = await boundWorld('bound-note');
@@ -2243,7 +2264,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     const launched: Array<[string, Record<string, unknown>]> = [];
     const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
       dbPath: busDb, pollIntervalMs: 25, heartbeatMs: 60_000, ledgerPath: join(dir, 'ledger.json'), draftDir, clisJson: SEATS,
-      bindings, onRunLaunched: (id, d) => launched.push([id, d]), log: () => {},
+      bindings, chatIdOf: (id) => id, onRunLaunched: (id, d) => launched.push([id, d]), log: () => {},
     });
     subs.push(sub!);
     // An earlier attempt's folder (its deliverable, its packet) is gone before this attempt starts; a folder that is no
@@ -2300,7 +2321,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
       return inner(input);
     };
     const sub = await startInteractiveDraftSubscriber(adapter, {
-      dbPath: busDb, pollIntervalMs: 25, heartbeatMs: 60_000, ledgerPath: join(dir, 'ledger-retry.json'), draftDir: join(dir, 'drafts'), clisJson: SEATS, bindings, log: () => {},
+      dbPath: busDb, pollIntervalMs: 25, heartbeatMs: 60_000, ledgerPath: join(dir, 'ledger-retry.json'), draftDir: join(dir, 'drafts'), clisJson: SEATS, bindings, chatIdOf: (id) => id, log: () => {},
     });
     subs.push(sub!);
     await expect(sub!.launchBound(spec)).rejects.toThrow(/restarting/);
@@ -2336,7 +2357,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
       const engine = fakeAdapter({ repos: [{ id: 'repo-crew', root_path: w.repoRoot }] });
       const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
         dbPath: busDb, pollIntervalMs: 25, heartbeatMs: 60_000, ledgerPath: join(dir, `ledger-${doc}.json`), draftDir, clisJson: SEATS,
-        bindings: w.bindings, onBoundOutcome: (ref, runId, o) => outcomes.push([ref, runId, o.kind === 'landed' ? `landed v${o.version}` : o.reason]),
+        bindings: w.bindings, chatIdOf: (id) => id, onBoundOutcome: (ref, runId, o) => outcomes.push([ref, runId, o.kind === 'landed' ? `landed v${o.version}` : o.reason]),
         draftFloorIo: { gardenRoot: () => null }, log: () => {},
       });
       subs.push(sub!);
@@ -2385,7 +2406,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     const engine = fakeAdapter();
     const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
       dbPath: busDb, pollIntervalMs: 25, heartbeatMs: 60_000, ledgerPath: join(dir, 'ledger-lost.json'), draftDir, clisJson: SEATS,
-      bindings: d.bindings, onBoundOutcome: (ref, runId, o) => outcomes.push([ref, runId, o.kind === 'landed' ? `landed v${o.version}` : o.reason]), log: () => {},
+      bindings: d.bindings, chatIdOf: (id) => id, onBoundOutcome: (ref, runId, o) => outcomes.push([ref, runId, o.kind === 'landed' ? `landed v${o.version}` : o.reason]), log: () => {},
     });
     subs.push(sub!);
     expect(sub!.inFlightDocs()).toContain('lost-note');

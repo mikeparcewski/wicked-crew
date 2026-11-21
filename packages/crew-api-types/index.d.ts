@@ -9327,7 +9327,7 @@ export interface ChatSingleSeatDegradation {
   message: string;
 }
 
-/** `POST /chats` → 201. */
+/** `POST /chats` → 201; a seeded retry → 200, or 410 `chat_gone` if its chat was deleted (api-types 0.222.0). */
 export interface ChatOpenResponse {
   chatId: string;
   seats: ChatSeatOutcome[];
@@ -9926,6 +9926,8 @@ export interface ArtifactProposal {
   seat: string;
   /** The "What" line: `label` is "Slides · Domain coverage for new engineers"; `outcome` is the catalog entry's. */
   what: { entry: string | null; title: string; label: string; outcome: string | null };
+  /** (api-types 0.222.0) A document job: the title in the person's words; absent = the catalog's name. */
+  namedTitle?: string;
   /** The brief (create), the ask (refine), or what to show (demo), as the seat wrote it. */
   brief: string | null;
   reason: string | null;

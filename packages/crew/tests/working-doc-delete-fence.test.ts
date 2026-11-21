@@ -29,6 +29,7 @@ describe('the retire route and a working document', () => {
     let asked = 0;
     const app = Fastify();
     registerInteractiveDocDelete(app, adapter, {
+    admitDocument: (_ref, fn) => fn(),
       settings, audit: AuditLog.noop(), actorOf: () => LOCAL_ACTOR, dropDocLedgerRows: () => ({ ok: true, removed_keys: [] }) as never,
       pool: { ensure: async () => { asked += 1; throw new Error('never'); }, invalidate: () => undefined } as never,
       ...opts,

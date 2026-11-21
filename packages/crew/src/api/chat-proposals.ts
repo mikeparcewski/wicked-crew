@@ -837,6 +837,13 @@ export function isJobCardEntry(block: { entry: string; option?: string | null | 
   return (card !== undefined && detectable(card)) || block.option !== undefined || block.confidence !== undefined;
 }
 
+/** A document title must occur in the person's own turn. */
+function ownTitle(title: string, words: string): boolean {
+  const plain = (s: string): string => s.replace(/['"‘’“”]/gu, '').replace(/\s+/gu, ' ').trim().toLowerCase();
+  const named = plain(title);
+  return named !== '' && plain(words).includes(named);
+}
+
 /** The person's own words of ONE turn (the message the seat's block answers). */
 function turnWords(records: readonly ChatTranscriptRecord[], turnId: string): string {
   const r = records.find((x): x is Extract<ChatTranscriptRecord, { kind: 'user' }> => x.kind === 'user' && x.turnId === turnId && x.owner === true);
@@ -1060,7 +1067,7 @@ export class ChatProposals {
    * The block → a card's facts. `null` when the operation is not advertised (the seat was never told about it) or the
    * chat has ended: no card. Everything else resolves, with what cannot be resolved struck or blocking Go.
    */
-  async resolve(input: { chatId: string; turnId: string; seat: string; block: ParsedMake; records: readonly ChatTranscriptRecord[] }): Promise<ArtifactProposal | null> {
+  async resolve(input: { chatId: string; turnId: string; seat: string; block: ParsedMake; records: readonly ChatTranscriptRecord[]; helperSeats?: readonly string[] }): Promise<ArtifactProposal | null> {
     const { chatId, turnId, seat, block, records } = input;
     const flags = this.deps.flags();
     const chat = this.deps.chat(chatId);
@@ -1203,7 +1210,7 @@ export class ChatProposals {
       demo = { url, audience: block.audience ?? null, show: block.show ?? null };
     }
     const sources = kind === 'create' ? await this.resolveSources(block.sources, { chatId, turnId, records, binding, turnHas, chat, words, personNamed: false }) : [];
-    const { helpers, block: helperBlock, seatsUnread } = await this.docHelpers(chat);
+    const { helpers, block: helperBlock, seatsUnread } = await this.docHelpers(chat, input.helperSeats);
     if (helperBlock !== null) blocked.push(helperBlock);
     return {
       pid, chatId, turnId, kind, seat,
@@ -1628,12 +1635,22 @@ export class ChatProposals {
    * proposals of one chat (or two chats changing one document) can never both pass the busy check.
    */
   private go(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, edits: ProposalEdits | null, identity: ProposalIdentity, actor: Actor, instance: string | null, power?: boolean): Promise<DecideResult> {
-    const docKey = (resolution.kind === 'refine' || (resolution.kind === 'create' && resolution.artifactRef !== undefined)) && identity.artifactRef !== null ? identity.artifactRef : null;
+    const docKey = identity.artifactRef;
     // Keyed by the chat's instance (shared by its original id and an ended chat's archived alias), else its id.
     return this.lock.run(`chat\u0000${instance ?? chatId}`, () =>
       docKey === null
         ? this.goLocked(chatId, folded, resolution, edits, identity, actor, instance, power)
-        : this.lock.run(`doc\u0000${docKey}`, () => this.goLocked(chatId, folded, resolution, edits, identity, actor, instance, power)));
+        : this.admitDocument(docKey, () => this.goLocked(chatId, folded, resolution, edits, identity, actor, instance, power)));
+  }
+
+  /** Share Go's admission with other actions on this chat instance. */
+  admitChat<T>(chatId: string, fn: () => Promise<T>): Promise<T> {
+    return this.lock.run(`chat\u0000${this.deps.instanceOf(chatId) ?? chatId}`, fn);
+  }
+
+  /** A create, refine or retirement of the same document waits for the previous admission. */
+  admitDocument<T>(ref: string, fn: () => Promise<T>): Promise<T> {
+    return this.lock.run(`doc\u0000${ref}`, fn);
   }
 
   private async goLocked(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, edits: ProposalEdits | null, identity: ProposalIdentity, actor: Actor, instance: string | null, power?: boolean): Promise<DecideResult> {
@@ -2154,6 +2171,7 @@ export class ChatProposals {
       if (block.url !== undefined && block.url !== '' && personUrls(words).has(block.url)) inputs['url'] = { kind: 'url', value: block.url };
       const facts: JobFacts = {
         card: g.card,
+        title: block.title !== undefined && ownTitle(block.title, words) ? block.title : null,
         option: g.option,
         depth: g.depth,
         words,
@@ -2380,7 +2398,7 @@ export class ChatProposals {
     const open = [...foldProposals(this.deps.records(chatId)).values()].find((f) => (f.state === 'open' || f.state === 'revising') && f.proposal.shape !== undefined);
     if (open !== undefined) {
       const p = open.proposal;
-      context.open = { pid: p.pid, label: p.what.label, card: p.shape!.card, option: p.shape!.option, repo: p.repos[0] ?? null, seats: [...(p.seats?.keys ?? [])], checks: checksLabel(p.gate ?? []) };
+      context.open = { pid: p.pid, label: p.what.label, card: p.shape!.card, option: p.shape!.option, repo: p.repos[0] ?? null, seats: [...(p.seats?.keys ?? p.helpers?.seats ?? [])], checks: checksLabel(p.gate ?? []) };
     }
     const job = this.launchedJob(chatId);
     if (job !== null && this.deps.heldPlan !== undefined) {
@@ -2493,9 +2511,11 @@ export class ChatProposals {
   }
 
   /** A document's two default helpers from the pool, and the line that blocks it when there are none. */
-  private async docHelpers(chat: ProposalChat): Promise<{ helpers: ProposalHelpers | null; block: string | null; seatsUnread?: boolean }> {
+  private async docHelpers(chat: ProposalChat, chosen?: readonly string[]): Promise<{ helpers: ProposalHelpers | null; block: string | null; seatsUnread?: boolean }> {
     const { pool, refusal } = await this.seatPool();
-    const helpers = this.helpers(chat, undefined, pool);
+    const eligible = new Set(this.deps.rosterEligible().map((s) => s.key));
+    const seats = chosen === undefined ? undefined : [...new Set(chosen)].filter((k) => eligible.has(k)).slice(0, 2);
+    const helpers = this.helpers(chat, seats, pool);
     return { helpers, block: helpers === null ? NEEDS_HELPER : null, ...(refusal !== undefined ? { seatsUnread: true } : {}) };
   }
 
@@ -2608,9 +2628,20 @@ export class ChatProposals {
     const turnId = ctx.turnId ?? `person:${pid.slice(pid.lastIndexOf(':') + 1)}`;
     // Crew's kind line goes first, as `withBriefLines` puts it on a run: a long request is cut at its end, never the line.
     const words = [r.resolved.brief ?? '', briefOf(facts)].filter((x) => x !== '').join('\n\n');
-    const made = await this.resolve({ chatId, turnId, seat: ctx.seat, block: { op: 'entry', entry: seed.id, brief: words, sources: ['chat'], repos: facts.repoRef !== null ? [facts.repoRef] : [] }, records });
+    const chosen = facts.lead === null && facts.seats === null ? undefined
+      : [...new Set([facts.lead, ...(facts.seats ?? [])].filter((k): k is string => k !== null))];
+    const made = await this.resolve({ chatId, turnId, seat: ctx.seat, ...(chosen !== undefined ? { helperSeats: chosen } : {}), block: { op: 'entry', entry: seed.id, ...(facts.title !== null ? { title: facts.title } : {}), brief: words, sources: ['chat'], repos: facts.repoRef !== null ? [facts.repoRef] : [] }, records });
     if (made === null) throw new JobRefusal('operation_unavailable', 'studio cannot start a document from a chat on this daemon yet', 409);
     const shape: ProposalShape = { card: card.id, option: r.option?.id ?? null, depth: null, by: facts.by, source: facts.source, ...(facts.guess !== undefined ? { guess: facts.guess } : {}) };
+    const nameOf = (key: string): string => ctx.roster.find((s) => s.key === key)?.name ?? key;
+    const extra = (chosen ?? []).filter((k) => ctx.roster.some((s) => s.key === k)).slice(2);
+    const helperNotes = extra.length > 0 ? [`${extra.map(nameOf).join(', ')} left out: a document uses two helpers`] : [];
+    const choices = (ctx.pool ?? ctx.roster).filter((s) => s.key !== made.helpers?.seats[0]).slice(0, 4).map((s) => ({ label: `${s.name} writes`, edit: { lead: s.key } }));
+    const seatsTok: ProposalToken = {
+      id: 'seats', kind: 'seats',
+      label: made.helpers === null ? 'two helpers needed' : `${nameOf(made.helpers.seats[0]!)} writes, ${nameOf(made.helpers.seats[1]!)} checks`,
+      swap: choices.length > 0 ? { choices } : null,
+    };
     const kindTok = { id: 'kind', kind: (card.variant !== undefined ? 'option' : 'card') as 'option' | 'card', label: nounOf(card, shape.option), swap: null };
     const checksTok = { id: 'checks', kind: 'checks' as const, label: checksLabel(r.resolved.gate), swap: null };
     const documentsInput = r.resolved.inputs.find((i) => i.id === 'documents');
@@ -2642,8 +2673,9 @@ export class ChatProposals {
       command: r.option?.command ?? card.command,
       gate: [...r.resolved.gate],
       words: facts.words,
+      ...(facts.title !== null ? { namedTitle: facts.title } : {}),
       details: [...facts.details],
-      sentence: { text: `I'll make {kind} from this conversation${documentsInput !== undefined ? ', reading {documents}' : ''}, filed in ${made.filedIn.label}, checked by {checks}.`, tokens: [kindTok, ...documentsTok, checksTok], notes: [...ctx.notes], ask: offline !== null ? null : question?.text ?? (made.blocked === null ? 'Start?' : null) },
+      sentence: { text: `I'll make {kind} from this conversation${documentsInput !== undefined ? ', reading {documents}' : ''}, filed in ${made.filedIn.label}, written by {seats}, checked by {checks}.`, tokens: [kindTok, ...documentsTok, seatsTok, checksTok], notes: [...ctx.notes, ...helperNotes], ask: offline !== null ? null : question?.text ?? (made.blocked === null ? 'Start?' : null) },
       suggestions: [],
       question,
       revises: ctx.revises,
@@ -2743,6 +2775,7 @@ export class ChatProposals {
         }
         const facts: JobFacts = {
           card,
+          title: null,
           option,
           depth: body.depth ?? null,
           words: (body.words ?? '').slice(0, 8000),
@@ -2978,7 +3011,7 @@ export class ChatProposals {
     // (F1/F2) What a removal did, from the card as published (never from the merge, which a loss question can hold).
     // A document's workers are its helpers (a revision can make a job a document; codex r2).
     const workers = candidate.seats !== undefined ? candidate.seats.keys : (candidate.helpers?.seats ?? []);
-    const removal = seatRemovalNote(edits.removeSeats, parent.proposal.seats?.keys ?? [], workers, (k) => ctx.roster.find((s) => s.key === k)?.name ?? k, candidate.seats !== undefined);
+    const removal = seatRemovalNote(edits.removeSeats, parent.proposal.seats?.keys ?? parent.proposal.helpers?.seats ?? [], workers, (k) => ctx.roster.find((s) => s.key === k)?.name ?? k);
     const proposal = removal.length === 0 || candidate.sentence === undefined ? candidate : { ...candidate, sentence: { ...candidate.sentence, notes: [...candidate.sentence.notes, ...removal] } };
     if (!this.write(chatId, { at: this.now(), turnId: src.turnId ?? `person:${src.pid.slice(src.pid.lastIndexOf(':') + 1)}`, kind: 'proposal', proposal }, instance)) return this.gone(chatId);
     const view = foldProposals(this.deps.records(chatId)).get(src.pid);
