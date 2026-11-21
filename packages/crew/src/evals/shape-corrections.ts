@@ -100,7 +100,7 @@ export class CorrectionChat {
     const registry = new LaunchOnceRegistry();
     for (const k of ['job', 'create', 'demo'] as const) registry.register(k, this.launcher);
     this.svc = new ChatProposals({
-      flags: () => ({ context: true, proposals: true, create: true, refine: false, theme: false, demo: false }),
+      flags: () => ({ context: true, instructions: true, proposals: true, create: true, refine: false, theme: false, demo: false }),
       catalog: CATALOG_SEEDS,
       records: () => [...this.records],
       append: (_c, rec) => {

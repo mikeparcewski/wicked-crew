@@ -425,6 +425,8 @@ export interface HealthCapabilities {
 /** {@link HealthCapabilities.chatArtifacts} (api-types 0.169.0). */
 export interface ChatArtifactsCapabilities {
   context: boolean;
+  /** crew#1463: accepts studio's answer instructions in `ChatMessageContext.instructions` wherever context is on. */
+  instructions: boolean;
   /**
    * (api-types 0.170.0, slice A2) A seat's `wicked-make` block becomes a crew-resolved proposal ({@link ArtifactProposal},
    * transcript kinds `proposal` / `proposal_accepting` / `proposal_decided`, `/ws` {@link ChatProposalFrame}) and
@@ -10320,6 +10322,9 @@ export interface ChatMessageBody {
 
 /** {@link ChatMessageBody.context} (api-types 0.169.0). */
 export interface ChatMessageContext {
+  /** crew#1463: studio's answer instructions (at most 4,096 characters), separate from the person's words and
+   *  context data; they cannot widen the chat's scope or override its rules or higher instructions. */
+  instructions?: string;
   /** The artifact on the surface the message was sent from (inline, pane, Made or full screen). */
   artifact?: ChatArtifactContext;
   /** The tab's effective appearance (DES §9), sent when `chatArtifacts.theme` is advertised. */
@@ -10360,6 +10365,8 @@ export interface ChatContextAppearance {
  * skin that does not know this kind ignores it.
  */
 export interface ChatContextBinding {
+  /** crew#1463: studio's instructions rode this turn; their text stays out of the transcript. */
+  instructions?: true;
   /** The open artifact, when the message carried one in scope. */
   artifact?: {
     ref: string;

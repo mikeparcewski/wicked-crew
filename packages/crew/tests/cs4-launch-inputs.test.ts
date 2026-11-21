@@ -135,7 +135,7 @@ describe('POST /runs: a job’s documents and source pick (CS4)', () => {
     const launches: ProposalDispatch[] = [];
     registry.register('job', { find: async () => false, launch: async (d) => { launches.push(d); } });
     const svc = new ChatProposals({
-      flags: () => ({ context: true, proposals: true, create: true, refine: false, theme: false, demo: false }),
+      flags: () => ({ context: true, instructions: true, proposals: true, create: true, refine: false, theme: false, demo: false }),
       catalog: CATALOG_SEEDS, records: () => records,
       append: (_id, record) => { records.push(record); return true; },
       instanceOf: () => 'instance', projectOf: () => null,

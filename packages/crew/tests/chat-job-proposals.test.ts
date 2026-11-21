@@ -100,7 +100,7 @@ function rig(o: { coverage?: ChatProposalDeps['coverage']; pickFirstRepo?: ChatP
   const registry = new LaunchOnceRegistry();
   registry.register('job', r.launcher);
   const deps: ChatProposalDeps = {
-    flags: () => ({ context: true, proposals: true, create: false, refine: false, theme: false, demo: false }),
+    flags: () => ({ context: true, instructions: true, proposals: true, create: false, refine: false, theme: false, demo: false }),
     catalog: CATALOG_SEEDS,
     records: () => [...r.records],
     append: (_c, rec) => {

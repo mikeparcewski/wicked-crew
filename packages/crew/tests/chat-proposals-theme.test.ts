@@ -88,7 +88,7 @@ function rig(): Rig {
   for (const k of ['create', 'refine', 'demo'] as const) registry.register(k, r.launcher);
   registry.register('theme', new ThemeLauncher());
   const deps: ChatProposalDeps = {
-    flags: () => ({ context: true, proposals: true, create: true, refine: true, theme: true, demo: true }),
+    flags: () => ({ context: true, instructions: true, proposals: true, create: true, refine: true, theme: true, demo: true }),
     catalog: CATALOG_SEEDS,
     records: (c) => [...(r.records.get(c) ?? [])],
     append: (c, rec) => {
