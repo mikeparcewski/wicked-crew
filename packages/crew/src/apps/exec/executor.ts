@@ -82,7 +82,10 @@ export type AppFilesSource = Pick<AppStore, 'acceptedFiles' | 'acceptedReceipt'>
 export interface ExecutorDeps {
   store: AppFilesSource;
   registry: AppSourceRegistry | null;
-  /** Rechecked at use time; null only on the published server, whose sources crew checked at publish. */
+  /**
+   * Rechecked at use time; null only on the published server, whose sources crew checked when it built the manifest
+   * (apps/publish/manifest.ts). A source scoped away after that keeps serving the image until it is published again.
+   */
   visibleSources: ((projectId: string | null) => Promise<ReadonlySet<string>>) | null;
   /** The crew source's in-process reads (Fastify `inject`); absent = the crew source is unavailable. */
   crewInject?: CrewInject;

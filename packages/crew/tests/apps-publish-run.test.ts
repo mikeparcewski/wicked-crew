@@ -47,7 +47,7 @@ async function rig() {
   const h = await appsHarness({ routes: {
     verifyUnitToken: async (token) => tokens[token] ?? null,
     publish: {
-      registry: null, grantOf: () => null, roster: async () => '[{"key":"judge"}]',
+      registry: null, visibleSources: async () => new Set<string>(), projectOf: () => null, grantOf: () => null, roster: async () => '[{"key":"judge"}]',
       engine: {
         launchRun: async (input) => {
           expect(h.store.publishOf(input.sessionId)).not.toBeNull();

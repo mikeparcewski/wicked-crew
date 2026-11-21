@@ -65,7 +65,10 @@ export interface WritePathDeps {
   /** The app's project now; null means it belongs to no project. */
   projectOf: (app: string) => string | null;
   registry: AppSourceRegistry | null;
-  /** Rechecked at use time; null only on the published server, whose sources crew checked at publish. */
+  /**
+   * Rechecked at use time; null only on the published server, whose sources crew checked when it built the manifest
+   * (apps/publish/manifest.ts). A source scoped away after that keeps serving the image until it is published again.
+   */
   visibleSources: ((projectId: string | null) => Promise<ReadonlySet<string>>) | null;
   audit: Pick<AuditLog, 'record'>;
   viewerOf: (actor: Actor) => Promise<Viewer>;

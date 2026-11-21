@@ -2162,6 +2162,8 @@ export function registerRoutes(
           return JSON.stringify(launchRosterNaming(rosterWithStanding({ launch: true }), undefined));
         },
         registry: runtime.mcp ?? null,
+        visibleSources: runtime.appsVisibleSources,
+        projectOf: (slug) => runtime.apps!.projectOf(slug),
         grantOf: (slug, action) => appsWritePath?.getGrant(slug, action) ?? null,
       },
       ...(appsExecutor !== undefined ? { executor: appsExecutor } : {}),
