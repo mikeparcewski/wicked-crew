@@ -77,6 +77,7 @@ export async function prepareRunEvalsLaunch(
   input.workflow = RUN_EVALS_WORKFLOW;
   input.clisJson = '[]';
   delete (input as { repoRef?: string }).repoRef;
+  delete input.deliver;
   if (input.problem === undefined || input.problem.trim() === '') input.problem = 'Run the default evals across every project';
   return report;
 }

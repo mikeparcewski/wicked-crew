@@ -1973,17 +1973,20 @@ export class CoreAdapter {
    */
   private async resolveDeliverIdentity(
     repoRef: string | null | undefined,
-  ): Promise<{ login: string; source: 'repo' | 'setting' }> {
+  ): Promise<{ login: string; source: 'repo' | 'setting'; authorNoreply: boolean }> {
     let login = '';
+    let authorNoreply = false;
     let source: 'repo' | 'setting' = 'setting';
     try {
-      ({ login, source } = deliverIdentityFor(await this.getSettings(), repoRef));
+      const settings = await this.getSettings();
+      ({ login, source } = deliverIdentityFor(settings, repoRef));
+      authorNoreply = settings.deliverAuthorNoreply === true;
     } catch {
       // A settings file that cannot be read leaves the identity unconfigured rather than
       // failing the launch — the deliver script still cross-checks gh against git's credential.
       login = '';
     }
-    return { login, source };
+    return { login, source, authorNoreply };
   }
 
   /**
@@ -2043,7 +2046,7 @@ export class CoreAdapter {
     /** (F2) The origin this launch resolved — launch-local, never adapter state. */
     originUrl: string | null,
     /** (crew#737) The identity this launch resolved — launch-local, never adapter state. */
-    identity: { login: string; source: 'repo' | 'setting' },
+    identity: { login: string; source: 'repo' | 'setting'; authorNoreply: boolean },
     /** (crew#720) The provider credential preflight this launch read. */
     credentials: DeliverCredentials | null,
     commitIdents: { author: GitIdent; committer: GitIdent } | null | undefined,
@@ -2056,6 +2059,7 @@ export class CoreAdapter {
       ghTokenPinned: typeof process.env['GH_TOKEN'] === 'string' && process.env['GH_TOKEN'] !== '',
       originUrl,
       deliverIdentity: identity.login,
+      deliverAuthorNoreply: identity.authorNoreply,
       deliverIdentitySource: identity.source,
       credentials,
       ...(commitIdents !== undefined ? { commitIdents } : {}),
@@ -2362,6 +2366,7 @@ export class CoreAdapter {
             // holds on a daemon started without GH_ACCOUNT exported; crew#737 — the repository's
             // own pin wins, and the card says when it is not signed in here.
             deliverIdentity: deliverIdentity.login,
+            deliverAuthorNoreply: deliverIdentity.authorNoreply,
             deliverIdentitySource: deliverIdentity.source,
             // crew#720 — the provider credential preflight, said on the card before approval.
             credentials: deliverCredentials,
@@ -4269,6 +4274,7 @@ export class CoreAdapter {
         const v = parsed.graphNodeLimit;
         if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > 10000) delete parsed.graphNodeLimit;
       }
+      if ('deliverAuthorNoreply' in parsed && typeof parsed.deliverAuthorNoreply !== 'boolean') delete parsed.deliverAuthorNoreply;
       // deliverIdentityLogin (crew#549): a LOGIN, and the same charset PUT /settings enforces —
       // a hand-edited settings.json must not enable a value the API rejects (and must never be
       // able to put anything but a login into the deliver script's shell literal). Anything else

@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AuditLog } from '../src/api/audit.js';
 import { agentAuditKeys, ALLOWED, auditEntryFor, auditFor } from '../src/api/audit-view.js';
@@ -20,6 +20,7 @@ import { appDetailFor } from '../src/apps/views.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { Actor, AppAction, AppDetail, AppQuery, AuditEntry, AuditPage, McpPreviewResponse } from '../src/core/types.js';
 import type { McpUpstreamConfig, Prober } from '../src/mcp/probe.js';
+import { McpPolicies } from '../src/mcp/policies.js';
 import { McpRegistry } from '../src/mcp/registry.js';
 import { McpRegistryStore } from '../src/mcp/registry-store.js';
 import type { SecretStore } from '../src/mcp/secrets.js';
@@ -133,6 +134,127 @@ describe('crew#1316: a non-human preview cannot name a secret crew already holds
     const env = await call('POST', '/mcp/servers/preview', 'human', { name: 'envy', kind: 'mcp-http', url: 'https://envy.example/mcp', auth: { ref: 'env:KD_DAEMON_TOKEN', header: 'Authorization' } });
     expect(env.status, env.text).toBe(200);
     expect(probed.map((p) => p.secret)).toEqual(['human-staged-1', VICTIM_SECRET, ENV_SECRET]);
+  });
+});
+
+describe('crew#1558: a stdio env is the human operator’s per-server allowlist', () => {
+  let base: string;
+  let app: FastifyInstance;
+  let registry: McpRegistry;
+  let policies: McpPolicies;
+  let probe: ReturnType<typeof vi.fn<Prober>>;
+  const stdio = { name: 'envy', kind: 'mcp-stdio', command: 'node', args: ['server.js'] };
+  const approved = { LOG_LEVEL: 'debug', GOCACHEPROG: 'helper' };
+  const call = (route: string, as: string, payload: object) => app.inject({
+    method: 'POST', url: `/api/v1${route}`, headers: { authorization: `Bearer ${as}` }, payload,
+  });
+  const preview = (as: string, env?: Record<string, string>) => call('/mcp/servers/preview', as, { ...stdio, ...(env === undefined ? {} : { env }) });
+  const save = (as: string, previewHash: unknown) => call('/mcp/servers', as, { previewHash });
+  const register = async () => {
+    const p = await preview('human', approved);
+    expect(p.statusCode, p.body).toBe(200);
+    const s = await save('human', p.json().previewHash);
+    expect(s.statusCode, s.body).toBe(201);
+    probe.mockClear();
+  };
+
+  beforeEach(async () => {
+    base = mkdtempSync(join(tmpdir(), 'crew-env-allowlist-'));
+    probe = vi.fn<Prober>().mockResolvedValue({ ok: true, serverInfo: null, tools: [] });
+    registry = new McpRegistry({ store: new McpRegistryStore(join(base, 'mcp')), secrets: new MemorySecrets(), probe, discover: () => [] });
+    policies = new McpPolicies(registry, { listRules: async () => [], upsertRule: async () => undefined, previewCalls: async () => '[]' });
+    app = Fastify({ logger: false });
+    registerAuthHooks(app, { mode: 'required', verifiers: [{ name: 'test', verify: async (t) => TOKENS[t] ?? null }], allowedOrigins: null });
+    registerMcpRoutes(app, { registry, policies, audit: new AuditLog(join(base, 'audit.log'), () => undefined), actorOf: (req) => req.actor });
+    await app.ready();
+  });
+  afterEach(async () => {
+    await app.close();
+    removeScratch(base);
+  });
+
+  it.each(['agent', 'system'])('refuses a new env for %s before spawning a probe', async (as) => {
+    const r = await preview(as, approved);
+    expect(r.statusCode, r.body).toBe(403);
+    expect(r.json()).toEqual({ code: 'env_human_only', error: `only a human operator can set or change a stdio server's environment variables (its allowlist); you are ${TOKENS[as]!.kind}/${TOKENS[as]!.trust}` });
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, {}])('allows an agent to preview and save a new server with empty env (%j)', async (env) => {
+    const p = await preview('agent', env);
+    expect(p.statusCode, p.body).toBe(200);
+    expect(p.json()).not.toHaveProperty('envNames');
+    expect((await save('agent', p.json().previewHash)).statusCode).toBe(201);
+  });
+
+  it('shows sorted advisory classes only to a human operator with non-empty env', async () => {
+    const p = await preview('human', approved);
+    expect(p.statusCode, p.body).toBe(200);
+    expect(p.json().envNames).toEqual([
+      { name: 'GOCACHEPROG', class: 'runtime_control' },
+      { name: 'LOG_LEVEL', class: 'app_setting' },
+    ]);
+    expect((await preview('human')).json()).not.toHaveProperty('envNames');
+    await register();
+    const agent = await preview('agent', { GOCACHEPROG: 'helper', LOG_LEVEL: 'debug' });
+    expect(agent.statusCode, agent.body).toBe(200);
+    expect(agent.json()).not.toHaveProperty('envNames');
+    expect((await save('agent', agent.json().previewHash)).statusCode).toBe(201);
+  });
+
+  it.each([
+    { ...approved, LOG_LEVEL: 'info' },
+    { ...approved, ALLOWED_PATHS: '/tmp' },
+    { LOG_LEVEL: 'debug' },
+    { log_level: 'debug', GOCACHEPROG: 'helper' },
+    {},
+    undefined,
+  ])('refuses any change to a saved env before probing (%j)', async (env) => {
+    await register();
+    const r = await preview('agent', env);
+    expect([r.statusCode, r.json().code]).toEqual([403, 'env_human_only']);
+    expect(probe).not.toHaveBeenCalled();
+    expect((await registry.get('envy')).env).toEqual(approved);
+  });
+
+  it.each([false, true])('refuses an agent save of a human preview that changes env (existing: %s)', async (existing) => {
+    if (existing) await register();
+    const p = await preview('human', { LOG_LEVEL: 'info' });
+    const write = vi.spyOn(registry, 'save');
+    const withdrawals = vi.spyOn(policies, 'withdrawnBySave');
+    const r = await save('agent', p.json().previewHash);
+    expect([r.statusCode, r.json().code]).toEqual([403, 'env_human_only']);
+    expect(write).not.toHaveBeenCalled();
+    expect(withdrawals).not.toHaveBeenCalled();
+    if (existing) expect((await registry.get('envy')).env).toEqual(approved);
+    else expect((await registry.list()).servers).toEqual([]);
+    // A refusal leaves the held preview available for a person to approve.
+    expect((await save('human', p.json().previewHash)).statusCode).toBe(201);
+  });
+
+  it('rechecks the current saved env when an agent saves an earlier identical preview', async () => {
+    await register();
+    const p = await preview('agent', approved);
+    const changed = await preview('human', { LOG_LEVEL: 'info' });
+    expect((await save('human', changed.json().previewHash)).statusCode).toBe(201);
+    const r = await save('agent', p.json().previewHash);
+    expect([r.statusCode, r.json().code]).toEqual([403, 'env_human_only']);
+    expect((await registry.get('envy')).env).toEqual({ LOG_LEVEL: 'info' });
+  });
+
+  it.each([undefined, {}])('refuses an agent save that clears the approved env (%j)', async (env) => {
+    await register();
+    const p = await preview('human', env);
+    const r = await save('agent', p.json().previewHash);
+    expect([r.statusCode, r.json().code]).toEqual([403, 'env_human_only']);
+    expect((await registry.get('envy')).env).toEqual(approved);
+  });
+
+  it('keeps the denylist as a second line even for a human operator', async () => {
+    const r = await preview('human', { NODE_OPTIONS: '--require=unapproved.js' });
+    expect(r.statusCode, r.body).toBe(400);
+    expect(r.body).toContain('reserved_name');
+    expect(probe).not.toHaveBeenCalled();
   });
 });
 

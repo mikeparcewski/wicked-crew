@@ -1239,6 +1239,63 @@ describe('POST /chats {workflow: "analyze"} — a read-only, cited analysis chat
     expect(read.json()).toMatchObject({ planRev: 1 });
   });
 
+  it('crew#1259: a delivering chat plan change is never approved: the next message and the gate route refuse it; declining stays open', async () => {
+    expect((await open({ chatId: 'an-plan', clis: ['claude'], repoRefs: ['alpha'] })).statusCode).toBe(201);
+    expect((await send('an-plan', 'How does sign-in work?')).statusCode).toBe(202);
+    chatTurns.observe({ type: 'chatReply', chat: 'an-plan', cliKey: 'claude', text: 'PLAN+ {"steps":[{"catalog":"build"}],"touch":["src/a.ts"]}', ok: true });
+    adapter.sessionsDetail = async () => [{ session: { id: 'run-p1', status: 'awaiting_human', unit_ix: 0 }, units: [] }] as unknown as Awaited<ReturnType<CoreAdapter['sessionsDetail']>>;
+    (adapter as unknown as { interactionRequests: () => Promise<unknown[]> }).interactionRequests = async () => [
+      { kind: 'gate', ord: 2, created_at: 1, gate_kind: 'plan_approval', prompt: 'Approve the plan change?' },
+    ];
+    const propose = vi.fn<CoreAdapter['proposePlan']>(async () => ({} as Awaited<ReturnType<CoreAdapter['proposePlan']>>));
+    adapter.proposePlan = propose;
+    const confirm = vi.fn(async () => 'approved');
+    adapter.confirmGate = confirm as unknown as CoreAdapter['confirmGate'];
+    const gate = await app.inject({ method: 'POST', url: '/api/v1/runs/run-p1/gate', payload: { approve: true } });
+    expect(gate.statusCode).toBe(409);
+    expect(gate.json().code).toBe('chat_build_needs_job');
+    const next = await send('an-plan', 'Go ahead');
+    expect(next.statusCode).toBe(409);
+    expect(next.json().code).toBe('chat_build_needs_job');
+    expect(propose).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+    const edited = await app.inject({ method: 'POST', url: '/api/v1/runs/run-p1/gate', payload: { approve: true, action: 'edit_plan', plan: { steps: [{ catalog: 'build', id: 'b' }] } } });
+    expect(edited.statusCode).toBe(409);
+    expect(confirm).not.toHaveBeenCalled();
+    const declined = await app.inject({ method: 'POST', url: '/api/v1/runs/run-p1/gate', payload: { approve: false } });
+    expect(declined.statusCode, declined.body).toBe(200);
+    // A plan edit (the team route) at that gate, or adding a build step, is refused too.
+    const teamEdit = await app.inject({ method: 'POST', url: '/api/v1/runs/run-p1/plan', payload: { plan: { steps: [{ catalog: 'build', id: 'b' }] } } });
+    expect(teamEdit.statusCode).toBe(409);
+    expect(teamEdit.json().code).toBe('chat_build_needs_job');
+    // crew#1512: the gate read lists the same — only the declines — whatever the engine takes.
+    (adapter as unknown as { runEvents: () => Promise<unknown[]> }).runEvents = async () => [];
+    (adapter as unknown as { gateActions: () => Promise<unknown> }).gateActions = async () => ({
+      ord: 2, gateKind: 'plan_approval', planRev: 1,
+      actions: ['approve', 'edit_plan', 'request_changes', 'reject'].map((action) => ({ action, intent: action, note: 'optional', needsPlanRev: true })),
+    });
+    const read = await app.inject({ method: 'GET', url: '/api/v1/runs/run-p1/gate' });
+    expect(read.statusCode, read.body).toBe(200);
+    expect((read.json() as { actions?: Array<{ action: string }> }).actions?.map((a) => a.action)).toEqual(['request_changes', 'reject']);
+    expect(read.json()).toMatchObject({ planRev: 1 });
+  });
+
+  it.each(['repo-less ask', 'ordinary plan'])('crew#1259: leaves %s approvals open', async (kind) => {
+    if (kind === 'repo-less ask') {
+      expect((await open({ chatId: 'no-repo', clis: ['claude'] })).statusCode).toBe(201);
+      expect((await send('no-repo', 'Explain')).statusCode).toBe(202);
+      expect(launched[0]).not.toHaveProperty('deliver');
+    } else {
+      const launch = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'Build', clisJson: '[]', plan: { steps: [{ catalog: 'build' }] } } });
+      expect(launch.statusCode, launch.body).toBe(201);
+    }
+    adapter.sessionsDetail = async () => [{ session: { id: 'run-p1', status: 'awaiting_human', unit_ix: 0 }, units: [] }] as unknown as Awaited<ReturnType<CoreAdapter['sessionsDetail']>>;
+    adapter.interactionRequests = async () => [{ kind: 'gate', ord: 2, created_at: 1, gate_kind: 'plan_approval', prompt: 'Approve?' }] as Awaited<ReturnType<CoreAdapter['interactionRequests']>>;
+    adapter.confirmGate = vi.fn(async () => 'approved') as unknown as CoreAdapter['confirmGate'];
+    const gate = await app.inject({ method: 'POST', url: '/api/v1/runs/run-p1/gate', payload: { approve: true } });
+    expect(gate.statusCode, gate.body).toBe(200);
+  });
+
   it('xreview on #1160 (P3): an analysis chat re-seats only its one helper', async () => {
     withPresets([analyzePreset]);
     expect((await open({ chatId: 'an-seat', clis: ['claude'], repoRefs: ['alpha'], workflow: 'analyze' })).statusCode).toBe(201);
@@ -1252,11 +1309,12 @@ describe('POST /chats {workflow: "analyze"} — a read-only, cited analysis chat
     expect(askPaths.get('an-seat')?.eligible).toEqual(['claude']);
   });
 
-  it('a plain repo chat is unchanged: it may deliver, asks for a reviewer, and keeps the PLAN+ proposal line', async () => {
+  it('a plain repo chat may deliver and asks for a reviewer, but routes work to a job', async () => {
     expect((await open({ chatId: 'plain', clis: ['claude'], repoRefs: ['alpha'] })).statusCode).toBe(201);
     expect((await send('plain', 'Where is the entry point?')).statusCode).toBe(202);
     expect(launched[0]).toMatchObject({ repoRef: 'r1', deliver: 'pr', plan: { monitors: { asked: 1 } } });
     expect(launched[0]!.plan!.steps[0]).not.toHaveProperty('skill_ref');
-    expect(launched[0]!.plan!.steps[0]!['instructions'] as string).toContain('PLAN+');
+    expect(launched[0]!.plan!.steps[0]!['instructions'] as string).not.toContain('PLAN+');
+    expect(launched[0]!.plan!.steps[0]!['instructions'] as string).toContain('start the work as a job');
   });
 });

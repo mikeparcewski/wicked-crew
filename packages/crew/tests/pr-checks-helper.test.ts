@@ -18,18 +18,28 @@ afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, f
 
 type Row = { name: string; bucket: string; link?: string; workflow?: string };
 interface Scenario {
-  /** One entry per `pr checks` call; the last repeats. A string is raw stdout (unreadable cases). */
+  /** One entry per `pr checks --required` call; the last repeats. A string is stderr + exit 1. */
   polls: (Row[] | string)[];
+  /** Answers without --required. A string is stderr + exit 1; the last entry repeats. */
+  own?: (Row[] | string)[];
   required: string[];
   rulesFail?: boolean;
+  rulesPlanGated?: boolean;
+  rulesAnswer?: { stdout: string; stderr: string };
   /** Contexts only classic branch protection requires (answered on `repos/o/r/branches/main`). */
   classic?: string[];
   classicFail?: boolean;
+  classicPlanGated?: boolean;
   /** Raw stdout for the classic-protection call (a malformed answer). */
   classicRaw?: string;
   /** Raw log text for `run view --log-failed`. */
   log?: string;
 }
+
+const PLAN_MESSAGE = 'Upgrade to GitHub Pro or make this repository public to enable this feature.';
+const PLAN_BODY = JSON.stringify({ message: PLAN_MESSAGE, documentation_url: 'https://docs.github.com/rest/repos/rules#get-rules-for-a-branch', status: '403' });
+const PLAN_STDERR = `gh: ${PLAN_MESSAGE} (HTTP 403)`;
+const PLAN_LINE = "deliver: PR checks: branch rules are not available on this repository's plan; judged by the PR's own checks";
 
 function run(sc: Scenario, timeout = 30, poll = 0): { code: number; out: string; calls: number } {
   const dir = mkdtempSync(join(tmpdir(), 'checks-'));
@@ -42,9 +52,11 @@ const fs = require('fs');
 const d = ${JSON.stringify(dir)};
 const sc = JSON.parse(fs.readFileSync(d + '/sc.json', 'utf8'));
 const a = process.argv.slice(2);
+function planGated() { process.stdout.write(${JSON.stringify(PLAN_BODY)}); process.stderr.write(${JSON.stringify(PLAN_STDERR)}); process.exit(1); }
 if (a[0] === 'pr' && a[1] === 'checks') {
   const n = Number(fs.readFileSync(d + '/n', 'utf8')); fs.writeFileSync(d + '/n', String(n + 1));
-  const p = sc.polls[Math.min(n, sc.polls.length - 1)];
+  const polls = a.includes('--required') ? sc.polls : (sc.own || ['unexpected own checks read']);
+  const p = polls[Math.min(n, polls.length - 1)];
   if (typeof p === 'string') { process.stderr.write(p); process.exit(1); }
   process.stdout.write(JSON.stringify(p)); process.exit(p.some((r) => r.bucket === 'fail') ? 1 : 0);
 }
@@ -52,10 +64,13 @@ if (a[0] === 'pr' && a[1] === 'view') { process.stdout.write('main\\n'); process
 // An api call must name the PR's host (an Enterprise PR is not on github.com).
 if (a[0] === 'api' && a.slice(2).join(' ') !== '--hostname ghe.example.test') { process.stderr.write('wrong host'); process.exit(1); }
 if (a[0] === 'api' && /rules\\/branches\\/main$/.test(a[1])) {
+  if (sc.rulesPlanGated) planGated();
+  if (sc.rulesAnswer) { process.stdout.write(sc.rulesAnswer.stdout); process.stderr.write(sc.rulesAnswer.stderr); process.exit(1); }
   if (sc.rulesFail) { process.stderr.write('HTTP 403'); process.exit(1); }
   process.stdout.write(JSON.stringify([{ type: 'deletion' }, { type: 'required_status_checks', parameters: { required_status_checks: sc.required.map((context) => ({ context })) } }])); process.exit(0);
 }
 if (a[0] === 'api' && /branches\\/main$/.test(a[1])) {
+  if (sc.classicPlanGated) planGated();
   if (sc.classicFail) { process.stderr.write('HTTP 403'); process.exit(1); }
   if (sc.classicRaw !== undefined) { process.stdout.write(sc.classicRaw); process.exit(0); }
   process.stdout.write(JSON.stringify({ protection: { required_status_checks: { contexts: sc.classic || [] } } })); process.exit(0);
@@ -125,6 +140,69 @@ describe('PR checks watch (crew#1623)', () => {
     const r = run({ polls: [[]], required: [] });
     expect(r.code).toBe(0);
     expect(r.out).toContain('requires no status check');
+  });
+
+  it('plan-gated rules + no PR checks -> 0 with the plan explanation (crew#1683)', () => {
+    const r = run({ polls: ['required checks must not be read'], own: ["no checks reported on the 'b' branch"], required: [], rulesPlanGated: true });
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain(PLAN_LINE);
+    expect(r.out).toContain('the PR has no checks');
+    expect(r.calls).toBe(1);
+  });
+
+  it('plan-gated rules + a PR check only reported without --required -> 0', () => {
+    const r = run({ polls: [[]], own: [[ok('GitGuardian')]], required: [], rulesPlanGated: true });
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain('1 check(s) green');
+  });
+
+  it('plan-gated rules + a red PR check -> 3 with the existing failing line', () => {
+    const r = run({ polls: [[]], own: [[{ name: 'scan', bucket: 'fail', link: job }]], required: [], rulesPlanGated: true });
+    expect(r.code, r.out).toBe(3);
+    expect(r.out).toContain('deliver: failing required check(s): scan');
+  });
+
+  it('plan-gated rules + a PR check pending past the timeout -> 4', () => {
+    const r = run({ polls: [[]], own: [[{ name: 'scan', bucket: 'pending' }]], required: [], rulesPlanGated: true }, 1, 0.3);
+    expect(r.code, r.out).toBe(4);
+    expect(r.out).toContain('still pending');
+    expect(r.out).toContain('scan');
+  });
+
+  it('caches own mode while polling and prints the plan explanation once', () => {
+    const r = run({ polls: [[]], own: [[{ name: 'scan', bucket: 'pending' }], [ok('scan')]], required: [], rulesPlanGated: true });
+    expect(r.code, r.out).toBe(0);
+    expect(r.calls).toBe(2);
+    expect(r.out.split(PLAN_LINE)).toHaveLength(2);
+    expect(r.out).toContain('1 check(s) green');
+  });
+
+  it('classic plan-gated 403 + no PR checks -> 0 in own mode', () => {
+    const r = run({ polls: ['required checks must not be read'], own: ["no checks reported on the 'b' branch"], required: [], classicPlanGated: true });
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain(PLAN_LINE);
+    expect(r.out).toContain('the PR has no checks');
+  });
+
+  it('accepts numeric 403 and trims the exact plan message', () => {
+    const r = run({ polls: [[]], own: [[]], required: [], rulesAnswer: { stdout: JSON.stringify({ message: ` ${PLAN_MESSAGE}\n`, status: 403 }), stderr: PLAN_STDERR } });
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain(PLAN_LINE);
+  });
+
+  it.each([
+    ['other 403', JSON.stringify({ message: 'Resource not accessible by integration', documentation_url: 'https://docs.github.com/rest/repos/rules#get-rules-for-a-branch', status: '403' })],
+    ['404', JSON.stringify({ message: 'Not Found', status: '404' })],
+    ['502 with non-JSON stdout', 'Bad Gateway'],
+    ['plan message with 404 status', JSON.stringify({ message: PLAN_MESSAGE, status: '404' })],
+    ['different message with 403 status', JSON.stringify({ message: `${PLAN_MESSAGE} Contact support.`, status: '403' })],
+    ['non-object JSON', 'null'],
+  ])('rules refusal stays unreadable: %s', (_name, stdout) => {
+    const r = run({ polls: [[]], own: [[]], required: [], rulesAnswer: { stdout, stderr: 'gh: rules unavailable' } });
+    expect(r.code, r.out).toBe(5);
+    expect(r.out).toContain('the base branch rules could not be read');
+    expect(r.out).not.toContain(PLAN_LINE);
+    expect(r.calls).toBe(0);
   });
 
   it('pending past the timeout -> 4 naming the pending checks', () => {

@@ -589,11 +589,12 @@ describe('the run-evals workflow (data)', () => {
 
   it('a launch is prepared in-process: the evals run, their copy is written, and the run is repo-less with no seat', async () => {
     const dir = tmp();
-    const input = { problem: '', sessionId: 'run-1', clisJson: '["claude"]', repoRef: 'repo-a' } as unknown as LaunchRunInput;
+    const input = { problem: '', sessionId: 'run-1', clisJson: '["claude"]', repoRef: 'repo-a', deliver: 'pr' } as unknown as LaunchRunInput;
     const report = (await runDefaultEvals({ id: 'e1', now: new Date(0), project: null, cases: [cls('a', 'x', 'x')], replay: NO_REPLAY, previous: {}, suites: ['floor-class'] })).report;
     await prepareRunEvalsLaunch(input, async () => report, dir);
     expect(input).toMatchObject({ workflow: 'run-evals', clisJson: '[]', problem: 'Run the default evals across every project' });
     expect((input as { repoRef?: string }).repoRef).toBeUndefined();
+    expect(input).not.toHaveProperty('deliver');
     expect(JSON.parse(readFileSync(join(dir, 'run-1', 'report.json'), 'utf8')).id).toBe('e1');
     // The Tool step reads it back by its run id, calls nothing, and prints the summary.
     const never = vi.fn();
@@ -624,9 +625,10 @@ describe('the run-evals workflow (data)', () => {
     } as unknown as CoreAdapter;
     const app = Fastify({ logger: false });
     registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: new AuditLog(join(dir, 'audit.log'), () => undefined), authMode: 'off' }, { evalRunsDir: dir });
-    const res = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'Run the default evals', workflow: 'run-evals' } });
+    const res = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'Run the default evals', workflow: 'run-evals', deliver: 'pr' } });
     expect(res.statusCode).toBe(201);
     expect(launched[0]).toMatchObject({ workflow: 'run-evals', clisJson: '[]' });
+    expect(launched[0]).not.toHaveProperty('deliver');
     const report = JSON.parse(readFileSync(join(dir, launched[0]!.sessionId, 'report.json'), 'utf8')) as DefaultEvalReport;
     expect(report.project).toBeNull();
     expect(report.suites.length).toBe(9);

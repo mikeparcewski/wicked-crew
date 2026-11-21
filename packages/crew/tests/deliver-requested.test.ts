@@ -90,6 +90,29 @@ async function requested(app: FastifyInstance): Promise<Record<string, unknown>>
 }
 
 describe('crew#762 — AgentSession.deliver_requested', () => {
+  it('crew#1418: an explicit mapping PR is dropped for the adapter, audit and deliver_requested', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mapping-delivery-'));
+    dirs.push(dir);
+    const audit = new AuditLog(join(dir, 'audit.log'), () => undefined);
+    const launched = vi.fn<CoreAdapter['launchRun']>(async () => ASKED);
+    const adapter = withRunViews({
+      launchRun: launched,
+      getWorkflow: () => ({ id: 'domain-extraction', phases: [{ id: 'map', role: 'creator', executes_code: true }] }),
+      getSettings: async () => ({ graphNodeLimit: 150 }),
+      sessionsDetail: async () => [view(ASKED)],
+      sessions: async () => [ASKED],
+    }) as unknown as CoreAdapter;
+    const app = Fastify({ logger: false });
+    apps.push(app);
+    registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), undefined, { audit, authMode: 'off' });
+    const res = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'Map domain', workflow: 'domain-extraction', repoRef: 'repo-1', deliver: 'pr' } });
+    expect(res.statusCode, res.body).toBe(201);
+    expect(launched.mock.calls[0]![0]).not.toHaveProperty('deliver');
+    await audit.flush();
+    expect((await audit.readAll({ action: 'run.launched' }))[0]?.detail?.['deliver']).toBe('none');
+    expect(await requested(app)).toEqual({ [ASKED]: false });
+  });
+
   it('none at launch reads false; a failed post-hoc attempt reads true; deliver: pr reads true; no launch record is absent — and all of it survives a restart', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'deliver-requested-'));
     dirs.push(dir);

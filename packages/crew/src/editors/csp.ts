@@ -48,6 +48,17 @@ export function thirdPartyScripts(scriptHashes: readonly string[]): string {
 }
 
 /**
+ * Agent-authored proxy documents may load their own images and demo media, but cannot contact another host.
+ * Only guardBundle's prefixed scripts run; pair this with INLINE_ONLY_POLICY to refuse integrity-bearing URLs too.
+ * A document can still navigate itself: studio's shellCsp limits that when it is framed, not when opened top-level.
+ */
+export function documentCsp(scriptHashes: readonly string[]): string {
+  return `default-src 'none'; script-src ${thirdPartyScripts(scriptHashes)}; style-src 'unsafe-inline' 'self'; ` +
+    "img-src data: blob: 'self'; media-src blob: 'self'; font-src data: 'self'; connect-src 'none'; " +
+    "frame-src 'none'; child-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'none'; manifest-src 'none'";
+}
+
+/**
  * Exactly the §8.2 header set for one editor's bundle. `scriptHashes` are the served bundle's prefixed inline
  * scripts (`guardBundle`); a third-party bundle runs those and nothing else, so none given means none run.
  */

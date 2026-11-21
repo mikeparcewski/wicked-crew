@@ -13,7 +13,7 @@ import { AuditLog } from '../src/api/audit.js';
 import { LOCAL_ACTOR } from '../src/api/auth.js';
 import { McpServerConfigSchema, registerMcpRoutes } from '../src/api/mcp.js';
 import type { McpPreviewResponse, McpServer } from '../src/core/types.js';
-import { validateServerEnv } from '../src/mcp/env.js';
+import { envWarningClass, validateServerEnv } from '../src/mcp/env.js';
 import { probeMcpServer, transportFor } from '../src/mcp/probe.js';
 import { configOf, McpRegistry } from '../src/mcp/registry.js';
 import { McpRegistryStore, type McpServerRecord } from '../src/mcp/registry-store.js';
@@ -23,6 +23,24 @@ import { removeScratch } from './setup/scratch.js';
 const FIXTURE_SERVER = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'mcp', 'fixture-server.mjs');
 const SECRET_VAR = 'FIXTURE_TOKEN';
 const SENTINEL = 'zz-public-value-9f3a';
+
+describe('envWarningClass', () => {
+  const runtime = [
+    'GOCACHEPROG', 'GOWORK', 'GOMODCACHE', 'GOCACHE', 'CC', 'CXX', 'PKG_CONFIG', 'CGO_CFLAGS', 'GODEBUG',
+    'ESBUILD_BINARY_PATH', 'TS_NODE_COMPILER', 'TSX_TSCONFIG_PATH', 'COREPACK_HOME', 'NODE_COMPILE_CACHE',
+    'NODE_USE_SYSTEM_CA', 'ZDOTDIR', 'RUSTC_WRAPPER', 'CARGO_HOME', 'RUSTFLAGS', 'R_PROFILE', 'R_PROFILE_USER',
+    'R_ENVIRON', 'R_ENVIRON_USER', 'R_LIBS', 'R_LIBS_USER', 'JULIA_PROJECT', 'VIRTUAL_ENV', 'CONDA_PREFIX',
+    'RUBYPATH', 'RUBYSHELL', 'DLN_LIBRARY_PATH', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME',
+    'XDG_CONFIG_DIRS', 'XDG_DATA_DIRS',
+  ];
+  it.each(runtime.flatMap((name) => [name, name.toLowerCase()]))('advises runtime_control for %s without refusing it', (name) => {
+    expect(envWarningClass(name)).toBe('runtime_control');
+    expect(validateServerEnv({ [name]: 'example' })).toBeNull();
+  });
+  it.each(['LOG_LEVEL', 'GITHUB_TOOLSETS', 'ALLOWED_PATHS', 'GOOGLE_CLOUD_PROJECT', 'CC_MODE', 'R_PROFILE_OTHER'])('advises app_setting for %s', (name) => {
+    expect(envWarningClass(name)).toBe('app_setting');
+  });
+});
 
 describe('validateServerEnv', () => {
   const refused: Array<[string, Record<string, string>, string]> = [

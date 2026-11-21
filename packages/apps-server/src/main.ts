@@ -31,7 +31,7 @@ import { checkEverything, describeOne, describeSources, missingSecrets, REDESCRI
  * crew's action store, fenced on this server's claim of the volume: once another server owns it, every store step
  * (a grant seeded, a record prepared, the move to `running`, an outcome) is refused before it reads or writes.
  */
-class FencedActionStore extends AppActionStore {
+export class FencedActionStore extends AppActionStore {
   constructor(
     file: string,
     private readonly owns: () => boolean,
