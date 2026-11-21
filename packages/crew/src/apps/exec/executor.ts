@@ -425,6 +425,8 @@ export class AppExecutor {
       if (err.errorClass === 'refused') return new AppExecError(409, 'query_refused', `the source refused the read${err.refusal !== null ? ` (${err.refusal})` : ''}: describe it again if it changed`);
       return new AppExecError(502, err.errorClass === 'connection' ? 'source_unavailable' : 'source_failed', `the source answered ${err.errorClass}${st}`);
     }
+    // crew#1297: name the read bound without exposing the upstream's words.
+    if (err instanceof UpstreamCallError && err.errorClass === 'too_large') return new AppExecError(502, 'source_failed', "the source's answer passed the 10 MiB read bound");
     if (err instanceof UpstreamCallError) return new AppExecError(err.errorClass === 'timeout' ? 504 : 502, err.errorClass === 'timeout' ? 'source_timeout' : 'source_failed', `the source call failed (${err.errorClass})`);
     if (err instanceof McpRegistryError) return new AppExecError(409, 'contract_changed', `the source cannot be used now (${err.code})`);
     return new AppExecError(502, 'source_failed', 'the read failed');

@@ -3,6 +3,10 @@
 // byte caps, the Postgres rewrite (statement cut, LIMIT, per-cell projection, the policy again), and the
 // Toolbox document's spawn policy and YAML-escaped secret.
 
+import { appendFileSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { describe, expect, it, vi } from 'vitest';
 import { parseAllDocuments } from 'yaml';
 
@@ -298,6 +302,85 @@ describe('the Toolbox document (§5.1 deployment policy at spawn, §7.5 host mod
 
 describe('the read record is durable before a release (§7.9)', () => {
   const entry = { callId: 'c1', at: '2026-11-04T00:00:00.000Z', runId: 'r1', unit: 1, attempt: 1, seat: 'claude', source: 's', sourceId: 'id', sqlHash: 'h', outcome: 'ok', rows: 1, truncated: false, ms: 1, released: true };
+  it('folds only new bytes across appends and reads (crew#1319)', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'kd-fold-'));
+    try {
+      const log = new SourceReadLog(base);
+      expect(await log.recent('s')).toEqual([]);
+      for (let i = 0; i < 20; i++) {
+        await log.append({ ...entry, callId: `c${i}` });
+        expect(await log.recent('s')).toHaveLength(i + 1);
+        await log.dataUse('r1');
+      }
+      expect(log.bytesFolded).toBe(statSync(log.path).size);
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+
+  it('compacts to each call’s last entry without changing recent or data use (crew#1319)', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'kd-compact-'));
+    try {
+      const log = new SourceReadLog(join(base, 'compact'), undefined, { compactMinLines: 4 });
+      const original = new SourceReadLog(join(base, 'original'));
+      for (const released of [false, true]) {
+        for (let i = 0; i < 4; i++) {
+          const e = { ...entry, callId: `c${i}`, released, outcome: released ? 'ok' : 'unconfirmed' };
+          await log.append(e);
+          await original.append(e);
+        }
+      }
+      expect(readFileSync(log.path, 'utf8').trim().split('\n')).toHaveLength(4);
+      expect(statSync(log.path).mode & 0o777).toBe(0o600);
+      expect(await log.recent('s')).toEqual(await original.recent('s'));
+      expect(await log.dataUse('r1')).toEqual(await original.dataUse('r1'));
+      await log.append({ ...entry, callId: 'next' });
+      expect((await log.recent('s'))?.[0]?.callId).toBe('next');
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+
+  it('keeps an append durable when the compaction barrier fails and refolds on the next read (crew#1319)', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'kd-compact-failure-'));
+    try {
+      let barriers = 0;
+      const log = new SourceReadLog(base, async () => {
+        if (++barriers > 1) throw new Error('compaction directory sync failed');
+      }, { compactMinLines: 2 });
+      await log.append({ ...entry, outcome: 'unconfirmed', released: false });
+      await expect(log.append(entry)).resolves.toBeUndefined();
+      expect(barriers).toBe(2);
+      expect(readdirSync(base)).toEqual(['source-queries.ndjson']);
+      expect(await log.all()).toEqual([entry]);
+      await log.append({ ...entry, callId: 'next' });
+      expect((await log.all())?.map((e) => e.callId)).toEqual(['c1', 'next']);
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+
+  it('ignores a torn tail, refuses corrupt whole lines, and resets on replacement or truncation (crew#1319)', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'kd-fold-recovery-'));
+    try {
+      const log = new SourceReadLog(base, undefined, { compactMinLines: 2 });
+      await log.append(entry);
+      await log.recent('s');
+      appendFileSync(log.path, JSON.stringify({ ...entry, callId: 'torn' }));
+      expect((await log.all())?.map((e) => e.callId)).toEqual(['c1']);
+      await log.append({ ...entry, callId: 'c2' });
+      expect((await log.all())?.map((e) => e.callId)).toEqual(['c1', 'c2']);
+      appendFileSync(log.path, 'broken\n');
+      expect(await log.all()).toBeNull();
+      await log.append({ ...entry, callId: 'c2' });
+      expect(await log.all()).toBeNull();
+      expect(readFileSync(log.path, 'utf8')).toContain('broken\n');
+      writeFileSync(`${log.path}.new`, `${JSON.stringify({ ...entry, callId: 'replacement' })}\n`);
+      renameSync(`${log.path}.new`, log.path);
+      expect((await log.all())?.map((e) => e.callId)).toEqual(['replacement']);
+      writeFileSync(log.path, '');
+      expect(await log.all()).toEqual([]);
+      await log.append(entry);
+      expect((await log.all())?.map((e) => e.callId)).toEqual(['c1']);
+      rmSync(log.path);
+      expect(await log.all()).toEqual([]);
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+
   it('a new directory chain is synced into each parent, deepest first, before the first append resolves', async () => {
     const { mkdtempSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
