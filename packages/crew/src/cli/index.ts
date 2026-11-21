@@ -834,11 +834,12 @@ const GATE_USAGE = [
  *  installed the remedy is its log, not a second hand-started daemon. */
 function noDaemonRemedy(port: number): string {
   const head = `wicked-crew: no daemon answering on 127.0.0.1:${port}`;
-  const service = installedService();
+  const service = installedService(undefined, undefined, port);
   if (service !== null) {
     return `${head} — the login service is installed but the daemon is not up; read ${service.logPath ?? service.unitPath}`;
   }
-  return `${head} — start it with \`wicked-crew serve\` (or at every login: \`wicked-crew serve ${INSTALL_SERVICE_FLAG}\`)`;
+  const portNote = port === DEFAULT_DAEMON_PORT ? '' : `; pass \`--port ${port}\` to both`;
+  return `${head} — start it with \`wicked-crew serve\` (or at every login: \`wicked-crew serve ${INSTALL_SERVICE_FLAG}\`)${portNote}`;
 }
 
 /** `serve --install-service` / `--uninstall-service` (crew#551): exit code of the verb. */
@@ -850,8 +851,8 @@ async function runServiceVerb(args: string[]): Promise<number> {
     run: runCommand,
     log: (line: string) => console.log(line),
   };
-  if (hasFlag(args, UNINSTALL_SERVICE_FLAG)) return uninstallService(deps);
   const port = resolveDaemonPort(args);
+  if (hasFlag(args, UNINSTALL_SERVICE_FLAG)) return uninstallService(deps, port);
   const db = flag(args, '--db');
   return installService(
     {

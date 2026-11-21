@@ -17,6 +17,8 @@
  *   POST   /projects/:id/graph/refresh       incremental (re)build over every `crew.repo` member
  *   GET    /projects/:id/graph/blast-radius  ?name= — dependents across member repos, each attributed
  *   GET    /projects/:id/graph/search        ?name= — symbol resolution across member repos
+ *   GET    /projects/:id/graph/path          ?from=&to= — attributed routes (crew#1476)
+ *   GET    /projects/:id/graph/boundaries    possible unproven member links (crew#1477)
  *
  * Route-layer rules the engine cannot own:
  * - The `default` project ("Unfiled") is SYNTHESIZED here (ADR §7): its members are the runs
@@ -57,6 +59,8 @@ import {
   CO_LOCATION_NOTE,
   ProjectGraphEngineTooOldError,
   projectBlastRadius,
+  projectGraphBoundaries,
+  projectGraphPath,
   projectGraphStatus,
   projectSymbolSearch,
   queryable,
@@ -662,6 +666,59 @@ export function registerProjectRoutes(
       return reply.code(graphErrorStatus(err)).send({ error: message(err) });
     }
   });
+
+  app.get(
+    `${V}/projects/:id/graph/path`,
+    { config: { manifest: { responseType: 'ProjectGraphPath', statusCodes: [200, 400, 404, 501, 503] } } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const params = req.query as { from?: string; to?: string; maxDepth?: string };
+      if (typeof params.from !== 'string' || params.from.trim() === '' || typeof params.to !== 'string' || params.to.trim() === '') {
+        return reply.code(400).send({ error: 'from and to query parameters required' });
+      }
+      const maxDepth = params.maxDepth === undefined ? undefined : Number(params.maxDepth);
+      // crew#1476: estate's path horizon is bounded, and invalid input must not become its default.
+      if (maxDepth !== undefined && (!Number.isInteger(maxDepth) || maxDepth < 1 || maxDepth > 16)) {
+        return reply.code(400).send({ error: 'maxDepth must be an integer from 1 to 16' });
+      }
+      if (id === DEFAULT_PROJECT_ID) {
+        return reply.code(404).send({ error: defaultProjectGraph().detail, status: defaultProjectGraph() });
+      }
+      try {
+        const project = await adapter.projectGet(id);
+        if (project === null) return reply.code(404).send({ error: `Project ${id} not found` });
+        const ready = await queryable(adapter, id);
+        if (!ready.ok) {
+          return reply.code(ready.status.state === 'engine-too-old' ? 501 : 404).send({ error: notQueryableError(ready.status), status: ready.status });
+        }
+        return reply.send(await projectGraphPath(ready, params.from.trim(), params.to.trim(), maxDepth));
+      } catch (err) {
+        return reply.code(graphErrorStatus(err)).send({ error: message(err) });
+      }
+    },
+  );
+
+  app.get(
+    `${V}/projects/:id/graph/boundaries`,
+    { config: { manifest: { responseType: 'ProjectGraphBoundaries', statusCodes: [200, 404, 501, 503] } } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      if (id === DEFAULT_PROJECT_ID) {
+        return reply.code(404).send({ error: defaultProjectGraph().detail, status: defaultProjectGraph() });
+      }
+      try {
+        const project = await adapter.projectGet(id);
+        if (project === null) return reply.code(404).send({ error: `Project ${id} not found` });
+        const ready = await queryable(adapter, id);
+        if (!ready.ok) {
+          return reply.code(ready.status.state === 'engine-too-old' ? 501 : 404).send({ error: notQueryableError(ready.status), status: ready.status });
+        }
+        return reply.send(await projectGraphBoundaries(ready));
+      } catch (err) {
+        return reply.code(graphErrorStatus(err)).send({ error: message(err) });
+      }
+    },
+  );
 
   app.get(
     `${V}/projects/:id/graph/search`,

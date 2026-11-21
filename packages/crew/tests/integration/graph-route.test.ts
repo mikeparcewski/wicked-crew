@@ -8,7 +8,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, expect, describe, it } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
@@ -24,7 +24,6 @@ const KINDS: GraphKind[] = [
 let app: Awaited<ReturnType<typeof createServer>>;
 let adapter: CoreAdapter;
 let dir: string;
-let baseUrl: string;
 
 /** Records the repoRef the route passed through, so the test proves wiring, not just a value. */
 let lastRepoRef: string | null = null;
@@ -41,9 +40,6 @@ beforeAll(async () => {
   };
 
   app = await createServer(adapter);
-  await app.listen({ port: 0, host: '127.0.0.1' });
-  const addr = app.server.address();
-  baseUrl = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
 });
 
 afterAll(async () => {
@@ -53,8 +49,9 @@ afterAll(async () => {
 });
 
 async function get(path: string) {
-  const res = await fetch(`${baseUrl}${path}`);
-  return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+  // crew#1556: route injection also works where the test host cannot open sockets.
+  const res = await app.inject({ method: 'GET', url: path });
+  return { status: res.statusCode, body: res.json() as Record<string, unknown> };
 }
 
 describe('GET /governance/graph', () => {
@@ -95,5 +92,39 @@ describe('GET /governance/graph', () => {
   it('maps an internal (non-not-found) failure to 500, not 404', async () => {
     const res = await get('/api/v1/governance/graph?repo=boom');
     expect(res.status).toBe(500);
+  });
+});
+
+// crew#1555, crew#1556: the repo route carries estate's additive fields and every page's drift.
+describe.skipIf(process.platform === 'win32')('repo blast-radius wire', () => {
+  it('passes depth, stale, resolved and merged freshness through two pages', async () => {
+    const priorPath = process.env['PATH'];
+    const priorList = adapter.listRepos;
+    const db = join(dir, 'blast.db');
+    const exe = join(dir, 'wicked-estate');
+    const freshness = { commits_behind: 0, indexing: [], roots: [], stale_files: [], stale_files_total: 0, unindexed_files: 0, checked_files: 1, not_file_backed: 0 };
+    const pages = [
+      { target: 'f', resolved: true, dependents: [{ id: 'a', name: 'a', kind: 'Function', file: 'a.ts', line: 1, depth: 2, stale: 'modified' }], next_cursor: 'c1', freshness: { ...freshness, stale_files: [{ file: 'a.ts', status: 'modified' }], stale_files_total: 1, checked_files: 2 } },
+      { target: 'f', resolved: true, dependents: [], next_cursor: null, freshness },
+    ];
+    writeFileSync(db, '');
+    writeFileSync(exe, `#!/usr/bin/env node
+const pages = ${JSON.stringify(pages)};
+process.stdout.write(JSON.stringify(pages[process.argv.includes('--cursor') ? 1 : 0]));
+`);
+    chmodSync(exe, 0o755);
+    process.env['PATH'] = `${dir}:${priorPath ?? ''}`;
+    adapter.listRepos = async () => [{ id: 'blast', name: 'blast', root_path: dir, default_branch: 'main', registered_at: 0, code_graph_db: db }];
+    try {
+      const res = await get('/api/v1/repos/blast/graph/blast-radius?name=f');
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ resolved: true, dependents: [{ depth: 2, stale: 'modified' }], freshness: {
+        stale_files: [{ file: 'a.ts', status: 'modified' }], stale_files_total: 1, checked_files: 3,
+      } });
+    } finally {
+      adapter.listRepos = priorList;
+      if (priorPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = priorPath;
+    }
   });
 });

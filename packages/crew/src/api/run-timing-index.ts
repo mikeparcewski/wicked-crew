@@ -88,44 +88,58 @@ export class RunTimingIndex {
    * `GroupIndex`, so boot stays at the same full-file trail scans, not one more.
    */
   hydrateFromLaunchEntries(entries: AuditEntry[]): void {
-    const principalSeen = new Set<string>();
+    const seen = new Set<string>();
     for (const entry of entries) {
-      if (typeof entry.runId === 'string' && typeof entry.ts === 'number' && entry.ts > 0) {
-        this.runToCreatedAt.set(entry.runId, toSeconds(entry.ts));
-      }
-      const runId = entry.runId;
-      if (typeof runId !== 'string') continue;
-      // The trail reads newest first: a reused run id keeps its NEWEST launch's principal (codex r2), and a
-      // system relaunch means "nobody's use".
-      if (!principalSeen.has(runId)) {
-        principalSeen.add(runId);
-        const launcher = entry.actor as { id?: unknown; kind?: unknown } | undefined;
-        if (typeof launcher?.id === 'string' && launcher.kind !== 'system') this.setPrincipal(runId, launcher.id);
-        else this.runToPrincipal.delete(runId);
-      }
-      const detail = entry.detail as Record<string, unknown> | undefined;
-      const ch = detail?.['channel'];
-      if (ch === 'studio' || ch === 'cli' || ch === 'api') this.runToChannel.set(runId, ch);
-      const la = detail?.['actor'];
-      if (typeof la === 'string' && la.length > 0) this.runToLaunchActor.set(runId, la);
-      // crew#641/#642 (item 5): chat promotion provenance.
-      const sc = detail?.['chatSeatCount'];
-      if (typeof sc === 'number') this.runToChatSeatCount.set(runId, sc);
-      const cg = detail?.['chatGrounded'];
-      if (typeof cg === 'boolean') this.runToChatGrounded.set(runId, cg);
-      // C1: the chat↔run link crew#619 already makes durable, read back for every run.
-      const chatId = detail?.['chatId'];
-      if (typeof chatId === 'string' && chatId.length > 0) this.runToChatId.set(runId, chatId);
-      if (detail?.['askPath'] === true) this.askPathRuns.add(runId);
-      const cw = detail?.['chatWorkflow'];
-      if (typeof cw === 'string' && cw.length > 0) this.runToChatWorkflow.set(runId, cw);
-      const deliver = detail?.['deliver'];
-      if (deliver === 'pr' || deliver === 'none') this.runToLaunchDeliver.set(runId, deliver);
-      this.noteProposal(runId, detail);
-      this.noteChain(runId, detail);
-      // Newest first: a reused id keeps its newest launch's facts.
-      if (!this.runToLaunchFacts.has(runId)) this.noteLaunchFacts(runId, detail);
+      if (typeof entry.runId !== 'string' || seen.has(entry.runId)) continue;
+      seen.add(entry.runId);
+      this.applyLaunchEntry(entry);
     }
+  }
+
+  /** A launch replaces all launch facts, including facts absent from this entry. */
+  applyLaunchEntry(entry: Pick<AuditEntry, 'runId' | 'ts' | 'actor' | 'detail'>): void {
+    const runId = entry.runId;
+    if (typeof runId !== 'string') return;
+    const previousFrom = this.runToChainedFrom.get(runId);
+    if (previousFrom !== undefined && this.chainedRun.get(previousFrom) === runId) this.chainedRun.delete(previousFrom);
+    this.runToCreatedAt.delete(runId);
+    this.runToChannel.delete(runId);
+    this.runToLaunchActor.delete(runId);
+    this.runToChatSeatCount.delete(runId);
+    this.runToChatGrounded.delete(runId);
+    this.runToChatId.delete(runId);
+    this.askPathRuns.delete(runId);
+    this.runToPrincipal.delete(runId);
+    this.runToChatWorkflow.delete(runId);
+    this.runToChainedFrom.delete(runId);
+    this.autoCaptureOffRuns.delete(runId);
+    this.runToLaunchDeliver.delete(runId);
+    this.runToProposal.delete(runId);
+    this.runToLaunchFacts.delete(runId);
+    if (typeof entry.ts === 'number' && entry.ts > 0) this.set(runId, entry.ts);
+    const launcher = entry.actor;
+    if (typeof launcher?.id === 'string' && launcher.kind !== 'system') this.setPrincipal(runId, launcher.id);
+    const detail = entry.detail as Record<string, unknown> | undefined;
+    const ch = detail?.['channel'];
+    if (ch === 'studio' || ch === 'cli' || ch === 'api') this.runToChannel.set(runId, ch);
+    const la = detail?.['actor'];
+    if (typeof la === 'string' && la.length > 0) this.runToLaunchActor.set(runId, la);
+    // crew#641/#642 (item 5): chat promotion provenance.
+    const sc = detail?.['chatSeatCount'];
+    if (typeof sc === 'number') this.runToChatSeatCount.set(runId, sc);
+    const cg = detail?.['chatGrounded'];
+    if (typeof cg === 'boolean') this.runToChatGrounded.set(runId, cg);
+    // C1: the chat↔run link crew#619 already makes durable, read back for every run.
+    const chatId = detail?.['chatId'];
+    if (typeof chatId === 'string' && chatId.length > 0) this.runToChatId.set(runId, chatId);
+    if (detail?.['askPath'] === true) this.askPathRuns.add(runId);
+    const cw = detail?.['chatWorkflow'];
+    if (typeof cw === 'string' && cw.length > 0) this.runToChatWorkflow.set(runId, cw);
+    const deliver = detail?.['deliver'];
+    if (deliver === 'pr' || deliver === 'none') this.runToLaunchDeliver.set(runId, deliver);
+    this.noteProposal(runId, detail);
+    this.noteChain(runId, detail);
+    this.noteLaunchFacts(runId, detail);
   }
 
   /** (DES-CATALOG-002 §4.4) A launch entry's shape, envelope and proposal, as recorded. */
@@ -438,40 +452,6 @@ export function recordRunLaunched(
   detail: Record<string, unknown>,
 ): number {
   const ts = audit.record('run.launched', actor, { runId, detail });
-  if (ts > 0) runTimingIndex?.set(runId, ts);
-  if (actor.kind !== 'system') runTimingIndex?.setPrincipal(runId, actor.id);
-  else runTimingIndex?.clearPrincipal(runId);
-  // crew#632: also stamp channel/actor into the index for live serving (same posture as created_at).
-  const ch = detail['channel'];
-  if ((ch === 'studio' || ch === 'cli' || ch === 'api') && runTimingIndex !== undefined) {
-    runTimingIndex.setChannel(runId, ch);
-  }
-  const la = detail['actor'];
-  if (typeof la === 'string' && la.length > 0 && runTimingIndex !== undefined) {
-    runTimingIndex.setLaunchActor(runId, la);
-  }
-  // C1: the chat link, live — the same field a restart rehydrates from this entry.
-  const chatId = detail['chatId'];
-  if (typeof chatId === 'string' && chatId.length > 0 && runTimingIndex !== undefined) {
-    runTimingIndex.setChatId(runId, chatId);
-  }
-  // crew#854: an ask's run, live — the same field a restart rehydrates.
-  if (detail['askPath'] === true && runTimingIndex !== undefined) runTimingIndex.setAskPath(runId);
-  // crew#1157: an analysis chat's run, live — the same field a restart rehydrates.
-  const chatWorkflow = detail['chatWorkflow'];
-  if (typeof chatWorkflow === 'string' && chatWorkflow.length > 0 && runTimingIndex !== undefined) {
-    runTimingIndex.setChatWorkflow(runId, chatWorkflow);
-  }
-  // crew#552: the chain facts, live — the same fields a restart rehydrates.
-  runTimingIndex?.noteChain(runId, detail);
-  // A3: the proposal facts, live — the same fields a restart rehydrates.
-  runTimingIndex?.noteProposal(runId, detail);
-  // DES-CATALOG-002 §4.4: the shape, envelope and proposal, live — the same fields a restart rehydrates.
-  runTimingIndex?.noteLaunchFacts(runId, detail);
-  // crew#762: the launch's delivery decision, live — the same field a restart rehydrates.
-  const deliver = detail['deliver'];
-  if ((deliver === 'pr' || deliver === 'none') && runTimingIndex !== undefined) {
-    runTimingIndex.setLaunchDeliver(runId, deliver);
-  }
+  runTimingIndex?.applyLaunchEntry({ runId, ts, actor, detail });
   return ts;
 }

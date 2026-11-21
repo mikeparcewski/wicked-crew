@@ -1,7 +1,7 @@
 /**
  * One server owns a data volume (DES-APPS-001 §7.3: "an app with actions runs as ONE server replica"). The action
  * store is a file with an in-process lock; a second server on the same volume could run one record twice and
- * overwrite the other's records. A node:sqlite BEGIN EXCLUSIVE transaction on `<data>/.owner.lock` guards it:
+ * overwrite the other's records. A node:sqlite BEGIN IMMEDIATE transaction on `<data>/.owner.lock` guards it:
  *
  * - The first server holds the transaction open for its lifetime; a second stops immediately, naming the owner
  *   from `<data>/.owner.json` (informational host/pid only, never used to decide ownership).
@@ -45,7 +45,11 @@ export async function claimDataDir(dir: string, opts: { onLost?: () => void } = 
   let identity: BigIntStats;
   try {
     db = new DatabaseSync(lock);
-    db.exec('PRAGMA busy_timeout = 0; BEGIN EXCLUSIVE');
+    // IMMEDIATE takes SQLite's single RESERVED lock in one step: of two servers starting together, exactly one gets
+    // it and the other is refused at once. EXCLUSIVE has a second step (RESERVED, then EXCLUSIVE, which waits for
+    // every SHARED lock to go): a racer holding SHARED for that instant made the winner's upgrade fail too, with a
+    // zero busy timeout, so nobody owned the volume. Only owners take RESERVED, so it means "owned" here.
+    db.exec('PRAGMA busy_timeout = 0; BEGIN IMMEDIATE');
     identity = statSync(lock, { bigint: true });
     writeFileSync(ownerFile, `${JSON.stringify({ host: hostname(), pid: process.pid })}\n`, { mode: 0o600 });
   } catch (err) {

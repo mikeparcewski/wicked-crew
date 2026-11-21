@@ -23,7 +23,7 @@ import { registerSourceRoutes } from '../src/sources/routes.js';
 
 import { describePg, pgPrivileges } from '../src/sources/catalog/postgres.js';
 import { policyCatalog } from '../src/sources/catalog/types.js';
-import { pgClient, pgRead } from '../src/sources/drivers/postgres.js';
+import { pgClient, pgRead, pgTx } from '../src/sources/drivers/postgres.js';
 import type { SqlConnectArgs } from '../src/sources/drivers/types.js';
 import { pgTableSafety, pgTableSafetyIn } from '../src/sources/safety/postgres.js';
 import { relKey } from '../src/sources/policy/types.js';
@@ -52,6 +52,46 @@ for (const target of PG_TARGETS) {
     }, 60_000);
     afterAll(async () => {
       await db?.drop();
+    });
+
+    it('crew#1302: a hand-run transaction stays on one backend across six idle seconds', async () => {
+      const life = { closed: false };
+      const sql = pgClient(login('apps_reader', 'apps-reader'), { onclose: () => (life.closed = true) });
+      try {
+        await pgTx(sql, life, 'BEGIN READ ONLY', async (tx) => {
+          const first = await tx.unsafe('SELECT pg_backend_pid() AS pid');
+          await new Promise<void>((r) => setTimeout(r, 6_000));
+          const second = await tx.unsafe('SELECT pg_backend_pid() AS pid');
+          expect(second[0]?.['pid']).toBe(first[0]?.['pid']);
+        });
+      } finally {
+        await sql.end({ timeout: 0 });
+      }
+    }, 15_000);
+
+    it('crew#1290: a foreign partition attached after the first check drops the answer', async () => {
+      // The CI superuser must be able to create contrib extensions; never skip a failed setup.
+      await db.admin.unsafe('CREATE EXTENSION IF NOT EXISTS postgres_fdw');
+      await db.admin.unsafe(`CREATE TABLE s.attach_parent (id integer) PARTITION BY RANGE (id);
+        CREATE TABLE s.attach_rows (id integer);
+        INSERT INTO s.attach_rows VALUES (1);
+        CREATE SERVER attach_self FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host '127.0.0.1', port '5432', dbname '${db.database}');
+        CREATE USER MAPPING FOR CURRENT_USER SERVER attach_self OPTIONS (user 'postgres', password 'apps');
+        CREATE FOREIGN TABLE s.attach_foreign (id integer) SERVER attach_self OPTIONS (schema_name 's', table_name 'attach_rows')`);
+      const args = login(decodeURIComponent(target.url.username), decodeURIComponent(target.url.password));
+      let attached = false;
+      try {
+        await expect(pgRead(args, 'SELECT id FROM s.attach_parent', [], {
+          expect: [{ schema: 's', name: 'attach_parent', kinds: ['partitioned'], noForeignBelow: true, columns: ['id'] }],
+          afterExpect: async () => {
+            await db.admin.unsafe('ALTER TABLE s.attach_parent ATTACH PARTITION s.attach_foreign FOR VALUES FROM (0) TO (10)');
+            attached = true;
+          },
+        })).rejects.toMatchObject({ errorClass: 'refused', message: expect.stringContaining('now has a foreign table below it') });
+        expect(attached).toBe(true);
+      } finally {
+        await db.admin.unsafe('DROP TABLE s.attach_parent CASCADE; DROP FOREIGN TABLE IF EXISTS s.attach_foreign; DROP TABLE s.attach_rows; DROP SERVER attach_self CASCADE');
+      }
     });
 
     it('describes the catalog: structure and declared enum literals, never a row value', async () => {

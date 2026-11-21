@@ -13,6 +13,7 @@ import { pinOf } from '../src/apps/exec/sources.js';
 import { secretEnvName } from '../src/apps/publish/layout.js';
 import { buildManifest, manifestDigest, type ManifestInput, siteOriginProblem } from '../src/apps/publish/manifest.js';
 import { PackError, writeImageContext, writeSite } from '../src/apps/publish/pack.js';
+import { PublishService } from '../src/apps/publish/run.js';
 import type { AppAction, AppActionGrant, AppPublishBody, AppSpec } from '../src/core/types.js';
 import type { McpUpstreamConfig } from '../src/mcp/probe.js';
 
@@ -68,10 +69,11 @@ function fixture(opts: { configs?: McpUpstreamConfig[]; actions?: AppAction[]; q
       ...body,
     },
     registry,
+    maySee: async () => true,
     grantOf,
     endpoints: { authorization: 'https://dex.apps.test/auth', token: 'https://dex.apps.test/token' },
   });
-  return { input, spec, lock };
+  return { input, spec, lock, registry };
 }
 
 const codes = async (i: ManifestInput): Promise<string[]> => {
@@ -118,6 +120,28 @@ describe('the publish manifest', () => {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.findings.filter((f) => f.code === 'blocked_source').map((f) => f.message).join(' ')).toMatch(/crew source.*query runs[\s\S]*local MCP server: remove query local_q/);
+  });
+
+  it("(crew#1533) refuses a source the app's project may not see now: its config never reaches the image", async () => {
+    const { input, registry } = fixture({ actions: [] });
+    const asked: Array<string | null> = [];
+    const service = (visible: string[]) => new PublishService({
+      engine: { launchRun: async () => 'never', sessionsDetail: async () => [] },
+      roster: async () => '[]',
+      registry,
+      grantOf: () => null,
+      projectOf: (slug) => (slug === 'esc' ? 'proj-a' : null),
+      visibleSources: async (projectId) => { asked.push(projectId); return new Set(visible); },
+    });
+    // No issuer: the manifest is built without a discovery fetch.
+    const { app, files, body } = input({ identity: null, audience: { kind: 'public' } });
+    const hidden = await service([]).manifestFor({ app, files, body });
+    expect(hidden.ok).toBe(false);
+    if (hidden.ok) return;
+    expect(hidden.findings).toContainEqual({ code: 'unknown_source', message: "support is no source this app's project may see (used by query open)" });
+    expect(asked).toEqual(['proj-a']);
+    const seen = await service(['support']).manifestFor({ app, files, body });
+    expect(seen.ok ? [] : seen.findings.map((f) => f.code)).not.toContain('unknown_source');
   });
 
   it('(DES-KNOWLEDGE-DATA-001 §9.1) refuses a knowledge query: recall is studio-hosted only in v1', async () => {

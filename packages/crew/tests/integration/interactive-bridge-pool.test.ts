@@ -710,3 +710,30 @@ describe('a sidecar names a bridge INSTANCE, not a pid (crew#510)', () => {
     expect(upgraded.startedAt).toBe(recorded.startedAt);
   }, 30_000);
 });
+
+describe('crew#1288 bridge version adoption', () => {
+  function belowFloor(root: string): void {
+    const path = join(root, LOCK_NAME);
+    writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, 'utf8')), version: '0.14.1' }));
+  }
+
+  it('recycles a below-floor bridge with matching env and a gone owner', async () => {
+    const root = join(dir, 'below-floor-owned');
+    mkdirSync(root);
+    const pair = { origin: 'http://127.0.0.1:60785', bus: join(dir, 'state', 'bus') };
+    const { pid } = await orphanedMismatch(root);
+    belowFloor(root);
+    const replacement = await poolWith(pair).ensure(root);
+    expect(replacement.pid).not.toBe(pid);
+    expect(pidAlive(pid)).toBe(false);
+  });
+
+  it('refuses an unrecorded below-floor bridge without killing it', async () => {
+    const root = join(dir, 'below-floor-unrecorded');
+    mkdirSync(root);
+    const pid = await operatorBridge(root);
+    belowFloor(root);
+    await expect(poolWith({ origin: null, bus: null }).ensure(root)).rejects.toMatchObject({ hint: expect.stringContaining(`kill ${pid}`) });
+    expect(pidAlive(pid)).toBe(true);
+  });
+});

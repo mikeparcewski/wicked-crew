@@ -319,7 +319,7 @@ import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.j
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
 import { crewStateHome, stateHomeOfDb, wickedWorkRoot } from '../projects/state-home.js';
 import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, jobLaunchRoster, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
-import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
+import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, removeStagedDocuments, stagedDocumentsRemoved, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
 import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks, webScopeReason } from './run-sources.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
 import { LaunchRefusal, ChatProposals, LaunchOnceRegistry, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
@@ -1357,7 +1357,7 @@ export interface RegisteredRoutes {
   proposalLaunchers: LaunchOnceRegistry;
 }
 
-export interface RuntimeDeps {
+interface RuntimeServices {
   /** Recheck the rebased tree before redelivery; default reads Core.checkRunTree at call time. */
   checkRunTree?: CheckRunTree;
   /** Run a refresh script; tests supply a temp HOME with stub gh and a local origin. */
@@ -1594,10 +1594,6 @@ export interface RuntimeDeps {
   editorUnitTokenProbe?: (token: string) => Promise<UnitTokenVerdict>;
   /** EP-C1 (tests): where `daemon-editors.json` lives; default = the crew state home. */
   editorsStateHome?: string;
-  /** DES-APPS-001 (K2a): the app store behind `/apps` and `POST /repos {create}`. `createServer` builds it over
-   *  the state home's `daemon-apps.json` and the apps root; a directly-driven route set gets the routes only when it
-   *  injects one (so a test never makes a repo under the real `~/.wicked/apps`). */
-  apps?: AppStore;
   /** (DES-APPS-001 K5) A unit token → its run and step, for `POST /apps/check`; absent = that route answers 503. */
   appsVerifyUnitToken?: (token: string) => Promise<{ runId: string; phase: string } | null>;
   /** (K2b) Grants and action records (`daemon-apps-actions.json`); with `apps`, the action routes serve for real. */
@@ -1677,6 +1673,15 @@ export interface RuntimeDeps {
    *  its own default (shells `estate stats --db`). */
   entityCount?: (dbPath: string) => Promise<number>;
 }
+
+/** An Apps runtime always supplies project visibility; a route set without Apps needs neither. */
+export type RuntimeDeps = RuntimeServices & ({
+  /** DES-APPS-001 (K2a): the app store behind `/apps` and `POST /repos {create}`. `createServer` builds it over
+   *  the state home's `daemon-apps.json` and the apps root; a directly-driven route set gets the routes only when it
+   *  injects one (so a test never makes a repo under the real `~/.wicked/apps`). */
+  apps: AppStore;
+  appsVisibleSources: (projectId: string | null) => Promise<ReadonlySet<string>>;
+} | { apps?: undefined; appsVisibleSources?: never });
 
 /**
  * The daemon REST surface. Every endpoint is a thin wrapper over one adapter /
@@ -2135,6 +2140,7 @@ export function registerRoutes(
       ? new AppExecutor({
           store: runtime.apps,
           registry: runtime.mcp ?? null,
+          visibleSources: runtime.appsVisibleSources,
           ...(appsKnowledge !== undefined ? { knowledge: appsKnowledge } : {}),
           projectOf: (slug) => runtime.apps!.projectOf(slug),
           crewInject: async (r) => {
@@ -2151,6 +2157,8 @@ export function registerRoutes(
           store: runtime.apps,
           actions: runtime.appsActions,
           registry: runtime.mcp ?? null,
+          visibleSources: runtime.appsVisibleSources,
+          projectOf: (slug) => runtime.apps!.projectOf(slug),
           audit,
           viewerOf: runtime.appsViewerOf ?? localViewerOf,
           ...(appsExecutor !== undefined ? { executor: appsExecutor } : {}),
@@ -2167,6 +2175,8 @@ export function registerRoutes(
           return JSON.stringify(launchRosterNaming(rosterWithStanding({ launch: true }), undefined));
         },
         registry: runtime.mcp ?? null,
+        visibleSources: runtime.appsVisibleSources,
+        projectOf: (slug) => runtime.apps!.projectOf(slug),
         grantOf: (slug, action) => appsWritePath?.getGrant(slug, action) ?? null,
       },
       ...(appsExecutor !== undefined ? { executor: appsExecutor } : {}),
@@ -3498,13 +3508,24 @@ export function registerRoutes(
     const p = chatScopes.get(chatId)?.projectId ?? chatHistory?.stateOf(chatId)?.projectId ?? null;
     return p === null || p === DEFAULT_PROJECT_ID ? null : p;
   };
+  /** crew#1429: a run's staged documents folder goes with the run (a refused launch, an archive). Logged, never fatal:
+   *  the run's own outcome stands. */
+  const freeStagedDocuments = (runId: string, archived: boolean): void => {
+    if (runtime.runDocumentsRoot === undefined) return;
+    try {
+      removeStagedDocuments(runId, runtime.runDocumentsRoot, archived);
+    } catch (err) {
+      app.log.warn(`[runs] staged documents of ${runId} not removed: ${message(err)}`);
+    }
+  };
   /**
    * (CS4) The documents an earlier run was given, to be authorised and staged again for its retry: its tokens and chat
    * from its staged manifest, hash-checked. `null` = it had none; `'unreadable'` = it had some that can't be read back.
    */
-  const stagedTokensOf = (runId: string, root: string): { chatId: string; tokens: string[] } | null | 'unreadable' => {
+  const stagedTokensOf = (runId: string, root: string): { chatId: string; tokens: string[] } | null | 'unreadable' | 'removed' => {
     const staged = stagedDocumentsOf(runId, root);
     if (staged === null) {
+      if (stagedDocumentsRemoved(runId, root)) return 'removed';
       try {
         readFileSync(join(root, runId, 'records', 'MANIFEST.json'));
       } catch {
@@ -3853,12 +3874,17 @@ export function registerRoutes(
     // only (a named workflow or an explicit plan); best-effort: an unreadable store launches without it.
     const briefRules = async (workflow: string | null): Promise<void> => {
       try {
+        // wicked-crew#1706: the registered checkout root lets the engine judge pack fit from the repo's manifests;
+        // an unreadable registry leaves it unknown (the rule still matches, as before).
+        const repoRoot = b.repoRef !== undefined ? await repoRootOf(b.repoRef).catch(() => undefined) : undefined;
         const read = await considerations.inForceFor(b.projectId ?? null);
         const def = workflow === null ? null : adapter.getWorkflow(workflow);
         const kinds = def === null ? null : def.phases.map((p) => String(p.kind ?? 'build'));
         const rules = read.source === 'unavailable' ? [] : read.rules;
         // (coord, E7 rerun) The job's repository: a rule that names it (its statement or its source doc) applies.
-        const job = { workflow, steps: null, kinds, project: b.projectId ?? null, repo: b.repoRef ?? null };
+        const job = { workflow, steps: null, kinds, project: b.projectId ?? null, repo: b.repoRef ?? null,
+          ...(repoRoot !== undefined ? { repoRoot } : {}),
+        };
         const matches = await matchRulesForJob(rules, job, runtime.matchRules ?? CoreAdapter.ruleMatcher(), (m) => req.log.warn(m));
         const briefed = withRulesBrief(input.problem, rules, matches);
         input.problem = briefed.problem;
@@ -3964,7 +3990,7 @@ export function registerRoutes(
     // chat, its project, the document's version now) and staged whole, read-only, in the run's own folder outside the
     // state home; a retry or reshape that sends none reuses the earlier run's staged folder (hash-checked). The folder
     // is a READ root only: the run can read its documents and never write there. The brief says where they are.
-    let staged: StagedDocuments | null = null;
+    let staged: (StagedDocuments & { published: boolean }) | null = null;
     // What to stage: the documents sent, or (a retry that sends none) the earlier run's tokens under the earlier run's
     // chat, authorised again now; never the earlier folder mounted as it is. `[]` = none, inherit nothing.
     let docTokens: { chatId: string; tokens: string[] } | null = null;
@@ -3972,6 +3998,9 @@ export function registerRoutes(
       if (b.documents.length > 0 && b.chatId !== undefined) docTokens = { chatId: b.chatId, tokens: b.documents };
     } else if (b.retryOf !== undefined && runtime.runDocumentsRoot !== undefined) {
       const earlier = stagedTokensOf(b.retryOf, runtime.runDocumentsRoot);
+      if (earlier === 'removed') {
+        return reply.code(409).send({ code: 'documents_unavailable', error: `the documents of run ${b.retryOf} were removed when it was archived; start the job again from its chat` });
+      }
       if (earlier === 'unreadable') {
         return reply.code(409).send({ code: 'documents_unavailable', error: `the documents of run ${b.retryOf} can't be read again; start the job again from its chat` });
       }
@@ -4020,8 +4049,10 @@ export function registerRoutes(
       input.extraReadRoots = [...(input.extraReadRoots ?? []), staged.root];
       input.problem = `${input.problem.trimEnd()}\n\n${documentsClause(staged)}`;
     }
+    let launched = false;
     try {
       const runId = await adapter.launchRun(input);
+      launched = true;
       // crew#641/#642 (item 5): when a run is promoted from a chat, record how many seats
       // participated and whether the chat was grounded — so an intent authored by a single
       // ungrounded model is distinguishable from one that survived a disagreement.
@@ -4118,8 +4149,7 @@ export function registerRoutes(
       if (chatSeatCount !== undefined && chatGrounded !== undefined) {
         runTimingIndex.setChatPromotion(runId, chatSeatCount, chatGrounded);
       }
-      if (b.retryOf !== undefined) retryIndex.set(runId, b.retryOf);
-      if (revisesPr !== undefined) retryIndex.setRevisesPr(runId, revisesPr);
+      retryIndex.applyLaunchEntry(runId, { retryOf: b.retryOf, revisesPr });
       // (DES-PM-001 §3.2, §4) The issues this run addresses, as its tracker set resolved them: delivery links them
       // back, the deliver gate's actions are offered for them, and the projection draws the trail.
       if (linkedAddresses !== undefined && runtime.trackerAddresses !== undefined) {
@@ -4172,6 +4202,7 @@ export function registerRoutes(
       const power = { ...(input.power === true ? { power: true } : {}), ...(powerNotice !== null ? { powerNotice } : {}), ...(humanConfirmNotice !== null ? { humanConfirmNotice } : {}) };
       return reply.code(201).send({ runId, ...(linkedIssues !== undefined ? { linkedIssues } : {}), ...freeText, ...skillsWarning, ...assuranceNotice, ...power });
     } catch (err) {
+      if (!launched && staged?.published === true) freeStagedDocuments(input.sessionId, false);
       const msg = message(err);
       if (isReview) runtime.reviewLaunchRefused?.(input.sessionId, msg);
       // DES-TEAMING-002 T3: a plan on an engine without the plan approval gate is an "upgrade the
@@ -4506,6 +4537,7 @@ export function registerRoutes(
     try {
       const found = await adapter.archiveRun(id, parsed.data.archived, parsed.data.note);
       if (!found) return reply.code(404).send({ error: 'Run not found' });
+      if (parsed.data.archived) freeStagedDocuments(id, true);
       return { runId: id, archived: parsed.data.archived };
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -4558,6 +4590,7 @@ export function registerRoutes(
           }
           const found = await adapter.archiveRun(id, true, note);
           if (!found) return { code: 404, body: { error: 'Run not found' } };
+          freeStagedDocuments(id, true);
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           return { code: /only a terminal run/i.test(msg) ? 409 : 500, body: { error: msg } };
@@ -4586,6 +4619,7 @@ export function registerRoutes(
     for (const id of parsed.data.ids) {
       try {
         const found = await adapter.archiveRun(id, true, parsed.data.note);
+        if (found) freeStagedDocuments(id, true);
         results.push(found ? { id, ok: true } : { id, ok: false, error: 'not found' });
       } catch (e: unknown) {
         results.push({ id, ok: false, error: e instanceof Error ? e.message : String(e) });
@@ -9791,7 +9825,7 @@ export function registerRoutes(
       return reply.code(404).send({ error: 'Code graph not built for this repo yet' });
     }
     try {
-      // Every page of the answer (estate#279): the dependents are joined, the rest is the last page's.
+      // crew#1556: join every page's dependents and freshness; other fields are the last page's.
       return reply.send(
         await readBlastRadiusPages('wicked-estate', q.name.trim(), dbPath, { timeout: 30_000, cwd: repo.root_path }),
       );

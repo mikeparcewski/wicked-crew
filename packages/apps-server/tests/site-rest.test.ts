@@ -55,6 +55,8 @@ describe('a public site over a REST source', () => {
       files: at.files,
       body: { base: head, targets: ['site', 'embed'], site: { origin: 'http://localhost:8080' }, identity: null, audience: { kind: 'public' }, embedOrigins: ['https://intranet.example.com'] },
       registry: h.registry,
+      // The rig's app is in no project and its sources carry no project controls: every source is visible.
+      maySee: async () => true,
       grantOf: () => null,
       endpoints: null,
     });

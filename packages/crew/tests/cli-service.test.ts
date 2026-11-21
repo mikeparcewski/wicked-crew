@@ -31,6 +31,7 @@ import {
   serviceUnitPath,
   stableNodePath,
   uninstallService,
+  windowsRecipe,
   type CommandRunner,
   type ServiceDeps,
   type ServiceSpec,
@@ -50,6 +51,7 @@ afterEach(() => {
 });
 
 const SPEC: ServiceSpec = {
+  port: 7702,
   program: ['/usr/local/bin/node', '/opt/crew/dist/cli/index.js', 'serve', '--port', '7702'],
   env: { PATH: '/usr/bin:/bin', CLAUDE_CONFIG_DIR: '/srv/op/alt & co/.claude', WICKED_X: '100%' },
   logPath: '/srv/op/100% crew/daemon-stdout.log',
@@ -104,13 +106,17 @@ describe('stableNodePath', () => {
 });
 
 describe('unit rendering', () => {
+  it('names the Windows task for the port', () => {
+    expect(windowsRecipe(SPEC)).toContain('/TN wicked-crew-7702 ');
+    expect(windowsRecipe({ ...SPEC, port: 7701 })).toContain('/TN wicked-crew ');
+  });
   it('plist: label, argv, escaped env, RunAtLoad + KeepAlive, log path — and the log reads back', () => {
     const text = renderPlist(SPEC);
-    expect(text).toContain('<string>com.wickedagile.wicked-crew</string>');
+    expect(text).toContain('<string>com.wickedagile.wicked-crew.7702</string>');
     expect(text).toContain('<string>/opt/crew/dist/cli/index.js</string>\n    <string>serve</string>');
     expect(text).toContain('<key>CLAUDE_CONFIG_DIR</key>\n    <string>/srv/op/alt &amp; co/.claude</string>');
     expect(text).toMatch(/<key>RunAtLoad<\/key>\s*<true\/>/);
-    expect(text).toMatch(/<key>KeepAlive<\/key>\s*<true\/>/);
+    expect(text).toMatch(/<key>KeepAlive<\/key>\s*<dict><key>SuccessfulExit<\/key><false\/><\/dict>/);
     // Background would have launchd throttle the daemon's disk I/O (a live boot took minutes).
     expect(text).not.toContain('ProcessType');
     expect(logPathFromUnit(text)).toBe(SPEC.logPath);
@@ -139,6 +145,7 @@ describe('unit rendering', () => {
 
   it('systemd: % doubled everywhere, $ doubled in ExecStart arguments only (the executable path is taken as written), " and \\ escaped in quoted words', () => {
     const spec: ServiceSpec = {
+      port: 7702,
       program: ['/opt/a$b/node', '/opt/"q"/100%/x\\y.js', '--p=$HOME'],
       env: { K: 'a"b\\c$d%e' },
       logPath: '/l/100%/x.log',
@@ -225,11 +232,35 @@ const INPUT = (home: string) => ({
 });
 
 describe('installService / uninstallService', () => {
+  it('crew#1469 isolates per-port installs and uninstalls and limits restarts', async () => {
+    for (const platform of ['darwin', 'linux'] as const) {
+      const home = tmpHome();
+      const { deps, calls } = fakeDeps(platform, home);
+      await installService(INPUT(home), deps);
+      const secondary = join(home, ...(platform === 'darwin' ? ['Library', 'LaunchAgents', 'com.wickedagile.wicked-crew.7702.plist'] : ['.config', 'systemd', 'user', 'wicked-crew-7702.service']));
+      expect(existsSync(secondary)).toBe(true);
+      const text = readFileSync(secondary, 'utf8');
+      if (platform === 'darwin') {
+        expect(text).toMatch(/<key>KeepAlive<\/key>\s*<dict>\s*<key>SuccessfulExit<\/key>\s*<false\/>/);
+        expect(text).toMatch(/<key>ThrottleInterval<\/key>\s*<integer>30<\/integer>/);
+      } else {
+        expect(calls).toContain('systemctl --user restart wicked-crew-7702.service');
+        expect(text).toContain('StartLimitIntervalSec=60');
+        expect(text).toContain('StartLimitBurst=5');
+      }
+      await installService({ ...INPUT(home), port: 7701, serveArgs: ['--port', '7701'] }, deps);
+      expect(existsSync(secondary)).toBe(true);
+      expect(uninstallService(deps, 7702)).toBe(0);
+      expect(existsSync(secondary)).toBe(false);
+      expect(existsSync(serviceUnitPath(platform, home)!)).toBe(true);
+    }
+  });
+
   it('macOS: writes a 0600 LaunchAgent and bootstraps it; the token is named, not written', async () => {
     const home = tmpHome();
     const { deps, calls, lines } = fakeDeps('darwin', home);
     expect(await installService(INPUT(home), deps)).toBe(0);
-    const unit = serviceUnitPath('darwin', home)!;
+    const unit = serviceUnitPath('darwin', home, 7702)!;
     const text = readFileSync(unit, 'utf8');
     expect(statSync(unit).mode & 0o777).toBe(0o600);
     expect(text).toContain(join(home, 'alt', '.claude'));
@@ -238,18 +269,18 @@ describe('installService / uninstallService', () => {
     expect(text).not.toContain('--install-service');
     expect(calls).toEqual([`launchctl bootstrap gui/501 ${unit}`]);
     expect(lines.join('\n')).toContain('GH_TOKEN');
-    expect(installedService('darwin', home)).toEqual({ unitPath: unit, logPath: join(home, '.wicked-crew', 'daemon-stdout.log') });
+    expect(installedService('darwin', home, 7702)).toEqual({ unitPath: unit, logPath: join(home, '.wicked-crew', 'daemon-stdout.log') });
   });
 
   it('macOS: re-install boots the loaded agent out first (so kickstart/reload picks up the new unit)', async () => {
     const home = tmpHome();
-    const unit = serviceUnitPath('darwin', home)!;
+    const unit = serviceUnitPath('darwin', home, 7702)!;
     mkdirSync(dirname(unit), { recursive: true });
     writeFileSync(unit, 'old');
     // The daemon answering on the port IS the installed service (same pid) — not a refusal.
     const { deps, calls } = fakeDeps('darwin', home, { pid: 42 }, 42);
     expect(await installService(INPUT(home), deps)).toBe(0);
-    expect(calls).toEqual([`launchctl bootout gui/501/com.wickedagile.wicked-crew`, `launchctl bootstrap gui/501 ${unit}`]);
+    expect(calls).toEqual([`launchctl bootout gui/501/com.wickedagile.wicked-crew.7702`, `launchctl bootstrap gui/501 ${unit}`]);
   });
 
   it('refuses while a hand-started daemon holds the port, naming its pid; writes nothing', async () => {
@@ -258,12 +289,12 @@ describe('installService / uninstallService', () => {
     expect(await installService(INPUT(home), deps)).toBe(1);
     expect(lines.join('\n')).toContain('pid 4242');
     expect(calls).toEqual([]);
-    expect(existsSync(serviceUnitPath('darwin', home)!)).toBe(false);
+    expect(existsSync(serviceUnitPath('darwin', home, 7702)!)).toBe(false);
   });
 
   it('refuses a re-install while a DIFFERENT process holds the port (the service is not the holder)', async () => {
     const home = tmpHome();
-    const unit = serviceUnitPath('darwin', home)!;
+    const unit = serviceUnitPath('darwin', home, 7702)!;
     mkdirSync(dirname(unit), { recursive: true });
     writeFileSync(unit, 'old');
     const { deps, calls, lines } = fakeDeps('darwin', home, { pid: 4242 }, 42);
@@ -288,11 +319,11 @@ describe('installService / uninstallService', () => {
     const home = tmpHome();
     const { deps, calls, lines } = fakeDeps('linux', home);
     expect(await installService(INPUT(home), deps)).toBe(0);
-    expect(existsSync(join(home, '.config', 'systemd', 'user', 'wicked-crew.service'))).toBe(true);
+    expect(existsSync(join(home, '.config', 'systemd', 'user', 'wicked-crew-7702.service'))).toBe(true);
     expect(calls).toEqual([
       'systemctl --user daemon-reload',
-      'systemctl --user enable wicked-crew.service',
-      'systemctl --user restart wicked-crew.service',
+      'systemctl --user enable wicked-crew-7702.service',
+      'systemctl --user restart wicked-crew-7702.service',
     ]);
     expect(lines.join('\n')).toContain('loginctl enable-linger');
   });
@@ -327,7 +358,7 @@ describe('installService / uninstallService', () => {
     expect(await installService(INPUT(home), deps)).toBe(1);
     expect(lines).toEqual([
       'wicked-crew: `systemctl --user daemon-reload` failed (exit 1): Access denied',
-      `The unit file is at ${serviceUnitPath('linux', home)}; remove it with \`wicked-crew serve --uninstall-service\`.`,
+      `The unit file is at ${serviceUnitPath('linux', home, 7702)}; remove it with \`wicked-crew serve --uninstall-service\`.`,
     ]);
   });
 
@@ -344,10 +375,10 @@ describe('installService / uninstallService', () => {
     const { deps, calls } = fakeDeps('darwin', home);
     await installService(INPUT(home), deps);
     calls.length = 0;
-    expect(uninstallService(deps)).toBe(0);
-    expect(calls).toEqual(['launchctl bootout gui/501/com.wickedagile.wicked-crew']);
-    expect(existsSync(serviceUnitPath('darwin', home)!)).toBe(false);
-    expect(uninstallService(deps)).toBe(0);
+    expect(uninstallService(deps, 7702)).toBe(0);
+    expect(calls).toEqual(['launchctl bootout gui/501/com.wickedagile.wicked-crew.7702']);
+    expect(existsSync(serviceUnitPath('darwin', home, 7702)!)).toBe(false);
+    expect(uninstallService(deps, 7702)).toBe(0);
   });
 });
 
@@ -388,7 +419,10 @@ describe('wicked-crew CLI (crew#551)', () => {
     expect(out.code).toBe(1);
     expect(out.stdout).toBe('');
     expect(out.stderr.trim().split('\n')).toHaveLength(1);
+    // The selftest (wicked-ci S10) and cli-status tests pin "start it with `wicked-crew serve`": the port is a note after it.
+    expect(out.stderr).toMatch(/start it with `wicked-crew serve`/);
     expect(out.stderr).toContain('`wicked-crew serve --install-service`');
+    expect(out.stderr).toContain(`pass \`--port ${port}\` to both`);
     expect(out.stderr).not.toMatch(/^\s+at /m);
   });
 
@@ -397,11 +431,11 @@ describe('wicked-crew CLI (crew#551)', () => {
     async () => {
       const home = tmpHome();
       const platform = process.platform === 'darwin' ? 'darwin' : 'linux';
-      const unit = serviceUnitPath(platform, home)!;
+      const port = await closedPort();
+      const unit = serviceUnitPath(platform, home, port)!;
       mkdirSync(dirname(unit), { recursive: true });
       const log = join(home, '.wicked-crew', 'daemon-stdout.log');
       writeFileSync(unit, (platform === 'darwin' ? renderPlist : renderSystemdUnit)({ ...SPEC, logPath: log }));
-      const port = await closedPort();
       const out = await cli(['status', '--port', String(port)], { ...process.env, HOME: home });
       expect(out.code).toBe(1);
       expect(out.stderr.trim().split('\n')).toHaveLength(1);
