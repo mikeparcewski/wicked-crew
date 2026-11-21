@@ -3835,12 +3835,17 @@ export function registerRoutes(
     // only (a named workflow or an explicit plan); best-effort: an unreadable store launches without it.
     const briefRules = async (workflow: string | null): Promise<void> => {
       try {
+        // wicked-crew#1706: the registered checkout root lets the engine judge pack fit from the repo's manifests;
+        // an unreadable registry leaves it unknown (the rule still matches, as before).
+        const repoRoot = b.repoRef !== undefined ? await repoRootOf(b.repoRef).catch(() => undefined) : undefined;
         const read = await considerations.inForceFor(b.projectId ?? null);
         const def = workflow === null ? null : adapter.getWorkflow(workflow);
         const kinds = def === null ? null : def.phases.map((p) => String(p.kind ?? 'build'));
         const rules = read.source === 'unavailable' ? [] : read.rules;
         // (coord, E7 rerun) The job's repository: a rule that names it (its statement or its source doc) applies.
-        const job = { workflow, steps: null, kinds, project: b.projectId ?? null, repo: b.repoRef ?? null };
+        const job = { workflow, steps: null, kinds, project: b.projectId ?? null, repo: b.repoRef ?? null,
+          ...(repoRoot !== undefined ? { repoRoot } : {}),
+        };
         const matches = await matchRulesForJob(rules, job, runtime.matchRules ?? CoreAdapter.ruleMatcher(), (m) => req.log.warn(m));
         const briefed = withRulesBrief(input.problem, rules, matches);
         input.problem = briefed.problem;

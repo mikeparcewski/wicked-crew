@@ -24,6 +24,7 @@ import { RUNTIME_DOWN_REASON, RuntimeState, type RuntimeStateReader } from './ru
 import { CoreAdapter } from '../core/adapter.js';
 import { defaultLaunchRoster, isOptInSeat } from '../core/opt-in-seats.js';
 import type { RosterSeat } from '../core/types.js';
+import { isPublishingPlaceholder } from '../skills/runtime.js';
 import { hostSandboxLauncher, seatVersionPins, type SeatVersionPinCache } from './diagnostics.js';
 import {
   liveCheckLiftsBench,
@@ -126,6 +127,8 @@ export interface RosterStandingDeps {
   registry?: () => unknown[];
   /** Where `WICKED_WORKER_HOME` is read from at call time (default `process.env`). */
   env?: NodeJS.ProcessEnv;
+  /** wicked-crew#1705: roster admissions stay unknown until the daemon's skills ladder settles. */
+  skillsLanded?: () => boolean;
   /** The live seat credential probe (crew#630, `seat-probe.ts`). Default: a real one when neither
    *  `signedIn` nor `registry` is injected (the daemon), none otherwise — a test that fixes the
    *  sign-in reading gets exactly that reading. `null` turns it off. */
@@ -181,6 +184,8 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
   const signedIn = deps.signedIn ?? signedInHeuristic;
   const registry = deps.registry ?? (() => CoreAdapter.roster());
   const env = deps.env ?? process.env;
+  const skillsLanded = (): boolean =>
+    (deps.skillsLanded?.() ?? true) && !isPublishingPlaceholder(env['WICKED_SKILLS_SNAPSHOT'] ?? '');
   const containerMode = (): boolean => isContainerSeatFloor(env);
   const containerStatus = deps.containerStatus ?? new SeatContainerStatus();
   const probe =
@@ -236,6 +241,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
   let generation = '';
   const qeMemo = new Map<string, { admitted: boolean | null; at: number }>();
   const qeAdmission = (key: string, invocation: string | undefined, identity = ''): boolean | null => {
+    if (!skillsLanded()) return null;
     // crew#1021: core filters empty snapshot values and home_dir falls back to USERPROFILE.
     const snapshot = env['WICKED_SKILLS_SNAPSHOT'] || undefined;
     const token = generationToken();
@@ -263,6 +269,8 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
   // Served while a refresh is in flight (the token, which carries each seat's identity, triggers it).
   const lastAdmission = new Map<string, boolean>();
   const qeAdmissions = (seats: QeAdmissionSeat[]): Map<string, boolean | null> => {
+    // wicked-crew#1705: a read during publishing neither resolves the ladder nor memoizes unknown.
+    if (!skillsLanded()) return new Map(seats.map(({ key }) => [key, lastAdmission.get(key) ?? null]));
     const batch = deps.qeAdmittedBatch !== undefined ? deps.qeAdmittedBatch : daemon ? nativeQeAdmissionBatch(deps.qeAddon) : null;
     if (batch != null) {
       const generation = generationToken();
@@ -291,7 +299,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
         void pending.then((admissions) => {
           // A publish can move the env even without another roster read. Also reject A→B→A
           // completions from an earlier epoch, and results for an obsolete invocation roster.
-          if (epoch !== batchEpoch || generation !== generationToken()) return;
+          if (!skillsLanded() || epoch !== batchEpoch || generation !== generationToken()) return;
           const at = nowMs();
           for (const { key } of seats) {
             const admitted = admissions.get(key);
