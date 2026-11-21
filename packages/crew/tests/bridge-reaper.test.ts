@@ -24,7 +24,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   BRIDGE_BINS,
   BRIDGE_KILL_GRACE_MS,
@@ -54,6 +54,25 @@ const PKG_ROOT = join(HERE, '..');
 const esrch = (): Error => Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' });
 
 const byNumber = (a: number, b: number): number => a - b;
+
+// crew#1284: the parsers skip the daemon's own pid (a daemon never reaps itself), and the fixture listings below name
+// fixed pids (901-907, 35959, 96633…). A vitest worker whose pid was one of them dropped that row (macOS wraps its pid
+// counter; a worker once ran as 902). So the describes that parse fixture listings run as a pid no fixture names and
+// no host hands out; a case there that reads the REAL process table asks for the real pid back (`realPid`).
+const FIXTURE_HOST_PID = 2 ** 30;
+const REAL_PID = Object.getOwnPropertyDescriptor(process, 'pid')!;
+function runAsFixtureHost(): void {
+  beforeEach(() => {
+    Object.defineProperty(process, 'pid', { ...REAL_PID, value: FIXTURE_HOST_PID });
+  });
+  afterEach(() => {
+    Object.defineProperty(process, 'pid', REAL_PID);
+  });
+}
+/** In a fixture-host describe: this case reads the real process table, so it runs as this process's real pid. */
+function realPid(): void {
+  Object.defineProperty(process, 'pid', REAL_PID);
+}
 
 /** A cwd inside an engine run worktree — what every engine-spawned bridge/worker runs from. */
 const WORKTREE_CWD = '/home/op/.wicked-crew/wicked-worktrees/run-7f/repo';
@@ -332,6 +351,7 @@ describe('discoverBridgeChildren (real process table)', () => {
 });
 
 describe('orphaned run-process sweep (crew#340)', () => {
+  runAsFixtureHost();
   // A worker CLI orphaned by `kill -9` on its bridge: ppid 1, cwd inside a run worktree.
   const ORPHANED_CLAUDE = '  901     1 node /opt/homebrew/bin/claude --output-format stream-json';
   const ORPHANED_BRIDGE = `  902     1 node /repo/node_modules/.bin/${BRIDGE_BINS[1]}`;
@@ -342,6 +362,11 @@ describe('orphaned run-process sweep (crew#340)', () => {
   // The operator's own interactive claude, orphaned by a dead terminal — token matches,
   // but its cwd (checked separately) is NOT a run worktree.
   const OPERATOR_CLAUDE = '  905     1 claude';
+
+  it('crew#1284: these cases run as a pid no fixture names, and a row naming the host\'s own pid is still skipped', () => {
+    expect(process.pid).toBe(FIXTURE_HOST_PID);
+    expect(parseOrphanedRunProcesses([ORPHANED_CLAUDE, `  ${FIXTURE_HOST_PID}     1 node /opt/homebrew/bin/claude`].join('\n'))).toEqual([901]);
+  });
 
   it('parseOrphanedRunProcesses matches orphaned bridges AND worker CLIs, nothing parented', () => {
     const listing = [ORPHANED_CLAUDE, ORPHANED_BRIDGE, PARENTED_CLAUDE, ORPHANED_VIM, OPERATOR_CLAUDE].join('\n');
@@ -486,6 +511,7 @@ describe('orphaned run-process sweep (crew#340)', () => {
 });
 
 describe('the orphan sweep never starves the daemon (crew#806)', () => {
+  runAsFixtureHost();
   // The W12 proof host's ppid-1 processes the OLD matcher took for worker CLIs — five `lsof` probes
   // per 30 s tick, one of which took over 80 s (a crashpad handler in state U). None is ours.
   const CLAUDE_APP = '  46048     1 /Applications/Claude.app/Contents/MacOS/Claude';
@@ -651,6 +677,7 @@ describe('the orphan sweep never starves the daemon (crew#806)', () => {
   });
 
   it.skipIf(process.platform === 'win32')('probeCwds reads this process\'s own cwd in one call and answers nothing for a pid that is gone', async () => {
+    realPid();
     const cwds = await probeCwds([process.pid, 2 ** 22 - 1]);
     expect(cwds.get(process.pid)).toBe(process.cwd());
     expect(cwds.has(2 ** 22 - 1)).toBe(false);
@@ -679,6 +706,7 @@ describe('bridge token boundaries (#300 post-merge review)', () => {
 // holds the port. A live daemon's pair (ppid = the daemon) and an operator's own `serve` (shell-
 // parented, or nohup'd with NO crew sidecar) sit beside them and must never be touched.
 describe('interactive bridge trees (F-W1-103)', () => {
+  runAsFixtureHost();
   const DOCS = '/home/op/wicked-interactive/docs';
   const PROJ = `${DOCS}/projects/proj_178933212081900000`;
   const STATE = '/home/op/.wicked-crew/interactive/docs/proj_2';
@@ -874,6 +902,7 @@ describe('interactive bridge trees (F-W1-103)', () => {
   it.skipIf(process.platform === 'win32')(
     'end to end with the default seams: a serve orphaned by its dead wrapper, recorded by a dead owner, is reaped at boot — fenced to the fixture root',
     async (ctx) => {
+      realPid();
       const root = mkdtempSync(join(tmpdir(), 'wi-reap-e2e-'));
       const WRAPPER = `
         const { spawn } = require('node:child_process');
@@ -933,6 +962,7 @@ describe('interactive bridge trees (F-W1-103)', () => {
   it.skipIf(process.platform === 'win32')(
     'shutdown reaps a real wrapper → server tree spawned like the pool does, server included',
     async () => {
+      realPid();
       // The wrapper: spawns its "server" (same token, same --root), prints the server pid, idles.
       const WRAPPER = `
         const { spawn } = require('node:child_process');
@@ -985,6 +1015,7 @@ describe('interactive bridge trees (F-W1-103)', () => {
   it.skipIf(process.platform === 'win32')(
     'shutdown reaps a real wrapper → mid → leaf tree spawned like the pool does, leaf included',
     async () => {
+      realPid();
       const root = mkdtempSync(join(tmpdir(), 'wi-reap-three-'));
       const fixture = join(root, `${INTERACTIVE_BIN}.js`);
       writeFileSync(fixture, `
