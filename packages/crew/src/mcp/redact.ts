@@ -63,50 +63,50 @@ export const VALUE_PATTERNS: ReadonlyArray<ValuePattern> = [
   { id: 'private-key-block', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
 ];
 
-export function redactString(value: string): string {
+export function redactString(value: string, patterns: ReadonlyArray<ValuePattern> = VALUE_PATTERNS): string {
   let out = value;
-  for (const { id, re, replace } of VALUE_PATTERNS) {
+  for (const { id, re, replace } of patterns) {
     re.lastIndex = 0;
     out = replace !== undefined ? out.replace(re, replace) : out.replace(re, REDACTED(id));
   }
   return out;
 }
 
-/** The parsed value of a JSON object or array text; `undefined` for any other text (prose, a bare scalar, bad JSON). */
-function jsonTextValue(text: string): unknown {
-  const head = text.trimStart()[0];
-  if (head !== '{' && head !== '[') return undefined;
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return undefined;
-  }
-}
+/**
+ * (crew#1520) The value shapes for a text block that is a JSON document. One difference: a `kv-secret` value never
+ * takes a backslash that escapes a quote. Over JSON text the plain pattern takes the backslash of an escaped quote
+ * (`password=admin` written inside quotes in a record) and leaves the quote bare, so the block stops parsing. Here
+ * every other escape (a tab, a backslash, a `u0041` escape) still counts as part of the value, so what the plain
+ * pass redacted is redacted here too, less that one backslash.
+ */
+const JSON_TEXT_PATTERNS: ReadonlyArray<ValuePattern> = VALUE_PATTERNS.map((p) =>
+  p.id === 'kv-secret' ? { ...p, re: /\b(token|secret|password|passwd|pwd|api[-_]?key|apikey|access[-_]?key|auth)=((?:[^&\s"'\\]|\\[^"\s]){4,})/gi } : p,
+);
 
-/** Layer 3 over every string of a parsed JSON value, keys included (the coverage a pass over its text had). */
-function redactShapes(v: unknown): unknown {
-  if (typeof v === 'string') return redactString(v);
-  if (Array.isArray(v)) return v.map(redactShapes);
-  if (v !== null && typeof v === 'object') {
-    // `fromEntries` defines each key as an own property, so a `__proto__` key stays a key.
-    return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, inner]) => [redactString(k), redactShapes(inner)]));
+/** Whether `text` is a JSON object or array (never throws: a text too deep to parse is not one). */
+function isJsonDocument(text: string): boolean {
+  const head = text.trimStart()[0];
+  if (head !== '{' && head !== '[') return false;
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
   }
-  return v;
 }
 
 /**
- * (crew#1520) An MCP text block that carries JSON (estate's records, most servers' answers) is redacted as JSON:
- * parsed, layer 3 applied to its strings, serialized again. Run over the serialized text instead, a pattern can eat
- * an escape (`"password=admin"` is `\"password=admin\"` there: `kv-secret` takes the `\` and leaves the quote bare),
- * and the block stops parsing. The text is re-serialized only when a value changed, so a clean block is passed as
- * it came. Layer 2 is not newly applied inside the text: what a block showed before, it still shows.
+ * (crew#1520) An MCP text block. Text that is a JSON document (estate's records, most servers' answers) is redacted
+ * over its text with {@link JSON_TEXT_PATTERNS}, so it still parses afterwards; numbers, duplicate members and a key
+ * split across members are seen exactly as the plain pass sees them, since nothing is parsed and re-serialized. In
+ * the unlikely case the redaction still leaves invalid JSON, the plain pass's text is returned, as before this fix.
+ * Other text keeps the plain pass.
  */
 function redactTextBlock(text: string): string {
-  const parsed = jsonTextValue(text);
-  if (parsed === undefined) return redactString(text);
-  const redacted = redactShapes(parsed);
-  const out = JSON.stringify(redacted);
-  return out === JSON.stringify(parsed) ? text : out;
+  const plain = redactString(text);
+  if (plain === text || !isJsonDocument(text) || isJsonDocument(plain)) return plain;
+  const safe = redactString(text, JSON_TEXT_PATTERNS);
+  return isJsonDocument(safe) ? safe : plain;
 }
 
 /** Whether `v` is an MCP content block of type `text`. */

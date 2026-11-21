@@ -29,7 +29,20 @@ const BILLING_ID = '3f0c9a1e-0000-4000-8000-00000000c112';
 const envelope = (payload: unknown): Record<string, unknown> => ({ content: [{ type: 'text', text: JSON.stringify(payload) }], isError: false });
 const textOf = (result: unknown): string => ((result as { content: Array<{ text: string }> }).content[0]?.text) ?? '';
 
-describe('crew#1520: the scrub redacts a JSON text block as JSON', () => {
+// Credential-shaped test values are assembled at run time, so no secret scanner reads a literal one in this file.
+const BEARER = ['Bearer', 'abcdefghijklmnop'].join(' ');
+const GH_TOKEN_SHAPE = ['ghp', '0123456789abcdefghij0123'].join('_');
+const PEM = ['-----BEGIN PRIVATE KEY-----', 'MIIEvQIBADANBgkqhkiG9w0BAQEFAASC', '-----END PRIVATE KEY-----'];
+const parses = (text: string): boolean => {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+describe('crew#1520: the scrub keeps a JSON text block valid JSON', () => {
   it('a quoted password= value is redacted and the block still parses (fails before the fix)', () => {
     const record = { items: [{ id: 'k1', text: 'the seed login is "password=admin" on the test box' }] };
     const out = scrubResult(envelope(record), []);
@@ -39,31 +52,47 @@ describe('crew#1520: the scrub redacts a JSON text block as JSON', () => {
     expect(textOf(out)).not.toContain('admin');
   });
 
-  it('every value shape is still redacted inside the JSON, keys included, and nested blocks are found', () => {
-    const payload = { nodes: [{ note: 'Authorization: Bearer abcdefghijklmnop', 'token=abcdef': 1, deep: ['ghp_0123456789abcdefghij0123'] }] };
-    const out = redactDeep({ result: envelope(payload) }) as { result: unknown };
-    const text = textOf(out.result);
-    const parsed = JSON.parse(text) as { nodes: Array<Record<string, unknown>> };
-    expect(parsed.nodes[0]?.['note']).toBe('Authorization: [REDACTED:bearer]');
-    expect(parsed.nodes[0]?.['token=[REDACTED:kv]']).toBe(1);
-    expect(parsed.nodes[0]?.['deep']).toEqual(['[REDACTED:github-token]']);
+  it('loses no coverage the plain pass had (xreview): escapes, duplicate members, a key split across members', () => {
+    const cases: Array<{ text: string; gone: string }> = [
+      // An escaped tab inside the value: the whole value is still taken.
+      { text: '{"note":"password=ab\\tcdefgh","q":"\\"x\\""}', gone: 'cdefgh' },
+      // A member JSON.parse would drop (the first of two with one name) is still redacted in the text.
+      { text: '{"note":"password=hunter22","note":"\\"safe\\""}', gone: 'hunter22' },
+      // A private key written as an array of lines is still one match.
+      { text: JSON.stringify({ lines: PEM, q: '"quoted password=abcdef"' }), gone: 'MIIEvQIB' },
+    ];
+    for (const c of cases) {
+      const out = textOf(scrubResult({ content: [{ type: 'text', text: c.text }] }, []));
+      expect(out, c.text).not.toContain(c.gone);
+      expect(parses(out), out).toBe(true);
+    }
   });
 
-  it('a clean JSON block is handed back byte for byte, and a non-JSON block keeps the string redaction', () => {
+  it('numbers are never re-serialized: a large id beside a redacted value keeps every digit (xreview)', () => {
+    const text = '{"id":9007199254740993,"big":1e400,"note":"\\"password=admin\\""}';
+    const out = textOf(scrubResult({ content: [{ type: 'text', text }] }, []));
+    expect(out).toContain('"id":9007199254740993');
+    expect(out).toContain('"big":1e400');
+    expect(out).not.toContain('admin');
+    expect(parses(out)).toBe(true);
+  });
+
+  it('other value shapes are redacted as before, and a clean block is handed back unchanged', () => {
+    const payload = { nodes: [{ note: `Authorization: ${BEARER}`, deep: [GH_TOKEN_SHAPE] }] };
+    const text = textOf(redactDeep({ result: envelope(payload) }).result);
+    const parsed = JSON.parse(text) as { nodes: Array<Record<string, unknown>> };
+    expect(parsed.nodes[0]?.['note']).toBe('Authorization: [REDACTED:bearer]');
+    expect(parsed.nodes[0]?.['deep']).toEqual(['[REDACTED:github-token]']);
     const pretty = JSON.stringify({ items: [{ id: 'k1', text: 'nothing secret' }] }, null, 2);
     const clean = { content: [{ type: 'text', text: pretty }], isError: false };
     expect(scrubResult(clean, [])).toEqual(clean);
-    const prose = { content: [{ type: 'text', text: 'STALENESS: 0 commits behind; password=hunter22 seen' }] };
-    expect(textOf(scrubResult(prose, []))).toBe('STALENESS: 0 commits behind; password=[REDACTED:kv] seen');
-    // A text that only looks like JSON is redacted as a string, as before.
-    const broken = { content: [{ type: 'text', text: '{ not json, password=hunter22' }] };
-    expect(textOf(scrubResult(broken, []))).toBe('{ not json, password=[REDACTED:kv]');
   });
 
-  it('a __proto__ key inside the JSON stays a key', () => {
-    const text = '{"__proto__":{"x":"password=hunter22"},"y":1}';
-    const out = textOf(scrubResult({ content: [{ type: 'text', text }] }, []));
-    expect(JSON.parse(out)).toEqual(JSON.parse('{"__proto__":{"x":"password=[REDACTED:kv]"},"y":1}'));
+  it('a text block that is not a JSON document keeps the plain string pass', () => {
+    const prose = { content: [{ type: 'text', text: 'STALENESS: 0 commits behind; password=hunter22 seen' }] };
+    expect(textOf(scrubResult(prose, []))).toBe('STALENESS: 0 commits behind; password=[REDACTED:kv] seen');
+    const broken = { content: [{ type: 'text', text: '{ not json, password=hunter22' }] };
+    expect(textOf(scrubResult(broken, []))).toBe('{ not json, password=[REDACTED:kv]');
   });
 });
 
@@ -142,6 +171,29 @@ describe('the relay answer through the broker (crew#1520, crew#1442 item 1)', ()
     expect(rec?.outcome).toBe('ok');
     expect(rec?.attrs['estate.withheld']).toBe(2);
     expect(rec?.decision.ruleIds).toEqual([PICK_RULE]);
+  });
+
+  it('a diagnostics block is not a withheld record, and a later result-bound refusal keeps the count (xreview)', async () => {
+    setup();
+    const diag = { content: [{ type: 'text', text: JSON.stringify({ items: [] }) }, { type: 'text', text: 'STALENESS: 0 commits behind' }], isError: false };
+    await boot(async () => ({ result: diag }), { get: (runId) => (runId === UNIT.runId ? ['support-pg'] : null) });
+    expect((await call('mcp:estate/knowledge.recall', { query: 'x' })).status).toBe(200);
+    await app!.close();
+    // Two billing items withheld by the pick, and the support item that is kept is over the relay's bound.
+    const items = [
+      { id: 'a', text: 'x'.repeat(1_100_000), deps: [`source:${SUPPORT_ID}`] },
+      { id: 'b', text: 'billing', deps: [`source:${BILLING_ID}`] },
+      { id: 'c', text: 'billing', deps: [`source:${BILLING_ID}`] },
+    ];
+    await boot(async () => ({ result: envelope({ items }) }), { get: (runId) => (runId === UNIT.runId ? ['support-pg'] : null) });
+    const bound = await call('mcp:estate/knowledge.recall', { query: 'x' });
+    expect(bound.status).toBe(403);
+    const [clean, refused] = recorded();
+    expect(clean?.attrs['estate.withheld']).toBeUndefined();
+    expect(clean?.decision.ruleIds).toEqual([]);
+    expect(refused?.outcome).toBe('withheld');
+    expect(refused?.attrs['estate.withheld']).toBe(2);
+    expect(refused?.decision.ruleIds).toEqual(['estate:result-bound', PICK_RULE]);
   });
 
   it('a run with no pick records the count without the pick rule, and nothing withheld records no count', async () => {

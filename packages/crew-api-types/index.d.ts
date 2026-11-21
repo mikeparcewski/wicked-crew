@@ -15057,9 +15057,11 @@ export interface McpCallRecord {
     'bytes.out': number;
     retries: number;
     /**
-     * (crew#1442) `mcp:estate/<tool>` knowledge reads: how many records the relay's release re-check withheld
-     * (outside what the step may see, or outside the run's source pick, which then names `crew:source-pick` in
-     * `decision.ruleIds`). Absent = none withheld.
+     * (crew#1442) `mcp:estate/<tool>` knowledge reads: how many records (recalled items, graph nodes and edges) the
+     * relay's release re-check left out of the answer, as outside what the step may see. When the run has a source
+     * pick, `decision.ruleIds` also names `crew:source-pick`. Carried on the call's record whatever its outcome (an
+     * answer, or a later refusal such as the result bound). Absent = no record was left out; an answer withheld whole
+     * (outcome `withheld`, `estate:visible`) has no count.
      */
     'estate.withheld'?: number;
   };
