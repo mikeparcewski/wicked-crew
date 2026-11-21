@@ -197,6 +197,7 @@ import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, Fil
 import { registerTestingRoutes } from './testing.js';
 import { registerDefaultEvalRoutes, runAndRecord, type DefaultEvalDeps } from '../evals/routes.js';
 import { prepareRunEvalsLaunch, RUN_EVALS_WORKFLOW } from '../evals/workflow.js';
+import { DOMAIN_MAPPING } from '../projects/repo-watch.js';
 import { defaultReplaySet } from '../evals/replay.js';
 import type { DefaultEvalStore } from '../evals/store.js';
 import type { DecisionLike, EventLike, RunLike } from '../evals/capture.js';
@@ -3698,8 +3699,6 @@ export function registerRoutes(
         return reply.code(400).send({ error: 'a review posts nothing and never delivers' });
       }
       if (b.repoRef === undefined) return reply.code(400).send({ error: 'review-change needs repoRef' });
-      deliver = 'none';
-      delete input.deliver;
       const root = await repoRootOf(b.repoRef);
       if (root === undefined) return reply.code(404).send({ error: `repoRef names an unknown repo: ${b.repoRef}` });
       const ex = await reviewChangeExclusion(envelopeWords, reviewChangeDeps(b.repoRef, root));
@@ -3902,7 +3901,6 @@ export function registerRoutes(
       } catch (err) {
         return reply.code(409).send({ error: `the default evals could not be prepared: ${message(err)}` });
       }
-      deliver = 'none';
     }
     const isReview = b.workflow !== undefined && reviewPrepared(b.workflow);
     if (isReview) {
@@ -3911,7 +3909,10 @@ export function registerRoutes(
       } catch (err) {
         return reply.code(409).send({ error: `the review could not be prepared: ${message(err)}` });
       }
+    }
+    if (b.workflow !== undefined && postureFacts.preparationDropsDelivery(b.workflow)) {
       deliver = 'none';
+      delete input.deliver;
     }
     // DES-CHAT-ARTIFACTS-001 §4.3 (A3): one live job per chat, work and artifact runs together. A work launch filed under
     // a chat whose proposal's document attempt has no outcome yet is refused, as Go is refused the other way round.
@@ -7231,10 +7232,10 @@ export function registerRoutes(
     }
     // crew#1157: every APPROVING path (the gate route, standing orders, a gated resume or reassign, a
     // plan edit at the gate, the next message of a chat) is judged here, so no path approves a held
-    // plan change on an analysis run. Declining stays open.
+    // plan change on an analysis or delivering chat run. Declining stays open.
     if (!('refusal' in decided) && opts.declining !== true) {
-      const analysis = analysisPlanRefusal(run.session.id, { gateKind: decided.gateKind });
-      if (analysis !== null) return { refusal: analysis };
+      const chatRefusal = chatPlanRefusal(run.session.id, { gateKind: decided.gateKind });
+      if (chatRefusal !== null) return { refusal: chatRefusal };
     }
     return decided;
   }
@@ -7324,21 +7325,30 @@ export function registerRoutes(
   }
 
   /**
-   * crew#1157 (xreview on #1160): an ANALYSIS chat's run never takes on work. Its seat is told not to
+   * crew#1157 / crew#1259: an analysis or delivering ask-path chat's run never takes on work. Its seat is told not to
    * propose any, but a `PLAN+` line in an answer would still hold a creator addition at a
    * `plan_approval` gate; approving it (or approving with an edited plan) would let the run write.
    * Refused here, for every decision path, by the durable launch record: declining stays allowed.
    */
-  function analysisPlanRefusal(
+  function chatPlanRefusal(
     runId: string,
     held: { gateKind?: string | undefined; plan?: { steps: ReadonlyArray<{ catalog: string; id?: string | undefined; [k: string]: unknown }> } | undefined },
   ): { code: number; body: unknown } | null {
     const workflow = runTimingIndex.chatWorkflowOf(runId);
-    if (workflow === undefined) return null;
+    const deliveringChat = workflow === undefined && runTimingIndex.isAskPath(runId) && runTimingIndex.launchDeliverFor(runId) === 'pr';
+    if (workflow === undefined && !deliveringChat) return null;
     // A held plan change (the gate the engine opens on a `PLAN+` line), or a plan edit with any step
     // that could write (the same read-only predicate the chat open applies to the workflow).
     const writes = held.plan?.steps.some((s) => writeCapableStep(s) !== null) === true;
     if (held.gateKind !== 'plan_approval' && !writes) return null;
+    if (deliveringChat) return {
+      code: 409,
+      body: {
+        code: 'chat_build_needs_job',
+        error: `run ${runId}: the chat's run has no QE acceptance, so it cannot take on a change it would deliver. ` +
+          'Decline it here and start a job (a feature or bug job runs QE acceptance before its pull request).',
+      },
+    };
     return {
       code: 409,
       body: {
@@ -7475,8 +7485,8 @@ export function registerRoutes(
       ) {
         return { code: 501, body: { error: message(new PlanGateNoteUnsupportedError()) } };
       }
-      const analysis = parsed.data.approve ? analysisPlanRefusal(id, { plan: parsed.data.plan }) : null;
-      if (analysis !== null) return analysis;
+      const chatRefusal = parsed.data.approve ? chatPlanRefusal(id, { plan: parsed.data.plan }) : null;
+      if (chatRefusal !== null) return chatRefusal;
       // The gated unit and its receipt as it stands when the person decides (wicked-core#850: every
       // gate answer carries it). An APPROVE that would run the deliver unit passes the delivery
       // checks first.
@@ -7985,9 +7995,9 @@ export function registerRoutes(
       const codeWork = def !== null && def.phases.some((p) => p.executes_code === true && p.role !== 'evaluator');
       return codeWork && (await adapter.getSettings()).deliverDefault !== 'none' ? 'pr' : 'none';
     },
-    // The launch route removes a change review's delivery (it posts nothing), and a run review's preparation removes it
-    // (`ReviewService.prepareLaunch`). The default evals' preparation keeps whatever delivery was resolved.
-    preparationDropsDelivery: (workflow) => workflow === REVIEW_CHANGE_WORKFLOW || reviewPrepared(workflow),
+    // crew#1418 / crew#1585: prepared reviews, evals and maps never deliver.
+    preparationDropsDelivery: (workflow) => workflow === REVIEW_CHANGE_WORKFLOW || reviewPrepared(workflow) ||
+      workflow === RUN_EVALS_WORKFLOW || workflow === DOMAIN_MAPPING,
   };
 
   // ── Power mode (program DES-POWER-MODE; api-types 0.149.0) ─────────────────────────────────────
@@ -8141,8 +8151,8 @@ export function registerRoutes(
    */
   async function crewGateActions(run: SessionView, gated: WorkUnit | undefined, gateKind: string, actions: GateAction[]): Promise<GateAction[]> {
     const declines = (a: GateAction): boolean => a.action === 'reject' || a.action === 'request_changes';
-    // crew#1157: an analysis run's held plan change is never approved (`gateForDecision`): only the declines stay.
-    let approveRefused = analysisPlanRefusal(run.session.id, { gateKind }) !== null;
+    // crew#1157 / crew#1259: an analysis or delivering chat run's held plan change is never approved (`gateForDecision`): only the declines stay.
+    let approveRefused = chatPlanRefusal(run.session.id, { gateKind }) !== null;
     let skipRefused = approveRefused;
     if (!approveRefused && gated !== undefined && isDeliverUnit(gated)) {
       approveRefused = 'refusal' in (await deliverApprovalRefusal(run, gated));
@@ -10067,6 +10077,9 @@ export function registerRoutes(
           .send({ error: 'workerStallMaxEscalations must be an integer between 1 and 10' });
       }
     }
+    if (Object.hasOwn(patch, 'deliverAuthorNoreply') && typeof patch.deliverAuthorNoreply !== 'boolean') {
+      return reply.code(400).send({ error: 'deliverAuthorNoreply must be a boolean' });
+    }
     // deliverIdentityLogin (crew#549): the login the deliver phase must push as. A typo here
     // would be an identity the script can never match — every delivery would refuse — so an
     // invalid value is a 400, never a silently-dropped key. `''` clears it (back to GH_ACCOUNT).
@@ -10237,6 +10250,7 @@ export function registerRoutes(
       'newWorkSeats',
       'onboardingAutoCapture',
       'deliverIdentityLogin',
+      'deliverAuthorNoreply',
       'deliverIdentityByRepo',
       'baseSkillRef',
       'baseSkillPolicy',
@@ -11247,8 +11261,8 @@ export function registerRoutes(
     judge: gateForDecision,
     expect: expectFor,
     changed: gateChangedRefusal,
-    // crew#1157: a plan edit on an analysis run may not add a step that could write.
-    readOnlyRefusal: (runId, plan) => analysisPlanRefusal(runId, { plan }),
+    // crew#1157 / crew#1259: these chat runs may not add a step that could write.
+    readOnlyRefusal: (runId, plan) => chatPlanRefusal(runId, { plan }),
   });
 
   // ── Campaigns (crew#342 + TH-9) — the engine's durable Run-DAG scheduler over REST ──────────

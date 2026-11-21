@@ -154,8 +154,9 @@ describe('the chat statement routes new work (§2.3)', () => {
     const st = chatScopeStatement(CHAT, SCOPE, [], { make });
     expect(st).toMatch(/type `<its command>` to start it/u);
     expect(st).not.toMatch(/"entry":"<card id>"/u);
-    // Today's flow stays whole (codex r8). CS8: Review a change and the flipped cards are offered.
-    expect(st).toMatch(/PLAN\+ \{"steps"/u);
+    // crew#1259: older clients also start work as a job; CS8's commands stay available.
+    expect(st).not.toMatch(/PLAN\+ \{"steps"/u);
+    expect(st).toContain('start the work as a job');
     expect(st).toMatch(/`\/bug`/u);
     expect(st).toMatch(/`\/review-change`/u);
   });

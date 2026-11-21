@@ -458,7 +458,7 @@ describe('the scratch root and its statement', () => {
     }
   });
 
-  it('crew#855: a request for work is never attempted — a repo-bound chat proposes it as one PLAN+ line with touch; any other scope points at Continue in Build', () => {
+  it('crew#855: a request for work is never attempted — a repo-bound chat directs work to a job; any other scope points at Continue in Build', () => {
     const bound = chatScopeStatement('c855', {
       kind: 'repos',
       repos: [{ id: 'r1', name: 'alpha', rootPath: '/srv/repos/alpha' }],
@@ -468,13 +468,8 @@ describe('the scratch root and its statement', () => {
     } as unknown as Parameters<typeof chatScopeStatement>[1]);
     expect(bound).toContain('## Requests for work');
     expect(bound).toMatch(/do NOT attempt it/);
-    // The one line the engine parses (plan_gate/revise.rs `parse_plan_lines`): `PLAN+` then JSON
-    // with a creator step and the touch set a first-creator change must carry.
-    const planLine = bound.split('\n').map((l) => l.trim()).find((l) => l.startsWith('PLAN+'));
-    expect(planLine).toBeDefined();
-    const block = JSON.parse(planLine!.slice('PLAN+'.length).trim()) as { steps: Array<{ catalog: string }>; touch: string[] };
-    expect(block.steps).toEqual([{ catalog: 'build' }]);
-    expect(block.touch.length).toBeGreaterThan(0);
+    expect(bound).not.toContain('PLAN+');
+    expect(bound).toContain('start the work as a job');
     // It sits before the decisions block, which must stay the reply's last section.
     expect(bound.indexOf('## Requests for work')).toBeLessThan(bound.indexOf('## Decisions'));
 

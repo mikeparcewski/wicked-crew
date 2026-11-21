@@ -44,6 +44,15 @@ describe('PUT/GET /settings deliverIdentityLogin', () => {
     return app;
   };
 
+  it('crew#1471: persists the opt-in noreply rule and refuses non-booleans', async () => {
+    const a = build();
+    expect((await a.inject({ method: 'PUT', url: '/api/v1/settings', payload: { deliverAuthorNoreply: true } })).statusCode).toBe(200);
+    expect((await a.inject({ method: 'GET', url: '/api/v1/settings' })).json().settings.deliverAuthorNoreply).toBe(true);
+    expect((await a.inject({ method: 'PUT', url: '/api/v1/settings', payload: { deliverAuthorNoreply: 'true' } })).statusCode).toBe(400);
+    expect((await a.inject({ method: 'PUT', url: '/api/v1/settings', payload: { deliverAuthorNoreply: false } })).statusCode).toBe(200);
+    expect((await a.inject({ method: 'GET', url: '/api/v1/settings' })).json().settings.deliverAuthorNoreply).toBe(false);
+  });
+
   it('accepts a login, trims it, and serves it back', async () => {
     const a = build();
     const put = await a.inject({

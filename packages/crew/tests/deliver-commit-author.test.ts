@@ -74,14 +74,22 @@ function fixture() {
 }
 
 // Minimum real-script rig from deliver-script-exec: a login shell, isolated HOME, fake gh.
-function runDeliver(workdir: string, script: string) {
+function runDeliver(workdir: string, script: string, github = false, login = 'tester') {
   const bin = join(root, 'bin');
   mkdirSync(bin);
+  if (github) {
+    // Only the origin read is fake; every git mutation uses the real local bare repository.
+    const realGit = execFileSync('which', ['git'], { encoding: 'utf8', env: { ...process.env } }).trim();
+    writeFileSync(join(bin, 'git'), '#!/bin/sh\nif [ "$1 $2" = "remote get-url" ]; then echo https://github.com/o/r.git; else exec "' + realGit + '" "$@"; fi\n');
+    chmodSync(join(bin, 'git'), 0o755);
+  }
+
   writeFileSync(join(process.env['HOME']!, '.bash_profile'), `export PATH="${bin}:$PATH"\n`);
   writeFileSync(join(bin, 'gh'), [
     '#!/bin/sh',
     'case "$1 $2" in',
-    '  "api user") echo tester;;',
+    '  "api user") printf "%s\\n" "$GH_FAKE_LOGIN";;',
+    '  "auth status") exit 0;;',
     '  "api "*) case "$2" in */rules/branches/*) echo "[]";; *) echo "{}";; esac;;',
     '  "pr checks") echo "[]";;',
     '  "pr create")',
@@ -96,7 +104,7 @@ function runDeliver(workdir: string, script: string) {
     cwd: workdir,
     encoding: 'utf8',
     timeout: 30_000,
-    env: { ...process.env, GH_RECORD: join(root, 'pr-text'), GH_TOKEN: '', GH_ACCOUNT: '', WICKED_DELIVER_VERIFIED_BASE: '', WICKED_DELIVER_CHECKS_POLL_SECS: '0' },
+    env: { ...process.env, GH_RECORD: join(root, 'pr-text'), GH_FAKE_LOGIN: login, GH_TOKEN: '', GH_ACCOUNT: '', WICKED_DELIVER_VERIFIED_BASE: '', WICKED_DELIVER_CHECKS_POLL_SECS: '0' },
   });
 }
 
@@ -118,10 +126,60 @@ describe('crew#1667 — compose, pin, say', () => {
     for (const originUrl of ['https://github.com/o/r.git', 'https://dev.azure.com/org/proj/_git/repo']) {
       const opts = { originUrl, commitIdents: IDENTS };
       const sentence = 'Commits carry: Ambient Author <ambient@example.com> (the git author this repository resolves; the deliver commit is made with exactly it).';
-      expect(deliver.deliverGateInstructions(opts)).toBe(`${deliver.deliverGateInstructions({ originUrl })} ${sentence}`);
+      expect(deliver.deliverGateInstructions(opts)).toBe(`${deliver.deliverGateInstructions({ originUrl })} ${sentence} Committed by: Ambient Author <ambient@example.com> (the git committer this repository resolves).`);
       expect(composed(IDENTS).instructions).toContain(sentence);
       expect(deliver.deliverPresetStep(null, [], RUN_ID, 'ship', opts).instructions).toContain(sentence);
     }
+  });
+
+  it.each([
+    ['someone@example.com', 'tester@users.noreply.github.com', false, true, true, 'tester'],
+    ['123+other+tester@users.noreply.github.com', 'tester@users.noreply.github.com', false, true, true, 'tester'],
+    ['tester@users.noreply.github.com', 'someone@example.com', false, true, true, 'tester'],
+    ['tester@users.noreply.github.com', '123+TESTER@users.noreply.github.com', true, true, true, 'tester'],
+    ['tester@users.noreply.github.com', '123+TESTER@users.noreply.github.com', true, false, true, 'tester'],
+    ['someone@example.com', 'someone@example.com', true, true, false, 'tester'],
+    ['tester@users.noreply.github.com', 'tester@users.noreply.github.com', false, true, true, ''],
+  ] as const)('crew#1471: checks both c1 emails before staging: %s / %s (allowed=%s pinned=%s rule=%s login=%s)', (authorEmail, committerEmail, allowed, pinned, rule, login) => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'change.txt'), 'delivered work\n');
+    const before = git(fx.workdir, 'rev-parse', 'HEAD');
+    if (!pinned) {
+      git(fx.clone, 'config', 'user.email', authorEmail);
+      git(fx.clone, 'config', 'committer.email', committerEmail);
+    }
+    const opts = { originUrl: 'https://github.com/o/r.git', deliverAuthorNoreply: rule, commitIdents: pinned ? { author: { name: 'Someone', email: authorEmail }, committer: { name: 'Committer', email: committerEmail } } : null };
+    const result = runDeliver(fx.workdir, deliver.deliverPrScript('Ship change', opts), true, login);
+    expect(result.status, result.stdout + result.stderr).toBe(allowed ? 0 : 1);
+    if (!allowed) {
+      expect(result.stdout).toContain('nothing was staged, committed or pushed');
+      expect(git(fx.workdir, 'diff', '--cached', '--name-only')).toBe('');
+      expect(git(fx.workdir, 'rev-parse', 'HEAD')).toBe(before);
+      expect(git(fx.origin, 'for-each-ref', '--format=%(refname)', 'refs/heads/wicked/')).toBe('');
+    }
+  }, 40_000);
+
+  it('crew#1471: discloses the opt-in rule and the known match on the card', () => {
+    const base = { originUrl: 'https://github.com/o/r.git', deliverAuthorNoreply: true, deliverIdentity: 'tester' };
+    expect(deliver.deliverGateInstructions({ ...base, commitIdents: IDENTS })).toContain('The pinned commit emails do not both match the configured push identity.');
+    const matching = { author: { name: 'Author', email: '123+TESTER@users.noreply.github.com' }, committer: { name: 'Committer', email: 'tester@users.noreply.github.com' } };
+    const card = deliver.deliverGateInstructions({ ...base, commitIdents: matching });
+    expect(card).toContain("Commit emails: both the author and the committer must be tester's GitHub noreply address (Settings: deliverAuthorNoreply); the phase refuses before staging anything otherwise, or when the push login cannot be read.");
+    expect(card).toContain('Both pinned commit emails match the configured push identity.');
+    expect(deliver.deliverGateInstructions({ ...base, originUrl: 'https://dev.azure.com/org/proj/_git/repo' })).toContain('The GitHub noreply rule does not apply to this origin.');
+    expect(deliver.deliverGateInstructions({ ...base, deliverAuthorNoreply: false })).not.toContain('Commit emails:');
+    for (const make of [
+      () => deliver.composeDeliverWorkflow({ id: 'author-test', phases: [] } as WorkflowDef, RUN_ID, 'ship', base).phases[0]!,
+      () => deliver.deliverPresetStep(null, [], RUN_ID, 'ship', base),
+    ]) {
+      const phase = make();
+      expect(phase.instructions).toContain('Settings: deliverAuthorNoreply');
+      expect((phase.executor as { cmd: string[] }).cmd[2]).toContain('_noreply "$NA" && _noreply "$NC"');
+    }
+  });
+
+  it('crew#1471: an unread origin still discloses the noreply rule', () => {
+    expect(deliver.deliverGateInstructions({ deliverAuthorNoreply: true })).toContain("Commit emails: both the author and the committer must be the push login's GitHub noreply address (Settings: deliverAuthorNoreply); the phase refuses before staging anything otherwise, or when the push login cannot be read.");
   });
 
   it('commits with the composed author AND committer after repo config changes', async () => {
