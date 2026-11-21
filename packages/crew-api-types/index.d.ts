@@ -2897,6 +2897,15 @@ export interface CoreEvent {
   writePlanOrd?: number;
   /** `awaitingHuman{gateKind: 'consent'}` (core#820): CLIs the plan leaves out, and why. */
   writeTargetsSkipped?: Array<{ cli: string; why: string }>;
+  /**
+   * `awaitingHuman{gateKind: 'consent'}` (crew#1424): what each editor or run plugin in an editor install plan
+   * asks to do (garden `install.py --dry-run` `asks`, passed on by wicked-core), in manifest order. ABSENT when the
+   * plan names none. Information for the person approving the install: the rows grant nothing, and each one is
+   * allowed later in Plugins. A permission the install consent itself grants (garden `INSTALL_GRANTED`, e.g.
+   * `mcp.session`, which has no Plugins switch) is never listed here: it is a `writeTargets` row on the
+   * `EDITOR-GRANTS` rule. Crew relays the frame verbatim.
+   */
+  consentAsks?: Array<{ editor: string; permission: string; why: string }>;
   /** `awaitingHuman{gateKind: 'consent'}` (core#820): why no write targets are listed (no dry run
    *  ran before the gate, or it printed no plan); the gate is then a plain approve / reject. */
   writeTargetsMissing?: string;
