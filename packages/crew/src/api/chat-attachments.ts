@@ -176,6 +176,7 @@ export function safeName(filename: string): string {
 /** One pdf content stream inflates to at most this; the whole pdf's streams to at most the total. */
 export const PDF_INFLATE_STREAM_BYTES = 4 * 1024 * 1024;
 export const PDF_INFLATE_TOTAL_BYTES = 16 * 1024 * 1024;
+const PDF_INFLATE_ATTEMPT_BYTES = 4096;
 
 /** Best-effort text from a pdf: the strings shown by `Tj` / `TJ` in its (Flate or plain) content
  *  streams. Good for the common text pdf; a scanned page has none, and says so. */
@@ -190,38 +191,75 @@ export function extractPdfText(data: Buffer, maxChars = ATTACHMENT_TEXT_EXCERPT_
     const start = m.index + m[0].length;
     const end = raw.indexOf('endstream', start);
     if (end < 0) break;
-    const dict = raw.slice(Math.max(0, m.index - 400), m.index);
+    const preceding = raw.slice(Math.max(0, m.index - 400), m.index);
+    const dict = preceding.slice(preceding.lastIndexOf('<<'));
+    streamRe.lastIndex = end + 'endstream'.length;
+    // Image and font streams cannot supply shown text (crew#1428).
+    if (/\/Subtype\s*\/Image\b|\/Length[123]\b/.test(dict)) continue;
     let content = data.subarray(start, end);
-    if (/\/FlateDecode/.test(dict.slice(dict.lastIndexOf('<<')))) {
-      // Bounded: a small stream that inflates to gigabytes (a decompression bomb) is skipped, and
-      // the inflated bytes across the whole pdf are budgeted (xreview r1 on #1140).
-      if (inflated >= PDF_INFLATE_TOTAL_BYTES) break;
+    if (/\/FlateDecode/.test(dict)) {
+      const allowance = Math.min(PDF_INFLATE_STREAM_BYTES, PDF_INFLATE_TOTAL_BYTES - inflated);
+      if (allowance < PDF_INFLATE_ATTEMPT_BYTES) break;
+      // Failed inflations also spend work, so tiny bad streams exhaust the budget (crew#1428).
       try {
-        content = inflateSync(content, { maxOutputLength: Math.min(PDF_INFLATE_STREAM_BYTES, PDF_INFLATE_TOTAL_BYTES - inflated) });
-        inflated += content.length;
-      } catch {
-        streamRe.lastIndex = end;
+        content = inflateSync(content, { maxOutputLength: allowance });
+        inflated += Math.max(PDF_INFLATE_ATTEMPT_BYTES, content.length);
+      } catch (err) {
+        inflated += (err as NodeJS.ErrnoException).code === 'ERR_BUFFER_TOO_LARGE' ? allowance : PDF_INFLATE_ATTEMPT_BYTES;
         continue;
       }
     }
     const text = content.toString('latin1');
-    const shown = /\((?:[^()\\]|\\[\s\S])*\)\s*Tj|\[((?:[^\]\\]|\\[\s\S])*)\]\s*TJ/g;
-    let t: RegExpExecArray | null;
-    while ((t = shown.exec(text)) !== null && total < maxChars) {
-      const strings = t[0].match(/\((?:[^()\\]|\\[\s\S])*\)/g) ?? [];
-      const piece = strings
-        .map((s) =>
-          s
-            .slice(1, -1)
-            .replace(/\\([nrtbf()\\]|[0-7]{1,3})/g, (_, c: string) =>
-              /^[0-7]+$/.test(c) ? String.fromCharCode(parseInt(c, 8)) : ({ n: '\n', r: '', t: '\t', b: '', f: '' } as Record<string, string>)[c] ?? c,
-            ),
-        )
-        .join('');
+    let at = 0;
+    // One moving cursor handles nesting and escapes without regex backtracking (crew#1428).
+    while (at < text.length && total < maxChars) {
+      const array = text[at] === '[';
+      if (!array && text[at] !== '(') {
+        at++;
+        continue;
+      }
+      if (array) at++;
+      const strings: string[] = [];
+      let closed = !array;
+      let unterminated = false;
+      while (at < text.length) {
+        if (array && text[at] === ']') {
+          at++;
+          closed = true;
+          break;
+        }
+        if (text[at] !== '(') {
+          at++;
+          continue;
+        }
+        const from = ++at;
+        let depth = 1;
+        while (at < text.length && depth > 0) {
+          if (text[at] === '\\') {
+            at += 2;
+            continue;
+          }
+          if (text[at] === '(') depth++;
+          else if (text[at] === ')') depth--;
+          at++;
+        }
+        if (depth !== 0) {
+          unterminated = true;
+          break;
+        }
+        strings.push(text.slice(from, at - 1));
+        if (!array) break;
+      }
+      if (unterminated || !closed) break;
+      while (at < text.length && /\s/.test(text[at]!)) at++;
+      if (text.slice(at, at + 2) !== (array ? 'TJ' : 'Tj')) continue;
+      at += 2;
+      const piece = strings.map((value) => value.replace(/\\([nrtbf()\\]|[0-7]{1,3})/g, (_, c: string) =>
+        /^[0-7]+$/.test(c) ? String.fromCharCode(parseInt(c, 8)) : ({ n: '\n', r: '', t: '\t', b: '', f: '' } as Record<string, string>)[c] ?? c,
+      )).join('');
       out.push(piece);
       total += piece.length;
     }
-    streamRe.lastIndex = end;
   }
   return out.join(' ').replace(/\s+/g, ' ').trim().slice(0, maxChars);
 }

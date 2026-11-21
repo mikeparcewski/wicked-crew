@@ -1,9 +1,11 @@
 // The SQLite snapshot runner (DES-APPS-001 §5.1, §5.3, §7.5): one JSON request on stdin, one JSON
 // answer on stdout. crew starts it as a CHILD PROCESS (packages/crew/src/sources/drivers/sqlite.ts):
 // the daemon itself never loads a SQLite library (wicked-core#631), and a statement past its deadline
-// is stopped by ending this process (node:sqlite has no interrupt). Plain ESM, no imports but node:sqlite.
+// is stopped by ending this process (node:sqlite has no interrupt). Plain ESM outside the daemon.
 // It lives outside src/ on purpose: it is not daemon code, and the daemon's SQLite guards scan src/.
 import { DatabaseSync, constants } from 'node:sqlite';
+import { readFile } from 'node:fs/promises';
+import { parseCsv, parseXlsx, detectHeader, columnNames, inferType, tableNameFor } from './upload-parse.mjs';
 // One UTF-8 decoder for the whole request: a character split across two pipe chunks stays one.
 process.stdin.setEncoding('utf8');
 let input = '';
@@ -16,21 +18,33 @@ try {
   if (typeof DatabaseSync.prototype.setAuthorizer !== 'function' || typeof DatabaseSync.prototype.enableDefensive !== 'function') {
     throw new Error('SQLite sources need Node.js 24.12, 25.1 or later (the authorizer and defensive mode)');
   }
-  if (req.op === 'create') {
-    // A new snapshot from parsed rows (uploads.ts): one table, typed columns, one transaction.
+  if (req.op === 'ingest') {
+    // Parsing and inference share the snapshot writer's killable process (crew#1289).
+    const data = await readFile(req.input);
+    const rows = req.kind === 'xlsx' ? parseXlsx(data, req.limits) : parseCsv(data.toString('utf8').replace(/^﻿/, ''), req.limits);
+    if (rows.length === 0) throw { code: 'empty', message: 'the file has no rows' };
+    const detected = detectHeader(rows, req.header);
+    const width = rows.reduce((w, r) => Math.max(w, r.length), 0);
+    const names = columnNames(rows[0], width, detected);
+    const body = detected ? rows.slice(1) : rows;
+    if (body.length > req.limits.rows) throw { code: 'too_many_rows', message: `the file has more than ${req.limits.rows} rows` };
+    const types = names.map((_n, i) => inferType((function* () {
+      for (const r of body) yield r[i] ?? '';
+    })()));
+    const table = tableNameFor(req.filename);
     const quote = (n) => '"' + String(n).replace(/"/g, '""') + '"';
     const w = new DatabaseSync(req.path, { enableForeignKeyConstraints: false, enableDoubleQuotedStringLiterals: false, allowExtension: false });
     try {
-      w.exec('CREATE TABLE ' + quote(req.table) + ' (' + req.names.map((n, i) => quote(n) + ' ' + req.types[i]).join(', ') + ')');
-      const ins = w.prepare('INSERT INTO ' + quote(req.table) + ' VALUES (' + req.names.map(() => '?').join(', ') + ')');
+      w.exec('CREATE TABLE ' + quote(table) + ' (' + names.map((n, i) => quote(n) + ' ' + types[i]).join(', ') + ')');
+      const ins = w.prepare('INSERT INTO ' + quote(table) + ' VALUES (' + names.map(() => '?').join(', ') + ')');
       w.exec('BEGIN');
-      for (const r of req.rows) {
-        ins.run(...req.names.map((_n, i) => {
+      for (const r of body) {
+        ins.run(...names.map((_n, i) => {
           const raw = r[i] ?? '';
           const v = raw.trim();
           if (v === '') return null;
-          if (req.types[i] === 'INTEGER') return BigInt(v);
-          if (req.types[i] === 'REAL') return Number(v);
+          if (types[i] === 'INTEGER') return BigInt(v);
+          if (types[i] === 'REAL') return Number(v);
           return raw;
         }));
       }
@@ -38,7 +52,7 @@ try {
     } finally {
       w.close();
     }
-    out({ ok: true });
+    out({ ok: true, table, header: { detected, columns: names }, sample: body.slice(0, req.limits.sampleRows).map((r) => names.map((_n, i) => r[i] ?? '')) });
     process.exit(0);
   }
   const db = new DatabaseSync(req.uri, { readOnly: true, enableForeignKeyConstraints: false, enableDoubleQuotedStringLiterals: false, allowExtension: false });
@@ -106,5 +120,6 @@ try {
     }
   }
 } catch (e) {
-  out({ ok: false, error: String(e && e.message || e) });
+  const refused = !(e instanceof Error) && typeof e?.code === 'string';
+  out({ ok: false, ...(refused ? { refused: true, code: e.code } : {}), error: String(e && e.message || e) });
 }

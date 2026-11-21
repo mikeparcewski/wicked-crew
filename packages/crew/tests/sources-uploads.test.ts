@@ -14,10 +14,16 @@ import type { AppQuery } from '../src/core/types.js';
 import type { McpRegistry } from '../src/mcp/registry.js';
 import type { McpUpstreamConfig } from '../src/mcp/probe.js';
 import { specWith } from './support/apps-harness.js';
-import { observeSqliteRunnerForTests, runnerEnv, sqliteCreate, sqliteRead } from '../src/sources/drivers/sqlite.js';
+import { observeSqliteRunnerForTests, runnerEnv, sqliteIngest, sqliteRead } from '../src/sources/drivers/sqlite.js';
 import { checkSqlQuery, readSqlQuery, SourcePolicyError } from '../src/sources/sql.js';
-import { detectHeader, ingestUpload, looksLikeHeader, snapshotPath, UploadError } from '../src/sources/uploads.js';
+import { ingestUpload, snapshotPath, UploadError, UPLOAD_LIMITS } from '../src/sources/uploads.js';
+import { detectHeader, looksLikeHeader } from '../runners/upload-parse.mjs';
 import { makeSqlite, makeXlsx, makeZipBomb, zip } from './fixtures/apps-sources/uploads/make.mjs';
+
+// Parsing and inference of 51 MB keep main busy past one second (crew#1289).
+function largeCsv(): Buffer {
+  return Buffer.from('a,b,c,d,e,f,g,h,i,j,k,l\n' + '1234,2345,3456,4567,5678,6789,7890,8901,9012,0123,1234,2345\n'.repeat(850_000));
+}
 
 const FIX = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'apps-sources', 'uploads');
 let dir = '';
@@ -32,6 +38,56 @@ afterAll(() => {
 });
 
 describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => {
+  it('crew#1289: a large CSV leaves the daemon event loop responsive', async () => {
+    const data = largeCsv();
+    let last = performance.now();
+    let maxGap = 0;
+    let ticks = 0;
+    const ticker = setInterval(() => {
+      const now = performance.now();
+      maxGap = Math.max(maxGap, now - last);
+      last = now;
+      ticks++;
+    }, 10);
+    try {
+      const result = await ingestUpload('responsive.csv', data, { dir });
+      expect(result.catalog.relations[0]?.rowEstimate).toBe(850_000);
+      expect(ticks).toBeGreaterThan(10);
+      expect(maxGap).toBeLessThan(500);
+    } finally {
+      clearInterval(ticker);
+    }
+  }, 60_000);
+
+  it('crew#1289: a parser past its deadline is killed and a following upload answers', async () => {
+    const pids: number[] = [];
+    observeSqliteRunnerForTests((pid) => pids.push(pid));
+    try {
+      const data = largeCsv();
+      await expect(ingestUpload('deadline.csv', data, { dir, parseMs: 2000 })).rejects.toMatchObject({ code: 'too_slow' });
+      expect(pids).toHaveLength(1);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(() => process.kill(pids[0]!, 0)).toThrow();
+      expect(readdirSync(dir).filter((f) => f.startsWith('.tmp-'))).toEqual([]);
+      expect((await ingestUpload('after.csv', Buffer.from('id\n1\n'), { dir })).sample).toEqual([['1']]);
+    } finally {
+      observeSqliteRunnerForTests(null);
+    }
+  }, 30_000);
+
+  it('crew#1289: a stopped parser reports unreadable and a following upload answers', async () => {
+    observeSqliteRunnerForTests((pid) => { setImmediate(() => process.kill(pid, 'SIGKILL')); });
+    try {
+      await expect(ingestUpload('stopped.csv', Buffer.from('id\n1\n'), { dir })).rejects.toMatchObject({
+        code: 'unreadable', message: 'crew could not read the file (its parser failed)',
+      });
+      expect(readdirSync(dir).filter((f) => f.startsWith('.tmp-'))).toEqual([]);
+    } finally {
+      observeSqliteRunnerForTests(null);
+    }
+    expect((await ingestUpload('recovered.csv', Buffer.from('id\n2\n'), { dir })).sample).toEqual([['2']]);
+  });
+
   it('a CSV with a header: the header is detected, types inferred, the first rows for the person, the snapshot read-only', async () => {
     const up = await ingestUpload('refunds-2026.csv', readFileSync(join(FIX, 'with-header.csv')), { dir });
     expect(up.kind).toBe('csv');
@@ -48,6 +104,15 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
     expect(again.digest).toBe(up.digest);
     const r = await sqliteRead(path, up.catalog, 'SELECT region, amount FROM refunds_2026 WHERE amount > ? ORDER BY id', [6]);
     expect(r.rows).toEqual([['EMEA', 10.5], ['AMER', 99.99]]);
+  });
+
+  it('an uncoded parser failure reports unreadable without its JavaScript message', async () => {
+    // An XML entity outside Unicode makes String.fromCodePoint throw an ordinary RangeError.
+    const data = zip([{ name: 'xl/workbook.xml', data: Buffer.from('<workbook><sheets><sheet r:id="&#1114112;"/></sheets></workbook>') }]);
+    await expect(ingestUpload('broken.xlsx', data, { dir })).rejects.toMatchObject({
+      code: 'unreadable', message: 'crew could not read the file (its parser failed)',
+    });
+    expect(readdirSync(dir).filter((f) => f.startsWith('.tmp-'))).toEqual([]);
   });
 
   it('a CSV whose first row looks like data gets col_1… names', async () => {
@@ -173,11 +238,18 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
     expect(back.rows).toEqual([['1']]);
   });
 
+  it('an ingest runner ended at its deadline leaves the daemon alive (crew#1289)', async () => {
+    await expect(sqliteIngest(join(work, 'ended.sqlite'), join(work, 'missing.upload'), 'csv', 't.csv', null, UPLOAD_LIMITS, 1)).rejects.toMatchObject({ errorClass: 'timeout' });
+    await new Promise((r) => setTimeout(r, 300));
+    expect((await ingestUpload('alive.csv', Buffer.from('id\n1\n'), { dir })).sample).toEqual([['1']]);
+  });
+
   it('a runner ended while its request is still being written: the call is a timeout and the daemon lives on (codex r7)', async () => {
-    const cell = 'x'.repeat(200);
-    const rows = Array.from({ length: 200_000 }, (_v, i) => [String(i), cell]); // ~40 MB of request
-    await expect(sqliteCreate(join(work, 'epipe.sqlite'), 't', ['id', 'v'], ['INTEGER', 'TEXT'], rows, 1)).rejects.toMatchObject({ errorClass: 'timeout' });
+    const up = await ingestUpload('epipe.csv', Buffer.from('id\n1\n'), { dir });
+    const path = snapshotPath(up.digest, dir);
+    await expect(sqliteRead(path, up.catalog, 'SELECT id FROM epipe WHERE id = ?', ['x'.repeat(40 * 1024 * 1024)], { deadlineMs: 1 })).rejects.toMatchObject({ errorClass: 'timeout' });
     await new Promise((r) => setTimeout(r, 300)); // an unhandled EPIPE would surface here and fail the run
+    expect((await sqliteRead(path, up.catalog, 'SELECT id FROM epipe', [])).rows).toEqual([['1']]);
   });
 
   it('the runner gets none of the daemon\'s environment, the estate store\'s connection string included (codex r7)', () => {

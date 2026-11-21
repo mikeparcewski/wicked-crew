@@ -79,6 +79,43 @@ describe('multipart and types', () => {
     expect(safeName('a\u0000b c.png')).toBe('ab c.png');
   });
 
+  it.each(['[', '('])('crew#1428: 200,000 unclosed %s bytes scan in bounded time', (char) => {
+    const pdf = Buffer.from(`%PDF-1.4\n<< >>\nstream\n${char.repeat(200_000)}\nendstream\n`);
+    const started = performance.now();
+    expect(extractPdfText(pdf)).toBe('');
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(extractPdfText(pdfWith('following request'))).toBe('following request');
+  }, 120_000);
+
+  it('crew#1428: bad Flate streams spend the inflate budget', () => {
+    const bad = '<< /Filter /FlateDecode >>\nstream\nx\nendstream\n';
+    expect(extractPdfText(Buffer.concat([Buffer.from('%PDF-1.4\n' + bad.repeat(4095)), pdfWith('within budget')]))).toBe('within budget');
+    const pdf = Buffer.concat([Buffer.from('%PDF-1.4\n' + bad.repeat(200_000)), pdfWith('past budget')]);
+    const started = performance.now();
+    expect(extractPdfText(pdf)).toBe('');
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(extractPdfText(pdfWith('following request'))).toBe('following request');
+  }, 30_000);
+
+  it.each(['/Subtype /Image', '/Length1 1', '/Length2 1', '/Length3 1'])('crew#1428: skips non-text streams with %s before inflating', (dict) => {
+    const bad = `<< /Filter /FlateDecode ${dict} >>\nstream\nx\nendstream\n`;
+    const pdf = Buffer.concat([Buffer.from('%PDF-1.4\n' + bad.repeat(4096)), pdfWith('text survives')]);
+    expect(extractPdfText(pdf)).toBe('text survives');
+  });
+
+  it('crew#1428: a size-limited failed inflate spends its whole allowance', () => {
+    const bomb = deflateSync(Buffer.alloc(5 * 1024 * 1024, 0));
+    const stream = Buffer.concat([Buffer.from('<< /Filter /FlateDecode >>\nstream\n'), bomb, Buffer.from('\nendstream\n')]);
+    const pdf = Buffer.concat([Buffer.from('%PDF-1.4\n'), ...Array<Buffer>(4).fill(stream), pdfWith('past budget')]);
+    expect(extractPdfText(pdf)).toBe('');
+    expect(extractPdfText(pdfWith('following request'))).toBe('following request');
+  });
+
+  it('crew#1428: balanced nested literals and a bracket inside a TJ string survive', () => {
+    const pdf = Buffer.from('%PDF-1.4\n<< >>\nstream\n(outer (nested) value) Tj [(a]b) -20 (c (d))] TJ\nendstream\n');
+    expect(extractPdfText(pdf)).toBe('outer (nested) value a]bc (d)');
+  });
+
   it('extracts the shown text of a Flate pdf', () => {
     expect(extractPdfText(pdfWith('Quarterly numbers \\(draft\\)'))).toBe('Quarterly numbers (draft)');
   });
