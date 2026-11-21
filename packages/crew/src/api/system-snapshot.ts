@@ -1108,15 +1108,15 @@ export interface RosterSeatLike {
 
 function cliState(seat: RosterSeatLike): { state: SystemCliState; reason: string | null; until?: string } {
   const hostReason = hostFloorReason(seat);
+  if (seat.auth === 'signed_out' || (seat.auth === undefined && seat.signed_in === false)) {
+    return { state: 'signed_out', reason: hostReason ?? seat.council_ineligible_reason ?? seat.work_ineligible_reason ?? seat.auth_evidence ?? 'signed out' };
+  }
   const bench = seat.recent_bench;
   if (bench !== undefined && bench !== null) {
     const kind = bench.kind === 'quota_exhausted' ? 'quota (429)' : bench.kind.replace(/_/g, ' ');
     // A seat the host floor gives no work keeps that (durable) reason; the quota bench is on top of it.
     if (hostReason !== null) return { state: 'benched', reason: hostReason, until: bench.lifts_at };
     return { state: 'benched', reason: `benched: ${kind} until ${bench.lifts_at.slice(11, 16)} UTC (${bench.reason})`, until: bench.lifts_at };
-  }
-  if (seat.auth === 'signed_out' || (seat.auth === undefined && seat.signed_in === false)) {
-    return { state: 'signed_out', reason: hostReason ?? seat.council_ineligible_reason ?? seat.work_ineligible_reason ?? seat.auth_evidence ?? 'signed out' };
   }
   if (seat.auth === 'unknown' || (seat.auth === undefined && (seat.signed_in === null || seat.signed_in === undefined))) {
     return { state: 'unknown', reason: hostReason ?? seat.login_note ?? 'the sign-in check has not answered' };
