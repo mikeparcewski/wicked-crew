@@ -95,7 +95,16 @@ export class TrackerAddresses {
   /** What `runId` addresses: the cache's record, else the launch record's; `[]` when neither has one. */
   async of(runId: string): Promise<RunAddress[]> {
     await this.chain;
-    return (await this.load()).runs.find((r) => r.runId === runId)?.addresses ?? this.deps.launched?.of(runId)?.addresses ?? [];
+    let cached: RunAddress[] | undefined;
+    try {
+      cached = (await this.load()).runs.find((r) => r.runId === runId)?.addresses;
+    } catch (err) {
+      // An unreadable cache is not "no issues": the launch record answers for a run it holds; otherwise it throws.
+      const launched = this.deps.launched?.of(runId);
+      if (launched !== undefined) return launched.addresses;
+      throw err;
+    }
+    return cached ?? this.deps.launched?.of(runId)?.addresses ?? [];
   }
 
   /**

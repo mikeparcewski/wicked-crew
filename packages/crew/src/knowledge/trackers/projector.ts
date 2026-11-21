@@ -33,6 +33,8 @@ import type { TrackerProjectionState } from './view.js';
 export const TRACKER_PROJECTION_FORMAT = 1;
 /** At most this many issue_ref documents per tracker generation (the newest runs first). */
 export const TRACKER_ISSUE_REFS_MAX = 2_000;
+/** The runs kept per issue_ref (the newest): each gives at most two links, and a document holds at most 200. */
+const REF_RUNS_MAX = 200;
 /** Under estate's 20,000 links per generation. */
 export const GENERATION_LINKS_MAX = 19_000;
 const RETRY_BASE_MS = 5_000;
@@ -132,8 +134,11 @@ export function trackerGenerationBody(
       links,
     },
   ];
-  // issue_refs: every issue a run addresses through this tracker, each owning its runs' `addresses` links.
+  // issue_refs: every issue a run addresses through this tracker, each owning its runs' `addresses` links. Collected
+  // newest run first and bounded as it goes (crew#1352: the launch record keeps every run, so `runs` is the whole
+  // history): at most TRACKER_ISSUE_REFS_MAX issues, and per issue the newest REF_RUNS_MAX runs, deduplicated by a set.
   const byRef = new Map<string, Array<{ runId: string; deps: string[]; pr: string | null }>>();
+  const runsOfRef = new Map<string, Set<string>>();
   for (const r of [...runs].reverse()) {
     const deps = r.projectId !== null ? [`project:${r.projectId}`] : r.repoId !== null ? [`repo:${r.repoId}`] : [];
     if (deps.length === 0) continue;
@@ -143,10 +148,16 @@ export function trackerGenerationBody(
     const pr = n !== null && r.repoId !== null ? `pr:${r.repoId}#${n[1]}` : null;
     for (const a of r.addresses) {
       if (a.trackerId !== trackerId) continue;
+      if (!byRef.has(a.ref) && byRef.size >= TRACKER_ISSUE_REFS_MAX) continue;
       const list = byRef.get(a.ref) ?? [];
+      const seenRuns = runsOfRef.get(a.ref) ?? new Set<string>();
       // `closes` only for an issue the run's PR closes (Fixes, or a Jira key the title carries): a mention is not one.
-      if (!list.some((x) => x.runId === r.runId)) list.push({ runId: r.runId, deps, pr: a.closing === true ? pr : null });
+      if (!seenRuns.has(r.runId) && list.length < REF_RUNS_MAX) {
+        seenRuns.add(r.runId);
+        list.push({ runId: r.runId, deps, pr: a.closing === true ? pr : null });
+      }
       byRef.set(a.ref, list);
+      runsOfRef.set(a.ref, seenRuns);
     }
   }
   // estate's generation-wide link bound (20,000): the newest issues' trail links first, the tracker's own links kept.

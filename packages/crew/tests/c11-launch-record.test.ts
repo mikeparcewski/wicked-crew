@@ -17,6 +17,8 @@ import { composeDeliverWorkflow, DELIVER_PHASE_ID } from '../src/core/deliver.js
 import type { AuditEntry } from '../src/core/types.js';
 import { upstreamFailure } from '../src/knowledge/trackers/gate-pm.js';
 import { TrackerAddresses, type RunAddress } from '../src/knowledge/trackers/addresses.js';
+import { trackerGenerationBody } from '../src/knowledge/trackers/projector.js';
+import { pickAllows } from '../src/mcp/run-fence.js';
 import { classifyUpstreamError } from '../src/mcp/invoke.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 
@@ -98,11 +100,24 @@ describe('TrackerAddresses: the store is a cache; the launch record lasts the ru
     expect((await store.all()).map((r) => [r.runId, r.addresses[0]?.ref])).toEqual([['run-old', 'PROJA-1'], ['run-new', 'acme/app#42']]);
   });
 
-  it('an unreadable cache is still an error (never read as "no issues")', async () => {
+  it('an unreadable cache is still an error (never read as "no issues"), unless the launch record holds the run (xreview)', async () => {
     const d = dir();
     writeFileSync(join(d, 'tracker-addresses.json'), '{ not json');
-    const store = new TrackerAddresses(d, { launched: launched([]) });
+    const store = new TrackerAddresses(d, { launched: launched([{ runId: 'run-held', at: 1, addresses: [JIRA] }]) });
     await expect(store.all()).rejects.toThrow();
+    expect(await store.of('run-held')).toEqual([JIRA]);
+    await expect(store.of('run-other')).rejects.toThrow();
+  });
+
+  it('the projection of a whole history stays bounded per issue: the newest runs, at most 200 links (xreview)', () => {
+    const t = { id: 'trk_gh_1', key: 'acme/app', label: 'app', tenant: 'github.com', tenantLabel: null, links: [] };
+    const runs = Array.from({ length: 1_000 }, (_, i) => ({ runId: `run-${String(i).padStart(4, '0')}`, projectId: 'proj', repoId: 'repo', addresses: [GH] }));
+    const body = trackerGenerationBody({ name: 'acme-gh', system: 'github' }, 'trk_gh_1', t, runs);
+    const doc = body.docs.find((x) => x.key === 'issue/acme/app#42')!;
+    expect(doc.links!.length).toBeLessThanOrEqual(200);
+    // The newest run (last in the list) is drawn; the oldest is not.
+    expect(doc.links!.map((l) => l.end.id)).toContain('run:run-0999');
+    expect(doc.links!.map((l) => l.end.id)).not.toContain('run:run-0000');
   });
 });
 
@@ -118,6 +133,31 @@ describe('RunSourcePicks: a lost store entry keeps the launch record\'s pick (cr
     expect(picks.get('run-p')).toEqual(['support-pg']);
     // A run with no recorded pick is still "no pick".
     expect(picks.get('run-open')).toBeNull();
+  });
+
+  it('a pick the launch record holds cannot be replaced through the store (xreview)', () => {
+    const file = join(dir(), 'mcp', 'run-source-picks.json');
+    const picks = new RunSourcePicks(file, (runId) => (runId === 'run-r' ? [] : null));
+    expect(() => picks.set('run-r', ['web'])).toThrow(/can't change/);
+    expect(picks.get('run-r')).toEqual([]);
+    // The same pick again is no change.
+    expect(() => picks.set('run-r', [])).not.toThrow();
+  });
+
+  it('after a failed boot read of the trail, a run of unknown pick fails closed; a run launched since does not (xreview)', () => {
+    const idx = new RunTimingIndex();
+    idx.markLaunchHistoryUnreadable();
+    idx.applyLaunchEntry(launchEntry('run-new', 5, {}));
+    idx.applyLaunchEntry(launchEntry('run-new-picked', 6, { sourcePick: ['support-pg'] }));
+    const picks = new RunSourcePicks(join(dir(), 'mcp', 'run-source-picks.json'), (runId) => idx.recordedPickOf(runId));
+    expect(() => picks.get('run-old')).toThrow(/unknown/);
+    expect(pickAllows(picks, 'run-old', 'support-pg')).toBe(false);
+    expect(picks.get('run-new')).toBeNull();
+    expect(picks.get('run-new-picked')).toEqual(['support-pg']);
+    // A new pick is still recorded (the unreadable history is not read as a pick for a new run).
+    expect(() => picks.set('run-fresh', ['web'])).not.toThrow();
+    // With the history read, an unknown run is simply unpicked.
+    expect(new RunTimingIndex().recordedPickOf('run-old')).toBeNull();
   });
 
   it('the store stays the authority for a run it holds', () => {

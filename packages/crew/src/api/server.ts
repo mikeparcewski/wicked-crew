@@ -935,6 +935,9 @@ export async function createServer(
       }
     }
   } catch (err) {
+    // crew#1442: a run launched before this boot then has an unknown source pick; one whose store entry is gone is
+    // refused its source calls (fail closed) until a restart reads the trail.
+    runTimingIndex.markLaunchHistoryUnreadable();
     app.log.warn(
       `[runs] launch-index hydrate failed (prior runs read as not-a-retry / ungrouped / undated, without their chat_id link, until restart): ${
         err instanceof Error ? err.message : String(err)
@@ -2792,7 +2795,7 @@ export async function createServer(
   // (DES-CATALOG-002 CS4/CS10) Each run's source pick: recorded at launch (POST /runs), read by the broker, the unit's
   // tool list and the estate relay, so a unit never reaches a registered source its job did not pick.
   // crew#1442: a run the store no longer holds keeps the pick its launch recorded (fail closed, never widened).
-  const runSourcePicks = new RunSourcePicks(join(crewStateHome(), 'mcp', 'run-source-picks.json'), (runId) => runTimingIndex.sourcePickOf(runId));
+  const runSourcePicks = new RunSourcePicks(join(crewStateHome(), 'mcp', 'run-source-picks.json'), (runId) => runTimingIndex.recordedPickOf(runId));
   /** Every registered source and PM tracker id with its owning source's name: how the relay maps `source:<id>` to a pick. */
   const sourceOwnerNames = async (): Promise<Array<{ id: string; name: string }>> => {
     const out = (await dataGate.sources()).map((s) => ({ id: s.id, name: s.name }));
