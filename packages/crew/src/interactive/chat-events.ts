@@ -1123,7 +1123,9 @@ export async function startInteractiveChatSubscriber(
         clisJson: spec.clisJson,
         workflow: INTERACTIVE_CHAT_WORKFLOW,
         ...(spec.projectId !== undefined ? { projectId: spec.projectId } : {}),
-        ...(spec.graphDb !== null ? { projectGraph: { dbPath: spec.graphDb } } : {}),
+        // The stored graph only beside its project (W24): an Unfiled document's binding holds its chat's repo graph, and
+        // the adapter refuses projectGraph on a run filed nowhere.
+        ...(spec.graphDb !== null && spec.projectId !== undefined ? { projectGraph: { dbPath: spec.graphDb } } : {}),
         // No repository snapshot; only the packet and this revision are writable.
         extraWriteRoots: [runDir],
         requireDeliverables: [outPath],

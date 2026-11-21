@@ -445,6 +445,11 @@ function fakeAdapter(repoWorld?: RepoWorld): FakeAdapter {
           return def.id;
         },
         launchRun: async (input: LaunchRunInput) => {
+          // The real adapter's cross-field rule (core/adapter.ts launchRun): projectGraph never rides without projectId.
+          // A fake that accepted it let a test assert the broken launch as correct (W24).
+          if (input.projectGraph !== undefined && input.projectId === undefined) {
+            throw new Error('projectGraph is the PROJECT\'s graph, so the run must be filed into that project');
+          }
           state.launches.push(input);
           return input.sessionId;
         },
@@ -2304,7 +2309,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     const launch = engine.launches[0]!;
     expect(launch.sessionId).toBe('run-bound-note');
     expect(launch.clisJson).toBe(spec.clisJson);
-    expect(launch.projectGraph).toEqual({ dbPath: '/graphs/chat.db' });
+    expect(launch.projectGraph).toBeUndefined(); // Unfiled: its chat's repo graph is no project graph (W24)
     expect('projectId' in launch).toBe(false); // Unfiled
     expect(existsSync(join(draftDir, '_unfiled__bound-note', 'attempt-old-run'))).toBe(false);
     expect(existsSync(join(draftDir, '_unfiled__bound-note', 'attempt-elsewhere'))).toBe(true);
@@ -2331,6 +2336,28 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(bindings.get('_unfiled/bound-note')?.attempts[0]?.launchedAt).toBeDefined();
     // The same document cannot get a second live draft.
     await expect(sub!.launchBound({ ...spec, runId: 'run-other' })).rejects.toThrow(/already running/);
+  });
+
+  it('W24: a bound launch sends projectGraph only with its projectId: an Unfiled chat document starts without the project graph field, a filed one keeps it', async () => {
+    // The binding of an Unfiled repo chat's document holds that chat's REPO graph (proposal-create's graphFor(null)).
+    // core/adapter.ts refuses projectGraph without projectId, so a launch carrying it alone fails Go with a 502.
+    const { spec, repoRoot } = await boundWorld('w24-note');
+    const engine = fakeAdapter({ repos: [{ id: 'repo-crew', root_path: repoRoot }] });
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb, pollIntervalMs: 25, heartbeatMs: 60_000, ledgerPath: join(dir, 'ledger.json'),
+      draftDir: join(dir, 'drafts'), clisJson: SEATS, chatIdOf: (id: string) => id, log: () => {},
+    });
+    subs.push(sub!);
+    await sub!.launchBound(spec);
+    await sub!.launchBound({ ...spec, documentId: 'w24-filed', projectId: 'proj-a', artifactRef: 'proj-a/w24-filed', runId: 'run-w24-filed', graphDb: '/graphs/proj-a.db' });
+    expect(engine.launches).toHaveLength(2);
+    for (const l of engine.launches) {
+      if (l.projectGraph !== undefined) expect(l.projectId).toBeDefined();
+    }
+    const [unfiled, filed] = engine.launches;
+    expect(unfiled!.projectGraph).toBeUndefined();
+    expect('projectId' in unfiled!).toBe(false);
+    expect(filed).toMatchObject({ projectId: 'proj-a', projectGraph: { dbPath: '/graphs/proj-a.db' } });
   });
 
   it('A3: an attempt the engine refused can be tried again with the same run id (Go again): a fresh folder, one launch', async () => {

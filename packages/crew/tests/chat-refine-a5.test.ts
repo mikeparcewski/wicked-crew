@@ -124,6 +124,8 @@ describe('A5: a refine of the open document', () => {
     const launches: LaunchRunInput[] = [];
     const adapter = {
       launchRun: async (input: LaunchRunInput) => {
+        // The real adapter refuses projectGraph without projectId (core/adapter.ts launchRun, W24).
+        if (input.projectGraph !== undefined && input.projectId === undefined) throw new Error('projectGraph is the PROJECT\'s graph, so the run must be filed into that project');
         launches.push(input);
         extra.duringLaunch?.(input, (e) => { for (const l of listeners) l(e); });
         return input.sessionId;
@@ -193,7 +195,7 @@ describe('A5: a refine of the open document', () => {
     expect(w.launches[0]!.problem).toContain('MANIFEST-');
     expect(w.launches[0]!.problem).not.toContain('--repo');
     expect(w.launches[0]!.problem).not.toContain("records/ is one of the self-check's");
-    expect(w.launches[0]!.projectGraph).toEqual({ dbPath: '/graphs/chat.db' });
+    expect(w.launches[0]!.projectGraph).toBeUndefined(); // Unfiled: its chat's repo graph is no project graph (W24)
     expect(w.launches[0]!.repoRef).toBeUndefined();
     if (tampered) writeFileSync(join(runDir, 'records', 'run-evidence-x.md'), 'Coverage 99%');
     writeFileSync(join(runDir, 'revised.html'), '<html><body><h2 data-wid="h">Release 0.17</h2></body></html>');
@@ -210,6 +212,26 @@ describe('A5: a refine of the open document', () => {
       expect(floorCalls[0]).not.toContain('--repo');
       expect(existsSync(join(chatDir, 'landed', RUN, 'records'))).toBe(false);
     }
+  });
+
+  it('W24: an Unfiled refine never sends projectGraph without its projectId (its binding holds the chat\'s repo graph)', async () => {
+    const outcomes: Array<{ runId: string; outcome: unknown }> = [];
+    const w = await start({ keep: 'kept', argv: [] }, outcomes);
+    bindings.begin({ ref: '_unfiled/deck', mount: '_unfiled', doc: 'deck', projectId: null, owner: 'mike', chatId: 'c1', chatInstance: null, scopeProject: null, proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [], graphDb: '/graphs/chat.db' }, { pid: 'c1:t1', runId: RUN, base: 3, op: 'refine' });
+    await w.sub.launchBound(spec({ graphDb: '/graphs/chat.db' }));
+    expect(w.launches).toHaveLength(1);
+    // core/adapter.ts refuses projectGraph without projectId: the launch would fail and the refine could never start.
+    expect(w.launches[0]!.projectGraph).toBeUndefined();
+    expect('projectId' in w.launches[0]!).toBe(false);
+  });
+
+  it('W24: a filed refine keeps its project graph beside its projectId', async () => {
+    const outcomes: Array<{ runId: string; outcome: unknown }> = [];
+    const w = await start({ keep: 'kept', argv: [] }, outcomes);
+    bindings.begin({ ref: 'proj-a/deck', mount: 'proj-a', doc: 'deck', projectId: 'proj-a', owner: 'mike', chatId: 'c1', chatInstance: null, scopeProject: 'proj-a', proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [], graphDb: '/graphs/proj-a.db' }, { pid: 'c1:t1', runId: RUN, base: 3, op: 'refine' });
+    await w.sub.launchBound(spec({ projectId: 'proj-a', artifactRef: 'proj-a/deck', graphDb: '/graphs/proj-a.db' }));
+    expect(w.launches).toHaveLength(1);
+    expect(w.launches[0]!).toMatchObject({ projectId: 'proj-a', projectGraph: { dbPath: '/graphs/proj-a.db' } });
   });
 
   it('lands a refine with existing repository citations without passing --repo to the floor', async () => {
@@ -346,6 +368,8 @@ describe('A5 r1 folds', () => {
     const fire = (e: CoreEvent): void => { for (const l of listeners) l(e); };
     const adapter = {
       launchRun: async (input: LaunchRunInput) => {
+        // The real adapter refuses projectGraph without projectId (core/adapter.ts launchRun, W24).
+        if (input.projectGraph !== undefined && input.projectId === undefined) throw new Error('projectGraph is the PROJECT\'s graph, so the run must be filed into that project');
         launches.push(input);
         opts.duringLaunch?.(input, fire);
         return input.sessionId;
