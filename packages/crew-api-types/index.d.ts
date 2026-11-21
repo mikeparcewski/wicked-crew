@@ -10112,8 +10112,9 @@ export interface ChatProposalDecisionBody {
    * run THIS job as a power run (a workflow run on a repository, a preset workflow, an engine with power mode) and its
    * Power mode for new jobs (`powerModeDefault`) is on: chat starts follow the setting. Else 409 `power_unavailable`
    * with the reason, and nothing is recorded or started. If that changes between this check and the engine call (the
-   * launcher checks again, as does the launch itself), the answer is 502 `launch_failed` with the reason and the
-   * proposal is interrupted: Go again resumes it with that press's choice. Never run phased silently. Where a job's
+   * launcher checks again, as does the launch itself), the launch's own refusal is answered (api-types 0.217.0: 409
+   * `power_unavailable`, the card reopened; a launcher-side refusal with no code stays 502 `launch_failed`, the
+   * proposal interrupted, and Go again resumes it with that press's choice). Never run phased silently. Where a job's
    * Start can choose (power mode and the setting on, the job fits), its `sentence` promises no plan review and its
    * `stops` is null: the client shows the choice beside Start.
    */
