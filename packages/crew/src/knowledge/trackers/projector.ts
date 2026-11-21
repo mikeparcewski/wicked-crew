@@ -169,9 +169,9 @@ export function trackerGenerationBody(
       title: ref,
       entry: { kind: 'issue_ref', system: source.system, ref },
       sections: [{ key: 'ref', text: `issue ${ref} of tracker ${t.key}.` }],
-      // Each run that addresses it, and the PR it delivered (`closes`): at most 200 links (estate's per-document bound).
+      // Each run that addresses it, and the PR it delivered (`closes`): at most 200 links (estate's per-document bound),
+      // the newest runs first (`rs` is in recency order; a run id says nothing of age, coord on #1734).
       links: rs
-        .sort((a, b) => a.runId.localeCompare(b.runId))
         .flatMap((x): TrackerGenerationLink[] => [
           { rel: 'addresses', dir: 'in', end: { store: 'control', id: `run:${x.runId}` }, deps: x.deps },
           ...(x.pr !== null ? [{ rel: 'closes' as const, dir: 'in' as const, end: { store: 'control' as const, id: x.pr } }] : []),

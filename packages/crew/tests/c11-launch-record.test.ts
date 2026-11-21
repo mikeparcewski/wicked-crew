@@ -119,6 +119,23 @@ describe('TrackerAddresses: the store is a cache; the launch record lasts the ru
     expect(doc.links!.map((l) => l.end.id)).toContain('run:run-0999');
     expect(doc.links!.map((l) => l.end.id)).not.toContain('run:run-0000');
   });
+
+  it('per issue the links cap keeps the newest runs by recency, not by run id, when each run also closes a PR (coord on #1734)', () => {
+    const t = { id: 'trk_gh_1', key: 'acme/app', label: 'app', tenant: 'github.com', tenantLabel: null, links: [] };
+    // Ids that do not sort by age (a permutation of 0..999), oldest first in the list as the address record keeps them.
+    const idOf = (i: number): string => `run-${String((i * 7919) % 1000).padStart(4, '0')}`;
+    const ageOf = new Map(Array.from({ length: 1_000 }, (_, i) => [idOf(i), i] as const));
+    const runs = Array.from({ length: 1_000 }, (_, i) => ({ runId: idOf(i), projectId: 'proj', repoId: 'repo', addresses: [GH] }));
+    // Every run delivered its own PR, so each gives two links (`addresses` and `closes`).
+    const body = trackerGenerationBody({ name: 'acme-gh', system: 'github' }, 'trk_gh_1', t, runs, (runId) => `https://github.com/acme/app/pull/${ageOf.get(runId)! + 1}`);
+    const links = body.docs.find((x) => x.key === 'issue/acme/app#42')!.links!;
+    expect(links).toHaveLength(200);
+    const linkedRuns = links.filter((l) => l.rel === 'addresses').map((l) => ageOf.get(l.end.id.slice('run:'.length))!);
+    // The newest 100 runs, every one of them; before the fold the cut went by run id and dropped newer runs.
+    expect(linkedRuns).toContain(999);
+    expect(Math.min(...linkedRuns)).toBe(900);
+    expect(new Set(linkedRuns).size).toBe(100);
+  });
 });
 
 describe('RunSourcePicks: a lost store entry keeps the launch record\'s pick (crew#1442 item 2)', () => {
