@@ -103,6 +103,17 @@ describe('multipart and types', () => {
     expect(extractPdfText(pdf)).toBe('text survives');
   });
 
+  it('crew#1721 coord r1: a truncated stream that inflates in full before it throws is charged what it inflated', () => {
+    // 1 MiB of zeros deflates to ~1 KiB; cut its tail and zlib inflates it all, then throws (not a size failure).
+    const deflated = deflateSync(Buffer.alloc(1024 * 1024, 0));
+    const truncated = deflated.subarray(0, deflated.length - 8);
+    const stream = Buffer.concat([Buffer.from('<< /Filter /FlateDecode >>\nstream\n'), truncated, Buffer.from('\nendstream\n')]);
+    // 24 of them pass the 16 MiB budget at ~1 MiB each; charged 4 KiB each they would not.
+    const pdf = Buffer.concat([Buffer.from('%PDF-1.4\n'), ...Array<Buffer>(24).fill(stream), pdfWith('past budget')]);
+    expect(extractPdfText(pdf)).toBe('');
+    expect(extractPdfText(Buffer.concat([Buffer.from('%PDF-1.4\n'), ...Array<Buffer>(4).fill(stream), pdfWith('within budget')]))).toBe('within budget');
+  });
+
   it('crew#1428: a size-limited failed inflate spends its whole allowance', () => {
     const bomb = deflateSync(Buffer.alloc(5 * 1024 * 1024, 0));
     const stream = Buffer.concat([Buffer.from('<< /Filter /FlateDecode >>\nstream\n'), bomb, Buffer.from('\nendstream\n')]);

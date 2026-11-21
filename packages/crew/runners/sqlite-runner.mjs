@@ -52,7 +52,9 @@ try {
     } finally {
       w.close();
     }
-    out({ ok: true, table, header: { detected, columns: names }, sample: body.slice(0, req.limits.sampleRows).map((r) => names.map((_n, i) => r[i] ?? '')) });
+    // Exit only once the answer is written: a pipe write is async on macOS, and an exit before it drains cuts
+    // anything past 64 KiB (a wide 20-row preview) (crew#1721 coord r1).
+    await new Promise((done) => process.stdout.write(JSON.stringify({ ok: true, table, header: { detected, columns: names }, sample: body.slice(0, req.limits.sampleRows).map((r) => names.map((_n, i) => r[i] ?? '')) }), done));
     process.exit(0);
   }
   const db = new DatabaseSync(req.uri, { readOnly: true, enableForeignKeyConstraints: false, enableDoubleQuotedStringLiterals: false, allowExtension: false });

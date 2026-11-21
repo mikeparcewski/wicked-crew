@@ -88,6 +88,15 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
     expect((await ingestUpload('recovered.csv', Buffer.from('id\n2\n'), { dir })).sample).toEqual([['2']]);
   });
 
+  it('crew#1721 coord r1: a preview past 64 KiB comes back whole from the runner (an exit before the pipe drains cut it)', async () => {
+    const note = (i: number) => `${'n'.repeat(5_000)}${i}`;
+    const csv = `id,notes\n${Array.from({ length: 25 }, (_v, i) => `${i},${note(i)}`).join('\n')}\n`;
+    const result = await ingestUpload('wide.csv', Buffer.from(csv), { dir });
+    expect(Buffer.byteLength(JSON.stringify(result.sample))).toBeGreaterThan(64 * 1024);
+    expect(result.sample).toHaveLength(20);
+    expect(result.sample[19]).toEqual(['19', note(19)]);
+  });
+
   it('a CSV with a header: the header is detected, types inferred, the first rows for the person, the snapshot read-only', async () => {
     const up = await ingestUpload('refunds-2026.csv', readFileSync(join(FIX, 'with-header.csv')), { dir });
     expect(up.kind).toBe('csv');

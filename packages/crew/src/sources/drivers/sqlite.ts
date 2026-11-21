@@ -38,6 +38,14 @@ interface RunnerAnswer {
   [k: string]: unknown;
 }
 
+/** The words of a runner that ended without a readable answer (a crash, out of memory, a kill). */
+const RUNNER_FAILED = 'the SQLite runner failed';
+
+/** Whether `err` is the runner's own failure (it ended without an answer), not a start or answer-size failure. */
+export function isRunnerFailure(err: unknown): boolean {
+  return err instanceof SourceQueryError && err.errorClass === 'source' && err.message.startsWith(RUNNER_FAILED);
+}
+
 /** Bytes of the runner's answer the parent reads at most. */
 const ANSWER_MAX_BYTES = 64 * 1024 * 1024;
 
@@ -101,7 +109,7 @@ async function runChild(request: Record<string, unknown>, deadlineMs: number, si
       try {
         finish(null, JSON.parse(stdout + decoder.end()) as RunnerAnswer);
       } catch {
-        finish(new SourceQueryError(null, 'source', `the SQLite runner failed${stderr === '' ? '' : `: ${stderr.trim()}`}`));
+        finish(new SourceQueryError(null, 'source', `${RUNNER_FAILED}${stderr === '' ? '' : `: ${stderr.trim()}`}`));
       }
     });
     child.stdin.end(JSON.stringify(request));

@@ -21,7 +21,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 
 import { mcpStateDir } from '../mcp/registry-store.js';
 import type { SqlCatalog } from './catalog/types.js';
-import { sqliteIngest, sqliteInspect } from './drivers/sqlite.js';
+import { isRunnerFailure, sqliteIngest, sqliteInspect } from './drivers/sqlite.js';
 import { SourceQueryError } from './drivers/types.js';
 
 export const UPLOAD_LIMITS = Object.freeze({
@@ -205,7 +205,10 @@ export async function ingestUpload(filename: string, data: Buffer, opts: { dir?:
       ingested = await sqliteIngest(tmp, input, kind, filename, opts.header ?? null, UPLOAD_LIMITS, Math.max(1, deadline - Date.now()));
     } catch (err) {
       if (err instanceof SourceQueryError && err.errorClass === 'timeout') throw tooSlow();
-      throw unavailable(err) ?? new UploadError('unreadable', 'crew could not read the file (its parser failed)');
+      // Only the child's own failure is the file's; a runner that could not start or answered too much passes
+      // through as before (crew#1721 coord r1).
+      if (isRunnerFailure(err)) throw unavailable(err) ?? new UploadError('unreadable', 'crew could not read the file (its parser failed)');
+      throw unavailable(err) ?? err;
     }
     if (!ingested.ok) {
       if (ingested.refused === true) throw new UploadError(ingested.code, ingested.error);

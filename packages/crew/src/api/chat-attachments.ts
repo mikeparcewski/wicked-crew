@@ -205,7 +205,9 @@ export function extractPdfText(data: Buffer, maxChars = ATTACHMENT_TEXT_EXCERPT_
         content = inflateSync(content, { maxOutputLength: allowance });
         inflated += Math.max(PDF_INFLATE_ATTEMPT_BYTES, content.length);
       } catch (err) {
-        inflated += (err as NodeJS.ErrnoException).code === 'ERR_BUFFER_TOO_LARGE' ? allowance : PDF_INFLATE_ATTEMPT_BYTES;
+        // A truncated stream inflates in full before it throws, so a non-size failure is charged what its input
+        // could have inflated to (deflate's 1032:1 bound), within the allowance (crew#1721 coord r1).
+        inflated += (err as NodeJS.ErrnoException).code === 'ERR_BUFFER_TOO_LARGE' ? allowance : Math.min(allowance, Math.max(PDF_INFLATE_ATTEMPT_BYTES, content.length * 1032));
         continue;
       }
     }
