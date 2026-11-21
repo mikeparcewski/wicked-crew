@@ -21,10 +21,18 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFil
 import { homedir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 
+import { DEFAULT_DAEMON_PORT } from './port.js';
+
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 
-export const SERVICE_LABEL = 'com.wickedagile.wicked-crew';
-export const SYSTEMD_UNIT_NAME = 'wicked-crew.service';
+export function serviceNames(port: number) {
+  const suffix = port === DEFAULT_DAEMON_PORT ? '' : `-${port}`;
+  return {
+    label: `com.wickedagile.wicked-crew${port === DEFAULT_DAEMON_PORT ? '' : `.${port}`}`,
+    unit: `wicked-crew${suffix}.service`,
+    task: `wicked-crew${suffix}`,
+  };
+}
 export const INSTALL_SERVICE_FLAG = '--install-service';
 export const UNINSTALL_SERVICE_FLAG = '--uninstall-service';
 
@@ -35,9 +43,10 @@ export function servicePlatform(platform: NodeJS.Platform = process.platform): S
 }
 
 /** Where the unit file lives for this platform, or `null` where nothing is automated. */
-export function serviceUnitPath(platform: ServicePlatform, home: string = homedir()): string | null {
-  if (platform === 'darwin') return join(home, 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`);
-  if (platform === 'linux') return join(home, '.config', 'systemd', 'user', SYSTEMD_UNIT_NAME);
+export function serviceUnitPath(platform: ServicePlatform, home: string = homedir(), port = DEFAULT_DAEMON_PORT): string | null {
+  const names = serviceNames(port);
+  if (platform === 'darwin') return join(home, 'Library', 'LaunchAgents', `${names.label}.plist`);
+  if (platform === 'linux') return join(home, '.config', 'systemd', 'user', names.unit);
   return null;
 }
 
@@ -85,6 +94,7 @@ export function captureServiceEnv(source: NodeJS.ProcessEnv = process.env): Capt
 }
 
 export interface ServiceSpec {
+  port: number;
   /** Absolute argv: the node binary, the CLI entry, `serve`, and the forwarded serve options. */
   program: string[];
   env: Record<string, string>;
@@ -113,7 +123,7 @@ export function renderPlist(spec: ServiceSpec): string {
     '<plist version="1.0">',
     '<dict>',
     '  <key>Label</key>',
-    `  <string>${SERVICE_LABEL}</string>`,
+    `  <string>${serviceNames(spec.port).label}</string>`,
     '  <key>ProgramArguments</key>',
     '  <array>',
     args,
@@ -127,7 +137,9 @@ export function renderPlist(spec: ServiceSpec): string {
     '  <key>RunAtLoad</key>',
     '  <true/>',
     '  <key>KeepAlive</key>',
-    '  <true/>',
+    '  <dict><key>SuccessfulExit</key><false/></dict>',
+    '  <key>ThrottleInterval</key>',
+    '  <integer>30</integer>',
     // No `ProcessType: Background`: launchd throttles a Background job's disk I/O, and on a busy
     // host the daemon then took minutes to open its own module files. The default (Standard) is right.
     '  <key>StandardOutPath</key>',
@@ -189,6 +201,8 @@ export function renderSystemdUnit(spec: ServiceSpec): string {
     '[Unit]',
     'Description=wicked-crew daemon (governed agent runs + the studio console)',
     'After=network-online.target',
+    'StartLimitIntervalSec=60',
+    'StartLimitBurst=5',
     '',
     '[Service]',
     'Type=simple',
@@ -221,8 +235,9 @@ export function logPathFromUnit(text: string): string | null {
 export function installedService(
   platform: ServicePlatform = servicePlatform(),
   home: string = homedir(),
+  port = DEFAULT_DAEMON_PORT,
 ): { unitPath: string; logPath: string | null } | null {
-  const unitPath = serviceUnitPath(platform, home);
+  const unitPath = serviceUnitPath(platform, home, port);
   if (unitPath === null || !existsSync(unitPath)) return null;
   let text = '';
   try {
@@ -238,7 +253,7 @@ export function windowsRecipe(spec: ServiceSpec): string {
   const cmd = spec.program.map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(' ');
   return [
     'wicked-crew: a login service is not automated on this platform. Register it with Task Scheduler:',
-    `  schtasks /Create /SC ONLOGON /TN wicked-crew /TR "${cmd.replace(/"/g, '\\"')}" /RL LIMITED`,
+    `  schtasks /Create /SC ONLOGON /TN ${serviceNames(spec.port).task} /TR "${cmd.replace(/"/g, '\\"')}" /RL LIMITED`,
     'and set the same environment variables for your user first (setx NAME value).',
   ].join('\n');
 }
@@ -312,7 +327,8 @@ function isWsl(): boolean {
 
 /** `0` on success, `1` on a refusal or a failed service-manager call (the reason is logged). */
 export async function installService(input: InstallInput, deps: ServiceDeps): Promise<number> {
-  const unitPath = serviceUnitPath(deps.platform, deps.home);
+  const names = serviceNames(input.port);
+  const unitPath = serviceUnitPath(deps.platform, deps.home, input.port);
   let cli = input.cliPath;
   try {
     cli = realpathSync(input.cliPath);
@@ -330,6 +346,7 @@ export async function installService(input: InstallInput, deps: ServiceDeps): Pr
   const nodePath = stableNodePath(input.nodePath, env['PATH']);
   const logPath = join(input.stateHome, 'daemon-stdout.log');
   const spec: ServiceSpec = {
+    port: input.port,
     program: [nodePath, cli, 'serve', ...forwardedServeArgs(input.serveArgs)],
     env,
     logPath,
@@ -345,7 +362,7 @@ export async function installService(input: InstallInput, deps: ServiceDeps): Pr
   // Only the installed service's own process may hold the port (a re-install reloads it). Anything
   // else (a hand-started daemon, another program) is refused, named by pid, and left alone.
   if (holder !== null) {
-    const servicePid = alreadyInstalled ? runningServicePid(deps) : null;
+    const servicePid = alreadyInstalled ? runningServicePid(deps, input.port) : null;
     const isService = servicePid !== null && (holder.pid === null || holder.pid === servicePid);
     if (!isService) {
       const who = holder.pid !== null ? `pid ${holder.pid}` : 'a process lsof could not name';
@@ -365,13 +382,13 @@ export async function installService(input: InstallInput, deps: ServiceDeps): Pr
     deps.platform === 'darwin'
       ? [
           // An installed agent is reloaded (bootout tolerates "not loaded").
-          ...(alreadyInstalled ? [['launchctl', ['bootout', `gui/${deps.uid}/${SERVICE_LABEL}`], false] as [string, string[], boolean]] : []),
+          ...(alreadyInstalled ? [['launchctl', ['bootout', `gui/${deps.uid}/${names.label}`], false] as [string, string[], boolean]] : []),
           ['launchctl', ['bootstrap', `gui/${deps.uid}`, unitPath], true],
         ]
       : [
           ['systemctl', ['--user', 'daemon-reload'], true],
-          ['systemctl', ['--user', 'enable', SYSTEMD_UNIT_NAME], true],
-          ['systemctl', ['--user', 'restart', SYSTEMD_UNIT_NAME], true],
+          ['systemctl', ['--user', 'enable', names.unit], true],
+          ['systemctl', ['--user', 'restart', names.unit], true],
         ];
   for (const [cmd, args, required] of steps) {
     const r = deps.run(cmd, args);
@@ -409,24 +426,26 @@ export async function installService(input: InstallInput, deps: ServiceDeps): Pr
 }
 
 /** The pid of the loaded service's running process, or `null` (not loaded, not running, unknown). */
-export function runningServicePid(deps: Pick<ServiceDeps, 'platform' | 'uid' | 'run'>): number | null {
+export function runningServicePid(deps: Pick<ServiceDeps, 'platform' | 'uid' | 'run'>, port = DEFAULT_DAEMON_PORT): number | null {
+  const names = serviceNames(port);
   if (deps.platform === 'darwin') {
-    const r = deps.run('launchctl', ['print', `gui/${deps.uid}/${SERVICE_LABEL}`]);
+    const r = deps.run('launchctl', ['print', `gui/${deps.uid}/${names.label}`]);
     const m = r.status === 0 ? /^\s*pid = (\d+)$/m.exec(r.stdout) : null;
     return m?.[1] !== undefined ? Number(m[1]) : null;
   }
   if (deps.platform === 'linux') {
-    const r = deps.run('systemctl', ['--user', 'show', '-p', 'MainPID', '--value', SYSTEMD_UNIT_NAME]);
+    const r = deps.run('systemctl', ['--user', 'show', '-p', 'MainPID', '--value', names.unit]);
     const pid = Number(r.stdout.trim());
     return r.status === 0 && Number.isInteger(pid) && pid > 0 ? pid : null;
   }
   return null;
 }
 
-export function uninstallService(deps: Pick<ServiceDeps, 'platform' | 'home' | 'uid' | 'run' | 'log'>): number {
-  const unitPath = serviceUnitPath(deps.platform, deps.home);
+export function uninstallService(deps: Pick<ServiceDeps, 'platform' | 'home' | 'uid' | 'run' | 'log'>, port = DEFAULT_DAEMON_PORT): number {
+  const names = serviceNames(port);
+  const unitPath = serviceUnitPath(deps.platform, deps.home, port);
   if (unitPath === null) {
-    deps.log('wicked-crew: no login service is automated on this platform (remove the Task Scheduler task by hand).');
+    deps.log(`wicked-crew: no login service is automated on this platform (remove the Task Scheduler task by hand: schtasks /Delete /TN ${names.task}).`);
     return 0;
   }
   if (!existsSync(unitPath)) {
@@ -434,10 +453,10 @@ export function uninstallService(deps: Pick<ServiceDeps, 'platform' | 'home' | '
     return 0;
   }
   if (deps.platform === 'darwin') {
-    deps.run('launchctl', ['bootout', `gui/${deps.uid}/${SERVICE_LABEL}`]);
+    deps.run('launchctl', ['bootout', `gui/${deps.uid}/${names.label}`]);
     unlinkSync(unitPath);
   } else {
-    deps.run('systemctl', ['--user', 'disable', '--now', SYSTEMD_UNIT_NAME]);
+    deps.run('systemctl', ['--user', 'disable', '--now', names.unit]);
     unlinkSync(unitPath);
     deps.run('systemctl', ['--user', 'daemon-reload']);
   }
