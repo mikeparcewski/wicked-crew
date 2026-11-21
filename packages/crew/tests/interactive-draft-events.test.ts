@@ -2244,7 +2244,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     const draftDir = join(dir, 'drafts');
     const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
       dbPath: busDb, pollIntervalMs: 25, heartbeatMs: 60_000,
-      ledgerPath: join(dir, 'ledger.json'), draftDir, clisJson: SEATS, log: () => {},
+      ledgerPath: join(dir, 'ledger.json'), draftDir, clisJson: SEATS, chatIdOf: (id: string) => id, log: () => {},
     });
     subs.push(sub!);
     await sub!.launchBound({ ...spec, repos: [], graphDb: null });
