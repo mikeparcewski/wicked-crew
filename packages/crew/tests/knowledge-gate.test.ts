@@ -337,13 +337,30 @@ describe('the read record is durable before a release (§7.9)', () => {
     } finally { rmSync(base, { recursive: true, force: true }); }
   });
 
+  it('compacts again each time the redundant lines cross the threshold, not only once (crew#1719 coord r1)', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'kd-compact-twice-'));
+    try {
+      const log = new SourceReadLog(base, undefined, { compactMinLines: 2 });
+      const lines = () => readFileSync(log.path, 'utf8').trim().split('\n').length;
+      const counts: number[] = [];
+      for (let i = 0; i < 6; i++) {
+        await log.append({ ...entry, callId: `c${i}`, outcome: 'unconfirmed', released: false });
+        await log.append({ ...entry, callId: `c${i}` });
+        counts.push(lines());
+      }
+      // Two redundant lines (two superseded unconfirmed entries) trigger each compaction: after calls 2, 4 and 6.
+      expect(counts).toEqual([2, 2, 4, 4, 6, 6]);
+      expect(await log.dataUse('r1')).toEqual([{ source: 's', queries: 6, released: 6, rows: 6, truncated: false, lastAt: entry.at }]);
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+
   it('keeps an append durable when the compaction barrier fails and refolds on the next read (crew#1319)', async () => {
     const base = mkdtempSync(join(tmpdir(), 'kd-compact-failure-'));
     try {
       let barriers = 0;
       const log = new SourceReadLog(base, async () => {
         if (++barriers > 1) throw new Error('compaction directory sync failed');
-      }, { compactMinLines: 2 });
+      }, { compactMinLines: 1 });
       await log.append({ ...entry, outcome: 'unconfirmed', released: false });
       await expect(log.append(entry)).resolves.toBeUndefined();
       expect(barriers).toBe(2);

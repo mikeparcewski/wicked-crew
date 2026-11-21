@@ -15,14 +15,17 @@ export async function processMemory(pid: number): Promise<number | null> {
       if (rss === null) return null;
       kb = Number(rss[1]);
     } else if (process.platform === 'darwin') {
-      const { stdout } = await exec('/bin/ps', ['-o', 'rss=', '-p', String(pid)], { timeout: 2_000, encoding: 'utf8' });
+      const { stdout } = await exec('/bin/ps', ['-o', 'rss=', '-p', String(pid)], { timeout: 10_000, encoding: 'utf8' });
       if (!/^\s*\d+\s*$/.test(stdout)) return null;
       kb = Number(stdout.trim());
     } else if (process.platform === 'win32') {
-      const { stdout } = await exec('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], { timeout: 2_000, encoding: 'utf8', windowsHide: true });
+      const { stdout } = await exec('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], { timeout: 10_000, encoding: 'utf8', windowsHide: true });
       const columns = [...stdout.trim().matchAll(/"((?:[^"]|"")*)"(?:,|$)/g)].map((m) => m[1]!);
-      if (columns[1] !== String(pid) || !/^[\d,.\s]+ K(?:B)?$/i.test(columns[4] ?? '')) return null;
-      kb = Number(columns[4]!.replace(/\D/g, ''));
+      // "Mem Usage" is always in KB; its unit word and digit grouping are localized (K, Ko, КБ; ',', '.', NBSP), so
+      // only the digits are read (crew#1719 coord r1).
+      const digits = (columns[4] ?? '').replace(/\D/g, '');
+      if (columns[1] !== String(pid) || digits === '') return null;
+      kb = Number(digits);
     } else {
       return null;
     }

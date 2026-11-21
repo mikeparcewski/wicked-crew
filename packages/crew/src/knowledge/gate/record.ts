@@ -233,17 +233,17 @@ export class SourceReadLog {
     try {
       const entries = await this.fold();
       const state = this.foldState;
-      if (entries === null || state.lines < (this.options.compactMinLines ?? 10_000) || state.lines < 2 * state.last.size) return;
+      // Trigger on REDUNDANT lines (superseded entries), not on a ratio: after one compaction a released call adds
+      // 2 lines per call and a refusal 1, so a ratio test would never fire again (crew#1719 coord r1).
+      if (entries === null || state.lines - state.last.size < (this.options.compactMinLines ?? 10_000)) return;
       tmp = `${this.path}.compact-${randomBytes(8).toString('hex')}`;
       const fh = await open(tmp, 'wx', 0o600);
-      let offset = 0;
+      // One write of the whole compacted record (not one awaited write per entry inside the append).
+      const text = [...entries.values()].map((entry) => `${JSON.stringify(entry)}\n`).join('');
+      const offset = Buffer.byteLength(text);
       let ino: number;
       try {
-        for (const entry of entries.values()) {
-          const line = `${JSON.stringify(entry)}\n`;
-          await fh.writeFile(line, 'utf8');
-          offset += Buffer.byteLength(line);
-        }
+        await fh.writeFile(text, 'utf8');
         await fh.sync();
         ino = (await fh.stat()).ino;
       } finally {
