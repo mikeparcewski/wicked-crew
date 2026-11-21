@@ -110,16 +110,15 @@ export interface ChatScopeDeps {
    *  lexically near the base — is noted instead of refusing the open (hardening, W7). */
   log?: (msg: string) => void;
   /**
-   * Entity count in a repo graph database — `nodes > 0` means indexed, anything else means
-   * schema-only, never indexed, or unreadable. Omitted = {@link estateEntityCount}, which probes
-   * `wicked-estate stats --db`; injectable so tests never shell out. A probe failure counts as 0
-   * (ungrounded — the gate fails CLOSED). crew#642.
+   * Entity count in a repo graph database: `nodes > 0` means indexed; 0 or an invalid count means
+   * ungrounded (crew#642). `null` means the probe could not count, not an empty graph (crew#1356).
+   * Omitted = {@link estateEntityCount}, which probes `wicked-estate stats --db`; injectable for tests.
    *
    * The default is applied by `ownGraph` itself, not only by {@link chatScopeDeps}: a constructor
    * that omits this must not silently skip the liveness gate and report a schema-only database as
    * grounded, which is the very defect crew#642 fixed (review of #651).
    */
-  entityCount?: (dbPath: string) => Promise<number>;
+  entityCount?: (dbPath: string) => Promise<number | null>;
   /** crew#899: bring each in-scope checkout to its upstream when safe, else report how stale it
    *  is ({@link freshenCheckout}). Omitted = checkouts are read as they are and nothing is said
    *  (tests; the daemon wires it in `server.ts`). */
@@ -252,21 +251,20 @@ export function chatScopeDeps(adapter: CoreAdapter): ChatScopeDeps {
 
 /**
  * crew#642 — the production entity-count probe: `wicked-estate stats --db <path>` parsed for its
- * `nodes` count. `nodes > 0` means indexed; anything else means schema-only, never indexed, or
- * unreadable. A probe failure (missing binary, timeout, unparseable output) counts as 0, so the
- * liveness gate fails CLOSED — an unanswerable graph reads ungrounded, never grounded.
+ * `nodes` count. crew#1356: a failed or unparseable probe returns null, so a transient failure
+ * does not claim an indexed graph is empty.
  *
  * Exported and used as `ownGraph`'s DEFAULT (review of #651): the contract on
  * `ChatScopeDeps.entityCount` promises this behaviour when the dep is omitted, so the promise is
  * kept where the value is USED rather than only where the deps happen to be built.
  */
-export async function estateEntityCount(dbPath: string): Promise<number> {
+export async function estateEntityCount(dbPath: string): Promise<number | null> {
   try {
     // A project graph is put back in DELETE mode after the CLI's writer open (crew#1497, codex r2 #2).
     const { stdout } = await readProjectGraph(dbPath, () => execCapped(estateExe(process.env), ['stats', '--db', dbPath], { timeout: 15_000 }));
-    return parseEstateTotals(stdout)?.nodes ?? 0;
+    return parseEstateTotals(stdout)?.nodes ?? null;
   } catch {
-    return 0;
+    return null;
   }
 }
 
@@ -610,15 +608,15 @@ async function graphForRepos(
   };
 }
 
-/** A single repo's OWN graph — bound only when the registered graph file exists AND holds entities.
+/** A single repo's OWN graph — unbound when missing or positively empty (crew#1356).
  *  crew#642: a zero-byte or schema-only estate.db is not grounded. The probe DEFAULTS to
  *  {@link estateEntityCount} (review of #651): omitting the dep must not skip the gate. */
 async function ownGraph(
   only: RepoEntry,
-  entityCount: (dbPath: string) => Promise<number> = estateEntityCount,
+  entityCount: (dbPath: string) => Promise<number | null> = estateEntityCount,
 ): Promise<{ wire: ChatScope['graph']; dbPath: string | null }> {
   try {
-  const dbPath = codeGraphDb(only);
+    const dbPath = codeGraphDb(only);
     // The registry field says WHERE the repo's graph lives, not that it was ever built
     // (Copilot, #518): a repo indexed by nothing would otherwise be reported as grounded while
     // the estate MCP answers "not found" about everything. Existence is the honest floor here
@@ -634,12 +632,9 @@ async function ownGraph(
         dbPath: null,
       };
     }
-    // crew#642: existence is necessary but not sufficient — a schema-only or never-indexed
-    // estate.db holds no entities. The seat would fall back to grep and burn its whole turn budget.
-    // Grounded is the NARROW case (a finite count above zero); every other answer — 0, a negative
-    // count, NaN from an unparseable probe — is ungrounded, because this gate fails closed.
-    const nodes = await entityCount(dbPath);
-    if (nodes <= 0 || !Number.isFinite(nodes)) {
+    // crew#1356: estate cannot count a zero-byte file; other probe failures do not prove emptiness.
+    const nodes = statSync(dbPath).size === 0 ? 0 : await entityCount(dbPath);
+    if (nodes !== null && (nodes <= 0 || !Number.isFinite(nodes))) {
       return {
         wire: {
           bound: false,
@@ -652,7 +647,12 @@ async function ownGraph(
       };
     }
     return {
-      wire: { bound: true, reason: `bound to '${only.name}'s own code graph.` },
+      wire: {
+        bound: true,
+        reason: nodes === null
+          ? `bound to '${only.name}'s own code graph (its size could not be read just now, so this chat could not confirm it holds symbols; if a graph search fails, say so).`
+          : `bound to '${only.name}'s own code graph.`,
+      },
       dbPath,
     };
   } catch (err) {

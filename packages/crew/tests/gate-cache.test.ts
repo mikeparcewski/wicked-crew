@@ -40,6 +40,34 @@ function view(id: string, status: string): SessionView {
 }
 
 describe('GateCache', () => {
+  it('evicts a hydrated gate on a late different frame and re-reads the record', async () => {
+    const cache = new GateCache();
+    const record = replayOpenGate(RUN, [awaitingHuman(4)])!;
+    await cache.resolve(RUN, async () => record);
+    cache.ingest(awaitingHuman(3));
+    expect(cache.get(RUN)).toBeUndefined();
+    const read = vi.fn(async () => record);
+    expect(await cache.resolve(RUN, read)).toMatchObject({ ord: 4 });
+    expect(read).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a hydrated gate on an identical frame and evicts a changed prompt', async () => {
+    const cache = new GateCache();
+    const record = replayOpenGate(RUN, [awaitingHuman(4)])!;
+    await cache.resolve(RUN, async () => record);
+    cache.ingest(awaitingHuman(4));
+    expect(cache.get(RUN)).toBe(record);
+    cache.ingest(logged('awaitingHuman', { ord: 4, prompt: 'Different plan' }));
+    expect(cache.get(RUN)).toBeUndefined();
+  });
+
+  it('a live entry still accepts a replacing live frame', () => {
+    const cache = new GateCache();
+    cache.ingest(awaitingHuman(4));
+    cache.ingest(awaitingHuman(3));
+    expect(cache.get(RUN)?.ord).toBe(3);
+  });
+
   it('serves a gate the live stream delivered', () => {
     const cache = new GateCache();
     cache.ingest(awaitingHuman());

@@ -143,7 +143,7 @@ beforeEach(async () => {
   holdReposOnce = null;
   base = mkdtempSync(join(tmpdir(), 'chat-routes-scope-'));
   graphFile = join(base, 'alpha-graph.db');
-  writeFileSync(graphFile, '');
+  writeFileSync(graphFile, 'graph fixture');
   applied = true;
   chatOpen.mockClear();
   signedIn = () => null;
@@ -684,6 +684,7 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     const propose = park('fixed-binding');
     expect((await send('fixed-binding')).statusCode).toBe(202);
     expect(propose).toHaveBeenCalledOnce();
+    expect(adapter.confirmGate).toHaveBeenCalledExactlyOnceWith('run-p1', true);
     expect(launched).toHaveLength(1);
   });
 

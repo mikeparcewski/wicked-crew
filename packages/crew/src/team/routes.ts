@@ -38,7 +38,7 @@ import { PlanSchema, toLaunchPlan } from '../api/plan-schema.js';
 const V = API_PREFIX;
 
 // Exported for tests/wire-contract.test.ts (the request-direction drift guard).
-export const EditPlanSchema = z.strictObject({ plan: PlanSchema, requestId: z.string().min(1).max(128).optional() });
+export const EditPlanSchema = z.strictObject({ plan: PlanSchema, ord: z.int().nonnegative().optional(), requestId: z.string().min(1).max(128).optional() });
 
 /** The engine's refusal of a gate edit when the paused run's open gate is not a plan approval:
  *  the run is paused at another gate, so the edit is a mid-run one. */
@@ -193,7 +193,9 @@ export function registerTeamRoutes(
   // it runs inside `exclusive`, so nothing acquires the lock twice.
   gateDecisions: {
     exclusive: <T>(runId: string, fn: () => Promise<T>) => Promise<T>;
-    judge: (run: SessionView, namedOrd: number | undefined) => Promise<{ refusal: { code: number; body: unknown } } | object>;
+    judge: (run: SessionView, namedOrd: number | undefined) => Promise<{ refusal: { code: number; body: unknown } } | { ord: number | undefined }>;
+    expect: (ord: number | undefined) => { ord: number } | undefined;
+    changed: (id: string, err: unknown) => Promise<{ code: number; body: unknown } | null>;
     /** crew#1157: a refusal when `plan` would let a read-only (analysis) run write; `null` otherwise. */
     readOnlyRefusal?: (runId: string, plan: { steps: Array<{ catalog: string; [k: string]: unknown }> }) => { code: number; body: unknown } | null;
   },
@@ -248,12 +250,12 @@ export function registerTeamRoutes(
       const readOnly = gateDecisions.readOnlyRefusal?.(id, parsed.data.plan as { steps: Array<{ catalog: string; [k: string]: unknown }> }) ?? null;
       if (readOnly !== null) return reply.code(readOnly.code).send(readOnly.body);
       if (run.session.status === 'awaiting_human') {
-        const decided = await gateDecisions.judge(run, undefined);
+        const decided = await gateDecisions.judge(run, parsed.data.ord);
         if ('refusal' in decided) return reply.code(decided.refusal.code).send(decided.refusal.body);
         try {
           // The edit IS the gate answer (T3): the engine proposes it (`plan.proposed{by:"human",
           // kind:"edit"}`), floor-fills and accepts it, or refuses it and re-opens the gate.
-          const status = await adapter.confirmGate(id, true, undefined, 'edit_plan', undefined, plan);
+          const status = await adapter.confirmGate(id, true, undefined, 'edit_plan', undefined, plan, gateDecisions.expect(decided.ord));
           // WHO answered the gate, like every other gate answer (POST /runs/:id/gate).
           audit.record('gate.decided', actorOf(req), {
             runId: id,
@@ -265,6 +267,8 @@ export function registerTeamRoutes(
         } catch (err) {
           // Paused at another gate (a unit gate, a team pause): no plan gate to answer, so the edit
           // is a mid-run one, below. Every other refusal is the answer.
+          const changed = await gateDecisions.changed(id, err);
+          if (changed !== null) return reply.code(changed.code).send(changed.body);
           if (!NO_PLAN_GATE.test(message(err))) {
             return reply.code(unsupported(err) ? 501 : 409).send({ error: message(err) });
           }

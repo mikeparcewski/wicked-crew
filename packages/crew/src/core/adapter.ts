@@ -1,3 +1,4 @@
+import { RuleChangedError, ruleRevision } from '../governance/rule-revision.js';
 import { builtinDefs as deriveBuiltinDefs, engineDefOf } from './builtin-catalog.js';
 import { createRequire } from 'node:module';
 import type { BusUnavailable } from './engine-bus.js';
@@ -3728,9 +3729,30 @@ export class CoreAdapter {
     await this.core.upsertPolicy(JSON.stringify(policy));
   }
 
-  /** Upsert a conformance rule via the single-writer actor. */
-  async upsertConformanceRule(rule: ConformanceRule): Promise<void> {
-    await this.core.upsertConformanceRule(JSON.stringify(rule));
+  private readonly ruleWriteTails = new Map<string, Promise<unknown>>();
+
+  private ruleExclusively<T>(id: string, write: () => Promise<T>): Promise<T> {
+    const result = (this.ruleWriteTails.get(id) ?? Promise.resolve()).then(write);
+    const tail = result.catch(() => undefined);
+    this.ruleWriteTails.set(id, tail);
+    void tail.then(() => {
+      if (this.ruleWriteTails.get(id) === tail) this.ruleWriteTails.delete(id);
+    });
+    return result;
+  }
+
+  /** Compare and write under the same lock as every crew writer of this rule. */
+  async upsertConformanceRule(rule: ConformanceRule, expectedRevision?: string): Promise<void> {
+    return this.ruleExclusively(rule.id, async () => {
+      if (expectedRevision !== undefined) {
+        const current = (await this.listConformanceRules()).find((r) => r.id === rule.id);
+        const revision = current === undefined ? null : ruleRevision(current);
+        if (revision !== expectedRevision) throw new RuleChangedError(revision);
+      }
+      const stored = { ...rule } as ConformanceRule & { revision?: string };
+      delete stored.revision;
+      await this.core.upsertConformanceRule(JSON.stringify(stored));
+    });
   }
 
   /**
@@ -3750,11 +3772,13 @@ export class CoreAdapter {
 
   /** Withdraw a conformance rule from recall. Same contract as {@link retirePolicy}. */
   async retireConformanceRule(id: string): Promise<boolean> {
-    const retire = this.core.retireConformanceRule;
-    if (typeof retire !== 'function') {
-      throw new Error('Retiring a conformance rule is not yet supported by this wicked-core build');
-    }
-    return JSON.parse(await retire.call(this.core, id)) as boolean;
+    return this.ruleExclusively(id, async () => {
+      const retire = this.core.retireConformanceRule;
+      if (typeof retire !== 'function') {
+        throw new Error('Retiring a conformance rule is not yet supported by this wicked-core build');
+      }
+      return JSON.parse(await retire.call(this.core, id)) as boolean;
+    });
   }
 
   /** Recall conformance rules matching a facet query (read-only, does not block actor). */

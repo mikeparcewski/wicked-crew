@@ -461,6 +461,19 @@ function lineOfSymbol(lines: readonly string[], symbol: string): number {
   return 0;
 }
 
+/** crew#1357: keep body citations when indentation still places the whole range in this block. */
+function insideBlockOf(lines: readonly string[], d: number, end: number): boolean {
+  const indent = (line: string): number => line.length - line.trimStart().length;
+  const base = indent(lines[d - 1]!);
+  for (let k = d; k < end; k++) {
+    const line = lines[k]!;
+    const text = line.trim();
+    if (text === '' || indent(line) > base || text === '{' || text.startsWith(')')) continue;
+    return false;
+  }
+  return true;
+}
+
 /**
  * Verify every citation in a reply, bounded. Never throws: a broken root, an unreadable file or a
  * git that is not there is a verdict (`unverified` / `unchecked`), not an error.
@@ -756,6 +769,14 @@ export async function verifyCitations(
     const re = new RegExp(`\\b${c.symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
     if (lines.slice(line - 1, end).some((l) => re.test(l))) {
       items.push({ raw: c.raw, kind: 'line', status: 'verified', ...foundAt });
+      continue;
+    }
+    // crew#1357: the nearest mention may introduce the body this line describes.
+    let d = line - 1;
+    while (d > 0 && !re.test(lines[d - 1]!)) d--;
+    if (d > 0 && insideBlockOf(lines, d, end)) {
+      const inside = `inside ${c.symbol} (from line ${d})`;
+      items.push({ raw: c.raw, kind: 'line', status: 'verified', note: 'note' in foundAt ? `${foundAt.note}; ${inside}` : inside });
       continue;
     }
     const actual = lineOfSymbol(lines, c.symbol);
