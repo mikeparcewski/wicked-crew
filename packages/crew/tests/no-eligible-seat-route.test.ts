@@ -28,11 +28,11 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { NoEligibleSeatBody } from 'wicked-crew-api-types';
 
-import type { CoreAdapter } from '../src/core/adapter.js';
+import { CoreAdapter } from '../src/core/adapter.js';
 import type { LaunchRunInput } from '../src/core/types.js';
 import { createServer } from '../src/api/server.js';
 import {
@@ -81,6 +81,7 @@ function stubAdapter(dbPath: string): CoreAdapter {
 }
 
 beforeAll(async () => {
+  vi.spyOn(CoreAdapter, 'judgeCoverage').mockReturnValue(JSON.stringify({ covered: false, singleIdentity: true, authors: [{ seat: 'claude', judges: [], notJudges: [] }], benched: [] }));
   scratch = mkdtempSync(join(tmpdir(), 'crew-no-eligible-seat-route-'));
   const home = join(scratch, 'state-home');
   mkdirSync(home, { recursive: true });
@@ -105,6 +106,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  vi.restoreAllMocks();
   await app.close();
   if (savedSnapshot === undefined) delete process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
   else process.env[SKILLS_SNAPSHOT_ENGINE_ENV] = savedSnapshot;

@@ -26,7 +26,7 @@ import { McpRegistry } from '../src/mcp/registry.js';
 import { McpRegistryStore } from '../src/mcp/registry-store.js';
 import type { SecretStore } from '../src/mcp/secrets.js';
 import { yamlQuotedBody } from '../src/knowledge/adapters/toolbox/document.js';
-import { ToolboxSupervisor } from '../src/knowledge/adapters/toolbox/supervisor.js';
+import { ToolboxSupervisor, type SupervisorDeps } from '../src/knowledge/adapters/toolbox/supervisor.js';
 import { DataGate } from '../src/knowledge/gate/gate.js';
 import { SourceReadLog } from '../src/knowledge/gate/record.js';
 import { registerGateRoutes } from '../src/knowledge/gate/routes.js';
@@ -143,7 +143,7 @@ function toolboxRecord(name: string, id: string): Record<string, unknown> {
   };
 }
 
-async function rig(): Promise<Rig> {
+async function rig({ deadlineMs = 1_500, ...memory }: Pick<SupervisorDeps, 'memoryBytes' | 'memoryOf'> & { deadlineMs?: number } = {}): Promise<Rig> {
   const base = mkdtempSync(join(tmpdir(), 'kd-b2-gate-'));
   const mcpDir = join(base, 'mcp');
   mkdirSync(mcpDir, { recursive: true });
@@ -179,7 +179,7 @@ async function rig(): Promise<Rig> {
   };
   let onBrokerRecord: (() => Promise<void>) | null = null;
   const calls = new McpCallRecordFile(mcpDir);
-  const sup = new ToolboxSupervisor({ binary: async () => bin, runRoot: join(mcpDir, 'adapters', 'toolbox', 'run') });
+  const sup = new ToolboxSupervisor({ ...memory, binary: async () => bin, runRoot: join(mcpDir, 'adapters', 'toolbox', 'run') });
   const texts: string[] = [];
   let afterRead: (() => Promise<void>) | null = null;
   const gate = new DataGate({
@@ -191,7 +191,7 @@ async function rig(): Promise<Rig> {
     resolver,
     lister,
     toolbox: sup,
-    deadlineMs: 1_500,
+    deadlineMs,
     recheckMs: 60_000,
     omitStatementTimeout: (id) => id === NODL_ID,
     onText: (t) => texts.push(t),
@@ -626,4 +626,47 @@ describe.skipIf(process.platform === 'win32')('the gate on a Toolbox-runtime sou
     expect(existsSync(join(r.base, 'audit.log'))).toBe(true);
     void randomUUID;
   });
+});
+
+
+describe('Toolbox host memory bound (crew#1320)', () => {
+  it('reads this process memory and returns null for an exited pid', async () => {
+    const { processMemory } = await import('../src/knowledge/adapters/toolbox/memory.js');
+    const { spawn } = await import('node:child_process');
+    expect(await processMemory(process.pid)).toBeGreaterThan(0);
+    const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    const pid = child.pid!;
+    await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+    expect(await processMemory(pid)).toBeNull();
+  });
+
+  for (const missing of [false, true]) {
+    it.skipIf(process.platform === 'win32')(missing ? 'refuses an unreadable memory sample and recovers' : 'kills a growing adapter before the deadline and the next read answers', async () => {
+      let unreadable = false;
+      const r = await rig({ deadlineMs: 20_000, ...(missing ? { memoryOf: async () => unreadable ? null : 1 } : { memoryBytes: 160 * 1024 * 1024 }) });
+      try {
+        expect((await r.app.inject({ method: 'POST', url: '/api/v1/sources/tb/test' })).json()).toMatchObject({ ok: true });
+        await put(r, 'tb', { projects: ['proj_a'], query: true });
+        const before = r.sup.current(TB_ID)?.pid ?? null;
+        expect(alive(before)).toBe(true);
+        unreadable = missing;
+        const started = Date.now();
+        const res = await call(r, 'wmt_a', 'mcp:tb/execute_sql', { sql: `SELECT t.a FROM s.t AS t WHERE t.b = '${missing ? 'HANG' : 'GROW'}'` });
+        unreadable = false;
+        expect(res.answer).toMatchObject({
+          refused: 'too_large',
+          reason: missing
+            ? "crew could not read the source's adapter memory, so the read was stopped"
+            : "the source's adapter passed its 160 MiB memory bound, so the read was stopped",
+        });
+        expect(Date.now() - started).toBeLessThan(10_000);
+        await until(() => !alive(before));
+        expect((await call(r, 'wmt_a', 'mcp:tb/execute_sql', { sql: Q })).answer).toMatchObject({ rowCount: 2 });
+      } finally {
+        r.sup.stopAll();
+        await r.app.close();
+        rmSync(r.base, { recursive: true, force: true });
+      }
+    }, 20_000);
+  }
 });

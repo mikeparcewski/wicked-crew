@@ -128,7 +128,7 @@ function repos() {
       default_branch: 'main',
       registered_at: 1,
       code_graph_db: graphFile,
-      ...(alphaFolderGone ? { findings: [{ code: REPO_FOLDER_MISSING, message: repoFolderMissingMessage('/srv/repos/alpha'), path: '/srv/repos/alpha' }] } : {}),
+      ...(alphaFolderGone ? { findings: [{ code: REPO_FOLDER_MISSING, message: repoFolderMissingMessage('/srv/repos/alpha', 'alpha'), path: '/srv/repos/alpha' }] } : {}),
     },
   ];
 }
@@ -435,7 +435,7 @@ describe('ASK-C1 — an ask starts a path: the open records eligibility and a ch
     alphaFolderGone = true;
     const res = await open({ chatId: 'gone-now', clis: ['claude'], repoRefs: ['alpha'] });
     expect(res.statusCode).toBe(409);
-    expect(res.json()).toEqual({ error: repoFolderMissingMessage('/srv/repos/alpha'), code: REPO_FOLDER_MISSING, path: '/srv/repos/alpha' });
+    expect(res.json()).toEqual({ error: repoFolderMissingMessage('/srv/repos/alpha', 'alpha'), code: REPO_FOLDER_MISSING, path: '/srv/repos/alpha' });
     expect(chatOpen).not.toHaveBeenCalled();
   });
 

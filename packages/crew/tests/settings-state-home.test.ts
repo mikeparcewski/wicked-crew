@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CoreAdapter, settingsFilePath } from '../src/core/adapter.js';
+import { CoreAdapter, readNewWorkSeats, settingsFilePath } from '../src/core/adapter.js';
 import { crewStateHome, defaultStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import { isRegisteredStateHomeEntry } from '../src/projects/state-home-registry.js';
 import { removeScratch } from './setup/scratch.js';
@@ -97,6 +97,7 @@ describe('system settings follow the state home (crew#756)', () => {
     const a = new CoreAdapter({ dbPath: join(dir, 'iso', 'core.db'), stub: true });
     try {
       setCrewStateHome(join(dir, 'iso'));
+      await expect(readNewWorkSeats()).resolves.toBeNull();
       await a.getSettings();
       expect(JSON.parse(readFileSync(join(dir, 'iso', 'daemon-settings.json'), 'utf8'))).toEqual({});
       const shared = join(dir, 'home', '.config/wicked-core', 'settings.json');
@@ -108,15 +109,20 @@ describe('system settings follow the state home (crew#756)', () => {
     }
   });
 
-  it('a shared file that is not valid JSON is never copied as the seed; the home starts empty (Copilot)', async () => {
+  it('a corrupt shared file refuses new work without seeding, then retries after repair', async () => {
     const shared = join(dir, 'home', '.config/wicked-core', 'settings.json');
     mkdirSync(join(shared, '..'), { recursive: true });
-    writeFileSync(shared, '{"graphNodeLimit": 4');
+    writeFileSync(shared, '{"newWorkSeats": ["claude"');
     const a = new CoreAdapter({ dbPath: join(dir, 'iso2', 'core.db'), stub: true });
     try {
       setCrewStateHome(join(dir, 'iso2'));
-      await a.getSettings();
-      expect(JSON.parse(readFileSync(join(dir, 'iso2', 'daemon-settings.json'), 'utf8'))).toEqual({});
+      await expect(readNewWorkSeats()).rejects.toMatchObject({ code: 'settings_unavailable', message: expect.stringContaining(shared) });
+      expect(existsSync(settingsFilePath())).toBe(false);
+      await expect(a.getSettings()).resolves.toHaveProperty('graphNodeLimit');
+      expect(existsSync(settingsFilePath())).toBe(false);
+      writeFileSync(shared, JSON.stringify({ newWorkSeats: ['claude'] }));
+      await expect(readNewWorkSeats()).resolves.toEqual(['claude']);
+      expect(JSON.parse(readFileSync(settingsFilePath(), 'utf8'))).toEqual({ newWorkSeats: ['claude'] });
     } finally {
       a.close();
     }

@@ -277,6 +277,7 @@ describe('dialFetch: the request reaches the checked address, or nothing at all'
       ['deflate', deflateRawSync(json)],
       ['deflate', deflateSync(json)], // zlib-wrapped
       ['gzip', Buffer.alloc(0)],
+      ['deflate', Buffer.alloc(0)],
     ];
     for (const [enc, body] of cases) {
       const { port } = await httpServer((_req, res) => {
@@ -388,7 +389,7 @@ describe('dialFetch: the request reaches the checked address, or nothing at all'
     await closed;
   });
 
-  it('an abort while waiting for a deflate answer\'s first byte rejects and closes the connection (codex r4)', async () => {
+  it('crew#1298: deflate headers arrive before the first body byte; an abort errors the body and closes the connection', async () => {
     let socketClosed: () => void = () => undefined;
     const closed = new Promise<void>((r) => (socketClosed = r));
     const { port } = await httpServer((req, res) => {
@@ -397,10 +398,13 @@ describe('dialFetch: the request reaches the checked address, or nothing at all'
       res.flushHeaders(); // headers now, body never
     });
     const ctrl = new AbortController();
-    const pending = dialFetch(`http://127.0.0.1:${port}/`, { signal: ctrl.signal }, LOOPBACK).then(() => 'answered', (e: unknown) => (e as Error).message);
-    await new Promise((r) => setTimeout(r, 200));
+    const pending = dialFetch(`http://127.0.0.1:${port}/`, { signal: ctrl.signal }, LOOPBACK);
+    const answer = await Promise.race([pending, new Promise<null>((r) => setTimeout(() => r(null), 200))]);
     ctrl.abort(new Error('deadline'));
-    expect(await pending).toBe('deadline');
+    // Consume the rejected call on old code too, so the red run has no unhandled rejection.
+    await pending.catch(() => undefined);
+    expect(answer?.status).toBe(200);
+    await expect(answer!.text()).rejects.toThrow('deadline');
     await closed;
   });
 

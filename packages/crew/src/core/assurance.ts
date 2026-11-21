@@ -1,97 +1,96 @@
 /**
- * The launcher's half of the engine's assurance contract (wicked-core#850, codex audit EX-01/EX-02;
- * wicked-core-ts >= 0.7.46).
- *
- * The engine refuses, by default, to let a run grade itself: an evaluator unit is never seated on
- * the seat that built what it checks (EX-01: refused at distribution, the run parks at the
- * `dead_seat` gate), and a gate whose judge could not run on a seat distinct from the work's author
- * HOLDS (EX-02: `judge_unavailable`). The explicit opt-out is `LaunchOptions.reducedAssurance`: the
- * creator's seat may then evaluate and a judge-less gate may pass, both disclosed on every receipt.
- *
- * A roster of ONE CLI cannot satisfy either requirement — there is no other seat to evaluate and no
- * other identity to judge. That is the one-CLI quickstart (`npx wicked-crew serve` with only Claude
- * Code signed in). crew never chooses for the caller: a launch on such a roster that did not opt in
- * runs under full assurance (the engine holds it for a distinct seat), and its 201 answer carries
- * {@link LaunchAssuranceNotice} naming the seat and the explicit opt-in to relaunch with.
+ * Full assurance refuses self-evaluation and holds a gate with no judge. Crew asks the engine's
+ * `Core.judgeCoverage` for the launch roster and binding; it never predicts the judge pool itself.
+ * `single_cli_roster` means every work seat is one CLI identity; other uncovered pools receive
+ * `no_independent_judge`. A person can sign in another CLI or explicitly choose reduced assurance.
  */
 
-/** `LaunchRunResponse.assuranceNotice.code`: every work seat of the launch's roster is one CLI identity. */
-export const SINGLE_CLI_ROSTER_CODE = 'single_cli_roster' as const;
-
-/**
- * A seat's JUDGE identity, the engine's rule (wicked-core `validator::seat_identity`): the basename of
- * its headless invocation's argv[0], case-folded — so `claude` and `claude-sonnet`, both invoking
- * `claude`, are ONE identity. `null` for a seat with no invocation: the engine never judges on it.
- */
-export function seatIdentity(seat: { headless_invocation?: unknown }): string | null {
-  const inv = typeof seat.headless_invocation === 'string' ? seat.headless_invocation.trim() : '';
-  const argv0 = inv.split(/\s+/, 1)[0] ?? '';
-  if (argv0 === '') return null;
-  return (argv0.split(/[\\/]/).pop() ?? argv0).toLowerCase();
+/** The engine's judge pool, read for the exact roster and repository binding of a launch. */
+export interface JudgeCoverage {
+  covered: boolean;
+  singleIdentity: boolean;
+  authors: Array<{
+    seat: string;
+    judges: Array<{ seat: string; seenSharing?: string }>;
+    notJudges: Array<{ seat: string; reason: string; detail?: string }>;
+  }>;
+  benched: Array<{ seat: string; reason: string; detail?: string }>;
 }
 
-/**
- * The seats of the roster crew hands the engine (`engineRosterJson` output) that can do WORK — and
- * so evaluate or judge — with their identities. Excluded: a seat the launcher benched
- * (`health.usable === false`) and a ballot-only seat (`seat_eligible_for_work === false`, which the
- * engine never routes work or a judge to). A seat with no `health` is usable (the engine treats it as
- * eligible). `null` when the roster does not parse as an array of keyed seats: the engine reports its
- * own parse error, crew does not predict around it.
- */
-export function workSeats(engineClisJson: string): Array<{ key: string; identity: string | null }> | null {
-  let parsed: unknown;
+/** Unknown coverage stays unknown: crew never predicts the engine's judge pool itself. */
+export function readJudgeCoverage(
+  engineClisJson: string,
+  bound: boolean,
+  predicate: (clisJson: string, bound: boolean) => string | null,
+): JudgeCoverage | null {
   try {
-    parsed = JSON.parse(engineClisJson);
+    const raw = predicate(engineClisJson, bound);
+    if (raw === null) return null;
+    const value: unknown = JSON.parse(raw);
+    const object = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
+    const seat = (v: unknown): v is Record<string, unknown> => object(v) && typeof v['seat'] === 'string' && v['seat'] !== '';
+    const reason = (v: unknown): boolean => seat(v) && typeof v['reason'] === 'string' && (v['detail'] === undefined || typeof v['detail'] === 'string');
+    if (!object(value) || typeof value['covered'] !== 'boolean' || typeof value['singleIdentity'] !== 'boolean' ||
+      !Array.isArray(value['authors']) || !Array.isArray(value['benched']) || !value['benched'].every(reason)) return null;
+    for (const author of value['authors']) {
+      if (!seat(author) || !Array.isArray(author['judges']) || !Array.isArray(author['notJudges']) ||
+        !author['notJudges'].every(reason) || !author['judges'].every((j: unknown) => seat(j) && (j['seenSharing'] === undefined || typeof j['seenSharing'] === 'string'))) return null;
+    }
+    return value as unknown as JudgeCoverage;
   } catch {
     return null;
   }
-  if (!Array.isArray(parsed)) return null;
-  const seats: Array<{ key: string; identity: string | null }> = [];
-  for (const seat of parsed) {
-    if (typeof seat !== 'object' || seat === null) return null;
-    const s = seat as { key?: unknown; headless_invocation?: unknown; health?: { usable?: unknown }; seat_eligible_for_work?: unknown };
-    if (typeof s.key !== 'string' || s.key === '') return null;
-    if (s.health?.usable === false || s.seat_eligible_for_work === false) continue;
-    seats.push({ key: s.key, identity: seatIdentity({ headless_invocation: s.headless_invocation }) });
-  }
-  return seats;
 }
 
-/** `LaunchRunResponse.assuranceNotice` (api-types 0.102.0). */
+export const SINGLE_CLI_ROSTER_CODE = 'single_cli_roster' as const;
+
+/** An uncovered launch's disclosure and explicit way to relaunch with fewer checks. */
 export interface LaunchAssuranceNotice {
-  code: typeof SINGLE_CLI_ROSTER_CODE;
+  /** One CLI identity across work seats, or another lack of independent judges. */
+  code: typeof SINGLE_CLI_ROSTER_CODE | 'no_independent_judge';
+  /** What full assurance will hold and how the person can proceed. */
   message: string;
-  /** The seats that can work — all one CLI identity. */
+  /** Keys of seats that can author work on this run. */
   seats: string[];
-  /** Relaunch with these fields to accept reduced assurance (`retryOf` names this run). */
+  /** Merge into a new launch only when the person chooses reduced assurance. */
   retryWith: { retryOf: string; reducedAssurance: true };
 }
 
-/**
- * The notice a full-assurance launch on a one-CLI roster answers with; `null` when the launch opted
- * in, or its roster has work seats of two CLI identities (or none the launcher could read).
- */
+/** One sentence for a chat card, using the engine's reasons rather than promising a judge. */
+export function coverageNote(coverage: JudgeCoverage | null, nameOf: (key: string) => string = (key) => key): string | null {
+  if (coverage === null || coverage.covered || coverage.authors.length === 0) return null;
+  const reasons = new Set<string>();
+  for (const author of coverage.authors) {
+    for (const other of author.notJudges) {
+      if (other.reason === 'same_identity') reasons.add(`${nameOf(other.seat)} runs the same CLI as ${nameOf(author.seat)}`);
+      else if (other.reason === 'benched') reasons.add(`${nameOf(other.seat)} cannot check it: ${other.detail ?? 'it cannot work on this run'}`);
+      else reasons.add(`${nameOf(other.seat)} cannot check work on this run`);
+    }
+    for (const judge of author.judges) {
+      if (judge.seenSharing !== undefined) reasons.add(`${nameOf(judge.seat)} was seen calling ${judge.seenSharing}, as was ${nameOf(author.seat)}`);
+    }
+  }
+  return `These seats cannot independently check one another's work${reasons.size > 0 ? `: ${[...reasons].join('; ')}` : ''}; the run may wait for a person at a gate.`;
+}
+
 export function launchAssuranceNotice(opts: {
   runId: string;
   reducedAssurance: boolean | undefined;
-  engineClisJson: string;
+  coverage: JudgeCoverage | null;
 }): LaunchAssuranceNotice | null {
   if (opts.reducedAssurance === true) return null;
-  const seats = workSeats(opts.engineClisJson);
-  if (seats === null || seats.length === 0) return null;
-  // Judge identities: a seat with no invocation can work but never judge (codex r3).
-  const identities = new Set(seats.flatMap((s) => (s.identity === null ? [] : [s.identity])));
-  if (identities.size > 1) return null;
-  const cli = [...identities][0] ?? seats[0]!.key;
-  const usable = seats.map((s) => s.key);
+  const note = coverageNote(opts.coverage);
+  if (note === null || opts.coverage === null) return null;
+  const seats = opts.coverage.authors.map((s) => s.seat);
   return {
-    code: SINGLE_CLI_ROSTER_CODE,
-    message:
-      `Every seat that can work runs ${cli} (${usable.join(', ')}), so no other CLI can evaluate or judge this run's ` +
-      `work. Under full assurance the engine refuses a review on its builder's seat and holds a gate that needs a ` +
-      `judge, so if this run reviews or changes code it will wait at a gate for a distinct seat. Sign a second CLI ` +
-      `in, or relaunch with "reducedAssurance": true to let ${cli} evaluate its own work, disclosed on every receipt.`,
-    seats: usable,
+    code: opts.coverage.singleIdentity ? SINGLE_CLI_ROSTER_CODE : 'no_independent_judge',
+    message: opts.coverage.singleIdentity
+      ? `Every seat that can work (${seats.join(', ')}) runs the same CLI, so no other CLI can evaluate or judge this run's ` +
+        `work. Under full assurance the engine refuses a review on its builder's seat and holds a gate that needs a ` +
+        `judge, so if this run reviews or changes code it will wait at a gate for a distinct seat. Sign a second CLI ` +
+        `in, or relaunch with "reducedAssurance": true to let it evaluate its own work, disclosed on every receipt.`
+      : `${note} Sign in a seat of another CLI, or relaunch with "reducedAssurance": true.`,
+    seats,
     retryWith: { retryOf: opts.runId, reducedAssurance: true },
   };
 }

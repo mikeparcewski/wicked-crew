@@ -90,9 +90,11 @@ export function pgClient(args: SqlConnectArgs, opts: { deadlineMs?: number; read
     max: 1,
     prepare: false,
     fetch_types: false,
-    idle_timeout: 5,
+    // Hand-run transactions own this client for one call and close it in finally. Pool timers
+    // must not end an idle transaction and dispatch its next statement on another connection.
+    idle_timeout: opts.onclose !== undefined ? 0 : 5,
     connect_timeout: 10,
-    max_lifetime: 60,
+    max_lifetime: opts.onclose !== undefined ? 0 : 60,
     onnotice: () => undefined,
     ...(opts.onclose !== undefined ? { onclose: opts.onclose } : {}),
     connection: params,
@@ -132,7 +134,7 @@ export function pgClient(args: SqlConnectArgs, opts: { deadlineMs?: number; read
 /** Map a postgres.js / server error to a {@link SourceQueryError}. */
 export function pgError(err: unknown): SourceQueryError {
   if (err instanceof SourceQueryError) return err;
-  if (err instanceof DialRefusedError) return new SourceQueryError(null, 'refused', err.message, err.code);
+  if (err instanceof DialRefusedError) return new SourceQueryError(null, 'refused', err.message, err.code, err.detail);
   const e = err as { code?: unknown; message?: unknown };
   const code = typeof e?.code === 'string' ? e.code : null;
   const message = typeof e?.message === 'string' ? e.message : String(err);
@@ -323,6 +325,8 @@ export async function pgRead(
   params: unknown[],
   opts: ReadOptions & {
     expect?: readonly RelationExpectation[];
+    /** TESTS ONLY: attach a partition between the first live check and the statement. */
+    afterExpect?: () => Promise<void>;
     /**
      * (DES-KNOWLEDGE-DATA-001 §6.3) The gate's per-cell projection: `text` is prepared (never executed) INSIDE
      * the read's transaction, after the live relation checks took their locks, and `shape` turns the columns
@@ -363,6 +367,7 @@ export async function pgRead(
         await tx.unsafe(`SET LOCAL work_mem = '${AGENT_WORK_MEM}'`);
       }
       if (opts.expect !== undefined) await pgExpectRelations(tx, opts.expect);
+      await opts.afterExpect?.();
       let run = text;
       let described: SqlColumn[] | null = null;
       if (opts.shape !== undefined) {
@@ -394,6 +399,9 @@ export async function pgRead(
         }
         return undefined;
       });
+      // ACCESS SHARE permits ATTACH PARTITION. Check again after the cursor, while the relations
+      // it read are still held, so a newly attached foreign partition never supplies an answer.
+      if (opts.expect !== undefined) await pgExpectRelations(tx, opts.expect);
       // A read with no rows never calls the cursor back: its columns are on the prepared statement.
       if (columns.length === 0) columns = (query as unknown as { statement?: { columns?: Array<{ name: string; type: number }> } }).statement?.columns ?? [];
       if (described !== null) return { columns: described, rows, truncated };

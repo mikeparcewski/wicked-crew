@@ -12,9 +12,10 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { ChatProposalView } from 'wicked-crew-api-types';
 
+import { engineRosterJson } from '../src/core/engine-roster.js';
 import { createServer } from '../src/api/server.js';
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
-import type { CoreAdapter } from '../src/core/adapter.js';
+import { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, LaunchRunInput } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
@@ -50,6 +51,7 @@ describe("a chat job's Start hands the engine the card's seats, even when they e
   let home: string;
   let app: FastifyInstance;
   const launches: LaunchRunInput[] = [];
+  let launchRefused = false;
   const runs: string[] = [];
   const listeners: Array<(e: CoreEvent) => void> = [];
   /** The seats signed in; every other seat reads signed out. */
@@ -70,6 +72,7 @@ describe("a chat job's Start hands the engine the card's seats, even when they e
     projectList: async () => [],
     projectMembers: async () => [],
     launchRun: async (input: LaunchRunInput) => {
+      if (launchRefused) throw new Error(`no eligible seat for ${input.sessionId}: 1 of 1 seats benched: claude (signed out — launcher) — sign a seat in, or add one, before launching`);
       launches.push(input);
       const id = input.sessionId ?? `run-${launches.length}`;
       runs.push(id);
@@ -90,6 +93,7 @@ describe("a chat job's Start hands the engine the card's seats, even when they e
   }) as unknown as CoreAdapter;
 
   beforeAll(async () => {
+    vi.spyOn(CoreAdapter, 'judgeCoverage').mockReturnValue(JSON.stringify({ covered: true, singleIdentity: false, authors: [], benched: [] }));
     scratch = mkdtempSync(join(tmpdir(), 'chat-job-launch-roster-'));
     home = join(scratch, 'state-home');
     mkdirSync(home);
@@ -109,6 +113,7 @@ describe("a chat job's Start hands the engine the card's seats, even when they e
   }, 150_000);
 
   afterAll(async () => {
+    vi.restoreAllMocks();
     await app.close();
     setCrewStateHome(armedStateHome);
     removeScratch(scratch);
@@ -128,6 +133,7 @@ describe("a chat job's Start hands the engine the card's seats, even when they e
     expect(p.seats?.keys).toEqual(['claude', 'codex', 'pi']);
     expect(p.blocked, JSON.stringify(p)).toBeNull();
 
+    const shownCoverage = vi.mocked(CoreAdapter.judgeCoverage).mock.calls.at(-1);
     // A fourth seat is added while the launch waits for the roster to be ready.
     duringReadiness = () => {
       lateAdded = true;
@@ -140,8 +146,34 @@ describe("a chat job's Start hands the engine the card's seats, even when they e
       lateAdded = false;
     }
     const launched = launches.at(-1)!;
+    expect(shownCoverage).toEqual([engineRosterJson(launched.clisJson!), true]);
     expect(launched.clisJson, 'the launch carries the card\'s roster').toBeDefined();
     expect((JSON.parse(launched.clisJson!) as Array<{ key: string }>).map((s) => s.key)).toEqual(['claude', 'codex', 'pi']);
+  });
+
+  it('a typed launch refusal passes through the dispatcher and Start can retry with reduced assurance', async () => {
+    const chatId = 'launch-roster-refused';
+    const opened = await app.inject({ method: 'POST', url: '/api/v1/chats', payload: { chatId, clis: ['claude', 'codex', 'pi'], repoRefs: ['r-crew'], accepts: ['job'] } });
+    expect(opened.statusCode, opened.body).toBe(201);
+    const sent = await app.inject({ method: 'POST', url: `/api/v1/chats/${chatId}/messages`, payload: { text: 'the login page fails' } });
+    expect(sent.statusCode, sent.body).toBe(202);
+    for (const fn of listeners) fn({ type: 'chatReply', chat: chatId, cliKey: 'claude', text: 'Looks like a bug.', ok: true } as unknown as CoreEvent);
+    await new Promise((r) => setTimeout(r, 50));
+    const made = await app.inject({ method: 'POST', url: `/api/v1/chats/${chatId}/proposals`, payload: { card: 'bug', source: 'pick', requestId: 'r1', words: 'the login page fails' } });
+    expect(made.statusCode, made.body).toBe(201);
+    const p = (made.json() as { view: ChatProposalView }).view.proposal;
+    const url = `/api/v1/chats/${chatId}/proposals/${encodeURIComponent(p.pid)}`;
+    const before = launches.length;
+    launchRefused = true;
+    try {
+      const refused = await app.inject({ method: 'POST', url, payload: { decision: 'go' } });
+      expect(refused.statusCode, refused.body).toBe(409);
+      expect(refused.json()).toMatchObject({ code: 'no_eligible_seat', view: { state: 'open' } });
+      expect(launches).toHaveLength(before);
+    } finally { launchRefused = false; }
+    const retried = await app.inject({ method: 'POST', url, payload: { decision: 'go', reducedAssurance: true } });
+    expect(retried.statusCode, retried.body).toBe(200);
+    expect(launches.at(-1)?.reducedAssurance).toBe(true);
   });
 
   // (coord merge check on 684bb5c, codex repro) The card's seats say WHICH seats, never that they are usable now: the

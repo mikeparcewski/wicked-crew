@@ -429,6 +429,13 @@ class KeyedLock {
   }
 }
 
+/** A launch refused before starting anything; the caller can correct the open card and try again. */
+export class LaunchRefusal extends Error {
+  constructor(readonly status: number, readonly body: Record<string, unknown> & { code: string }) {
+    super(typeof body['error'] === 'string' ? body['error'] : 'The launch was refused.');
+  }
+}
+
 /**
  * DES §4.3 step 3: ONE launcher per run id. `launchOnce` takes the run id's lock, asks the operation's launcher whether
  * that run exists (adopt), and starts it only if not — so a retry, a second tab and a late bus trigger (A3 calls this
@@ -628,6 +635,8 @@ export type HeldPlan =
   | { state: 'running' | 'ended' };
 
 export interface ChatProposalDeps {
+  /** Ask the engine about judges for these seats and binding, retaining a reshape's launch configuration. */
+  coverage?: (keys: readonly string[], bound: boolean, relaunch?: ArtifactProposal['relaunch']) => import('../core/assurance.js').JudgeCoverage | null;
   /** The operations crew advertises (and `proposals`). */
   flags(): ChatArtifactsCapabilities;
   /**
@@ -1478,7 +1487,7 @@ export class ChatProposals {
    * instance those checks passed against: nothing is read for, or written to, a chat that reused the id since. One
    * lock per proposal: a second tab or a double click waits for the first and gets its result.
    */
-  decide(chatId: string, pid: string, body: { decision: 'go' | 'not_now'; edits?: ProposalEdits | undefined; power?: boolean | undefined }, actor: Actor, instance: string | null): Promise<DecideResult> {
+  decide(chatId: string, pid: string, body: { decision: 'go' | 'not_now'; edits?: ProposalEdits | undefined; power?: boolean | undefined; reducedAssurance?: boolean | undefined }, actor: Actor, instance: string | null): Promise<DecideResult> {
     // Keyed by the pid alone (it is unique: `<chat>:<turn uuid>`), so the same proposal answered through an ended chat's
     // archived alias still waits for an in-flight answer through its first name.
     return this.lock.run(`pid\u0000${pid}`, () => this.decideLocked(chatId, pid, body, actor, instance)).then((r) => this.served(r));
@@ -1488,7 +1497,7 @@ export class ChatProposals {
     return { code: 409, body: { code: 'chat_gone', error: `chat ${chatId} ended and its id was reused; this proposal can no longer be answered here` } };
   }
 
-  private async decideLocked(chatId: string, pid: string, body: { decision: 'go' | 'not_now'; edits?: ProposalEdits | undefined; power?: boolean | undefined }, actor: Actor, instance: string | null): Promise<DecideResult> {
+  private async decideLocked(chatId: string, pid: string, body: { decision: 'go' | 'not_now'; edits?: ProposalEdits | undefined; power?: boolean | undefined; reducedAssurance?: boolean | undefined }, actor: Actor, instance: string | null): Promise<DecideResult> {
     if (this.deps.instanceOf(chatId) !== instance) return this.gone(chatId);
     const records = this.deps.records(chatId);
     const folded = foldProposals(records).get(pid);
@@ -1497,6 +1506,9 @@ export class ChatProposals {
     // (api-types 0.196.0) How it runs is a job's Start's choice, and nothing else's.
     if (body.power !== undefined && (kind !== 'job' || body.decision !== 'go')) {
       return { code: 400, body: { code: 'power_not_applicable', error: kind !== 'job' ? 'only a job runs as a power run' : 'how a job runs is chosen with Start, not Not now' } };
+    }
+    if (body.reducedAssurance !== undefined && (kind !== 'job' || body.decision !== 'go')) {
+      return { code: 400, body: { code: 'reduced_assurance_not_applicable', error: kind !== 'job' ? 'only a job can start with fewer checks' : 'choose fewer checks with Start' } };
     }
     const reread = (): FoldedProposal => foldProposals(this.deps.records(chatId)).get(pid) ?? folded;
     const ok = (f: FoldedProposal): DecideResult => ({ code: 200, body: { view: viewOf(f) } });
@@ -1527,6 +1539,15 @@ export class ChatProposals {
         const stale = await this.lock.run(`chat\u0000${instance ?? chatId}`, () => this.jobStale(chatId, folded, instance));
         if (stale !== null) return stale;
       }
+      if (kind === 'job') {
+        const can = new Set(this.deps.rosterEligible().map((s) => s.key));
+        const lost = (acc.resolution.seats?.keys ?? []).filter((k) => !can.has(k));
+        if (lost.length > 0) {
+          const reopened = this.reopenLaunch(chatId, folded, acc.resolution, instance);
+          if (reopened === null) return this.gone(chatId);
+          return { code: 409, body: { code: 'helper_unavailable', error: `${lost.join(' and ')} can't work now; change who works on it`, view: viewOf(reopened) } };
+        }
+      }
       // Go again: the frozen choices and identity, re-checked. Only the helpers may change (one may have signed out
       // since); everything else stays as accepted.
       let again = acc.resolution;
@@ -1541,6 +1562,7 @@ export class ChatProposals {
           throw err;
         }
       }
+      if (body.reducedAssurance === true) again = { ...again, reducedAssurance: true };
       return this.go(chatId, folded, again, again === acc.resolution ? acc.edits : { ...(acc.edits ?? {}), ...body.edits }, acc.identity, actor, instance, body.power);
     }
     if (folded.state === 'superseded') {
@@ -1597,6 +1619,7 @@ export class ChatProposals {
     if (effective.blocked !== null) {
       return { code: 409, body: { code: 'proposal_blocked', error: effective.blocked, view: viewOf(folded) } };
     }
+    if (body.reducedAssurance === true) effective = { ...effective, reducedAssurance: true };
     return this.go(chatId, folded, effective, body.edits ?? null, this.identityOf(effective), actor, instance, body.power);
   }
 
@@ -1725,6 +1748,17 @@ export class ChatProposals {
     try {
       result = await this.deps.registry.launchOnce({ kind, pid, chatId, actor, identity, resolution, ...(power !== undefined ? { power } : {}) });
     } catch (err) {
+      if (err instanceof LaunchRefusal) {
+        const reopened = this.reopenLaunch(chatId, folded, resolution, instance);
+        if (reopened === null) return this.gone(chatId);
+        this.deps.audit('chat.proposal.launch_refused', actor, { chatId, pid, code: err.body['code'], error: err.message });
+        return { code: err.status, body: {
+          code: err.body['code'], error: err.message,
+          ...(err.body['excluded'] !== undefined ? { excluded: err.body['excluded'] } : {}),
+          ...(err.body['retryWith'] !== undefined ? { retryWith: err.body['retryWith'] } : {}),
+          view: viewOf(reopened),
+        } };
+      }
       // Accepting stays recorded: the card shows "Interrupted · Go again", which resumes the same identity.
       const msg = err instanceof Error ? err.message : String(err);
       this.deps.audit('chat.proposal.launch_failed', actor, { chatId, pid, error: msg, ...(power !== undefined ? { power } : {}) });
@@ -1734,6 +1768,15 @@ export class ChatProposals {
     if (!this.decided(chatId, folded.turnId, pid, actor, 'go', result, resolution, edits, instance, power)) return this.gone(chatId);
     const after = foldProposals(this.deps.records(chatId)).get(pid) ?? folded;
     return { code: 200, body: { view: viewOf(after) } };
+  }
+
+  private reopenLaunch(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, instance: string | null): FoldedProposal | null {
+    const proposal = { ...resolution };
+    // A Go-only opt-in belongs to that attempt; a reshape card keeps its own prior choice.
+    if (folded.proposal.reducedAssurance === true) proposal.reducedAssurance = true;
+    else delete proposal.reducedAssurance;
+    if (!this.write(chatId, { at: this.now(), turnId: folded.turnId, kind: 'proposal', proposal }, instance)) return null;
+    return foldProposals(this.deps.records(chatId)).get(resolution.pid) ?? null;
   }
 
   /** Record the answer (and audit exactly what was answered); `false` when the chat is no longer this instance. */
@@ -2468,7 +2511,7 @@ export class ChatProposals {
     const qeOff = (await this.deps.qeOff?.().catch(() => false)) === true;
     const powerPresets = (await this.deps.powerPresets?.(chat.projectId).catch(() => null)) ?? null;
     const { eligible: roster, pool, refusal } = await this.seatPool();
-    return { chatId, pid, turnId, seat, chat, served, roster, pool, projectLabel, qeOff, powerPresets, ...extra, ...(refusal !== undefined ? { seatsUnread: true } : {}) };
+    return { chatId, pid, turnId, seat, chat, served, roster, pool, projectLabel, qeOff, powerPresets, ...(this.deps.coverage !== undefined ? { coverage: (keys: readonly string[], bound: boolean) => this.deps.coverage!(keys, bound) } : {}), ...extra, ...(refusal !== undefined ? { seatsUnread: true } : {}) };
   }
 
   /** Source availability matters only to a card that shows this input. Keep a failed read a named refusal. */
@@ -2611,10 +2654,13 @@ export class ChatProposals {
   }
 
   /** Resolve facts to their proposal. `previous` marks a rebuild; null is a held job without a stored parent. */
-  private async proposalOf(chatId: string, pid: string, facts: JobFacts, ctx: JobContext, records: readonly ChatTranscriptRecord[], allowHidden = false, previous?: ArtifactProposal | null): Promise<ArtifactProposal> {
+  private async proposalOf(chatId: string, pid: string, facts: JobFacts, ctx: JobContext, records: readonly ChatTranscriptRecord[], allowHidden = false, previous?: ArtifactProposal | null, relaunch = previous?.relaunch): Promise<ArtifactProposal> {
     const card = CATALOG_V2_CARDS.find((c) => c.id === facts.card);
     const r = card === undefined ? null : resolveOption(card.id, optionFor(card, facts.option), ctx.served);
     await this.loadJobSources(facts, ctx);
+    if (relaunch !== undefined && this.deps.coverage !== undefined) {
+      ctx = { ...ctx, coverage: (keys, bound) => this.deps.coverage!(keys, bound, relaunch) };
+    }
     ctx = await this.reviewRoster(facts, ctx);
     if (r?.resolved.inputs.some((i) => i.id === 'documents')) {
       if (facts.inputs['documents'] === undefined) {
@@ -3074,7 +3120,7 @@ export class ChatProposals {
         });
         if (ctx.seatsUnread) continue;
         const r = resolveOption(p.shape!.card, p.shape!.option, ctx.served);
-        if (r === null || ctx.served.rev !== p.catalogRev || r.resolved.resolution !== p.resolution || p.blocked !== seatsShortLine(r)) continue;
+        if (r === null || ctx.served.rev !== p.catalogRev || r.resolved.resolution !== p.resolution || p.blocked !== seatsShortLine(r, p.seats?.keys.length ?? 0)) continue;
         if ((ctx.pool ?? ctx.roster).length < seatsNeeded(r)) continue;
         const facts = { ...factsOf(p), lead: null, seats: null };
         const fresh = keepReshape(await this.proposalOf(chatId, p.pid, facts, ctx, this.deps.records(chatId), true, p), p);
@@ -3265,7 +3311,7 @@ export class ChatProposals {
             const gone = await this.firstGone(chatId, heldP);
             if (gone !== null) throw new JobRefusal('source_gone', gone, 409);
           }
-          proposal = await this.proposalOf(chatId, x.pid, facts, ctx, this.deps.records(chatId), false, heldP ?? null);
+          proposal = await this.proposalOf(chatId, x.pid, facts, ctx, this.deps.records(chatId), false, heldP ?? null, x.relaunch);
           if (x.edits.inputs?.['documents'] !== undefined) this.refuseStruckDocuments(proposal);
           else if (heldP !== undefined) this.refuseStruckDocuments(proposal, heldP);
         } catch (err) {

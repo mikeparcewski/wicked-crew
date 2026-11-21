@@ -24,6 +24,7 @@
 import { buildClientSchema, type IntrospectionQuery, Kind, parse, validate } from 'graphql';
 
 import type { AppAction, AppCheckFinding, AppParamSchema, AppParamsSchema, AppQuery, AppRowWriteAction, McpToolClass } from '../../core/types.js';
+import { effectiveReadAccepted } from '../../knowledge/registry/entry.js';
 import { canonicalJson, deriveToolClass, effectiveToolClass } from '../../mcp/classify.js';
 import { McpRegistryError, type McpRegistry } from '../../mcp/registry.js';
 import { describeMysql } from '../../sources/catalog/mysql.js';
@@ -46,19 +47,21 @@ import { crewNow, crewValueFits, inputForm, paramFits, writableKind } from '../a
 import { ArgTypeError, checkGraphqlVariables, checkToolArgs, type Provider, providerOf } from './arg-types.js';
 import type { AppSourceStage, AppSourceStageInput, AppSourceStageResult } from '../check.js';
 import { crewQueryContract, recallQueryContract, graphqlMutationContract, graphqlQueryContract, graphqlRootSignatures, paramOrder, relationTerms, rowWriteContract, splitTable, sqlQueryContract, toolActionContract, toolQueryContract } from './contract.js';
-import { lookupSource, pinOf, queryKindFits, type AppSource } from './sources.js';
+import { lookupSource, pinOf, projectMaySee, queryKindFits, type AppSource } from './sources.js';
 import { crewPathValueOk, parseCrewQueryText, parseRecallQueryText, parseToolQueryText, type QueryArg } from './texts.js';
 import { type AppKnowledgeDeps, RecallRefusal, recallProblem, RECALL_COLUMNS, RECALL_GROUP_COLUMNS, visibleSource } from './recall.js';
 
 export interface SourceStageDeps {
   registry: McpRegistry | null;
+  /** (crew#1533) The sources an app's project may see (the knowledge package's `agentMay(…, 'see')` set). */
+  visibleSources: (projectId: string | null) => Promise<ReadonlySet<string>>;
   /**
    * (DES-KNOWLEDGE-DATA-001 §9.1) What a `recall` query is checked against: the registry as the gate reads it and the
    * visible set of the app's project. Absent = this crew checks no recall query (it is refused, never passed).
    */
   knowledge?: Pick<AppKnowledgeDeps, 'sources' | 'visible'>;
   /** The project an app belongs to (crew's app store); `null` = no such app. */
-  projectOf?: (app: string) => string | null;
+  projectOf: (app: string) => string | null;
   /** Tests: how connections resolve. */
   dial?: DialOptions;
   /** Tests: where upload snapshots are. */
@@ -165,6 +168,11 @@ export class AppsSourceStage implements AppSourceStage {
   constructor(private readonly deps: SourceStageDeps) {}
 
   async check(input: AppSourceStageInput): Promise<AppSourceStageResult> {
+    // (crew#1533) The app's project's visible set, read at most once per check and only for a SQL source.
+    const visibleSources = this.deps.visibleSources;
+    let visibleSet: Promise<ReadonlySet<string>> | null = null;
+    const visible = (): Promise<ReadonlySet<string>> => (visibleSet ??= visibleSources(this.deps.projectOf(input.app)));
+    const maySee = (s: AppSource): Promise<boolean> => projectMaySee(s, visible);
     const out: AppSourceStageResult = { findings: [], sources: {}, queries: {}, actions: {}, uploads: {} };
     const sources = new Map<string, Promise<AppSource | null>>();
     const secrets = new Map<string, Promise<string | null>>();
@@ -212,6 +220,7 @@ export class AppsSourceStage implements AppSourceStage {
       try {
         const s = await source(q.source);
         if (s === null) throw new Refused('unknown_source', `no source named ${q.source}`);
+        if (!(await maySee(s))) throw new Refused('unknown_source', `${q.source} is no source this app's project may see`);
         if (!queryKindFits(q.kind, s)) throw new Refused('source_kind', `a ${q.kind} query cannot read ${q.source}, a ${s.kind} source`);
         out.queries[q.id] = await this.query(q, Object.hasOwn(input.queryText, q.id) ? input.queryText[q.id]! : '', s, secretOf, input.app);
         pinSource(s);
@@ -230,6 +239,7 @@ export class AppsSourceStage implements AppSourceStage {
       try {
         const s = await source(a.source);
         if (s === null) throw new Refused('unknown_source', `no source named ${a.source}`);
+        if (!(await maySee(s))) throw new Refused('unknown_source', `${a.source} is no source this app's project may see`);
         out.actions[a.id] = await this.action(a, s, secretOf);
         pinSource(s);
       } catch (err) {
@@ -247,7 +257,7 @@ export class AppsSourceStage implements AppSourceStage {
       const problem = recallProblem(q, parsed.value);
       if (problem !== null) throw new Refused('recall_text', problem, 'spec');
       const knowledge = this.deps.knowledge;
-      const projectId = this.deps.projectOf?.(app) ?? null;
+      const projectId = this.deps.projectOf(app);
       if (knowledge === undefined || projectId === null) throw new Refused('recall_unavailable', 'this crew cannot check a knowledge query (no knowledge plane, or the app has no project)');
       let sourceId: string | null = null;
       if (parsed.value.source !== undefined) {
@@ -283,7 +293,7 @@ export class AppsSourceStage implements AppSourceStage {
       const parsed = parseToolQueryText(text);
       if (!parsed.ok) throw new Refused('query_text', parsed.why, 'spec');
       const t = await this.tool(s, parsed.value.tool);
-      if (classOf(t) !== 'read') throw new Refused('not_a_read', `${s.name}/${parsed.value.tool} is not accepted as a read on the source sheet`);
+      if (classOf(t) !== 'read' || !effectiveReadAccepted(t)) throw new Refused('not_a_read', `${s.name}/${parsed.value.tool} is not accepted as a read on the source sheet`);
       checkToolArgs(providers(parsed.value.args, q.params), t.inputSchema);
       return toolQueryContract(s.kind, t, q.params);
     }

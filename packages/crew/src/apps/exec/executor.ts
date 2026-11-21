@@ -21,7 +21,8 @@ import { createHash } from 'node:crypto';
 
 import { buildClientSchema, getVariableValues, type IntrospectionQuery, Kind, parse } from 'graphql';
 
-import type { Actor, AppCell, AppLock, AppQuery, AppQueryResponse, AppRecallQueryText } from '../../core/types.js';
+import type { Actor, AppCallRecord, AppCell, AppLock, AppQuery, AppQueryResponse, AppRecallQueryText } from '../../core/types.js';
+import { effectiveReadAccepted } from '../../knowledge/registry/entry.js';
 import { canonicalJson, deriveToolClass, effectiveToolClass } from '../../mcp/classify.js';
 import { McpRegistryError } from '../../mcp/registry.js';
 import { invokeMcpTool } from '../../mcp/invoke.js';
@@ -42,7 +43,7 @@ import { crewQueryContract, recallQueryContract, graphqlQueryContract, graphqlRo
 import { AppLimits, RateLimited } from './limits.js';
 import { bindParams, ParamError, type Viewer } from './params.js';
 import { morePathSays, projectRows, RESULT_LIMITS, ResultError, selectPath, sqlRowObjects } from './project.js';
-import { lookupSource, pinOf, queryKindFits, type AppSource, type AppSourceRegistry } from './sources.js';
+import { lookupSource, pinOf, projectMaySee, queryKindFits, type AppSource, type AppSourceRegistry } from './sources.js';
 import { parseCrewQueryText, parseRecallQueryText, parseToolQueryText, type QueryArg } from './texts.js';
 import { type AppKnowledgeDeps, readRecall, RecallDeadline, RecallRefusal, recallProblem, RECALL_COLUMNS, RECALL_GROUP_COLUMNS, visibleSource } from './recall.js';
 
@@ -58,19 +59,7 @@ export class AppExecError extends Error {
   }
 }
 
-/** One call record (§7.2 step 6): never a row. */
-export interface AppCallRecord {
-  at: number;
-  viewer: string;
-  app: string;
-  version: number | null;
-  tree: string;
-  query: string;
-  ms: number;
-  rows: number;
-  bytes: number;
-  outcome: 'ok' | 'cached' | string;
-}
+export type { AppCallRecord } from '../../core/types.js';
 
 /**
  * The part of crew's app store the executor and the write path read: an accepted version's files, and
@@ -82,6 +71,11 @@ export type AppFilesSource = Pick<AppStore, 'acceptedFiles' | 'acceptedReceipt'>
 export interface ExecutorDeps {
   store: AppFilesSource;
   registry: AppSourceRegistry | null;
+  /**
+   * Rechecked at use time; null only on the published server, whose sources crew checked when it built the manifest
+   * (apps/publish/manifest.ts). A source scoped away after that keeps serving the image until it is published again.
+   */
+  visibleSources: ((projectId: string | null) => Promise<ReadonlySet<string>>) | null;
   /** The crew source's in-process reads (Fastify `inject`); absent = the crew source is unavailable. */
   crewInject?: CrewInject;
   /** Who the actor is as a viewer (email, name, groups). */
@@ -97,7 +91,7 @@ export interface ExecutorDeps {
    */
   knowledge?: AppKnowledgeDeps;
   /** The project an app belongs to (crew's app store); `null` = unknown. Recall reads only that project's knowledge. */
-  projectOf?: (app: string) => string | null;
+  projectOf: (app: string) => string | null;
 }
 
 const sha = (v: unknown): string => createHash('sha256').update(canonicalJson(v)).digest('hex');
@@ -236,6 +230,8 @@ export class AppExecutor {
       throw err;
     }
     if (source === null || !queryKindFits(q.kind, source)) throw new AppExecError(409, 'contract_changed', `${q.source} is gone or is another kind of source now`);
+    const visibleSources = this.deps.visibleSources;
+    if (visibleSources !== null && !(await projectMaySee(source, () => visibleSources(this.deps.projectOf(app))))) throw new AppExecError(409, 'query_refused', `${q.source} is not visible to ${app}'s project now`);
     if (source.pin.descriptorHash !== pinned.descriptorHash) throw new AppExecError(409, 'contract_changed', `${q.source}'s connection changed since this version was checked: check it again`);
     // A source switched off reads nothing (codex r1; a tool's server is checked through `bound`).
     if ((source.kind === 'sql' || source.kind === 'graphql') && !source.enabled) throw new AppExecError(409, 'query_refused', `${q.source} is switched off`);
@@ -247,7 +243,7 @@ export class AppExecutor {
       if (!t.ok || recallProblem(q, t.value) !== null) throw changed();
       const knowledge = this.deps.knowledge;
       if (knowledge === undefined) throw new AppExecError(503, 'apps_unavailable', 'this server does not read the system\'s knowledge: knowledge queries run in studio only');
-      const projectId = this.deps.projectOf?.(app) ?? null;
+      const projectId = this.deps.projectOf(app);
       if (projectId === null) throw new AppExecError(409, 'query_refused', `${app} belongs to no project, so it reads no knowledge`);
       let sourceId: string | null = null;
       try {
@@ -289,7 +285,7 @@ export class AppExecutor {
       const found = await this.deps.registry!.appTool(source.name, t.value.tool);
       // The tool as the PINNED config's server has it (a save between the two reads is a change, not a mix).
       if (found === null || !found.bound || pinOf(found.config).descriptorHash !== source.pin.descriptorHash) throw changed();
-      if (effectiveToolClass(deriveToolClass(found.tool.annotations), found.tool.classOverride) !== 'read') throw changed();
+      if (effectiveToolClass(deriveToolClass(found.tool.annotations), found.tool.classOverride) !== 'read' || !effectiveReadAccepted(found.tool)) throw changed();
       contract = toolQueryContract(source.kind, found.tool, q.params);
       plan = { kind: 'tool', source, tool: found.tool, args: t.value.args };
     }
@@ -425,6 +421,8 @@ export class AppExecutor {
       if (err.errorClass === 'refused') return new AppExecError(409, 'query_refused', `the source refused the read${err.refusal !== null ? ` (${err.refusal})` : ''}: describe it again if it changed`);
       return new AppExecError(502, err.errorClass === 'connection' ? 'source_unavailable' : 'source_failed', `the source answered ${err.errorClass}${st}`);
     }
+    // crew#1297: name the read bound without exposing the upstream's words.
+    if (err instanceof UpstreamCallError && err.errorClass === 'too_large') return new AppExecError(502, 'source_failed', "the source's answer passed the 10 MiB read bound");
     if (err instanceof UpstreamCallError) return new AppExecError(err.errorClass === 'timeout' ? 504 : 502, err.errorClass === 'timeout' ? 'source_timeout' : 'source_failed', `the source call failed (${err.errorClass})`);
     if (err instanceof McpRegistryError) return new AppExecError(409, 'contract_changed', `the source cannot be used now (${err.code})`);
     return new AppExecError(502, 'source_failed', 'the read failed');

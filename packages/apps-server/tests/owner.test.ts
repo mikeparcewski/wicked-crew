@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
 import { buildSync } from 'esbuild';
@@ -119,6 +120,23 @@ describe('the volume claim', () => {
     const refused = results.filter((r) => r.status === 'refused');
     expect(refused).toHaveLength(1);
     expect(refused[0]!.error).toMatch(/another wicked-apps-server owns/);
+  });
+
+  it("a contender's momentary read lock never makes the claim fail (the start race's lost-both case)", async () => {
+    // A racing contender holds SQLite's SHARED lock for an instant while it tries for the owner lock. It is held
+    // here on purpose: under BEGIN EXCLUSIVE the claim needed every SHARED lock gone and was refused, and with the
+    // contender refused too, nobody owned the volume.
+    const dir = fresh();
+    const reader = new DatabaseSync(join(dir, '.owner.lock'));
+    try {
+      reader.exec('BEGIN');
+      reader.prepare('SELECT count(*) FROM sqlite_master').get();
+      const claim = await claimDataDir(dir);
+      claims.push(claim);
+      expect(claim.held()).toBe(true);
+    } finally {
+      reader.close();
+    }
   });
 
   it('a graceful release lets another process start immediately', async () => {

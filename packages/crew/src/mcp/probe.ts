@@ -20,13 +20,35 @@ import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotoc
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
-import type { McpAuthConfig, McpRestMapping, McpToolAnnotations, McpUpstreamKind } from '../core/types.js';
+import type { AddressConfirmationDetail, McpAuthConfig, McpRestMapping, McpToolAnnotations, McpUpstreamKind } from '../core/types.js';
 import type { PmMarker, ToolboxSourceEntry } from '../knowledge/registry/entry.js';
 import { addressPolicyOf, type AddressPolicy, boundFetch, type DialOptions, DialRedirectRefusedError, DialRefusedError, type DialRefusalCode } from '../sources/dialer.js';
 import { SourceQueryError } from '../sources/drivers/types.js';
 import { describeSource, type SourceDescription, type SqlSourceConfig } from '../sources/kinds.js';
 import { probeRestServer, type RestEgress } from './rest.js';
 import { scrubSecrets } from './secrets.js';
+import { UpstreamCallError } from './upstream-error.js';
+
+export const MCP_RESPONSE_MAX_BYTES = 10 * 1024 * 1024;
+
+// crew#1297: one trip per connection, before an SDK close or parser error can hide the cause.
+class ResponseBound {
+  tripped = false;
+  readonly error = new UpstreamCallError('too_large', false, "the server's answer passed crew's 10 MiB read bound; crew stopped reading it");
+  private reject!: (err: UpstreamCallError) => void;
+  readonly promise = new Promise<never>((_, reject) => { this.reject = reject; });
+
+  constructor() {
+    // A transport can trip between racers; keep the original promise rejecting for its consumers.
+    void this.promise.catch(() => undefined);
+  }
+
+  trip(): void {
+    if (this.tripped) return;
+    this.tripped = true;
+    this.reject(this.error);
+  }
+}
 
 export const MCP_PROBE_TIMEOUT_MS = 45_000;
 /** The waits between http connection attempts while the server is not listening yet. */
@@ -98,6 +120,7 @@ export type ProbeResult =
       error: string;
       /** (DES-APPS-001 §5.2) The dialer refused the connection: why, so the route can say so as a 409, not a 502. */
       refusal?: DialRefusalCode;
+      detail?: AddressConfirmationDetail;
       /**
        * (DES-APPS-001 §5.2) A source's own words (`sql`/`graphql`), scrubbed, for a HUMAN only; `error`
        * then holds only the error class and SQLSTATE, which is what health and every agent see.
@@ -129,29 +152,52 @@ function objectOrNull(raw: unknown): Record<string, unknown> | null {
  * The transport to one upstream, with the hardened env (stdio) or the auth header (http). Shared by
  * the probe and the broker's call path (`invoke.ts`), so both reach an upstream the same way.
  */
-export function transportFor(config: McpUpstreamConfig, secret: string | null, dial: DialOptions = {}): { transport: Transport; stderrTail: () => string } {
+export function transportFor(config: McpUpstreamConfig, secret: string | null, dial: DialOptions = {}): { transport: Transport; stderrTail: () => string; bound: ResponseBound } {
   if (config.kind === 'rest') throw new Error('a rest upstream is not an MCP server; it has no MCP transport');
   if (config.kind === 'sql' || config.kind === 'graphql') throw new Error(`a ${config.kind} source is not an MCP server; it has no MCP transport`);
+  const bound = new ResponseBound();
   if (config.kind === 'mcp-stdio') {
     const env: Record<string, string> = { ...getDefaultEnvironment() };
     Object.assign(env, config.env);
     if (config.auth?.env !== undefined && secret !== null) env[config.auth.env] = secret;
-    const transport = new StdioClientTransport({ command: config.command ?? '', args: config.args, env, stderr: 'pipe' });
+    const transport = new StdioClientTransport({ command: config.command ?? '', args: config.args, env, stderr: 'pipe', maxBufferSize: MCP_RESPONSE_MAX_BYTES });
+    transport.onerror = (err) => {
+      if (err.message.includes('ReadBuffer exceeded maximum size')) bound.trip();
+    };
     let tail = '';
     transport.stderr?.on('data', (chunk: Buffer) => {
       tail = (tail + chunk.toString('utf8')).slice(-STDERR_TAIL_BYTES);
     });
-    return { transport, stderrTail: () => tail };
+    return { transport, stderrTail: () => tail, bound };
   }
   const headers: Record<string, string> = {};
   if (config.auth?.header !== undefined && secret !== null) headers[config.auth.header] = `${config.auth.prefix ?? ''}${secret}`;
   // (DES-APPS-001 §5.2) Every request the SDK makes goes through the ONE dialer under this server's
   // address policy: resolved once, every address checked, pinned, no redirect followed, TLS unless
   // the policy allows plaintext there.
-  const http = new StreamableHTTPClientTransport(new URL(config.url ?? ''), { requestInit: { headers }, fetch: boundFetch(addressPolicyOf(config), dial) as typeof fetch });
+  const upstreamFetch = boundFetch(addressPolicyOf(config), dial);
+  const cappedFetch: typeof upstreamFetch = async (input, init) => {
+    const response = await upstreamFetch(input, init);
+    if (response.body === null) return response;
+    let bytes = 0;
+    // crew#1297: count the stream before the SDK buffers JSON or SSE, including HTTP error bodies.
+    const body = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        bytes += chunk.byteLength;
+        if (bytes > MCP_RESPONSE_MAX_BYTES) {
+          bound.trip();
+          controller.error(bound.error);
+          return;
+        }
+        controller.enqueue(chunk);
+      },
+    }));
+    return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+  };
+  const http = new StreamableHTTPClientTransport(new URL(config.url ?? ''), { requestInit: { headers }, fetch: cappedFetch as typeof fetch });
   // The SDK's own class declares `sessionId?: string` against its `Transport` interface, which
   // `exactOptionalPropertyTypes` refuses; the runtime shapes are the same.
-  return { transport: http as unknown as Transport, stderrTail: () => '' };
+  return { transport: http as unknown as Transport, stderrTail: () => '', bound };
 }
 
 /**
@@ -169,7 +215,7 @@ async function probeSourceKind(config: McpUpstreamConfig, secret: string | null,
     const message = err instanceof Error ? err.message : String(err);
     // A dialer refusal keeps its code whether it arrives as itself or wrapped by a driver.
     const refusal = err instanceof DialRefusedError ? err.code : ((err as { refusal?: unknown })?.refusal as DialRefusalCode | null | undefined) ?? undefined;
-    const coded = refusal !== undefined && refusal !== null ? { refusal } : {};
+    const coded = refusal !== undefined && refusal !== null ? { refusal, ...((err instanceof DialRefusedError || err instanceof SourceQueryError) ? { detail: err.detail } : {}) } : {};
     // The dialer's own words can carry upstream text (a redirect's Location): the code only, words for a human.
     if (err instanceof DialRefusedError) {
       const where = err instanceof DialRedirectRefusedError && err.location !== null ? ` (to ${err.location})` : '';
@@ -246,17 +292,17 @@ export async function probeMcpServerWithin(config: McpUpstreamConfig, secret: st
       continue;
     }
     const message = retryable ? stillStartingMessage(budget.budgetMs, config.kind) : outcome.message;
-    return scrubSecrets({ ok: false, error: lastTail === '' ? message : `${message}; stderr: ${lastTail}`, ...(outcome.refusal !== undefined ? { refusal: outcome.refusal } : {}) }, secrets);
+    return scrubSecrets({ ok: false, error: lastTail === '' ? message : `${message}; stderr: ${lastTail}`, ...(outcome.refusal !== undefined ? { refusal: outcome.refusal, ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}) } : {}) }, secrets);
   }
 }
 
 type Attempt =
   | { ok: true; result: ProbeResult }
-  | { ok: false; message: string; tail: string; stillStarting: boolean; refusal?: DialRefusalCode };
+  | { ok: false; message: string; tail: string; stillStarting: boolean; refusal?: DialRefusalCode; detail?: AddressConfirmationDetail };
 
 /** One connect + `tools/list`, within `deadlineMs`. Secrets are scrubbed by the caller. */
 async function probeOnce(config: McpUpstreamConfig, secret: string | null, deadlineMs: number, dial: DialOptions): Promise<Attempt> {
-  const { transport, stderrTail } = transportFor(config, secret, dial);
+  const { transport, stderrTail, bound } = transportFor(config, secret, dial);
   const client = new Client({ name: 'wicked-crew-mcp-probe', version: '1' }, { capabilities: {} });
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -285,11 +331,12 @@ async function probeOnce(config: McpUpstreamConfig, secret: string | null, deadl
     return { ok: true, serverInfo: info === undefined ? null : { name: info.name, version: info.version }, tools };
   })();
   try {
-    return { ok: true, result: await Promise.race([work, deadline]) };
+    return { ok: true, result: await Promise.race([work, deadline, bound.promise]) };
   } catch (err) {
     work.catch(() => undefined);
-    const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, message, tail: stderrTail().trim(), stillStarting: err instanceof StillStarting, ...(err instanceof DialRefusedError ? { refusal: err.code } : {}) };
+    const failure = bound.tripped ? bound.error : err;
+    const message = failure instanceof Error ? failure.message : String(failure);
+    return { ok: false, message, tail: stderrTail().trim(), stillStarting: failure instanceof StillStarting, ...(err instanceof DialRefusedError ? { refusal: err.code, detail: err.detail } : {}) };
   } finally {
     clearTimeout(timer);
     await client.close().catch(() => undefined);

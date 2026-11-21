@@ -276,11 +276,11 @@ export const pollGit: GitFn = async (cwd, args) => {
 
 // ── Who holds a repo's graph ──────────────────────────────────────────────────
 
-/** The runs on `repoId` that hold its graph at their base now. */
-export function holdsOf(views: readonly SessionView[], repoId: string): RepoWatchHold[] {
+/** The runs on any checkout alias that hold its graph at their base now. */
+export function holdsOf(views: readonly SessionView[], repoIds: readonly string[]): RepoWatchHold[] {
   const out: RepoWatchHold[] = [];
   for (const v of views) {
-    if (v.session.repo_ref !== repoId || TERMINAL.has(v.session.status)) continue;
+    if (!repoIds.includes(v.session.repo_ref ?? '') || TERMINAL.has(v.session.status)) continue;
     const name = runNameOf(v);
     if (name === DOMAIN_MAPPING) out.push({ runId: v.session.id, reason: 'domain-mapping' });
     else if (ACTIVE.has(v.session.status) && !NON_GRAPH_RUNS.has(name ?? '')) out.push({ runId: v.session.id, reason: 'executing' });
@@ -325,6 +325,7 @@ function readRec(v: unknown): Rec | null {
 
 interface RepoState {
   repoId: string;
+  aliases: string[];
   root: string;
   /** The person's switch (persisted); never derived from `state` (codex r1). */
   enabled: boolean;
@@ -552,7 +553,18 @@ export class RepoWatcher {
     const t = this.now();
     if (!force && t - this.reposReadAt < REPOS_TTL_MS) return;
     this.reposReadAt = t;
-    const all = (await this.deps.listRepos())
+    const listed = await this.deps.listRepos();
+    const aliases = new Map<string, string[]>();
+    const rootOf = (root: string): string => {
+      try { return realpathSync(root); } catch { return root; }
+    };
+    for (const r of listed) {
+      const root = rootOf(r.root_path);
+      const ids = aliases.get(root) ?? [];
+      ids.push(r.id);
+      aliases.set(root, ids);
+    }
+    const all = listed
       .filter((r) => typeof r.code_graph_db === 'string' && r.code_graph_db !== '' && this.exists(r.code_graph_db) && this.exists(r.root_path))
       .sort((a, b) => (a.registered_at ?? 0) - (b.registered_at ?? 0) || (a.id < b.id ? -1 : 1));
     const keep = new Set(all.map((r) => r.id));
@@ -564,7 +576,7 @@ export class RepoWatcher {
       let cur = this.repos.get(r.id);
       if (cur === undefined) {
         cur = {
-          repoId: r.id, root: r.root_path, enabled, capped, state: 'starting', seenFp: null, changedAt: null,
+          repoId: r.id, aliases: aliases.get(rootOf(r.root_path))!, root: r.root_path, enabled, capped, state: 'starting', seenFp: null, changedAt: null,
           nextPollAt: t, lastPolledAt: null, lastPollMs: 0, pollFailures: 0, indexFailures: 0, indexBackoffUntil: 0,
           lastIndexMs: null, coarse: false, waitingOn: [], error: null, remedy: null, polls: 0, indexes: 0, forced: false,
           forcedGen: 0, projectsRetryAt: 0, projectsFailures: 0, offGen: 0, indexing: null, queuedGen: 0, repairOwed: false,
@@ -572,6 +584,7 @@ export class RepoWatcher {
         this.repos.set(r.id, cur);
       }
       cur.root = r.root_path;
+      cur.aliases = aliases.get(rootOf(r.root_path))!;
       cur.enabled = enabled;
       if (cur.capped && !capped) cur.nextPollAt = t; // a slot came free
       cur.capped = capped;
@@ -675,7 +688,7 @@ export class RepoWatcher {
     }
     // A failing index waits out its backoff whatever changes meanwhile; only a person's press skips it (codex r1).
     if (!r.forced && t < r.indexBackoffUntil) return;
-    const holds = holdsOf(await this.deps.runViews(), r.repoId);
+    const holds = holdsOf(await this.deps.runViews(), r.aliases);
     // Switched off while the runs were read (codex r3 on #1481): the switch emptied the queue; nothing refills it.
     if (r.offGen !== offGen || !this.pollable(r)) return;
     if (holds.length > 0) {
@@ -697,7 +710,7 @@ export class RepoWatcher {
     // Crew's own check (a domain mapping parked at a gate holds the map too); the engine re-reads active runs under
     // its lock, so a launch between this read and the index is caught there (`held`).
     const views = await this.deps.runViews();
-    const holds = holdsOf(views, repoId);
+    const holds = holdsOf(views, r.aliases);
     if (holds.length > 0) { r.state = 'waiting-runs'; r.waitingOn = holds; return; }
     // A press after this index was queued: poll first, so the index records the checkout it reads.
     if (r.forced && r.forcedGen !== r.queuedGen) { r.nextPollAt = this.now(); return; }
@@ -733,7 +746,7 @@ export class RepoWatcher {
       r.lastIndexMs = this.now() - started;
       if (answer.outcome === 'held') {
         r.state = 'waiting-runs';
-        const fresh = holdsOf(await this.deps.runViews(), repoId);
+        const fresh = holdsOf(await this.deps.runViews(), r.aliases);
         r.waitingOn = (answer.heldBy ?? []).map((runId) => fresh.find((x) => x.runId === runId) ?? { runId, reason: 'executing' as const });
         return;
       }
@@ -857,7 +870,7 @@ export class RepoWatcher {
     r.forcedGen += 1;
     r.indexBackoffUntil = 0;
     r.nextPollAt = this.now();
-    const holds = holdsOf(await this.deps.runViews(), repoId);
+    const holds = holdsOf(await this.deps.runViews(), r.aliases);
     if (holds.length > 0) {
       r.state = 'waiting-runs';
       r.waitingOn = holds;

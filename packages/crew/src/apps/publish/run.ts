@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { oidcAddressPolicy } from '../../api/auth.js';
 import type { AppActionGrant, AppPublished, AppPublishManifest, LaunchRunInput, SessionView } from '../../core/types.js';
 import { dialFetch } from '../../sources/dialer.js';
-import type { AppSourceRegistry } from '../exec/sources.js';
+import { projectMaySee, type AppSourceRegistry } from '../exec/sources.js';
 import { LOCK_PATH, SPEC_PATH } from '../check.js';
 import { AppStoreError, type AppPublisher, type AppStore, type StoredPublish } from '../store.js';
 import { appsRuntime, appsServerArtifact } from './artifacts.js';
@@ -23,6 +23,9 @@ export interface PublishDeps {
   };
   roster: () => Promise<string>;
   registry: AppSourceRegistry | null;
+  /** The sources a project may see now, and the app's project (crew#1533): the manifest refuses any other source. */
+  visibleSources: (projectId: string | null) => Promise<ReadonlySet<string>>;
+  projectOf: (slug: string) => string | null;
   grantOf: (slug: string, action: string) => AppActionGrant | null;
 }
 
@@ -71,7 +74,10 @@ export class PublishService implements AppPublisher {
   constructor(private readonly deps: PublishDeps) {}
 
   async manifestFor(input: Pick<ManifestInput, 'app' | 'files' | 'body'>): Promise<ManifestOutcome> {
-    return buildManifest({ ...input, registry: this.deps.registry, grantOf: (action) => this.deps.grantOf(input.app.slug, action), endpoints: await publishEndpoints(input.body.identity) });
+    let visible: Promise<ReadonlySet<string>> | undefined;
+    const maySee = (source: Parameters<typeof projectMaySee>[0]): Promise<boolean> =>
+      projectMaySee(source, () => (visible ??= this.deps.visibleSources(this.deps.projectOf(input.app.slug))));
+    return buildManifest({ ...input, registry: this.deps.registry, maySee, grantOf: (action) => this.deps.grantOf(input.app.slug, action), endpoints: await publishEndpoints(input.body.identity) });
   }
 
   async launch(p: StoredPublish, input: { repoId: string; projectId: string; excludeSeats: string[] }): Promise<void> {
