@@ -64,6 +64,16 @@ describe('crew#1564 review: the real reason, the target and the second-agent cou
     expect(outSeat).toMatchObject({ state: 'signed_out', stateReason: HOST_FLOOR_BENCH_COPY });
   });
 
+  it.each([false, true])('a signed-out seat with an active recent bench stays signed_out without benchedUntil (host-floor bench: %s)', (hostFloorBench) => {
+    const [cli] = clisOf([out('copilot', {
+      ...(hostFloorBench ? BENCH : {}),
+      council_ineligible_reason: 'signed out: no credential',
+      recent_bench: { kind: 'not_logged_in', reason: 'not signed in', lifts_at: '2099-11-15T14:00:00Z', last_at: '2026-11-15T11:00:00Z', runs: 1, source: 'engine' },
+    })]);
+    expect(cli).toMatchObject({ state: 'signed_out', stateReason: hostFloorBench ? HOST_FLOOR_BENCH_COPY : 'signed out: no credential' });
+    expect(cli).not.toHaveProperty('benchedUntil');
+  });
+
   it('noneReason names the bench only for a host-benched seat, and an unread bench as unknown', () => {
     const benched = attention([signedIn('opencode', BENCH), out('codex')]);
     expect(benched[0]!.reason).toContain('on this computer only Claude Code and Codex get work');
