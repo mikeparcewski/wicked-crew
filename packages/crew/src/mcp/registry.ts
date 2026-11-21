@@ -57,7 +57,7 @@ import { checkSourceDocument, DeploymentPolicyError, policyVersionOf } from '../
 import { canonicalJson, deriveToolClass, effectiveToolClass, APPS_SERVER, ESTATE_SERVER, type HashedRestTarget, type HashedToolShape, MCP_SERVER_NAME_RE, mcpSubject, parseMcpSubject, sha256Hex, toolSchemaHash } from './classify.js';
 import { envFingerprint } from './env.js';
 import type { McpUpstreamConfig, ProbedTool, ProbeResult, Prober } from './probe.js';
-import { GENERATIONS_KEPT, type McpRegistryFile, type McpRegistryStore, type McpServerRecord, type McpToolRecord } from './registry-store.js';
+import { type EstateTombstone, GENERATIONS_KEPT, type McpRegistryFile, type McpRegistryStore, type McpServerRecord, type McpToolRecord } from './registry-store.js';
 import { restTarget } from './rest.js';
 import { type AddressPolicy, classifyAddress, exactRangesFor, NO_CONFIRMATION } from '../sources/dialer.js';
 import { CREW_SOURCE, type SourceDescription, sourceDescriptorHash, sqlFromToolboxEntry, toolboxEntryFromSql } from '../sources/kinds.js';
@@ -196,9 +196,9 @@ export class McpRegistry {
   onRestored: (() => void) | undefined;
   /**
    * (crew#1328, crew#1354) Called once a removal or a restore that dropped records has landed, with the estate source
-   * ids it tombstoned ({@link estateSourceIds}); the daemon forgets their projections and reconciles. Never throws in.
+   * ids it tombstoned ({@link estateSourceIds}); the daemon has their writers erase them. Never throws in.
    */
-  onTombstoned: ((ids: string[]) => void) | undefined;
+  onTombstoned: ((targets: EstateTarget[]) => void) | undefined;
 
   constructor(private readonly deps: McpRegistryDeps) {
     this.now = deps.now ?? Date.now;
@@ -490,10 +490,10 @@ export class McpRegistry {
     return this.view(saved);
   }
 
-  private tombstoned(ids: string[]): void {
-    if (ids.length === 0) return;
+  private tombstoned(targets: EstateTarget[]): void {
+    if (targets.length === 0) return;
     try {
-      this.onTombstoned?.(ids);
+      this.onTombstoned?.(targets);
     } catch {
       // the listener's own failure; the tombstones are in the registry and the next reconcile sends them
     }
@@ -1095,9 +1095,11 @@ export class McpRegistry {
         const late = file.servers.map((s) => s.name).filter((n) => !expected.includes(n));
         if (late.length > 0) throw new McpRegistryError(409, 'registry_busy', `${late.join(', ')} was registered while the restore ran; nothing was restored: try again`);
       }
-      // (crew#1328, crew#1354) A source or tracker the restored generation does not hold is erased from estate too.
-      const kept = new Set(servers.flatMap(estateSourceIds));
-      const dropped = [...new Set(file.servers.flatMap(estateSourceIds))].filter((id) => !kept.has(id));
+      // (crew#1328, crew#1354) A source or tracker the restored generation does not hold is erased from estate too; one
+      // it brings back is not (its own projection replaces what estate holds).
+      const kept = servers.flatMap(estateSourceIds);
+      const dropped = file.servers.flatMap(estateSourceIds).filter((t) => !kept.some((k) => k.id === t.id && k.kind === t.kind));
+      for (const kind of ['source', 'tracker'] as const) dropEstateTombstones(file, kind, new Set(kept.filter((k) => k.kind === kind).map((k) => k.id)));
       addEstateTombstones(file, dropped, stamp);
       file.servers = servers;
       return { current: file.generation ?? 0, tombstoned: dropped };
@@ -1472,29 +1474,38 @@ export function diffTools(registered: ReadonlyArray<Pick<McpToolRecord, 'name' |
 
 // ── The one registry's entry (DES-KNOWLEDGE-DATA-001 §5) ─────────────────────────────────────────
 
+/** An estate source id a record's structure lives under, and which projector writes it. */
+export type EstateTarget = Pick<EstateTombstone, 'id' | 'kind'>;
+
 /**
  * (crew#1328, crew#1354) The estate source ids a record's structure lives under: a data source's entry id (its
  * projected catalog), and a PM entry's trackers, retired ones included.
  */
-export function estateSourceIds(s: McpServerRecord): string[] {
-  const out: string[] = [];
-  if (isSourceRecord(s)) out.push(entryId(s));
+export function estateSourceIds(s: McpServerRecord): EstateTarget[] {
+  const out: EstateTarget[] = [];
+  if (isSourceRecord(s)) out.push({ id: entryId(s), kind: 'source' });
   if (pmOf(s) !== null) {
-    for (const t of trackersOf(s)) out.push(t.id);
-    for (const r of s.retired ?? []) out.push(r.id);
+    for (const t of trackersOf(s)) out.push({ id: t.id, kind: 'tracker' });
+    for (const r of s.retired ?? []) out.push({ id: r.id, kind: 'tracker' });
   }
   return out;
 }
 
-/** At most this many tombstones are kept (the newest); one estate never takes would otherwise grow the file. */
-export const ESTATE_TOMBSTONES_MAX = 2_000;
+/**
+ * Add `targets` to the registry's tombstones. An id already waiting keeps its tombstone (its writer erases by id, after
+ * reading the registry, so one is enough); nothing is ever evicted (codex on #1735: a dropped one is never erased).
+ */
+export function addEstateTombstones(file: McpRegistryFile, targets: readonly EstateTarget[], at: string): void {
+  const list = file.estateTombstones ?? [];
+  for (const t of targets) if (!list.some((x) => x.id === t.id && x.kind === t.kind)) list.push({ id: t.id, kind: t.kind, at });
+  if (list.length > 0) file.estateTombstones = list;
+}
 
-/** Add `ids` to the registry's tombstones (once each, the newest kept). */
-export function addEstateTombstones(file: McpRegistryFile, ids: readonly string[], at: string): void {
-  if (ids.length === 0) return;
-  const list = (file.estateTombstones ?? []).filter((t) => !ids.includes(t.id));
-  for (const id of new Set(ids)) list.push({ id, at });
-  file.estateTombstones = list.slice(-ESTATE_TOMBSTONES_MAX);
+/** Drop the tombstones of `kind` whose id `settled` names (their writer erased them, or the id is live again). */
+export function dropEstateTombstones(file: McpRegistryFile, kind: EstateTombstone['kind'], settled: ReadonlySet<string>): void {
+  if (file.estateTombstones === undefined) return;
+  file.estateTombstones = file.estateTombstones.filter((t) => t.kind !== kind || !settled.has(t.id));
+  if (file.estateTombstones.length === 0) delete file.estateTombstones;
 }
 
 /** A data source of any form: K1 `sql`/`graphql`, or a Toolbox-form database source. */

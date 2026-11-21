@@ -22,7 +22,7 @@ import { createHash } from 'node:crypto';
 
 import { callEstateTool } from '../../core/estate-mcp-client.js';
 import { canonicalJson } from '../../mcp/classify.js';
-import { entryId, estateSourceIds, normalizeRegistryFile } from '../../mcp/registry.js';
+import { dropEstateTombstones, entryId, estateSourceIds, normalizeRegistryFile } from '../../mcp/registry.js';
 import type { McpRegistryStore } from '../../mcp/registry-store.js';
 import { replaceSource } from '../estate-write.js';
 import { pmOf, type StoredTracker, trackersOf } from '../registry/entry.js';
@@ -178,7 +178,7 @@ export function trackerGenerationBody(
   };
 }
 
-/** The empty generation that erases a removed source's structure (a data source's catalog, or a tracker) from estate. */
+/** The empty generation that erases a removed PM entry's tracker from estate. */
 export function removedGenerationBody(sourceId: string): Omit<TrackerGeneration, 'generation'> {
   return { sourceId, label: 'removed source', catalog: { removed: true, format: TRACKER_PROJECTION_FORMAT }, docs: [] };
 }
@@ -247,6 +247,36 @@ export class TrackerProjector {
   async reconcile(): Promise<void> {
     await this.deps.store.settled();
     const file = normalizeRegistryFile(await this.deps.store.read());
+    // (crew#1354) The registry's tracker tombstones: a removed PM entry's trackers. Each gets one empty generation and
+    // leaves the list once estate takes it, so a removal before a restart is erased after it. They need no run
+    // addresses, so an unreadable address record does not hold them up (codex on #1735). An id live again (a restore
+    // linked it back) is not erased: its own projection below replaces it. A data source's tombstone is the source
+    // projector's (the one writer of that id).
+    const live = new Set(file.servers.flatMap(estateSourceIds).filter((t) => t.kind === 'tracker').map((t) => t.id));
+    const tombstoned = new Set<string>();
+    const tombstonesDone = new Set<string>();
+    let tombstoneFailed = false;
+    for (const t of file.estateTombstones ?? []) {
+      if (t.kind !== 'tracker') continue;
+      if (live.has(t.id)) {
+        tombstonesDone.add(t.id);
+        continue;
+      }
+      tombstoned.add(t.id);
+      try {
+        await replaceSource(this.call, { ...removedGenerationBody(t.id), generation: this.nextGeneration(t.id) } as unknown as Record<string, unknown>, this.deps);
+        tombstonesDone.add(t.id);
+        // Nothing of it is acknowledged now: linked again later, it is projected again (codex on #1735).
+        this.states.delete(t.id);
+      } catch (err) {
+        this.deps.log?.(`[knowledge] tracker ${t.id} of a removed source was not erased from estate (it is retried): ${message(err)}`);
+        tombstoneFailed = true;
+      }
+    }
+    if (tombstoneFailed) (this.deps.schedule ?? ((fn, ms) => void setTimeout(fn, ms).unref?.()))(() => this.changed(), RETRY_MAX_MS);
+    // Only this projector writes a tracker id, one pass at a time, so the last generation estate took for an id dropped
+    // here is this pass's empty one (or the id is live, and the next pass projects it), even if it was removed again.
+    if (tombstonesDone.size > 0) await this.deps.store.mutate((f) => dropEstateTombstones(f, 'tracker', tombstonesDone));
     // An unreadable address record is not "no issues": nothing is projected this time, and the reconcile retries.
     let runs: Awaited<ReturnType<NonNullable<TrackerProjectorDeps['addresses']>>> = [];
     if (this.deps.addresses !== undefined) {
@@ -297,48 +327,21 @@ export class TrackerProjector {
         }
       }
     }
-    // (crew#1328, crew#1354) The registry's tombstones: a removed data source's structure, a removed PM entry's
-    // trackers. Each gets one empty generation and leaves the list once estate takes it, so a removal before a restart
-    // is erased after it. An id live again (a restore brought it back) is not erased: its own projection replaces it.
-    const live = new Set(file.servers.flatMap(estateSourceIds));
-    const tombstonesDone: string[] = [];
-    let tombstoneFailed = false;
-    for (const t of file.estateTombstones ?? []) {
-      if (live.has(t.id)) {
-        tombstonesDone.push(t.id);
-        continue;
-      }
-      seen.add(t.id);
-      try {
-        await replaceSource(this.call, { ...removedGenerationBody(t.id), generation: this.nextGeneration(t.id) } as unknown as Record<string, unknown>, this.deps);
-        tombstonesDone.push(t.id);
-        const st = this.states.get(t.id);
-        if (st !== undefined) st.state = 'retired';
-      } catch (err) {
-        this.deps.log?.(`[knowledge] the structure of removed source ${t.id} was not erased from estate (it is retried): ${message(err)}`);
-        tombstoneFailed = true;
-      }
-    }
-    if (tombstoneFailed) (this.deps.schedule ?? ((fn, ms) => void setTimeout(fn, ms).unref?.()))(() => this.changed(), RETRY_MAX_MS);
     // A tracker this process projected whose PM entry is gone by a path that left no tombstone: tombstoned once.
     for (const [id, st] of this.states) {
-      if (seen.has(id) || st.state === 'retired') continue;
+      if (seen.has(id) || tombstoned.has(id) || st.state === 'retired') continue;
       try {
         await replaceSource(this.call, { ...trackerGenerationBody({ name: 'removed source', system: 'unknown' }, id, null, []), generation: this.nextGeneration(id) } as unknown as Record<string, unknown>, this.deps);
         st.state = 'retired';
+        // Nothing of it is acknowledged now: linked again later, it is projected again (codex on #1735).
+        st.acked = null;
       } catch (err) {
         this.deps.log?.(`[knowledge] tracker ${id} of a removed source was not tombstoned in estate: ${message(err)}`);
       }
     }
-    // A retired tracker whose empty generation estate took leaves the entry's list; a sent tombstone leaves the registry's.
-    if (retiredDone.length > 0 || tombstonesDone.length > 0) {
+    // A retired tracker whose empty generation estate took leaves the entry's list.
+    if (retiredDone.length > 0) {
       await this.deps.store.mutate((f) => {
-        if (f.estateTombstones !== undefined) {
-          // Only the ids this pass settled; one added again since (a second removal) is kept for the next pass.
-          const settled = new Set(tombstonesDone);
-          f.estateTombstones = f.estateTombstones.filter((t) => !settled.has(t.id) || !(file.estateTombstones ?? []).some((x) => x.id === t.id && x.at === t.at));
-          if (f.estateTombstones.length === 0) delete f.estateTombstones;
-        }
         for (const d of retiredDone) {
           const s = f.servers.find((x) => x.name === d.server);
           if (s?.retired === undefined) continue;

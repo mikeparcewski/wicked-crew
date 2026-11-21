@@ -2765,11 +2765,12 @@ export async function createServer(
   app.addHook('onClose', async () => clearInterval(trackerTimer));
   mcpRegistry.trackerProjection = trackerProjector.projection;
   mcpRegistry.onRestored = () => trackerProjector.changed();
-  // crew#1328, crew#1354: a removed source's structure and a removed PM entry's trackers are erased from estate (the
-  // registry keeps the tombstones, so a restart before estate takes them still erases them).
-  mcpRegistry.onTombstoned = (ids) => {
-    sourceProjector.forget(ids);
-    trackerProjector.changed();
+  // crew#1328, crew#1354: a removed source's structure and a removed PM entry's trackers are erased from estate, each by
+  // the one writer of its id (the registry keeps the tombstones, so a restart before estate takes them still erases
+  // them: the source backfill and the tracker reconcile above read them at boot).
+  mcpRegistry.onTombstoned = (targets) => {
+    sourceProjector.erase(targets.filter((t) => t.kind === 'source').map((t) => t.id));
+    if (targets.some((t) => t.kind === 'tracker')) trackerProjector.changed();
   };
   trackerProjector.changed();
   // §4.3: what a unit's knowledge reads may see — the sources its project may see (the gate's predicate) and its repos.

@@ -27,7 +27,7 @@ import { dirname } from 'node:path';
 
 import { callEstateTool } from '../core/estate-mcp-client.js';
 import { Semaphore } from '../mcp/estate-relay.js';
-import { normalizeRegistryFile } from '../mcp/registry.js';
+import { dropEstateTombstones, entryId, normalizeRegistryFile } from '../mcp/registry.js';
 import type { McpRegistryStore } from '../mcp/registry-store.js';
 import { ASK_ENUM_MAX, ASK_NAME_MAX } from '../sources/ask.js';
 import type { SqlCatalog } from '../sources/catalog/types.js';
@@ -230,9 +230,11 @@ export function sourceGeneration(s: Pick<GateSource, 'id' | 'name' | 'dialect' |
 
 /**
  * (crew#1328) A source over one estate generation (5,000 documents or 32 MB) used to be refused whole, so none of its
- * structure reached recall. Now its relations go in catalog order while they fit, and one more document names how many
- * are not listed here and where every one is (`mcp:<source>/list_tables`), as a relation too wide to list is named
- * (relationDoc). No earlier generation held more (they had the same bounds), so the cut erases nothing that was there.
+ * structure reached recall. Now its relations go in catalog order while they fit, and one more document says how many
+ * are not listed here and how to read one by name (`mcp:<source>/list_tables` with `table_names`), as a relation too
+ * wide to list is named (relationDoc). The generation is complete as estate counts it: a relation it does not list is
+ * not in estate (one listed by an earlier generation is deleted by this one), and the catalog says so
+ * (`relationsNotListed`, which a catalog read reports as truncated).
  */
 function withinGenerationBounds(source: string, all: ReplaceSourceArgs['docs']): { docs: ReplaceSourceArgs['docs']; notListed: number } {
   if (all.length <= GENERATION_MAX_DOCS && all.reduce((n, d) => n + bytes(d), 0) <= GENERATION_MAX_BYTES) return { docs: all, notListed: 0 };
@@ -240,7 +242,7 @@ function withinGenerationBounds(source: string, all: ReplaceSourceArgs['docs']):
     key: NOT_LISTED_KEY,
     title: cutBytes(`${source} · relations not listed here`, NAME_MAX_BYTES),
     entry: { kind: 'not_listed', relationsNotListed: n },
-    sections: [{ key: 'note', text: `${NOT_LISTED_KEY}: data source ${source} has ${n} more relations than one knowledge generation holds; they are not listed here. mcp:${source}/list_tables lists every relation.` }],
+    sections: [{ key: 'note', text: `${NOT_LISTED_KEY}: data source ${source} has ${n} more relations than one knowledge generation holds; they are not listed here. Read one by name with mcp:${source}/list_tables and table_names.` }],
   });
   // The note's bytes are reserved at the largest count it can say, so it always fits.
   const budget = GENERATION_MAX_BYTES - bytes(note(all.length));
@@ -261,7 +263,8 @@ export type EstateCall = (tool: string, args: Record<string, unknown>) => Promis
 
 export interface SourceProjectorDeps {
   /** The registry (read after the mutation that wrote a catalog has landed). */
-  store: Pick<McpRegistryStore, 'read' | 'settled'>;
+  /** `mutate` drops an erased source's tombstone (the daemon's store has it; a test that erases nothing may omit it). */
+  store: Pick<McpRegistryStore, 'read' | 'settled'> & Partial<Pick<McpRegistryStore, 'mutate'>>;
   catalogs: SourceCatalogStore;
   /** Estate, in write mode (the operator client's spawn). */
   call?: EstateCall;
@@ -275,6 +278,16 @@ export interface SourceProjectorDeps {
    * memory only. A file that cannot be read starts empty (each source then waits for its next projection, as before).
    */
   acksFile?: string;
+  /** TESTS ONLY: how a refused erasure is retried later. */
+  schedule?: (fn: () => void, ms: number) => void;
+}
+
+/** A refused erasure is tried again after this long (and at the next boot). */
+const ERASE_RETRY_MS = 5 * 60_000;
+
+/** The empty generation that erases a removed data source's structure from estate (crew#1328 item 1). */
+export function removedSourceGeneration(sourceId: string, generation: number): ReplaceSourceArgs {
+  return { sourceId, generation, label: 'removed source', catalog: { removed: true, format: PROJECTION_FORMAT }, docs: [] };
 }
 
 /** The one writer of source structure into estate (module doc). */
@@ -287,6 +300,14 @@ export class SourceProjector {
   /** Per source id, the projection key (descriptor and allowed views) estate last ACCEPTED (this process). */
   private readonly acked = new Map<string, string>();
   private readonly gate = new Semaphore(PROJECTION_CONCURRENCY);
+  /**
+   * (crew#1328, codex and agy on #1735) Per source id, the one lane every estate write of that id runs on: a
+   * projection and an erasure. Each job reads the registry INSIDE the lane and acts on what it holds then, and every
+   * registry change that matters to an id (a catalog written, a removal, a restore) queues a job after it lands, so
+   * the last write estate takes for an id always matches the registry: a removal is never followed by a projection of
+   * what was removed, and a restore is never followed by an erasure of what it brought back.
+   */
+  private readonly lanes = new Map<string, Promise<void>>();
 
   constructor(private readonly deps: SourceProjectorDeps) {
     this.call = deps.call ?? ((tool, args) => callEstateTool(tool, args));
@@ -316,16 +337,73 @@ export class SourceProjector {
     }
   }
 
-  /** (crew#1328, crew#1354) Sources whose structure was tombstoned: no acknowledgement of theirs is kept. */
-  forget(sourceIds: readonly string[]): void {
-    let changed = false;
-    for (const id of sourceIds) changed = this.acked.delete(id) || changed;
-    if (!changed) return;
+  /**
+   * Drop `sourceId`'s acknowledgement on disk before estate is sent anything that may replace it, so a crash mid-send
+   * leaves none, never one for a key estate may no longer hold. Throws when the drop cannot be written, and then keeps
+   * the acknowledgement in memory too (codex and agy on #1735): the next attempt drops it again before ITS send.
+   */
+  private dropAck(sourceId: string): void {
+    const prior = this.acked.get(sourceId);
+    if (prior === undefined) return;
+    this.acked.delete(sourceId);
     try {
       this.persistAcks();
     } catch (err) {
-      this.deps.log?.(`[knowledge] the projection acknowledgements could not be written: ${message(err)}`);
+      this.acked.set(sourceId, prior);
+      throw err;
     }
+  }
+
+  /** Run `fn` on `sourceId`'s lane (after every job queued there before it). */
+  private exclusive<T>(sourceId: string, fn: () => Promise<T>): Promise<T> {
+    const prior = this.lanes.get(sourceId) ?? Promise.resolve();
+    const run = prior.then(fn);
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.lanes.set(sourceId, tail);
+    void tail.then(() => {
+      if (this.lanes.get(sourceId) === tail) this.lanes.delete(sourceId);
+    });
+    return run;
+  }
+
+  /**
+   * (crew#1328, crew#1354) Data sources the registry tombstoned (a removal, a restore that dropped them): each one's
+   * structure is erased from estate on its lane. Never throws; a refused erasure is retried (and the boot backfill
+   * erases every tombstone still in the registry).
+   */
+  erase(sourceIds: readonly string[]): void {
+    for (const id of new Set(sourceIds)) {
+      const key = `\u0000erase:${id}`;
+      const prior = this.chains.get(key) ?? Promise.resolve();
+      const next: Promise<void> = prior
+        .then(() => this.exclusive(id, () => this.eraseNow(id)))
+        .catch((err: unknown) => {
+          this.deps.log?.(`[knowledge] the structure of removed source ${id} was not erased from estate (it is retried): ${message(err)}`);
+          (this.deps.schedule ?? ((fn, ms) => void setTimeout(fn, ms).unref?.()))(() => this.erase([id]), ERASE_RETRY_MS);
+        });
+      this.chains.set(key, next);
+      void next.then(() => {
+        if (this.chains.get(key) === next) this.chains.delete(key);
+      });
+    }
+  }
+
+  /** On `sourceId`'s lane: erase it if the registry still holds its tombstone and no entry of that id. */
+  private async eraseNow(sourceId: string): Promise<void> {
+    await this.deps.store.settled();
+    const file = normalizeRegistryFile(await this.deps.store.read());
+    if (!(file.estateTombstones ?? []).some((t) => t.kind === 'source' && t.id === sourceId)) return;
+    // Live again (a restore brought it back): its own projection replaces what estate holds; nothing is erased.
+    if (!file.servers.some((x) => entryId(x) === sourceId)) {
+      await this.gate.run(async () => {
+        this.dropAck(sourceId);
+        await replaceSource(this.call, removedSourceGeneration(sourceId, this.nextGeneration(sourceId)) as unknown as Record<string, unknown>, this.deps);
+      });
+    }
+    await this.deps.store.mutate?.((f) => dropEstateTombstones(f, 'source', new Set([sourceId])));
   }
 
   /**
@@ -359,12 +437,17 @@ export class SourceProjector {
   /** Every described source, once (a daemon's first boot on this release projects what was described before it). */
   async backfill(): Promise<void> {
     let names: string[];
+    let erased: string[];
     try {
-      names = normalizeRegistryFile(await this.deps.store.read()).servers.map((s) => s.name);
+      const file = normalizeRegistryFile(await this.deps.store.read());
+      names = file.servers.map((s) => s.name);
+      erased = (file.estateTombstones ?? []).filter((t) => t.kind === 'source').map((t) => t.id);
     } catch (err) {
       this.deps.log?.(`[knowledge] the registry could not be read to project source structure: ${message(err)}`);
       return;
     }
+    // (crew#1328) A source removed before a restart whose erasure estate had not taken is erased now.
+    this.erase(erased);
     for (const n of names) this.written(n);
     await this.idle();
   }
@@ -379,6 +462,16 @@ export class SourceProjector {
     await this.deps.store.settled();
     const r = normalizeRegistryFile(await this.deps.store.read()).servers.find((x) => x.name === name);
     if (r === undefined) return false;
+    const id = entryId(r);
+    return this.exclusive(id, () => this.projectNow(id));
+  }
+
+  /** On `sourceId`'s lane: project the entry of that id as the registry and its catalog hold it NOW. */
+  private async projectNow(sourceId: string): Promise<boolean> {
+    await this.deps.store.settled();
+    const r = normalizeRegistryFile(await this.deps.store.read()).servers.find((x) => entryId(x) === sourceId);
+    // Removed since it was named: its erasure runs on this lane, and nothing of it is projected again.
+    if (r === undefined) return false;
     const s = await gateSourceOf(r, this.deps.catalogs);
     if (s === null) return false;
     if (s.description === null) return false;
@@ -390,11 +483,7 @@ export class SourceProjector {
       // (crew#1328) The kept acknowledgement of another key goes BEFORE the send: a crash mid-send then leaves none,
       // never one for a key estate may no longer hold. If it cannot be dropped, nothing is sent (the next describe or
       // boot projects again).
-      const prior = this.acked.get(s.id);
-      if (prior !== undefined && prior !== key) {
-        this.acked.delete(s.id);
-        this.persistAcks();
-      }
+      if (this.acked.get(s.id) !== key) this.dropAck(s.id);
       await replaceSource(this.call, gen as unknown as Record<string, unknown>, this.deps);
       this.acked.set(s.id, key);
       try {

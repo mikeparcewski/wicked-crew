@@ -151,14 +151,17 @@ export interface McpRegistryFile {
   /**
    * (crew#1328, crew#1354) Estate source ids whose structure must be erased: a removed data source's entry id, a removed
    * PM entry's trackers. Kept here, outside any entry, so it survives the entry, a restart and a restore (a restore
-   * replaces `servers` only). The tracker projector sends each an empty generation and drops it once estate takes it.
+   * replaces `servers` only). Its writer sends each an empty generation and drops it once estate takes it: the source
+   * projector for a data source (`kind: 'source'`), the tracker projector for a tracker. Unbounded on purpose: an
+   * erasure estate has not taken is never evicted (one per removed id; a second removal of the same id adds none).
    */
   estateTombstones?: EstateTombstone[];
 }
 
-/** One estate source id waiting for its empty generation, and when it was asked for. */
+/** One estate source id waiting for its empty generation, which writer owns it, and when it was asked for. */
 export interface EstateTombstone {
   id: string;
+  kind: 'source' | 'tracker';
   at: string;
 }
 

@@ -515,11 +515,14 @@ describe('the describe -> knowledge.replace_source projection (§4.1): value-fre
       const second = new SourceProjector(deps(['s.v']));
       await expect(second.project('support-pg')).rejects.toThrow(/estate refused/);
       expect(new SourceProjector(deps([])).projectedDescriptor(SUPPORT_ID)).toBeNull();
-      // A tombstoned source keeps none either.
+      // An erased (removed) source keeps none either.
       refuse = false;
       const third = new SourceProjector(deps([]));
       await third.project('support-pg');
-      third.forget([SUPPORT_ID]);
+      expect(new SourceProjector(deps([])).projectedDescriptor(SUPPORT_ID)).toBe(key);
+      const removed = new SourceProjector({ ...deps([]), store: { read: async () => ({ version: 1, servers: [], estateTombstones: [{ id: SUPPORT_ID, kind: 'source', at: DESCRIBED_AT }] }) as never, settled: async () => undefined } });
+      removed.erase([SUPPORT_ID]);
+      await removed.idle();
       expect(new SourceProjector(deps([])).projectedDescriptor(SUPPORT_ID)).toBeNull();
       // A damaged file starts empty and says so, never throws.
       writeFileSync(acksFile, '{ not json');
