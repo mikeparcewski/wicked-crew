@@ -22,6 +22,7 @@ import {
 } from '../src/api/stall-watchdog.js';
 import { RunLivenessSampler, parseCpuTime, runOfCwd, type ProcRow } from '../src/api/run-liveness.js';
 import { createServer } from '../src/api/server.js';
+import { withRunViews } from './support/run-views.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, SessionView, SystemSettings } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
@@ -350,7 +351,7 @@ describe('the listExecuting mapper derives avoid for creator and evaluator_disti
       },
     } as unknown as CoreAdapter;
     const auditPath = join(dir, 'audit.log');
-    app = await createServer(adapter, {
+    app = await createServer(withRunViews(adapter), {
       auditPath,
       projectEvents: { disabled: true },
       interactiveWsRelay: { disabled: true },

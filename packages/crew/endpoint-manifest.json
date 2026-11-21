@@ -849,6 +849,7 @@
       "statusCodes": [
         200,
         400,
+        409,
         501
       ]
     },
@@ -2429,9 +2430,14 @@
     {
       "method": "POST",
       "path": "/api/v1/runs/:id/resume",
-      "requestType": null,
+      "requestType": "ResumeRequest",
       "responseType": null,
-      "statusCodes": []
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409
+      ]
     },
     {
       "method": "POST",
