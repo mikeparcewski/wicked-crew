@@ -159,10 +159,13 @@ export function relationKey(schema: string | null, name: string): string {
 /**
  * One relation's document, bounded by estate's record bound: columns are cut (and counted) first, then foreign
  * keys; a relation that still does not fit is named with its kind and a note, so one wide table never costs the
- * source its whole generation.
+ * source its whole generation. `partial`: the source is over one generation, so not every relation is listed; each
+ * document says so (its entry, and the head of its text, which a recall hit's snippet carries), so an agent whose
+ * recall misses a table never reads that as "no such table" (coord on #1735, 1735-1).
  */
-function relationDoc(source: string, r: Relation): ReplaceSourceArgs['docs'][number] {
+function relationDoc(source: string, r: Relation, partial = false): ReplaceSourceArgs['docs'][number] {
   const key = relationKey(r.schema, r.name);
+  const where = partial ? `data source ${source} (whose knowledge catalog is partial: not every relation is listed; read one by name with mcp:${source}/list_tables and table_names)` : `data source ${source}`;
   let columns = [...r.columns];
   let fkeys = [...r.foreignKeys];
   const make = (): ReplaceSourceArgs['docs'][number] => {
@@ -178,10 +181,11 @@ function relationDoc(source: string, r: Relation): ReplaceSourceArgs['docs'][num
       primaryKey: r.primaryKey,
       foreignKeys: fkeys,
       ...(fkNotListed > 0 ? { foreignKeysNotListed: fkNotListed } : {}),
+      ...(partial ? { catalogPartial: true } : {}),
     };
     const listed = columns.length > 0 ? columns.map(columnText).join('; ') : 'none listed';
     const more = notListed > 0 ? ` (${notListed} more not listed)` : '';
-    const sections = [{ key: 'columns', text: `${key}: a ${r.kind} in data source ${source}. Columns: ${listed}${more}.` }];
+    const sections = [{ key: 'columns', text: `${key}: a ${r.kind} in ${where}. Columns: ${listed}${more}.` }];
     const fks = fkeys.map((f) => `(${f.columns.join(', ')}) references ${relationKey(f.references.schema, f.references.table)} (${f.references.columns.join(', ')})`);
     if (fkNotListed > 0) fks.push(`${fkNotListed} more not listed`);
     if (r.primaryKey.length > 0 || fks.length > 0) {
@@ -204,8 +208,8 @@ function relationDoc(source: string, r: Relation): ReplaceSourceArgs['docs'][num
   return {
     key,
     title: cutBytes(`${source} · ${key}`, NAME_MAX_BYTES),
-    entry: { relation: r.table, schema: r.schema, name: r.name, kind: r.kind, tooLarge: true },
-    sections: [{ key: 'columns', text: `${key}: a ${r.kind} in data source ${source}; its structure is too large to list here (mcp:${source}/list_tables has it).` }],
+    entry: { relation: r.table, schema: r.schema, name: r.name, kind: r.kind, tooLarge: true, ...(partial ? { catalogPartial: true } : {}) },
+    sections: [{ key: 'columns', text: `${key}: a ${r.kind} in ${where}; its structure is too large to list here (mcp:${source}/list_tables has it).` }],
   };
 }
 
@@ -217,7 +221,9 @@ export function sourceGeneration(s: Pick<GateSource, 'id' | 'name' | 'dialect' |
   if (s.description === null) return null;
   const catalog = s.description.catalog as SqlCatalog;
   const relations = projectableRelations(catalog, s.viewsAllowed);
-  const all = relations.map((r) => relationDoc(s.name, r));
+  let all = relations.map((r) => relationDoc(s.name, r));
+  // Over one generation: every relation document says the catalog is partial (1735-1), then the cut is taken.
+  if (!withinBounds(all)) all = relations.map((r) => relationDoc(s.name, r, true));
   const { docs, notListed } = withinGenerationBounds(s.name, all);
   return {
     sourceId: s.id,
@@ -230,14 +236,19 @@ export function sourceGeneration(s: Pick<GateSource, 'id' | 'name' | 'dialect' |
 
 /**
  * (crew#1328) A source over one estate generation (5,000 documents or 32 MB) used to be refused whole, so none of its
- * structure reached recall. Now its relations go in catalog order while they fit, and one more document says how many
+ * structure reached recall. Now each relation document says the catalog is partial (relationDoc), its relations go in
+ * catalog order while they fit, and one more document says how many
  * are not listed here and how to read one by name (`mcp:<source>/list_tables` with `table_names`), as a relation too
  * wide to list is named (relationDoc). The generation is complete as estate counts it: a relation it does not list is
  * not in estate (one listed by an earlier generation is deleted by this one), and the catalog says so
  * (`relationsNotListed`, which a catalog read reports as truncated).
  */
+function withinBounds(all: ReplaceSourceArgs['docs']): boolean {
+  return all.length <= GENERATION_MAX_DOCS && all.reduce((n, d) => n + bytes(d), 0) <= GENERATION_MAX_BYTES;
+}
+
 function withinGenerationBounds(source: string, all: ReplaceSourceArgs['docs']): { docs: ReplaceSourceArgs['docs']; notListed: number } {
-  if (all.length <= GENERATION_MAX_DOCS && all.reduce((n, d) => n + bytes(d), 0) <= GENERATION_MAX_BYTES) return { docs: all, notListed: 0 };
+  if (withinBounds(all)) return { docs: all, notListed: 0 };
   const note = (n: number): ReplaceSourceArgs['docs'][number] => ({
     key: NOT_LISTED_KEY,
     title: cutBytes(`${source} · relations not listed here`, NAME_MAX_BYTES),

@@ -477,6 +477,22 @@ describe('the describe -> knowledge.replace_source projection (§4.1): value-fre
     const small = sourceGeneration(source('pg', SUPPORT_ID, {}, { description: { catalog: catalog(huge.slice(0, 10)), descriptorHash: 'h' } }), 1)!;
     expect(small.docs.map((d) => d.key)).not.toContain(NOT_LISTED_KEY);
     expect(small.catalog).not.toHaveProperty('relationsNotListed');
+    expect(small.docs[0]!.entry).not.toHaveProperty('catalogPartial');
+    expect(small.docs[0]!.sections[0]!.text).not.toContain('partial');
+  });
+
+  it('(coord on #1735, 1735-1) an agent\'s recall hit on a cut catalog carries the partial label through the relay', () => {
+    const huge = Array.from({ length: 5_001 }, (_, i) => rel('s', `t${i}`, { columns: [], primaryKey: [], foreignKeys: [] }));
+    const gen = sourceGeneration(source('pg', SUPPORT_ID, {}, { description: { catalog: catalog(huge), descriptorHash: 'h' } }), 1)!;
+    const doc = gen.docs[1]!;
+    expect(doc.entry).toMatchObject({ catalogPartial: true });
+    // Estate answers a recall hit with the section's text as its snippet; the relay's release re-check passes it on.
+    const hit = { node_id: `section ${doc.key}#columns`, class: 'section', label: doc.title, body_snippet: doc.sections[0]!.text, score: 1, source: `source:${SUPPORT_ID}/${doc.key}#columns`, scope: `source:${SUPPORT_ID}`, deps: [`source:${SUPPORT_ID}`], untrusted: true };
+    const released = releaseVisible('knowledge.recall', { content: [{ type: 'text', text: JSON.stringify({ items: [hit] }) }], isError: false }, new Set([`source:${SUPPORT_ID}`]));
+    if (!released.ok) throw new Error(`withheld: ${released.reason}`);
+    const items = (JSON.parse((released.result['content'] as Array<{ text: string }>)[0]!.text) as { items: Array<{ body_snippet: string }> }).items;
+    expect(items).toHaveLength(1);
+    expect(items[0]!.body_snippet).toMatch(/^s\.t1: a \w+ in data source pg \(whose knowledge catalog is partial: not every relation is listed; read one by name with mcp:pg\/list_tables and table_names\)\. Columns:/);
   });
 
   it('(crew#1328) the catalog read skips the note and says the catalog is incomplete', async () => {
