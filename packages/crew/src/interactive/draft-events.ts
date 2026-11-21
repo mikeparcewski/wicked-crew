@@ -511,6 +511,7 @@ export interface BoundDraft {
   /** The derived run id: the launch's `sessionId`, so a retry can only adopt it. */
   runId: string;
   chatId: string;
+  chatInstance: string | null;
   proposalId: string;
   /** Preserve the accepted card so its source-check promise reaches the engine. */
   shape?: ProposalShape;
@@ -766,6 +767,8 @@ export interface InteractiveDraftOptions {
   /** DES-CHAT-ARTIFACTS-001 §5.2 (A3): the durable bindings of chat-made documents. A `doc.created` for a bound document
    *  is never answered with a fresh random-id launch: it goes to {@link onBoundDocCreated}. */
   bindings?: DocBindingStore;
+  /** Resolve a bound chat instance when its launch is recorded. */
+  chatIdOf?: (chatId: string, instance: string | null) => string | null;
   /** A bound document's `doc.created` arrived (the normal path, or late): the daemon hands it to the proposal's one
    *  launcher per run id, which adopts the run its Go already started. */
   onBoundDocCreated?: (artifactRef: string, documentId: string) => Promise<void>;
@@ -1773,12 +1776,13 @@ export async function startInteractiveDraftSubscriber(
       return;
     }
     if (doc.projectId !== undefined) opts.onRunFiled?.(runId, doc.projectId);
+    const launchChatId = bound !== undefined ? opts.chatIdOf!(bound.chatId, bound.chatInstance) : null;
     opts.onRunLaunched?.(runId, {
       deliver: 'none', // crew#762: a document draft publishes a document, it never delivers a PR
       ...(docChannel !== undefined ? { channel: docChannel } : {}),
       ...(docActor !== undefined ? { actor: docActor } : {}),
       // A3 (DES §5.2 "Filing"): the run is filed under the chat, and says which proposal and artifact it is.
-      ...(bound !== undefined ? { chatId: bound.chatId, proposalId: bound.proposalId, artifactRef: bound.artifactRef } : {}),
+      ...(bound !== undefined ? { ...(launchChatId !== null ? { chatId: launchChatId } : {}), proposalId: bound.proposalId, artifactRef: bound.artifactRef } : {}),
     });
 
     // Upgrade the placeholder to a live flight: the heartbeat starts once the run exists.
@@ -1884,6 +1888,7 @@ export async function startInteractiveDraftSubscriber(
       if (left.length > 0) throw new Error(`an earlier attempt of this document could not be fenced (${left.join(', ')} is still there)`);
     },
     launchBound: async (spec: BoundDraft) => {
+      if (opts.chatIdOf === undefined) throw new Error('a bound draft needs its chat instance resolver');
       if (closed) throw new Error('the draft seam is stopping');
       for (const f of inFlight.values()) {
         if (f.documentId === spec.documentId && f.projectId === spec.projectId) {

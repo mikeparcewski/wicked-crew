@@ -23,7 +23,7 @@ import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { readFileSync, existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
-import { basename, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { videoPalette } from '../appearance/video-palette.js';
 import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, MaintenanceDrainError, RepoUnregisterUnsupportedError, TERMINAL_RUN_STATUSES, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, readNewWorkSeats, settingsFilePath, type RunViewsSnapshot } from '../core/adapter.js';
@@ -353,7 +353,7 @@ import {
 } from './diagnostics.js';
 import { GovernanceDiagnostics } from './governance-health.js';
 import { ATTACHMENT_LIMITS, ATTACHMENT_MAX_MESSAGE_BYTES, AttachmentError, ChatAttachmentStore, attachmentWire, attachmentsBlock, boundaryOf, parseMultipart, stageForSeat } from './chat-attachments.js';
-import { CHAT_HISTORY_MAX_LIMIT, ChatHistoryStore, decodeCursor } from './chat-history.js';
+import { CHAT_HISTORY_MAX_LIMIT, ChatHistoryStore, SeedRequestStore, decodeCursor } from './chat-history.js';
 import {
   PROBE_TIMEOUT_MS,
   SYSTEM_BUDGET_MS,
@@ -1912,6 +1912,8 @@ export function registerRoutes(
   const chatTranscripts = runtime.chatTranscripts;
   const chatAttachments = runtime.chatAttachments ?? new ChatAttachmentStore();
   const chatHistory = runtime.chatHistory ?? (chatTranscripts !== undefined ? new ChatHistoryStore(chatTranscripts, chatAttachments) : null);
+  // crew#1422: beside the history (its own folder: DELETE /chats/:id never removes a record).
+  const seedRequests = chatHistory !== null ? new SeedRequestStore(join(dirname(chatHistory.dir), 'seed-requests')) : null;
   // DES-CHAT-ARTIFACTS-001 §14 (A2): what a chat can do with artifacts. Production: `proposals` on, and each operation
   // on once its slice registers its launcher (A3 create, A7 theme). The TEST configuration (§13 A2) turns every
   // operation's resolution on and registers a recording stub that starts nothing.
@@ -4315,7 +4317,11 @@ export function registerRoutes(
       },
     },
     async (req, reply) => {
-      const out = await launchRun(req.body, { actor: actorOf(req), log: req.log });
+      const launch = () => launchRun(req.body, { actor: actorOf(req), log: req.log });
+      const parsed = LaunchSchema.safeParse(req.body);
+      const out = parsed.success && parsed.data.chatId !== undefined
+        ? await chatProposals.admitChat(parsed.data.chatId, launch)
+        : await launch();
       return reply.code(out.statusCode).send(out.payload);
     },
   );
@@ -5233,7 +5239,7 @@ export function registerRoutes(
           requestType: 'ChatOpenBody',
           responseType: 'ChatOpenResponse',
           // 200: a seeded retry answers the chat its request already opened (api-types 0.192.0).
-          statusCodes: [200, 201, 400, 403, 404, 409, 500, 501],
+          statusCodes: [200, 201, 400, 403, 404, 409, 410, 500, 501],
         },
       },
     },
@@ -5249,6 +5255,7 @@ export function registerRoutes(
       let seedChatId: string | undefined;
       if (b.seed !== undefined) {
         if (!chatJobProposalsOn) return reply.code(400).send({ error: 'this daemon does not take job proposals from a chat' });
+        if (chatHistory === null) return reply.code(501).send({ error: 'this daemon keeps no chat history for a seeded request' });
         seedActor = actorOf(req);
         if (!isHumanOperator(seedActor)) {
           audit.record('chat.proposal.refused', seedActor, { detail: { reason: 'not_a_person', what: 'seed' } });
@@ -5257,22 +5264,22 @@ export function registerRoutes(
         const bad = seedCardRefusal(b.seed.card);
         if (bad !== null) return reply.code(400).send({ code: 'card_unknown', error: bad });
         seedChatId = proposalRunId(`seed\u0000${seedActor.id}\u0000${b.requestId!}`);
-        // A retry: this request's chat exists (open, or kept in history after a close or a restart). Answer it and its
-        // proposal, completing the proposal while the chat is open; never open the id again (codex r1).
-        const open = askPaths.get(seedChatId) !== undefined || chatScopes.get(seedChatId) !== undefined;
-        if (open || chatHistory?.has(seedChatId) === true) {
-          const stored = chatProposals.viewOfPid(seedChatId, personPid(seedChatId, seedActor.id, b.requestId!));
-          let view = stored === null ? null : await chatProposals.servedView(stored);
-          // The same request id with another seed is not a retry (codex r2).
-          if (view !== null && view.proposal.request?.digest !== requestDigest(seedBody(b.seed, b.requestId!))) {
-            return reply.code(409).send({ code: 'request_reused', error: 'this requestId already started a chat with another job', chatId: seedChatId });
+        const record = seedRequests!.get(seedChatId);
+        if (record !== null) {
+          const id = chatHistory.idOfInstance(seedChatId, record.instance);
+          if (id === null) return reply.code(410).send({ code: 'chat_gone', error: 'the chat this request opened was deleted' });
+          if (record.digest !== requestDigest(seedBody(b.seed, b.requestId!))) {
+            return reply.code(409).send({ code: 'request_reused', error: 'this requestId already started a chat with another job', chatId: id });
           }
+          const stored = chatProposals.viewOfPid(id, personPid(seedChatId, seedActor.id, b.requestId!));
+          let view = stored === null ? null : await chatProposals.servedView(stored);
+          const open = id === seedChatId && (askPaths.get(id) !== undefined || chatScopes.get(id) !== undefined);
           if (view === null && open) {
-            const seeded = await seedProposal(seedChatId, b.seed, b.requestId!, seedActor);
-            if ('refused' in seeded) return reply.code(409).send({ ...seeded.refused, chatId: seedChatId });
+            const seeded = await seedProposal(id, b.seed, b.requestId!, seedActor);
+            if ('refused' in seeded) return reply.code(409).send({ ...seeded.refused, chatId: id });
             view = seeded.view;
           }
-          return reply.code(200).send({ chatId: seedChatId, seats: [], scope: chatScopes.get(seedChatId) ?? null, refused: [], ...(view !== null ? { proposal: view } : {}), adopted: true });
+          return reply.code(200).send({ chatId: id, seats: [], scope: open ? chatScopes.get(id) ?? null : null, refused: [], ...(view !== null ? { proposal: view } : {}), adopted: true });
         }
       }
       const chatId = seedChatId ?? b.chatId ?? randomUUID();
@@ -5614,6 +5621,17 @@ export function registerRoutes(
           });
         } catch (err) {
           req.log.warn({ chatId }, `chat history entry not written: ${message(err)}`);
+        }
+        // crew#1422: the instance this request opened, so a retry answers that chat and never another one under the id.
+        // A failure here is logged, never thrown into an open that already published the chat.
+        if (b.seed !== undefined && seedActor !== null) {
+          const state = chatHistory?.stateOf(chatId) ?? null;
+          try {
+            if (state === null) throw new Error('no history entry');
+            seedRequests!.set(chatId, { instance: state.instance, digest: requestDigest(seedBody(b.seed, b.requestId!)), actorId: seedActor.id, at: Date.now() });
+          } catch (err) {
+            req.log.warn({ chatId }, `seed request not recorded (a retry of it cannot find this chat): ${message(err)}`);
+          }
         }
         // The thread learns of every refused seat the way it learns of everything else — a frame
         // on /ws — AFTER the scope is published, so a reader never sees a refusal for a chat it
@@ -6715,7 +6733,10 @@ export function registerRoutes(
     /** Runs right after the close fold, with NO await before it: the id cannot have been reopened
      *  yet, so a history operation here can never land on a replacement chat (xreview r1 on #1140). */
     afterFold?: () => void,
-  ): Promise<{ ok: true; cancelError?: { runId: string; error: string } } | { ok: false; error: string }> => {
+  ): Promise<{ ok: true; cancelError?: { runId: string; error: string } } | { ok: false; error: string; code?: 'chat_changed' }> => {
+    // crew#1279 (coord r1 on #1720): the instance the caller checked, read before the wait for a held Go. A chat closed
+    // by another route meanwhile whose id a new chat reused is not this close's to end (fence by generation).
+    const expected = chatHistory?.stateOf(id)?.instance ?? null;
     // DES-SYSTEM-CHAT: the answering CLI the history names is the path's PA, while it is known.
     const pa = askPaths.get(id)?.pa;
     if (pa !== undefined && pa !== null) chatHistory?.setCli(id, pa);
@@ -6723,7 +6744,15 @@ export function registerRoutes(
     // (crew#502). ASK-C1: the daemon owns the close, so the id is HELD — no grace timer — until
     // this close settles below; a reopen meanwhile is refused and a second DELETE joins this one
     // (nothing of the closed chat can land on a reuse — codex on #808 r5).
-    const ticket = chatScopes.holdClose(id);
+    // crew#1279: the close is committed under Go's admission of this chat, so it waits for a launch in flight. Only the
+    // hold is under it: a second DELETE still joins the settling close at once.
+    const ticket = await chatProposals.admitChat(id, async () => {
+      const now = chatHistory?.stateOf(id)?.instance ?? null;
+      return now !== null && now !== expected ? ('changed' as const) : chatScopes.holdClose(id);
+    });
+    if (ticket === 'changed') {
+      return { ok: false as const, code: 'chat_changed' as const, error: `chat ${id} was closed while this request waited, and its id now belongs to a new chat; nothing was changed` };
+    }
     if (ticket === null) return { ok: true as const };
     chatTurns.closed(id);
     // ASK-C1: End cancels the path (`path.ended{status:"cancelled"}`); the engine holds no chat
@@ -6778,7 +6807,7 @@ export function registerRoutes(
       chatAttachments.removeChat(id);
     };
     const ended = await endChat(id, removeHistory);
-    if (!ended.ok) return reply.code(400).send({ error: ended.error });
+    if (!ended.ok) return ended.code !== undefined ? reply.code(409).send({ code: ended.code, error: ended.error }) : reply.code(400).send({ error: ended.error });
     // A chat the daemon no longer held (no fold ran): its kept history goes too.
     if (chatHistory?.entry(id) !== null && chatScopes.get(id) === undefined && askPaths.get(id) === undefined) removeHistory();
     return { ok: true };
@@ -6787,7 +6816,7 @@ export function registerRoutes(
   // DES-SYSTEM-CHAT (api-types 0.137.0): end the chat and KEEP its history and attachments.
   app.post(
     `${V}/chats/:id/close`,
-    { config: { manifest: { responseType: 'ChatCloseResponse', statusCodes: [200, 400, 404, 501, 502] } } },
+    { config: { manifest: { responseType: 'ChatCloseResponse', statusCodes: [200, 400, 404, 409, 501, 502] } } },
     async (req, reply) => {
       const { id } = req.params as { id: string };
       if (chatHistory === null) return reply.code(501).send({ error: 'this daemon keeps no chat history' });
@@ -6799,7 +6828,7 @@ export function registerRoutes(
       // The close fold archives it; closing here too (before the id is free) covers a route set
       // without the fold, and is a no-op after it.
       const ended = await endChat(id, () => chatHistory.closed(id));
-      if (!ended.ok) return reply.code(400).send({ error: ended.error });
+      if (!ended.ok) return ended.code !== undefined ? reply.code(409).send({ code: ended.code, error: ended.error }) : reply.code(400).send({ error: ended.error });
       const chat = chatHistory.entry(id);
       if (chat === null) return reply.code(404).send({ error: `chat ${id} has no history on this daemon` });
       if (ended.cancelError !== undefined) {
@@ -7822,6 +7851,7 @@ export function registerRoutes(
       const base = old !== null && old.shape !== undefined ? factsOf(old) : null;
       const facts: JobFacts = {
         card: parsed.data.card,
+        title: base?.title ?? null,
         option: parsed.data.option ?? undefined,
         depth: parsed.data.depth ?? null,
         words: base?.words ?? envelope.words,
@@ -12067,6 +12097,7 @@ export function registerRoutes(
   // name forever — studio#119's ghost). One static segment more specific than the proxy's
   // wildcard, so the proxy stays pure transport for everything else.
   registerInteractiveDocDelete(app, adapter, {
+    admitDocument: (ref, fn) => chatProposals.admitDocument(ref, fn),
     settings: projectSettings,
     pool: interactiveBridges,
     audit,

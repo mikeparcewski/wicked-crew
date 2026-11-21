@@ -200,6 +200,7 @@ beforeAll(async () => {
   const env = { WICKED_INTERACTIVE_ROOT: sharedRoot };
   registerInteractiveProxy(app, adapter, { settings, pool, env });
   registerInteractiveDocDelete(app, adapter, {
+    admitDocument: (_ref, fn) => fn(),
     settings,
     pool,
     audit,
@@ -366,6 +367,7 @@ describe('partial failure is LOUD', () => {
     const adapter = stubAdapter(new Set(['p-a']));
     const settings = new ProjectSettingsStore(join(dir, 'project-settings.json'));
     registerInteractiveDocDelete(failingApp, adapter, {
+      admitDocument: (_ref, fn) => fn(),
       settings,
       pool: new InteractiveBridgePool({ spawn: spawnFake, startTimeoutMs: 15_000, healthTimeoutMs: 1_000 }),
       audit,
