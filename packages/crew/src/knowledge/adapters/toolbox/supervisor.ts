@@ -27,7 +27,9 @@ import { StringDecoder } from 'node:string_decoder';
 import { childEnvWithBootEstateDb, ESTATE_DB_ENGINE_ENV } from '../../../core/governance-store.js';
 import { scrubSecrets } from '../../../mcp/secrets.js';
 import { type ToolboxDocument, yamlQuotedBody } from './document.js';
+import { processMemory } from './memory.js';
 
+export const TOOLBOX_MEMORY_BYTES = 512 * 1024 * 1024;
 export const TOOLBOX_IDLE_MS = 15 * 60 * 1000;
 /** The first exec of the 155 MB binary can take ~19 s (an endpoint-security scan); a warm start ~1.2 s. */
 export const TOOLBOX_START_MS = 60_000;
@@ -37,7 +39,7 @@ const INTERNAL_BYTES = 8 * 1024 * 1024;
 
 export class ToolboxCallError extends Error {
   constructor(
-    readonly code: 'deadline' | 'too_large' | 'adapter_exited' | 'adapter_start_failed' | 'adapter_unverified' | 'protocol',
+    readonly code: 'memory' | 'deadline' | 'too_large' | 'adapter_exited' | 'adapter_start_failed' | 'adapter_unverified' | 'protocol',
     message: string,
   ) {
     super(message);
@@ -142,6 +144,8 @@ export class ToolboxProcess {
     secret: string | null,
     private readonly idleMs: number,
     private readonly onGone: (p: ToolboxProcess) => void,
+    private readonly memoryBytes: number = TOOLBOX_MEMORY_BYTES,
+    private readonly memoryOf: (pid: number) => Promise<number | null> = processMemory,
   ) {
     this.secret = secret;
     this.secrets = secret === null || secret === '' ? [] : [secret, yamlQuotedBody(secret), JSON.stringify(secret).slice(1, -1)].filter((s, i, a) => s !== '' && a.indexOf(s) === i);
@@ -169,8 +173,7 @@ export class ToolboxProcess {
     const config = join(this.runDir, 'tools.yaml');
     await writeFile(config, this.doc.yaml, { mode: 0o600 });
     if (this.doc.caPem !== null) await writeFile(join(this.runDir, 'ca.pem'), this.doc.caPem, { mode: 0o600 });
-    // GOMEMLIMIT is a SOFT bound (the Go runtime collects harder near it); the hard memory limit of §7.4 comes with
-    // the per-source runner container (§7.5). Host mode's residual: a process can still grow past it.
+    // crew#1320: GOMEMLIMIT is a soft GC target; the pending-call watchdog enforces the hard kill.
     const env: Record<string, string> = { PATH: process.platform === 'win32' ? (process.env['PATH'] ?? '') : '/usr/bin:/bin', HOME: this.runDir, TMPDIR: this.runDir, GOMEMLIMIT: '256MiB' };
     if (process.platform === 'win32' && process.env['SystemRoot'] !== undefined) env['SystemRoot'] = process.env['SystemRoot'];
     if (this.doc.secretVar !== null) env[this.doc.secretVar] = yamlQuotedBody(this.secret ?? '');
@@ -263,24 +266,51 @@ export class ToolboxProcess {
     if (this.pending !== null) return Promise.reject(new ToolboxCallError('protocol', 'a call is already in flight on this source (the gate runs one at a time)'));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
+      let memoryTimer: NodeJS.Timeout | undefined;
+      let settled = false;
+      const stopSampling = (): void => {
+        settled = true;
+        clearTimeout(memoryTimer);
+      };
+      // crew#1320: sample serially and discard readings from a call that has settled.
+      const sample = async (): Promise<void> => {
+        if (settled || this.pending?.id !== id) return;
+        const pid = this.pid;
+        const bytes = pid === null ? null : await this.memoryOf(pid).catch(() => null);
+        if (settled || this.pending?.id !== id) return;
+        if (bytes === null || !Number.isFinite(bytes) || bytes < 0 || bytes > this.memoryBytes) {
+          const pending = this.pending;
+          this.pending = null;
+          this.kill();
+          pending.reject(new ToolboxCallError('memory', bytes !== null && Number.isFinite(bytes) && bytes > this.memoryBytes
+            ? `the source's adapter passed its ${this.memoryBytes / (1024 * 1024)} MiB memory bound, so the read was stopped`
+            : "crew could not read the source's adapter memory, so the read was stopped"));
+          return;
+        }
+        memoryTimer = setTimeout(() => { void sample(); }, 200);
+      };
       const timer = setTimeout(() => {
         if (this.pending?.id !== id) return;
+        const pending = this.pending;
         this.pending = null;
         this.kill();
-        reject(new ToolboxCallError('deadline', `the read ran past its ${Math.round(deadlineMs / 1000)} s deadline; the Toolbox process was stopped`));
+        pending.reject(new ToolboxCallError('deadline', `the read ran past its ${Math.round(deadlineMs / 1000)} s deadline; the Toolbox process was stopped`));
       }, deadlineMs);
       this.pending = {
         id,
         cap,
         resolve: (v) => {
           clearTimeout(timer);
+          stopSampling();
           resolve(v as Record<string, unknown>);
         },
         reject: (e) => {
           clearTimeout(timer);
+          stopSampling();
           reject(e);
         },
       };
+      memoryTimer = setTimeout(() => { void sample(); }, 200);
       this.child?.stdin?.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
     });
   }
@@ -393,6 +423,9 @@ export interface SupervisorDeps {
   /** Where each source's run directory lives (`<state home>/adapters/toolbox/run`). */
   runRoot: string;
   idleMs?: number;
+  /** TESTS ONLY: a smaller resident-memory cap and a controlled host reading (crew#1320). */
+  memoryBytes?: number;
+  memoryOf?: (pid: number) => Promise<number | null>;
 }
 
 interface Slot {
@@ -431,7 +464,7 @@ export class ToolboxSupervisor {
       const bin = await this.deps.binary();
       const p = new ToolboxProcess(bin, dir, doc, secret, this.deps.idleMs ?? TOOLBOX_IDLE_MS, (gone) => {
         if (entry.proc === gone) entry.proc = null;
-      });
+      }, this.deps.memoryBytes, this.deps.memoryOf);
       await p.start();
       if (entry.retired) {
         p.stop();
@@ -458,7 +491,7 @@ export class ToolboxSupervisor {
     const bin = await this.deps.binary();
     // Its own directory per invocation: two previews (or Tests) of one entry never share or delete each other's.
     const dir = join(this.deps.runRoot, `preview-${label.replace(/[^A-Za-z0-9_-]/g, '_')}-${randomBytes(4).toString('hex')}`);
-    const p = new ToolboxProcess(bin, dir, doc, secret, this.deps.idleMs ?? TOOLBOX_IDLE_MS, () => undefined);
+    const p = new ToolboxProcess(bin, dir, doc, secret, this.deps.idleMs ?? TOOLBOX_IDLE_MS, () => undefined, this.deps.memoryBytes, this.deps.memoryOf);
     try {
       await p.start();
       return await fn(p);

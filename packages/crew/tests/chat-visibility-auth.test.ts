@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import type { ChatProposalView, ChatTranscriptRecord } from 'wicked-crew-api-types';
+import type { ChatProposalFrame, ChatProposalView, ChatTranscriptRecord } from 'wicked-crew-api-types';
 
 import { foldProposals } from '../src/api/chat-proposals.js';
 import { tokenHash } from '../src/api/auth.js';
@@ -81,6 +81,10 @@ describe('chat visibility under auth: required (crew#1669)', () => {
     const tokensPath = join(scratch, 'tokens.json');
     writeFileSync(tokensPath, JSON.stringify({ tokens: [
       { sha256: tokenHash('owner-token'), actor: { id: 'maria', kind: 'human', trust: 'operator' } },
+      { sha256: tokenHash('agent-token'), actor: { id: 'agent', kind: 'agent', trust: 'operator' } },
+      { sha256: tokenHash('system-token'), actor: { id: 'system', kind: 'system', trust: 'operator' } },
+      { sha256: tokenHash('plugin-token'), actor: { id: 'plugin:test@1.0.0', kind: 'plugin', trust: 'observer' } },
+      { sha256: tokenHash('observer-token'), actor: { id: 'watcher', kind: 'human', trust: 'observer' } },
       { sha256: tokenHash('other-token'), actor: { id: 'sam', kind: 'human', trust: 'operator' } },
     ] }));
     const opts = {
@@ -116,7 +120,11 @@ describe('chat visibility under auth: required (crew#1669)', () => {
   const replyTo = (chat: string, turnId: string) => {
     for (const fn of listeners) fn({ type: 'chatReply', chat, cliKey: 'claude', turnId, text: 'Looks like a bug.', ok: true } as unknown as CoreEvent);
   };
-  const proposalFrames = () => broadcast.mock.calls.filter(([frame]) => frame.type === 'chatProposal').length;
+  const proposalFrames = (chat: string, pid: string) => broadcast.mock.calls.flatMap(([frame]) => {
+    if (frame.type !== 'chatProposal' || frame.chat !== chat) return [];
+    const { record } = frame as ChatProposalFrame;
+    return record.kind === 'proposal' && record.proposal.pid === pid ? [record] : [];
+  });
 
   it('hides detail like a never-opened id, without rewriting a held card or broadcasting it; the owner rechecks it', async () => {
     codexSignedIn = false;
@@ -134,18 +142,19 @@ describe('chat visibility under auth: required (crew#1669)', () => {
     expect(made.statusCode, made.body).toBe(201);
     const p = (made.json() as { view: ChatProposalView }).view.proposal;
     expect(p.blocked).toBe(NEEDS_TWO);
+    await vi.waitFor(() => expect(proposalFrames(chatId, p.pid)).toHaveLength(1));
     const transcript = join(home, 'chats', `${chatId}.jsonl`);
     const bytesBefore = readFileSync(transcript);
     const launchesBefore = launches.length;
     const continuationsBefore = continuations.length;
-    const framesBefore = proposalFrames();
+    const framesBefore = proposalFrames(chatId, p.pid).length;
     codexSignedIn = true;
 
     const hidden = await app.inject({ method: 'GET', url, ...auth('other-token') });
     expect.soft(hidden.statusCode, hidden.body).toBe(404);
     expect.soft(hidden.body).toBe(unknown.body);
     expect.soft(readFileSync(transcript).equals(bytesBefore)).toBe(true);
-    expect.soft(proposalFrames()).toBe(framesBefore);
+    expect.soft(proposalFrames(chatId, p.pid)).toHaveLength(framesBefore);
     expect.soft(launches).toHaveLength(launchesBefore);
     expect.soft(continuations).toHaveLength(continuationsBefore);
 
@@ -156,9 +165,29 @@ describe('chat visibility under auth: required (crew#1669)', () => {
     expect(refreshed.proposal.blocked).toBeNull();
     expect(refreshed.proposal.seats?.keys).toEqual(['claude', 'codex']);
     expect(readFileSync(transcript).equals(bytesBefore)).toBe(false);
-    expect(proposalFrames()).toBe(framesBefore + 1);
+    expect(proposalFrames(chatId, p.pid)).toHaveLength(framesBefore + 1);
+    expect(proposalFrames(chatId, p.pid).at(-1)?.proposal.blocked).toBeNull();
     expect(launches).toHaveLength(launchesBefore);
     expect(continuations).toHaveLength(continuationsBefore);
+  });
+
+  it.each([
+    ['agent-token', 404], ['system-token', 404], ['plugin-token', 403], ['observer-token', 403],
+    [undefined, 401], ['wmt_not_a_bound_unit_token', 401],
+  ] as const)('hides chat reads and messages from %s (crew#1270)', async (token, postStatus) => {
+    const chatId = `matrix-${token ?? 'no-token'}`;
+    const url = `/api/v1/chats/${chatId}`;
+    const headers = token === undefined ? {} : auth(token);
+    const unknown = await app.inject({ method: 'GET', url, ...headers });
+    await open(chatId);
+    const hidden = await app.inject({ method: 'GET', url, ...headers });
+    expect(hidden.statusCode, hidden.body).toBe(postStatus === 401 ? 401 : 404);
+    expect(hidden.body).toBe(unknown.body);
+    const payload = { text: 'the login page 500s' };
+    const unknownSend = await app.inject({ method: 'POST', url: '/api/v1/chats/never-opened/messages', payload, ...headers });
+    const hiddenSend = await app.inject({ method: 'POST', url: `${url}/messages`, payload, ...headers });
+    expect(hiddenSend.statusCode, hiddenSend.body).toBe(postStatus);
+    expect(hiddenSend.body).toBe(postStatus === 404 ? unknown.body : unknownSend.body);
   });
 
   it('refuses another actor re-seating before changing the owner roster; the owner can re-seat', async () => {
