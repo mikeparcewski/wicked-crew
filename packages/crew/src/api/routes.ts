@@ -6674,7 +6674,9 @@ export function registerRoutes(
     // (crew#502). ASK-C1: the daemon owns the close, so the id is HELD — no grace timer — until
     // this close settles below; a reopen meanwhile is refused and a second DELETE joins this one
     // (nothing of the closed chat can land on a reuse — codex on #808 r5).
-    const ticket = chatScopes.holdClose(id);
+    // crew#1279: the close is committed under Go's admission of this chat, so it waits for a launch in flight. Only the
+    // hold is under it: a second DELETE still joins the settling close at once.
+    const ticket = await chatProposals.admitChat(id, async () => chatScopes.holdClose(id));
     if (ticket === null) return { ok: true as const };
     chatTurns.closed(id);
     // ASK-C1: End cancels the path (`path.ended{status:"cancelled"}`); the engine holds no chat
@@ -6718,7 +6720,6 @@ export function registerRoutes(
 
   app.delete(`${V}/chats/:id`, async (req, reply) => {
     const { id } = req.params as { id: string };
-    return chatProposals.admitChat(id, async () => {
     // DES-SYSTEM-CHAT: DELETE also deletes the chat's history and attachments (POST /close keeps them)
     // — under `auth: required` only its opener's (another actor's chat is not this caller's to end).
     const viewer = security.authMode === 'required' ? actorOf(req).id : null;
@@ -6734,7 +6735,6 @@ export function registerRoutes(
     // A chat the daemon no longer held (no fold ran): its kept history goes too.
     if (chatHistory?.entry(id) !== null && chatScopes.get(id) === undefined && askPaths.get(id) === undefined) removeHistory();
     return { ok: true };
-    });
   });
 
   // DES-SYSTEM-CHAT (api-types 0.137.0): end the chat and KEEP its history and attachments.
@@ -6743,7 +6743,6 @@ export function registerRoutes(
     { config: { manifest: { responseType: 'ChatCloseResponse', statusCodes: [200, 400, 404, 501, 502] } } },
     async (req, reply) => {
       const { id } = req.params as { id: string };
-      return chatProposals.admitChat(id, async () => {
       if (chatHistory === null) return reply.code(501).send({ error: 'this daemon keeps no chat history' });
       const viewer = security.authMode === 'required' ? actorOf(req).id : null;
       const known = chatHistory.entry(id) !== null;
@@ -6765,7 +6764,6 @@ export function registerRoutes(
         });
       }
       return { ok: true, chat };
-      });
     },
   );
 
