@@ -237,7 +237,7 @@ import { REQUIRED_GARDEN_VERSION } from '../skills/plugin-source.js';
 import type { EvalRunStore } from './eval-store.js';
 import { isSeatKeyList } from '../core/job-seats.js';
 import { engineRosterJson, noEligibleSeatBody, parseNoEligibleSeat, toEngineSeat } from '../core/engine-roster.js';
-import { launchAssuranceNotice } from '../core/assurance.js';
+import { launchAssuranceNotice, readJudgeCoverage } from '../core/assurance.js';
 import { launchPosture, type PostureFacts } from '../core/launch-posture.js';
 import { launchRequiresQe, mayRequireQe, qeAcceptanceMode, qeSettingSkipReason } from '../core/qe-acceptance-setting.js';
 import {
@@ -322,7 +322,7 @@ import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, 
 import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
 import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks, webScopeReason } from './run-sources.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
-import { ChatProposals, LaunchOnceRegistry, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
+import { LaunchRefusal, ChatProposals, LaunchOnceRegistry, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
 import { CATALOG_SEEDS } from '../workflow-catalog/catalog-data.js';
 import { registerInteractiveDocList } from '../interactive/doc-list-routes.js';
 import { REVIEWS_DIRNAME } from '../interactive/review-ledger.js';
@@ -575,6 +575,16 @@ export class LaunchReply {
     this.payload = payload;
     return this;
   }
+}
+
+/** Keep correctable launch refusals typed, and preserve error codes in other launch failures. */
+export function jobRefusal(status: number, payload: unknown): Error {
+  const b = payload as { error?: unknown; code?: unknown } | undefined;
+  if (status >= 400 && status < 500 && typeof b?.code === 'string') {
+    return new LaunchRefusal(status, b as Record<string, unknown> & { code: string });
+  }
+  const error = typeof b?.error === 'string' ? b.error : 'The launch was refused.';
+  return new Error(`${error}${typeof b?.code === 'string' ? ` (${b.code})` : ''}`);
 }
 
 /** Who launches, and where the launch logs. The rest is crew's own and never a client field. */
@@ -1539,6 +1549,7 @@ export interface RuntimeDeps {
    *  same seats (F-RECON-002/003); a directly-driven route set builds one over `seatHealth` +
    *  `signedIn` above. */
   rosterWithStanding?: RosterWithStanding;
+  judgeCoverage?: typeof CoreAdapter.judgeCoverage;
   /** Injectable so container-login route tests never spawn the engine or a login container. */
   seatLoginExec?: ExecLike;
   /** The `/ws` fan-out, for the few routes that say something to a thread themselves (a refused
@@ -2489,7 +2500,7 @@ export function registerRoutes(
       // boundary, are named before any run starts.
       ...(() => {
         const gov = seatGovernanceSnapshot();
-        return seatGovernanceWarnings(gov.diagnostics, hostSandboxLauncher(), gov.workEligible);
+        return [...seatGovernanceWarnings(gov.diagnostics, hostSandboxLauncher(), gov.workEligible), ...gov.imageFindings];
       })(),
       // crew 0.15.2 (#916): a custom seat written council-off with no work flag is now work-eligible
       // by the engine default; each is named once, so the operator can keep it off work.
@@ -2668,6 +2679,7 @@ export function registerRoutes(
         governanceDiagnostics.health(),
         floorCacheCache.get(),
       ]);
+      const seatGovernance = seatGovernanceSnapshot();
       const uptimeMs = Math.round(process.uptime() * 1000);
       const addr = app.server.address();
       const port = typeof addr === 'object' && addr !== null ? addr.port : 7701;
@@ -2705,9 +2717,10 @@ export function registerRoutes(
         seatGovernance: {
           rosterFile: seatRosterFile(),
           hostBoundary: hostSandboxLauncher(),
-          seats: seatGovernanceSnapshot().diagnostics,
+          seats: seatGovernance.diagnostics,
           // The same `seat.work_default` findings `/health.warnings` carries (api-types 0.133.0).
           roleFindings: seatWorkDefaultNow(),
+          imageFindings: seatGovernance.imageFindings,
         },
         // crew#740: which memory store this daemon reads and writes, and the isolation notice.
         memoryStore: memoryStoreInfo(),
@@ -2823,17 +2836,20 @@ export function registerRoutes(
   );
   /** crew#742: the seats' governance standing, read from the standing roster (empty when the
    *  roster cannot be read — the roster route reports that failure itself). */
-  const seatGovernanceSnapshot = (): { diagnostics: SeatGovernanceDiagnostic[]; workEligible: ReadonlySet<string> } => {
+  const seatGovernanceSnapshot = (): { diagnostics: SeatGovernanceDiagnostic[]; workEligible: ReadonlySet<string>; imageFindings: Array<{ kind: string; severity: 'warning'; message: string }> } => {
     try {
       // One roster read feeds both: the warnings follow the work role flag (not the council flag, and
       // not the runtime-gated `work_eligible`), which the published diagnostics do not carry.
       const roster = rosterWithStanding();
       return {
         diagnostics: seatGovernanceDiagnostics(roster as unknown as DiagnosticSeatInput[]),
+        imageFindings: roster.filter((seat) => seat.seat_image_unavailable !== undefined).map((seat) => ({
+          kind: 'seat.image_unavailable', severity: 'warning', message: `${seat.display_name ?? seat.key}: ${seat.seat_image_unavailable}`,
+        })),
         workEligible: new Set(roster.filter((seat) => seat.seat_eligible_for_work !== false).map((seat) => String(seat.key))),
       };
     } catch {
-      return { diagnostics: [], workEligible: new Set() };
+      return { diagnostics: [], workEligible: new Set(), imageFindings: [] };
     }
   };
 
@@ -4148,7 +4164,7 @@ export function registerRoutes(
       const skillsWarning = skillsAhead === null ? {} : { skillsWarning: { kind: skillsAhead.kind, severity: skillsAhead.severity, message: skillsAhead.message } };
       // wicked-core#850: a full-assurance run on a one-CLI roster will wait at a gate for a seat that
       // can evaluate or judge it; the answer names the explicit opt-in to relaunch with.
-      const notice = launchAssuranceNotice({ runId, reducedAssurance: b.reducedAssurance, engineClisJson: engineRosterJson(input.clisJson) });
+      const notice = launchAssuranceNotice({ runId, reducedAssurance: b.reducedAssurance, coverage: readJudgeCoverage(engineRosterJson(input.clisJson), input.repoRef !== undefined, runtime.judgeCoverage ?? CoreAdapter.judgeCoverage) });
       const assuranceNotice = notice === null ? {} : { assuranceNotice: notice };
       // (program DES-POWER-MODE) Whether the run is in power mode, and why not when it was wanted.
       const power = { ...(input.power === true ? { power: true } : {}), ...(powerNotice !== null ? { powerNotice } : {}), ...(humanConfirmNotice !== null ? { humanConfirmNotice } : {}) };
@@ -4279,16 +4295,6 @@ export function registerRoutes(
   );
 
   /**
-   * (DES-CATALOG-002 §4.6) The `job` launcher: a chat job proposal's Go, one launcher per launch kind, each with the
-   * identity derived from the proposal (`sessionId` = its run id, so a retry finds and adopts it), the chat filing, the
-   * shape, and the plan held: a job launched from a chat stops at its first plan unless the person's Start chose a
-   * power run (`power: true`, api-types 0.196.0), which is refused unless this daemon can run that job as one.
-   */
-  const jobRefusalText = (payload: unknown): string => {
-    const b = payload as { error?: unknown; code?: unknown } | undefined;
-    return `${typeof b?.error === 'string' ? b.error : 'the launch was refused'}${typeof b?.code === 'string' ? ` (${b.code})` : ''}`;
-  };
-  /**
    * (operator ruling 2026-11-06) Why a chat job can't run as a power run on this daemon now, else `null`: only a
    * workflow run on a repository whose workflow is a preset, on an engine with power mode (launchRun's own rule, which
    * would otherwise run it phased and only say so), with Power mode for new jobs on (chat starts follow the setting).
@@ -4318,6 +4324,12 @@ export function registerRoutes(
     if (!(await namesPreset(resolved.workflow, scoped))) return `${p.what.label} can't run as a power run (its workflow is not a preset); ${askPlan}`;
     return null;
   };
+  /**
+   * (DES-CATALOG-002 §4.6) The `job` launcher: a chat job proposal's Go, one launcher per launch kind, each with the
+   * identity derived from the proposal (`sessionId` = its run id, so a retry finds and adopts it), the chat filing, the
+   * shape, and the plan held: a job launched from a chat stops at its first plan unless the person's Start chose a
+   * power run (`power: true`, api-types 0.196.0), which is refused unless this daemon can run that job as one.
+   */
   proposalLaunchers.register('job', {
     find: async (identity) => (await adapter.sessions()).includes(identity.runId),
     live: async (runId) => {
@@ -4376,7 +4388,7 @@ export function registerRoutes(
           },
           { ...ctx, fromProposal: d.pid, ...(d.power === true ? { powerRequired: true } : {}) },
         );
-        if (out.statusCode !== 201) throw new Error(jobRefusalText(out.payload));
+        if (out.statusCode !== 201) throw jobRefusal(out.statusCode, out.payload);
         return;
       }
       if (p.launch === 'compose') {
@@ -4387,7 +4399,7 @@ export function registerRoutes(
           humanConfirm: 'before:1',
           common,
         });
-        if (out.code !== 202) throw new Error(jobRefusalText(out.body));
+        if (out.code !== 202) throw jobRefusal(out.code, out.body);
         return;
       }
       if (p.launch === 'demo') {
@@ -4403,7 +4415,7 @@ export function registerRoutes(
           fromProposal: d.pid,
           common,
         }, demoDeps);
-        if (out.code !== 201) throw new Error(jobRefusalText(out.body));
+        if (out.code !== 201) throw jobRefusal(out.code, out.body);
         return;
       }
       throw new Error(`a ${p.launch} job does not start from a chat`);
@@ -5739,6 +5751,11 @@ export function registerRoutes(
       return { ok: true, name: scope.repos[0]!.name };
     },
     rosterEligible: () => proposalRoster(rosterWithStanding()),
+    coverage: (keys, bound, relaunch) => {
+      const p = { seats: { keys: [...keys], lead: keys[0] ?? null, label: '' }, ...(relaunch !== undefined ? { relaunch } : {}) };
+      const { roster } = jobLaunchRoster(launchRosterNaming(rosterWithStanding({ launch: true }), p.seats.lead ?? undefined, keys), p);
+      return readJudgeCoverage(engineRosterJson(JSON.stringify(roster)), bound, runtime.judgeCoverage ?? CoreAdapter.judgeCoverage);
+    },
     // (F1/F2) Agents › "Use <seat> for new work": the pool every new chat job and document is drawn from.
     newWorkSeats: readNewWorkSeats,
     runs: async () => (await adapter.sessionsDetail()).map((v) => decorateRun(v)),
@@ -6315,6 +6332,7 @@ export function registerRoutes(
     // (api-types 0.196.0, operator ruling 2026-11-06) a job's Start chooses how it runs: `true` = a power run (no plan
     // gate), `false` = it stops at its plan. Absent = it stops at its plan, as before.
     power: z.boolean().optional(),
+    reducedAssurance: z.boolean().optional(),
   });
   /** (api-types 0.192.0) `POST /chats/:id/proposals`: a person-made proposal, or a revision of the open one. */
   const PersonProposalSchema = z.union([
@@ -6367,7 +6385,7 @@ export function registerRoutes(
   );
   app.post(
     `${V}/chats/:id/proposals/:pid`,
-    { config: { manifest: { requestType: 'ChatProposalDecisionBody', responseType: 'ChatProposalDecisionResponse', statusCodes: [200, 400, 403, 404, 409, 502] } } },
+    { config: { manifest: { requestType: 'ChatProposalDecisionBody', responseType: 'ChatProposalDecisionResponse', statusCodes: [200, 400, 403, 404, 409, 422, 502] } } },
     async (req, reply) => {
       const { id, pid } = req.params as { id: string; pid: string };
       if (!chatArtifactFlags.proposals) return reply.code(404).send({ error: 'this daemon does not answer chat proposals' });
@@ -6395,6 +6413,7 @@ export function registerRoutes(
         decision: parsed.data.decision,
         ...(edits !== undefined ? { edits } : {}),
         ...(parsed.data.power !== undefined ? { power: parsed.data.power } : {}),
+        ...(parsed.data.reducedAssurance !== undefined ? { reducedAssurance: parsed.data.reducedAssurance } : {}),
       }, actor, instance);
       return reply.code(out.code).send(out.body);
     },

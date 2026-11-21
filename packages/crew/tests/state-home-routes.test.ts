@@ -20,11 +20,11 @@
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { DiagnosticsResponse, HealthResponse, StateHomeBlockerBody } from 'wicked-crew-api-types';
 
-import type { CoreAdapter } from '../src/core/adapter.js';
+import { CoreAdapter } from '../src/core/adapter.js';
 import type { LaunchRunInput } from '../src/core/types.js';
 import { createServer } from '../src/api/server.js';
 import { crewStateHome } from '../src/projects/state-home.js';
@@ -71,6 +71,7 @@ function stubAdapter(dbPath: string): CoreAdapter {
 }
 
 beforeAll(async () => {
+  vi.spyOn(CoreAdapter, 'judgeCoverage').mockReturnValue(JSON.stringify({ covered: false, singleIdentity: true, authors: [{ seat: 'claude', judges: [], notJudges: [] }], benched: [] }));
   scratch = mkdtempSync(join(tmpdir(), 'crew-state-home-routes-'));
   // The state home the handed snapshot derives: `<home>/skills/snapshots/000001` — with the live
   // daemon's debris shape, a stray file, and a scratch dir under the skills root.
@@ -101,6 +102,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  vi.restoreAllMocks();
   await app.close();
   if (savedSnapshot === undefined) delete process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
   else process.env[SKILLS_SNAPSHOT_ENGINE_ENV] = savedSnapshot;

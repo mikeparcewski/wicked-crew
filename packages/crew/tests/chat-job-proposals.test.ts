@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import type { Actor, ArtifactProposal, CatalogEntry, ChatTranscriptRecord, Preset, ProposalRevisionEdits, WorkflowDef } from '../src/core/types.js';
+import type { Actor, ArtifactProposal, CatalogEntry, ChatProposalView, ChatTranscriptRecord, Preset, ProposalRevisionEdits, WorkflowDef } from '../src/core/types.js';
 import { CoreAdapter } from '../src/core/adapter.js';
 import { CATALOG_SEEDS } from '../src/workflow-catalog/catalog-data.js';
 import { buildWorkflowCatalogV2, resolveOption, servedState, type ServedState } from '../src/workflow-catalog/build-v2.js';
@@ -17,12 +17,13 @@ import {
   ChatProposals,
   foldProposals,
   LaunchOnceRegistry,
+  LaunchRefusal,
   type ChatProposalDeps,
   type ProposalChat,
   type ProposalDispatch,
   type ProposalDispatcher,
 } from '../src/api/chat-proposals.js';
-import { jobLaunchCommon, jobLaunchRoster, ownWords, personAskedSkip, qeSkipBound } from '../src/api/chat-jobs.js';
+import { jobLaunchCommon, jobLaunchRoster, seatsShortLine, ownWords, personAskedSkip, qeSkipBound } from '../src/api/chat-jobs.js';
 import { launchRosterNaming, primaryRefusal } from '../src/api/routes.js';
 import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
 import { SeatHealthTracker } from '../src/api/seat-health.js';
@@ -53,8 +54,9 @@ afterAll(() => removeScratch(dir));
 
 class FakeLauncher implements ProposalDispatcher {
   launched: ProposalDispatch[] = [];
+  failure: Error | null = null;
   async find(identity: { runId: string }): Promise<boolean> { return this.launched.some((d) => d.identity.runId === identity.runId); }
-  async launch(d: ProposalDispatch): Promise<void> { this.launched.push(d); }
+  async launch(d: ProposalDispatch): Promise<void> { if (this.failure !== null) throw this.failure; this.launched.push(d); }
   async live(): Promise<boolean> { return false; }
 }
 
@@ -80,7 +82,7 @@ interface Rig {
 
 const CHAT = 'c1';
 
-function rig(o: { pickFirstRepo?: ChatProposalDeps['pickFirstRepo']; roster?: Array<{ key: string; name: string }>; repos?: Array<{ id: string; name: string }>; reviewAuthors?: ChatProposalDeps['reviewAuthors']; powerPresets?: ChatProposalDeps['powerPresets'] } = {}): Rig {
+function rig(o: { coverage?: ChatProposalDeps['coverage']; pickFirstRepo?: ChatProposalDeps['pickFirstRepo']; roster?: Array<{ key: string; name: string }>; repos?: Array<{ id: string; name: string }>; reviewAuthors?: ChatProposalDeps['reviewAuthors']; powerPresets?: ChatProposalDeps['powerPresets'] } = {}): Rig {
   const r: Rig = {
     svc: null as unknown as ChatProposals,
     records: [],
@@ -110,6 +112,7 @@ function rig(o: { pickFirstRepo?: ChatProposalDeps['pickFirstRepo']; roster?: Ar
     chat: () => r.chat,
     ...(o.pickFirstRepo !== undefined ? { pickFirstRepo: o.pickFirstRepo } : {}),
     rosterEligible: () => r.roster,
+    ...(o.coverage !== undefined ? { coverage: o.coverage } : {}),
     runs: async () => [],
     chatOfRun: () => undefined,
     isAskPath: () => false,
@@ -1273,5 +1276,125 @@ describe('reshape launch with the real roster accessor after readiness (crew#160
     const engine = JSON.parse(engineRosterJson(clisJson)) as Array<Record<string, unknown>>;
     expect(engine.find((s) => s['key'] === 'codex')).toMatchObject({ model: 'held', health: { usable: false } });
     expect(engine.find((s) => s['key'] === 'claude')).toMatchObject({ model: 'held', health: { usable: true } });
+  });
+});
+
+
+describe('launch admission and recovery', () => {
+  it('a refused Go forgets its reduced assurance choice before the next plain Go', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'bug');
+    const p = open(r);
+    expect(p).not.toHaveProperty('reducedAssurance');
+    r.launcher.failure = new LaunchRefusal(409, { code: 'no_independent_reviewer', error: 'No other seat can review.' });
+    const refused = await r.svc.decide(CHAT, p.pid, { decision: 'go', reducedAssurance: true }, ME, 'i1');
+    expect(refused).toMatchObject({ code: 409, body: { view: { state: 'open' } } });
+    expect((refused.body['view'] as ChatProposalView).proposal).not.toHaveProperty('reducedAssurance');
+    r.launcher.failure = null;
+    expect((await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    expect(r.launcher.launched[0]!.resolution).not.toHaveProperty('reducedAssurance');
+  });
+
+  it('a refused Go preserves reduced assurance already chosen on the reshape card', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'bug');
+    const p = open(r);
+    r.records.push({ at: 1_001, turnId: 'person:test', kind: 'proposal', proposal: { ...p, reshapes: 'old-run', heldRejected: true, reducedAssurance: true } });
+    r.launcher.failure = new LaunchRefusal(409, { code: 'no_independent_reviewer', error: 'No other seat can review.' });
+    const refused = await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1');
+    expect(refused).toMatchObject({ code: 409, body: { view: { state: 'open', proposal: { reducedAssurance: true } } } });
+    r.launcher.failure = null;
+    expect((await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    expect(r.launcher.launched[0]!.resolution.reducedAssurance).toBe(true);
+  });
+
+  it('a typed launch refusal preserves its status and retry fields and reopens Start', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'bug');
+    const p = open(r);
+    const excluded = [{ seat: 'claude', reason: 'wrote the change' }];
+    const retryWith = { reducedAssurance: true };
+    const launch = r.launcher.launch.bind(r.launcher);
+    r.launcher.launch = async () => { throw new LaunchRefusal(409, { code: 'no_independent_reviewer', error: 'No other seat can check this change.', excluded, retryWith }); };
+    const refused = await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1');
+    expect(refused.code).toBe(409);
+    expect(refused.body).toMatchObject({ code: 'no_independent_reviewer', excluded, retryWith, view: { state: 'open' } });
+    r.launcher.launch = launch;
+    expect((await r.svc.decide(CHAT, p.pid, { decision: 'go', reducedAssurance: true }, ME, 'i1')).code).toBe(200);
+    expect(r.launcher.launched[0]!.resolution.reducedAssurance).toBe(true);
+    expect(r.records.filter((x) => x.kind === 'proposal_accepting').at(-1)).toMatchObject({ resolution: { reducedAssurance: true } });
+  });
+
+  it.each([false, true])('reduced assurance is only a job Start choice (%s)', async (reducedAssurance) => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'bug');
+    const p = open(r);
+    const notNow = await r.svc.decide(CHAT, p.pid, { decision: 'not_now', reducedAssurance }, ME, 'i1');
+    expect(notNow).toMatchObject({ code: 400, body: { code: 'reduced_assurance_not_applicable' } });
+    r.records.push({ at: 1_001, turnId: 'person:test', kind: 'proposal', proposal: { ...p, kind: 'create' } });
+    const document = await r.svc.decide(CHAT, p.pid, { decision: 'go', reducedAssurance }, ME, 'i1');
+    expect(document).toMatchObject({ code: 400, body: { code: 'reduced_assurance_not_applicable' } });
+    expect(r.launcher.launched).toHaveLength(0);
+  });
+
+  it('an interrupted job with a lost seat reopens and accepts a new seat pick', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'bug');
+    const p = open(r);
+    r.launcher.failure = new Error('launch interrupted');
+    expect((await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(502);
+    r.roster = r.roster.filter((x) => x.key !== 'pi');
+    const again = await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1');
+    expect(again.code).toBe(409);
+    expect(again.body).toMatchObject({ code: 'helper_unavailable', view: { state: 'open' } });
+    r.launcher.failure = null;
+    const fixed = await r.svc.decide(CHAT, p.pid, { decision: 'go', edits: { seats: ['claude', 'codex'] } }, ME, 'i1');
+    expect(fixed.code, JSON.stringify(fixed.body)).toBe(200);
+    expect(r.launcher.launched[0]!.resolution.seats?.keys).toEqual(['claude', 'codex']);
+  });
+
+  it('uncovered seats add a coverage note instead of claiming a judge exists', async () => {
+    const calls: unknown[] = [];
+    const r = rig({ roster: [{ key: 'claude', name: 'Claude' }, { key: 'codex', name: 'Codex' }], repos: [{ id: 'r-pay', name: 'payments-service' }], coverage: (keys, bound) => {
+      calls.push([keys, bound]);
+      return { covered: false, singleIdentity: false, authors: [{ seat: 'claude', judges: [{ seat: 'codex', seenSharing: 'anthropic' }], notJudges: [] }], benched: [] };
+    } });
+    await pick(r, 'bug');
+    const p = open(r);
+    expect(p.blocked).toBeNull();
+    expect(p.sentence?.notes.join(' ')).toContain('anthropic');
+    expect(p.sentence?.notes.join(' ')).not.toContain('judge is the author of the validator');
+    expect(calls).toContainEqual([p.seats!.keys, true]);
+  });
+
+  it('the card coverage note uses display names and names a benched seat once', async () => {
+    const benched = { seat: 'pi', reason: 'benched', detail: 'cannot use this checkout' };
+    const r = rig({
+      roster: [{ key: 'claude', name: 'Builder' }, { key: 'codex', name: 'Reviewer' }, { key: 'pi', name: 'Helper' }],
+      repos: [{ id: 'r-pay', name: 'payments-service' }],
+      coverage: () => ({
+        covered: false, singleIdentity: false,
+        authors: [
+          { seat: 'claude', judges: [{ seat: 'codex', seenSharing: 'anthropic' }], notJudges: [benched] },
+          { seat: 'codex', judges: [], notJudges: [{ seat: 'claude', reason: 'same_identity' }, benched] },
+        ],
+        benched: [benched],
+      }),
+    });
+    await pick(r, 'bug');
+    const note = open(r).sentence?.notes.find((n) => n.startsWith('These seats'));
+    expect(note).toContain('Reviewer was seen calling anthropic, as was Builder');
+    expect(note).toContain('Builder runs the same CLI as Reviewer');
+    expect(note).toContain('Helper cannot check it: cannot use this checkout');
+    expect(note?.match(/Helper/g)).toHaveLength(1);
+    expect(note).not.toMatch(/claude|codex|\bpi\b/);
+  });
+
+  it('the hold sentence says how many seats can work and how many more to sign in', () => {
+    const r = resolveOption('bug', null, served)!;
+    expect(seatsShortLine(r, 1)).toBe('Needs 2 seats that can work now, one to build it and one to check it, and only 1 can. Sign in another seat to start it.');
+    expect(seatsShortLine(r, 0)).toBe('Needs 2 seats that can work now, one to build it and one to check it, and none can. Sign in 2 more seats to start it.');
+    const one = { ...r, resolved: { ...r.resolved, seats: { ...r.resolved.seats, distinctEvaluator: false } } };
+    expect(seatsShortLine(one, 0)).toBe('Needs a seat that can work now to build it, and none can. Sign in a seat to start it.');
   });
 });
