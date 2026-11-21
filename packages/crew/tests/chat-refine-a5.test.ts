@@ -124,6 +124,8 @@ describe('A5: a refine of the open document', () => {
     const launches: LaunchRunInput[] = [];
     const adapter = {
       launchRun: async (input: LaunchRunInput) => {
+        // The real adapter refuses projectGraph without projectId (core/adapter.ts launchRun, W24).
+        if (input.projectGraph !== undefined && input.projectId === undefined) throw new Error('projectGraph is the PROJECT\'s graph, so the run must be filed into that project');
         launches.push(input);
         extra.duringLaunch?.(input, (e) => { for (const l of listeners) l(e); });
         return input.sessionId;
@@ -366,6 +368,8 @@ describe('A5 r1 folds', () => {
     const fire = (e: CoreEvent): void => { for (const l of listeners) l(e); };
     const adapter = {
       launchRun: async (input: LaunchRunInput) => {
+        // The real adapter refuses projectGraph without projectId (core/adapter.ts launchRun, W24).
+        if (input.projectGraph !== undefined && input.projectId === undefined) throw new Error('projectGraph is the PROJECT\'s graph, so the run must be filed into that project');
         launches.push(input);
         opts.duringLaunch?.(input, fire);
         return input.sessionId;

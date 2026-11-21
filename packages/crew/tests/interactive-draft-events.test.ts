@@ -445,6 +445,11 @@ function fakeAdapter(repoWorld?: RepoWorld): FakeAdapter {
           return def.id;
         },
         launchRun: async (input: LaunchRunInput) => {
+          // The real adapter's cross-field rule (core/adapter.ts launchRun): projectGraph never rides without projectId.
+          // A fake that accepted it let a test assert the broken launch as correct (W24).
+          if (input.projectGraph !== undefined && input.projectId === undefined) {
+            throw new Error('projectGraph is the PROJECT\'s graph, so the run must be filed into that project');
+          }
           state.launches.push(input);
           return input.sessionId;
         },
