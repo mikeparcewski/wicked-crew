@@ -448,6 +448,7 @@ export async function installPack(
     installed: true,
     updated: installed.updated,
     editors: installed.records.map((r) => EditorRegistry.view(r)),
+    ...(installed.removed.length > 0 ? { removed: installed.removed } : {}),
     check: verdict,
     conformance,
   };

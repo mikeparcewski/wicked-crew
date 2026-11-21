@@ -38,7 +38,7 @@ import { triageDeliverFailure, trustedDeliverOutcome, trustedOutcomeIn } from '.
 /** (crew#739) The sentinel nonce every composed script in this file carries. */
 const TEST_NONCE = '0123456789abcdef0123456789abcdef';
 import { committedScrubReason, deliverExclusionReason } from '../src/core/deliver-exclusions.js';
-import { DELIVER_TITLE_MAX, commitSubject, composeDeliverText, deliverTitle, factsFromWorkflow, framedDeliverText, redactHostPaths } from '../src/core/deliver-text.js';
+import { CLOSING_REFERENCE_MARKER, DELIVER_TITLE_MAX, commitSubject, composeDeliverText, deliverTitle, factsFromWorkflow, framedDeliverText, redactHostPaths } from '../src/core/deliver-text.js';
 
 const RUN_ID = '1bc72c20-0457-425f-b4cb-215a40e68e1e';
 
@@ -159,6 +159,8 @@ interface GhStub {
   checks?: string;
   /** (crew#1623) The base branch's `rules/branches/<base>` JSON (default `[]`: nothing required). */
   rules?: string;
+  /** (crew#1683) The real free-plan rules endpoint refusal (HTTP 403). */
+  rulesPlanGated?: boolean;
   /** (crew#737) `gh auth token --user <tokenFor>` prints a token; any other account fails. */
   tokenFor?: string;
   /** (crew#737) The login `gh api user` answers while that token is exported as GH_TOKEN. */
@@ -212,7 +214,12 @@ async function runDeliver(
       'case "$1" in',
       // (crew#1623) The PR-checks watch: the base branch's ruleset contexts (none by default) and the required
       // checks' rows (`gh pr checks --required --json`, none by default), which the watch reads after a delivery.
-      '  api) case "$2" in repos/*/rules/branches/*) printf "%s" "${GH_STUB_RULES:-[]}"; exit 0;; repos/*/branches/*) echo "{}"; exit 0;; esac; if [ -n "${GH_TOKEN:-}" ] && [ "$GH_TOKEN" = "tok-${GH_STUB_TOKEN_FOR:-}" ]; then echo "$GH_STUB_TOKEN_LOGIN"; exit 0; fi; if [ -n "${GH_STUB_API_FAIL:-}" ]; then echo "gh: not logged in" >&2; exit 1; fi; echo "${GH_STUB_LOGIN:-tester}";;',
+      '  api) case "$2" in repos/*/rules/branches/*)',
+      '    if [ -n "${GH_STUB_RULES_PLAN_GATED:-}" ]; then',
+      `      printf '%s' '{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature.","documentation_url":"https://docs.github.com/rest/repos/rules#get-rules-for-a-branch","status":"403"}'`,
+      '      echo "gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)" >&2; exit 1',
+      '    fi',
+      '    printf "%s" "${GH_STUB_RULES:-[]}"; exit 0;; repos/*/branches/*) echo "{}"; exit 0;; esac; if [ -n "${GH_TOKEN:-}" ] && [ "$GH_TOKEN" = "tok-${GH_STUB_TOKEN_FOR:-}" ]; then echo "$GH_STUB_TOKEN_LOGIN"; exit 0; fi; if [ -n "${GH_STUB_API_FAIL:-}" ]; then echo "gh: not logged in" >&2; exit 1; fi; echo "${GH_STUB_LOGIN:-tester}";;',
       // (crew#737) `gh auth token [--help] --user <a>`: a token only for the stubbed account; the
       // help text lists --user only on a stubbed newer gh. Any other auth verb is still recorded.
       '  auth)',
@@ -228,7 +235,7 @@ async function runDeliver(
       // DES-L9 revision mode: `gh pr view N --json state -q .state` and `gh pr comment N --body-file`.
       // (e2e-1105 F4c) `gh pr view <url> --json title,body`: the PR's text as GitHub holds it — the edit this stub
       // recorded, else GH_STUB_PR_TEXT; GH_STUB_VIEW_FAIL makes the read fail.
-      '      checks) printf "%s" "${GH_STUB_CHECKS:-[]}"; exit 0;;',
+      '      checks) case " $* " in *" --required "*) ;; *) if [ -z "${GH_STUB_CHECKS:-}" ]; then echo "no checks reported on the main branch" >&2; exit 1; fi;; esac; printf "%s" "${GH_STUB_CHECKS:-[]}"; exit 0;;',
       '      view) case " $* " in *" baseRefName "*) echo main;; *" title,body "*) if [ -n "${GH_STUB_VIEW_FAIL:-}" ]; then echo "gh: HTTP 502" >&2; exit 1; fi; if [ -n "${GH_STUB_VIEW_TEXT:-}" ]; then printf "%s\\n" "$GH_STUB_VIEW_TEXT"; elif [ -f "$GH_STUB_RECORD.edit" ]; then cat "$GH_STUB_RECORD.edit"; else printf "%s\\n" "$GH_STUB_PR_TEXT"; fi;; *) echo "${GH_STUB_PR_STATE:-OPEN}";; esac;;',
       // (e2e-1105 F4c) `gh pr edit <url> --title T --body-file F`: recorded as the PR's new text (title, blank, body).
       '      edit) T=""; BF=""; while [ $# -gt 0 ]; do case "$1" in --title) T="$2"; shift;; --body-file) BF="$2"; shift;; esac; shift; done; if [ -n "${GH_STUB_EDIT_FAIL:-}" ]; then echo "$GH_STUB_EDIT_FAIL" >&2; exit 1; fi; { printf "%s\\n\\n" "$T"; cat "$BF"; } > "$GH_STUB_RECORD.edit";;',
@@ -327,6 +334,7 @@ async function runDeliver(
           GH_STUB_VIEW_TEXT: opts.gh?.viewText ?? '',
           GH_STUB_CHECKS: opts.gh?.checks ?? '',
           GH_STUB_RULES: opts.gh?.rules ?? '',
+          GH_STUB_RULES_PLAN_GATED: opts.gh?.rulesPlanGated === true ? '1' : '',
           GH_STUB_TOKEN_FOR: opts.gh?.tokenFor ?? '',
           GH_STUB_TOKEN_LOGIN: opts.gh?.tokenLogin ?? '',
           GH_STUB_TOKEN_USER_FLAG: opts.gh?.tokenUserFlag === true ? '1' : '',
@@ -1705,7 +1713,7 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(r.output).not.toContain('composed from the run record');
     // …but the output still SAYS which text was used (Copilot on #525).
     expect(r.output).toContain('deliver: no daemon origin was known when this run launched — using the launch-time PR text');
-    expect(r.pr!.title).toBe('fix the thing (closes #3)');
+    expect(r.pr!.title).toBe(`fix the thing (closes${CLOSING_REFERENCE_MARKER} #3)`);
     expect(r.pr!.body).toContain('Fixes #3');
     expect(r.pr!.body).toContain(`- Run: \`${RUN_ID}\``);
   }, 60_000);
@@ -2517,6 +2525,18 @@ describe('deliver script — the PR\'s required checks (crew#1623)', () => {
     JSON.stringify([{ type: 'required_status_checks', parameters: { required_status_checks: names.map((context) => ({ context })) } }]);
   const row = (name: string, bucket: string): { name: string; bucket: string; link: string; workflow: string } => ({
     name, bucket, link: 'https://github.com/o/r/actions/runs/1/job/9', workflow: 'CI',
+  });
+
+  it('plan-gated rules + no PR checks: delivered with verdict pr (crew#1683)', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.txt'), 'the run\'s change\n');
+    const r = await runDeliver(fx, { gh: { rulesPlanGated: true }, env: { WICKED_DELIVER_CHECKS_POLL_SECS: '0' } });
+    expect(r.status, r.output).toBe(0);
+    expect(r.outcome).toBe('pr');
+    expect(r.lastLine).toBe('https://github.com/o/r/pull/7');
+    expect(r.output).toContain("branch rules are not available on this repository's plan; judged by the PR's own checks");
+    expect(r.output).toContain('the PR has no checks');
+    expect(r.ghCalls.some((call) => call.startsWith('pr checks ') && !call.includes('--required'))).toBe(true);
   });
 
   it('all required checks green: the PR URL is the last line and the verdict is pr', async () => {

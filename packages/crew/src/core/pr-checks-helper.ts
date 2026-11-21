@@ -8,7 +8,8 @@
  * It reads `gh pr checks <url> --required --json …` on the SAME identity the script pushed with (the
  * script hands it the token one-shot, exactly as its own gh calls get it) and polls to a conclusion:
  *
- *   exit 0  every required check is green (`pass` / `skipping`), or the base branch requires none;
+ *   exit 0  every required check is green (`pass` / `skipping`), or the base branch requires none
+ *           (in own mode, every PR check is green or the PR has no checks);
  *   exit 3  a required check is red (`fail` / `cancel`): failing job names plus the tail of each
  *           failed job's log, printed as the finding the rework reads; does not wait for the rest;
  *   exit 4  a required check is still pending when the timeout ends;
@@ -16,11 +17,14 @@
  *
  * WHICH checks are required comes from the base branch itself: the rulesets' `required_status_checks`
  * rule (`repos/{o}/{r}/rules/branches/{base}`) and the branch's classic protection
- * (`repos/{o}/{r}/branches/{base}`), both readable with repo read access; either failing to read is
- * "cannot read", never "none required". `gh pr checks --required` only lists checks that have REPORTED, so a
+ * (`repos/{o}/{r}/branches/{base}`). The exact free-plan 403 upgrade message means that API declares
+ * no contexts on this plan: own mode reads all the PR's checks WITHOUT `--required`, judges them
+ * with the same outcomes above, and prints the plan explanation once into the run's record.
+ * Every other failure to read is "cannot read", never "none required".
+ * `gh pr checks --required` only lists checks that have REPORTED, so a
  * required check that is merely late (a ruleset's "Expected — waiting for status") is matched by
  * name against that list and counts as PENDING, never as green and never as "none required". A
- * PR passes with no checks only when the base branch requires none.
+ * PR passes with no checks when the base branch requires none, or in own mode.
  *
  * Arguments: `<pr-url> <timeout-secs> <poll-secs>`.
  *
@@ -84,9 +88,9 @@ function gh(args) {
   });
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// One read of the required checks: { rows } or { error }.
-async function read() {
-  const r = await gh(['pr', 'checks', url, '--required', '--json', 'name,bucket,link,workflow']);
+// One read of the required checks (all PR checks in own mode): { rows } or { error }.
+async function read(own) {
+  const r = await gh(['pr', 'checks', url, ...(own ? [] : ['--required']), '--json', 'name,bucket,link,workflow']);
   const text = r.stdout.trim();
   if (text !== '') {
     try {
@@ -96,9 +100,18 @@ async function read() {
   }
   // gh answers a PR with no required checks on stderr (older versions, exit 1) or with an empty list.
   if (/no required checks reported/i.test(r.stderr)) return { rows: [] };
+  if (own && /no checks reported/i.test(r.stderr)) return { rows: [] };
   return { error: redact((r.spawnError || r.stderr || r.stdout || 'gh answered nothing') .trim().split('\n').slice(-3).join(' | ')).slice(0, 300) };
 }
-// The contexts the base branch requires: { names } or { error }. Rulesets must read; classic protection is best-effort.
+function planGated(r) {
+  if (r.code === 0) return false;
+  let body;
+  try { body = JSON.parse(r.stdout); } catch { return false; }
+  return body !== null && typeof body === 'object' && !Array.isArray(body)
+    && (body.status === '403' || body.status === 403) && typeof body.message === 'string'
+    && body.message.trim() === 'Upgrade to GitHub Pro or make this repository public to enable this feature.';
+}
+// The contexts the base branch requires: { names, own } or { error }. Only a plan-gated read declares no contexts.
 async function expected() {
   const m = /^https:\/\/([^/]+)\/([^/]+\/[^/]+)\/pull\/\d+$/.exec(url);
   const repo = m[2];
@@ -108,22 +121,24 @@ async function expected() {
   if (base.code !== 0 || branch === '') return { error: redact((base.stderr || 'no base branch').trim().split('\n').slice(-1)[0]).slice(0, 200) };
   const names = new Set();
   const rules = await gh(['api', 'repos/' + repo + '/rules/branches/' + encodeURIComponent(branch).replace(/%2F/g, '/'), '--hostname', host]);
+  const rulesOwn = planGated(rules);
   let parsed;
-  try { parsed = JSON.parse(rules.stdout); } catch {}
-  if (rules.code !== 0 || !Array.isArray(parsed)) return { error: 'the base branch rules could not be read: ' + redact((rules.stderr || rules.stdout || 'empty').trim().split('\n').slice(-1)[0]).slice(0, 200) };
+  try { parsed = rulesOwn ? [] : JSON.parse(rules.stdout); } catch {}
+  if ((rules.code !== 0 && !rulesOwn) || !Array.isArray(parsed)) return { error: 'the base branch rules could not be read: ' + redact((rules.stderr || rules.stdout || 'empty').trim().split('\n').slice(-1)[0]).slice(0, 200) };
   for (const rule of parsed) if (rule && rule.type === 'required_status_checks') for (const c of (rule.parameters && rule.parameters.required_status_checks) || []) if (c && c.context) names.add(c.context);
   // Classic branch protection, from the branch itself (readable with repo read access; its own endpoint needs admin).
   const classic = await gh(['api', 'repos/' + repo + '/branches/' + encodeURIComponent(branch).replace(/%2F/g, '/'), '--hostname', host]);
-  if (classic.code !== 0) return { error: 'the base branch protection could not be read: ' + redact((classic.stderr || 'empty').trim().split('\n').slice(-1)[0]).slice(0, 200) };
+  const classicOwn = planGated(classic);
+  if (classic.code !== 0 && !classicOwn) return { error: 'the base branch protection could not be read: ' + redact((classic.stderr || 'empty').trim().split('\n').slice(-1)[0]).slice(0, 200) };
   // A branch answer that is not the branch object is unreadable, never "nothing required".
   let branchInfo;
-  try { branchInfo = JSON.parse(classic.stdout); } catch {}
+  try { branchInfo = classicOwn ? {} : JSON.parse(classic.stdout); } catch {}
   if (branchInfo === null || typeof branchInfo !== 'object' || Array.isArray(branchInfo)) return { error: 'the base branch protection could not be read: the answer is not a branch' };
   // An unprotected branch has no protection key or a null required_status_checks; both mean none.
   const rsc = branchInfo.protection && branchInfo.protection.required_status_checks;
   for (const c of (rsc && rsc.contexts) || []) names.add(c);
   for (const c of (rsc && rsc.checks) || []) if (c && c.context) names.add(c.context);
-  return { names: [...names] };
+  return { names: [...names], own: rulesOwn || classicOwn };
 }
 function label(row) { return (row.workflow ? row.workflow + ' / ' : '') + row.name; }
 async function failedLog(row) {
@@ -141,8 +156,12 @@ async function main() {
   let last = [];
   let want = null;
   for (;;) {
-    let got = want === null ? await expected() : { names: want };
-    if (got.error === undefined) { want = got.names; got = await read(); }
+    let got = want === null ? await expected() : want;
+    if (got.error === undefined) {
+      if (want === null && got.own) process.stdout.write("deliver: PR checks: branch rules are not available on this repository's plan; judged by the PR's own checks\n");
+      want = got;
+      got = await read(want.own);
+    }
     const elapsed = Date.now() - start;
     if (got.error !== undefined) {
       unreadable += 1;
@@ -159,9 +178,12 @@ async function main() {
         process.exit(3);
       }
       const reported = new Set(last.map((r) => r.name));
-      const late = want.filter((n) => !reported.has(n));
+      const late = want.names.filter((n) => !reported.has(n));
       const pending = last.filter((r) => r.bucket !== 'pass' && r.bucket !== 'skipping').map(label).concat(late.map((n) => n + ' (not reported yet)'));
-      if (pending.length === 0) { process.stdout.write('deliver: PR checks: ' + (want.length === 0 && last.length === 0 ? 'the base branch requires no status check' : last.length + ' required check(s) green') + '\n'); process.exit(0); }
+      if (pending.length === 0) {
+        const pass = want.own ? (last.length === 0 ? 'the PR has no checks' : last.length + ' check(s) green') : (want.names.length === 0 && last.length === 0 ? 'the base branch requires no status check' : last.length + ' required check(s) green');
+        process.stdout.write('deliver: PR checks: ' + pass + '\n'); process.exit(0);
+      }
       if (elapsed + pollMs >= timeoutMs) { process.stdout.write('deliver: PR checks: still pending after ' + Math.round(elapsed / 1000) + 's: ' + pending.join(', ') + '\n'); process.exit(4); }
     }
     await sleep(pollMs);

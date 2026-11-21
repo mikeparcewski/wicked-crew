@@ -268,6 +268,8 @@ export interface DeliverScriptOptions {
    *  the credential stays in gh's keyring or in `GH_TOKEN`. `null`/absent ⇒ `GH_ACCOUNT` decides.
    *  Refused at compose time when it is not a GitHub login, so nothing unsafe is spliced. */
   deliverIdentity?: string | null;
+  /** crew#1471: require the author and committer emails to match the push login's GitHub noreply address. */
+  deliverAuthorNoreply?: boolean;
   /** (crew#737) Where the configured identity came from, for the gate card: the repository's own
    *  pin (`deliverIdentityByRepo`) or the daemon-wide setting. Absent ⇒ the daemon-wide setting. */
   deliverIdentitySource?: 'repo' | 'setting';
@@ -767,6 +769,8 @@ export const CHANGELOG_REBASE_LINES: readonly string[] = [
  * origin the script asks for the run-derived text (crew#524).
  */
 export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}): string {
+  const commitEnv = opts.commitIdents == null ? '' :
+    `GIT_AUTHOR_NAME=${shellSingleQuote(opts.commitIdents.author.name)} GIT_AUTHOR_EMAIL=${shellSingleQuote(opts.commitIdents.author.email)} GIT_COMMITTER_NAME=${shellSingleQuote(opts.commitIdents.committer.name)} GIT_COMMITTER_EMAIL=${shellSingleQuote(opts.commitIdents.committer.email)} `;
   const runId = opts.runId ?? opts.facts?.runId ?? '';
   const facts =
     opts.facts ??
@@ -1026,6 +1030,19 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     'esac',
     'fi',
     'fi',
+    // crew#1471: L is now known. Read exactly the identities c1 will use, before staging anything.
+    ...(opts.deliverAuthorNoreply === true ? [
+      'NOREPLY_GITHUB="${GHREPO:-}"',
+      'if [ -z "$ADOGIT" ] && [ -z "$NOREPLY_GITHUB" ]; then case "$(git remote get-url --push origin 2>/dev/null | tr \'A-Z\' \'a-z\' || true)" in https://github.com/*|https://*@github.com/*|git@github.com:*|ssh://git@github.com/*|ssh://git@ssh.github.com:443/*) NOREPLY_GITHUB=yes;; esac; fi',
+      'if [ -z "$ADOGIT" ] && [ -n "$NOREPLY_GITHUB" ]; then',
+      '  [ -n "${L:-}" ] || { echo "deliver: GitHub noreply rule cannot check an unknown push login; nothing was staged, committed or pushed"; exit 1; }',
+      `  NA=$(${commitEnv}git var GIT_AUTHOR_IDENT 2>/dev/null | sed -n 's/.*<\\([^>]*\\)>.*/\\1/p' || true)`,
+      `  NC=$(${commitEnv}git var GIT_COMMITTER_IDENT 2>/dev/null | sed -n 's/.*<\\([^>]*\\)>.*/\\1/p' || true)`,
+      '  NL=$(printf "%s" "$L" | tr \'A-Z\' \'a-z\')',
+      '  _noreply() { local E N; E=$(printf "%s" "$1" | tr \'A-Z\' \'a-z\'); case "$E" in "$NL@users.noreply.github.com") return 0;; *+"$NL@users.noreply.github.com") N=${E%+"$NL@users.noreply.github.com"}; case "$N" in ""|*[!0-9]*) return 1;; *) return 0;; esac;; *) return 1;; esac; }',
+      '  _noreply "$NA" && _noreply "$NC" || { echo "deliver: GitHub noreply rule requires both author and committer emails to belong to $L; nothing was staged, committed or pushed"; exit 1; }',
+      'else echo "deliver: the GitHub noreply rule does not apply to this origin"; fi',
+    ] : []),
     // REVISION MODE inputs (DES-L9 / crew#550) — baked at compose time from the resolved PR, each
     // validated against a strict charset before it is spliced into a single-quoted literal. Empty
     // TARGET ⇒ today's new-PR delivery.
@@ -1361,7 +1378,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // `--cleanup=whitespace`, NOT git's default for `-F`: an operator/repo `commit.cleanup=strip`
     // would otherwise treat every `## Intent` / `## Run` / `## Phases` heading as a `#` comment and
     // strip it from the commit body (review W3-K1).
-    `git diff --cached --quiet || ${opts.commitIdents == null ? '' : `GIT_AUTHOR_NAME=${shellSingleQuote(opts.commitIdents.author.name)} GIT_AUTHOR_EMAIL=${shellSingleQuote(opts.commitIdents.author.email)} GIT_COMMITTER_NAME=${shellSingleQuote(opts.commitIdents.committer.name)} GIT_COMMITTER_EMAIL=${shellSingleQuote(opts.commitIdents.committer.email)} `}git commit -q --cleanup=whitespace -F "$TD/commit"`,
+    `git diff --cached --quiet || ${commitEnv}git commit -q --cleanup=whitespace -F "$TD/commit"`,
     // (EX-04) The run's work as it stands, before any lift moves it — the post-hoc label's old tree.
     'TB=$(git rev-parse --verify -q "$B^{tree}" || true)',
     // (c2) NOTHING TO DELIVER — no staged work AND no commits of its own. Fail LOUDLY before the
@@ -1954,10 +1971,17 @@ export function deliverAuthorOf(text: string): GitIdent | null | undefined {
   return text.includes(NO_DELIVER_AUTHOR) ? null : undefined;
 }
 
+/** crew#1471: GitHub's two noreply spellings, compared without case. */
+function noreplyEmailMatches(email: string, login: string): boolean {
+  const lower = email.toLowerCase();
+  const suffix = `${login.toLowerCase()}@users.noreply.github.com`;
+  return lower === suffix || (lower.endsWith(`+${suffix}`) && /^\d+$/.test(lower.slice(0, -(suffix.length + 1))));
+}
+
 export function deliverGateInstructions(opts: DeliverScriptOptions): string {
   const commits = opts.commitIdents === undefined ? '' : opts.commitIdents === null
     ? ` ${NO_DELIVER_AUTHOR}`
-    : ` Commits carry: ${opts.commitIdents.author.name} <${opts.commitIdents.author.email}> (the git author this repository resolves; the deliver commit is made with exactly it).`;
+    : ` Commits carry: ${opts.commitIdents.author.name} <${opts.commitIdents.author.email}> (the git author this repository resolves; the deliver commit is made with exactly it). Committed by: ${opts.commitIdents.committer.name} <${opts.commitIdents.committer.email}> (the git committer this repository resolves).`;
   const pr = opts.revisesPr ?? null;
   const target =
     pr !== null
@@ -1975,6 +1999,15 @@ export function deliverGateInstructions(opts: DeliverScriptOptions): string {
   // account's own (or an exported GH_TOKEN), and git pushes with that same token.
   const github = githubRepoOf(opts.originUrl) !== null;
   const pinned = github && (configuredAccount || opts.ghTokenPinned === true);
+  const knownOtherOrigin = !github && (opts.originUrl != null || opts.adoTarget != null);
+  const noreply = opts.deliverAuthorNoreply !== true ? '' : knownOtherOrigin
+    ? ' The GitHub noreply rule does not apply to this origin.'
+    : ` Commit emails: both the author and the committer must be ${configuredAccount ? `${account}'s` : "the push login's"} GitHub noreply address (Settings: deliverAuthorNoreply); the phase refuses before staging anything otherwise, or when the push login cannot be read.` +
+      (configuredAccount && opts.commitIdents != null
+        ? (Object.values(opts.commitIdents).every((ident) => noreplyEmailMatches(ident.email, account!))
+          ? ' Both pinned commit emails match the configured push identity.'
+          : ' The pinned commit emails do not both match the configured push identity.')
+        : '');
   const who = !github
     ? configuredAccount
       ? `Push identity: ${account} (${source}) applies to github.com origins only; this push uses whatever credential the remote's host takes.`
@@ -1999,12 +2032,12 @@ export function deliverGateInstructions(opts: DeliverScriptOptions): string {
         : cred === null
           ? `Credential: the service principal (${ADO_SP_ENV.join(' / ')}) or ${ADO_PAT_ENV} from the daemon environment; the phase refuses before staging anything without one. `
           : '';
-    return `${target} ${credSentence}${how}It refuses if origin no longer points at that repository.${commits}`.replace(/\s+$/, '');
+    return `${target} ${credSentence}${how}It refuses if origin no longer points at that repository.${commits}${noreply}`.replace(/\s+$/, '');
   }
   // Pinned, git pushes with the same token; otherwise the phase asks git which credential IT would
   // use for the remote's host and refuses when the two logins disagree (F-RC1-010).
   const git = pinned ? 'git pushes with the same token, not its own configured credential.' : "It refuses if gh's login and git's credential for the remote disagree.";
-  return `${target} ${credSentence}${who} ${git}${commits}`;
+  return `${target} ${credSentence}${who} ${git}${commits}${noreply}`;
 }
 
 /**
@@ -2037,6 +2070,8 @@ export interface DeliverLaunchContext {
   originUrl?: string | null;
   /** (crew#549) The `deliverIdentityLogin` system setting — the login the push must run as. */
   deliverIdentity?: string | null;
+  /** crew#1471: require the author and committer emails to match the push login's GitHub noreply address. */
+  deliverAuthorNoreply?: boolean;
   /** (crew#737) Where that identity came from (the repository's pin or the daemon setting). */
   deliverIdentitySource?: 'repo' | 'setting';
   /** (crew#720) The provider credential preflight for the gate card (`null`/absent = none read). */
@@ -2086,6 +2121,7 @@ export function deliverPresetStep(
     ghTokenPinned: launch.ghTokenPinned === true,
     originUrl: launch.originUrl ?? null,
     deliverIdentity: launch.deliverIdentity ?? null,
+    deliverAuthorNoreply: launch.deliverAuthorNoreply === true,
     ...(launch.deliverIdentitySource !== undefined ? { deliverIdentitySource: launch.deliverIdentitySource } : {}),
     credentials: launch.credentials ?? null,
     ...(launch.commitIdents !== undefined ? { commitIdents: launch.commitIdents } : {}),
@@ -2140,6 +2176,7 @@ export function composeDeliverWorkflow(
     // request on a remote that can never carry one.
     originUrl: launch.originUrl ?? null,
     deliverIdentity: launch.deliverIdentity ?? null,
+    deliverAuthorNoreply: launch.deliverAuthorNoreply === true,
     ...(launch.deliverIdentitySource !== undefined ? { deliverIdentitySource: launch.deliverIdentitySource } : {}),
     credentials: launch.credentials ?? null,
     ...(launch.commitIdents !== undefined ? { commitIdents: launch.commitIdents } : {}),

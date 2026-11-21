@@ -6296,6 +6296,8 @@ export interface TestSetFile {
   /** `playwright` | `playwright-python` | `vitest` | `jest` | `pytest` | `python` | `unknown`. */
   harness: string;
   status: 'passed' | 'failed' | 'not-executed';
+  /** crew#1393: the verify phase's classification against base. */
+  class?: 'produced-test-failure' | 'pre-existing-on-base' | 'unclassified';
 }
 
 /**
@@ -6329,6 +6331,8 @@ export interface TestSet {
   executed: number;
   passed: number;
   failed: number;
+  /** crew#1393: produced files whose failures also occur on base; absent on sets registered before crew#1393. */
+  failed_on_base?: number;
   not_executed: number;
   /** The produced `tests/PLAN-*.md`, `null` when none was produced. */
   plan: string | null;
@@ -7344,6 +7348,9 @@ export interface SystemSettings {
    * `GH_TOKEN`; `GET /settings` returns this login and no secret ever.
    */
   deliverIdentityLogin?: string;
+  /** (crew#1471) Opt in to requiring both commit emails to be the push login's GitHub noreply
+   *  address before staging a delivery. Off by default; applies to GitHub deliveries only. */
+  deliverAuthorNoreply?: boolean;
   /**
    * (crew#737) A PUSH IDENTITY PER REGISTERED REPOSITORY: repo id → the GitHub login its deliveries
    * push as, winning over {@link deliverIdentityLogin}. The deliver phase reads that account's OWN
@@ -16297,6 +16304,9 @@ export interface InstallEditorResponse {
   /** The pack was installed before; its editors were replaced (a new hash asks for its grants again). */
   updated: boolean;
   editors: EditorView[];
+  /** Sorted ids of editors and run plugins this pack no longer declares, removed in the update's
+   *  registry commit. Absent when none were removed; `grantError` reports a failed grant withdrawal. */
+  removed?: string[];
   check: PackCheckResult;
   conformance: EditorConformanceSummary;
   /**
@@ -16310,6 +16320,23 @@ export interface InstallEditorResponse {
    */
   granted?: string[];
   grantError?: string;
+}
+
+/**
+ * Crew's editor routes emit this `/ws` frame after an install, update, removal or successful grant
+ * edit (an unchanged grant list still emits). An open host for `id` must re-read
+ * `GET /editors/:id/grants` and call `setGrants`; a 404 means drop every grant. The installed build's
+ * version and hash accompany install, update and grant frames; removal frames carry neither.
+ * An install or update emits even when the ledger edit fails, because the installed build changed.
+ * Governance rule writes outside the editor routes, including `POST /governance/rules` changes to
+ * EDITOR-GRANTS or EDITOR-BUILTIN, do not emit this frame.
+ */
+export interface EditorGrantsChangedFrame {
+  type: 'editorGrantsChanged';
+  id: string;
+  version?: string;
+  sha256?: string;
+  reason: 'install' | 'update' | 'removed' | 'grant';
 }
 
 /** What the install-time conformance run found (garden `scripts/editor/conformance.py`). */

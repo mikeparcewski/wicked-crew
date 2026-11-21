@@ -5,6 +5,7 @@
  *
  *  - Decisions: each decision answered (a gate, a checkpoint pause: who and what). Kept, never taken back.
  *  - Open questions: what waits on a person now (an open gate, a pause). Gone once answered.
+ *    An answered chat's turn gate is not an open question, as in the plugin.
  *  - Next and trailing work: what the newest hand-off round left (a step that failed or was skipped). Gone once a
  *    later round passes it.
  *
@@ -39,6 +40,10 @@ export interface LinesModel {
   started: number[];
   /** How many units the engine announced (`unitPlanned`): a replan announces its fresh units. */
   planned: number;
+  /** Each planned ord's step id, or null when its description has no valid step id. */
+  steps: Map<number, string | null>;
+  /** Ords that finished done and have not since restarted, been denied or failed. */
+  done: Set<number>;
 }
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
@@ -79,7 +84,7 @@ function answerPause(m: LinesModel, choice: PauseChoice, byPerson: boolean, at: 
 
 /** Fold a run's events (its recorded log, in `seq` order) into what the lines need. */
 export function foldLines(events: readonly CoreEvent[]): LinesModel {
-  const m: LinesModel = { gates: [], pauses: [], checkpoints: [], handoff: null, finished: null, power: false, started: [], planned: 0 };
+  const m: LinesModel = { gates: [], pauses: [], checkpoints: [], handoff: null, finished: null, power: false, started: [], planned: 0, steps: new Map(), done: new Set() };
   const sorted = [...events].sort((a, b) => (num((a as unknown as Record<string, unknown>)['seq']) ?? 0) - (num((b as unknown as Record<string, unknown>)['seq']) ?? 0));
   for (const e of sorted) {
     const ev = e as unknown as Record<string, unknown>;
@@ -98,6 +103,7 @@ export function foldLines(events: readonly CoreEvent[]): LinesModel {
         if (m.finished !== null && at >= m.finished) m.finished = null;
         for (const g of m.gates) if (g.answeredAt === null && g.openedAt <= at) g.answeredAt = at;
         if (e.type === 'unitExecuting' && ord !== null) {
+          m.done.delete(ord);
           if (!m.started.includes(ord)) m.started.push(ord);
           for (const g of m.gates) if (g.kind === 'plan_approval' && g.approvedAt === null && g.openedAt <= at && ord >= g.ord) g.approvedAt = at;
         }
@@ -108,8 +114,19 @@ export function foldLines(events: readonly CoreEvent[]): LinesModel {
       case 'powerIntakePlanned':
         m.power = true;
         break;
-      case 'unitPlanned':
+      case 'unitPlanned': {
         m.planned += 1;
+        if (ord !== null) {
+          const head = typeof ev['description'] === 'string' ? (ev['description'].split(/\s+[—-]\s+/u)[0]?.trim() ?? '') : '';
+          m.steps.set(ord, /^[a-z][a-z0-9_-]{0,40}$/u.test(head) ? head : null);
+        }
+        break;
+      }
+      case 'unitDone':
+        if (ord !== null) m.done.add(ord);
+        break;
+      case 'unitDenied': case 'stepFailed':
+        if (ord !== null) m.done.delete(ord);
         break;
       case 'rigorRescored': {
         m.power = true;
@@ -156,6 +173,12 @@ export function foldLines(events: readonly CoreEvent[]): LinesModel {
     }
   }
   return m;
+}
+
+/** An unfinished run of completed answer steps waits for the chat's next message, not a decision. */
+export function chatTurn(m: LinesModel): boolean {
+  return m.finished === null && m.steps.size > 0
+    && [...m.steps].every(([ord, step]) => step !== null && /^answer-\d+$/u.test(step) && m.done.has(ord));
 }
 
 /** "14:05", in the daemon's local time (the studio it serves runs on the same machine). */
@@ -338,7 +361,7 @@ export function docLines(m: LinesModel, notes: readonly PersonNote[] = []): { de
   }
   // A person's answer with words, after the gate line it explains when they share a time (a stable sort).
   for (const n of notes) made.push({ at: n.at, line: noteLine(n) });
-  if (m.finished === null) for (const g of m.gates) if (g.answeredAt === null) questions.push(`Waiting on you · ${gateWord(g.kind)} · since ${clock(g.openedAt)}`);
+  if (m.finished === null && !chatTurn(m)) for (const g of m.gates) if (g.answeredAt === null) questions.push(`Waiting on you · ${gateWord(g.kind)} · since ${clock(g.openedAt)}`);
   if (m.handoff !== null) {
     for (const [step, status] of m.handoff.steps) {
       const w = HANDOFF_WORDS[step];
