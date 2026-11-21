@@ -9804,7 +9804,7 @@ export function registerRoutes(
       return reply.code(404).send({ error: 'Code graph not built for this repo yet' });
     }
     try {
-      // Every page of the answer (estate#279): the dependents are joined, the rest is the last page's.
+      // crew#1556: join every page's dependents and freshness; other fields are the last page's.
       return reply.send(
         await readBlastRadiusPages('wicked-estate', q.name.trim(), dbPath, { timeout: 30_000, cwd: repo.root_path }),
       );
