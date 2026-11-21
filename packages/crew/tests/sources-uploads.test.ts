@@ -102,7 +102,7 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
       snapshot: async () => ({ config, enabled: true }),
       source: async () => ({ config, enabled: true, allowWrites: false, description: { catalog: up.catalog } }),
     } as unknown as McpRegistry;
-    const stage = new AppsSourceStage({ registry, snapshotDir: dir });
+    const stage = new AppsSourceStage({ registry, visibleSources: async () => new Set(['snapshot']), projectOf: () => null, snapshotDir: dir });
     const q: AppQuery = { id: 'q', source: 'snapshot', kind: 'sql', output: [{ name: 'a', type: 'integer' }] };
     const check = (text: string) => stage.check({ app: 'x', spec: specWith([q]), queryText: { q: text }, queries: ['q'], actions: [] });
     for (const prefix of ['', '-- read\n/* structure */\n']) {

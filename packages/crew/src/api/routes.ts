@@ -1357,7 +1357,7 @@ export interface RegisteredRoutes {
   proposalLaunchers: LaunchOnceRegistry;
 }
 
-export interface RuntimeDeps {
+interface RuntimeServices {
   /** Recheck the rebased tree before redelivery; default reads Core.checkRunTree at call time. */
   checkRunTree?: CheckRunTree;
   /** Run a refresh script; tests supply a temp HOME with stub gh and a local origin. */
@@ -1594,10 +1594,6 @@ export interface RuntimeDeps {
   editorUnitTokenProbe?: (token: string) => Promise<UnitTokenVerdict>;
   /** EP-C1 (tests): where `daemon-editors.json` lives; default = the crew state home. */
   editorsStateHome?: string;
-  /** DES-APPS-001 (K2a): the app store behind `/apps` and `POST /repos {create}`. `createServer` builds it over
-   *  the state home's `daemon-apps.json` and the apps root; a directly-driven route set gets the routes only when it
-   *  injects one (so a test never makes a repo under the real `~/.wicked/apps`). */
-  apps?: AppStore;
   /** (DES-APPS-001 K5) A unit token → its run and step, for `POST /apps/check`; absent = that route answers 503. */
   appsVerifyUnitToken?: (token: string) => Promise<{ runId: string; phase: string } | null>;
   /** (K2b) Grants and action records (`daemon-apps-actions.json`); with `apps`, the action routes serve for real. */
@@ -1677,6 +1673,15 @@ export interface RuntimeDeps {
    *  its own default (shells `estate stats --db`). */
   entityCount?: (dbPath: string) => Promise<number>;
 }
+
+/** An Apps runtime always supplies project visibility; a route set without Apps needs neither. */
+export type RuntimeDeps = RuntimeServices & ({
+  /** DES-APPS-001 (K2a): the app store behind `/apps` and `POST /repos {create}`. `createServer` builds it over
+   *  the state home's `daemon-apps.json` and the apps root; a directly-driven route set gets the routes only when it
+   *  injects one (so a test never makes a repo under the real `~/.wicked/apps`). */
+  apps: AppStore;
+  appsVisibleSources: (projectId: string | null) => Promise<ReadonlySet<string>>;
+} | { apps?: undefined; appsVisibleSources?: never });
 
 /**
  * The daemon REST surface. Every endpoint is a thin wrapper over one adapter /
@@ -2133,6 +2138,7 @@ export function registerRoutes(
       ? new AppExecutor({
           store: runtime.apps,
           registry: runtime.mcp ?? null,
+          visibleSources: runtime.appsVisibleSources,
           ...(appsKnowledge !== undefined ? { knowledge: appsKnowledge } : {}),
           projectOf: (slug) => runtime.apps!.projectOf(slug),
           crewInject: async (r) => {
@@ -2149,6 +2155,8 @@ export function registerRoutes(
           store: runtime.apps,
           actions: runtime.appsActions,
           registry: runtime.mcp ?? null,
+          visibleSources: runtime.appsVisibleSources,
+          projectOf: (slug) => runtime.apps!.projectOf(slug),
           audit,
           viewerOf: runtime.appsViewerOf ?? localViewerOf,
           ...(appsExecutor !== undefined ? { executor: appsExecutor } : {}),
@@ -2165,6 +2173,8 @@ export function registerRoutes(
           return JSON.stringify(launchRosterNaming(rosterWithStanding({ launch: true }), undefined));
         },
         registry: runtime.mcp ?? null,
+        visibleSources: runtime.appsVisibleSources,
+        projectOf: (slug) => runtime.apps!.projectOf(slug),
         grantOf: (slug, action) => appsWritePath?.getGrant(slug, action) ?? null,
       },
       ...(appsExecutor !== undefined ? { executor: appsExecutor } : {}),
