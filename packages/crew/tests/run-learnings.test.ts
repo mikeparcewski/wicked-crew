@@ -21,6 +21,7 @@ import {
   REPORT_FILE,
   RunLearningsService,
   checkedCount,
+  defaultLearningsDir,
   loadDistillWorkflow,
   parseDistillReport,
   runLearningsMode,
@@ -892,4 +893,17 @@ describe.skipIf(!hasEstate)('with a real wicked-estate-mcp: proposed, not writte
       }
     }
   }, 60_000);
+});
+
+describe('crew#1800: the learnings dir follows WICKED_HOME', () => {
+  it('a daemon on a scratch WICKED_HOME writes its distil handoffs under it; WICKED_CREW_LEARNINGS_DIR still names it', () => {
+    const scratch = join(tmpdir(), 'crew-1800-home');
+    expect(defaultLearningsDir({ WICKED_HOME: scratch })).toBe(join(scratch, 'learnings'));
+    expect(defaultLearningsDir({ WICKED_HOME: scratch, WICKED_CREW_LEARNINGS_DIR: '/elsewhere/learnings' })).toBe('/elsewhere/learnings');
+    // Unset or empty: the person's own home, as before.
+    expect(defaultLearningsDir({})).toBe(join(homedir(), '.wicked', 'learnings'));
+    expect(defaultLearningsDir({ WICKED_HOME: '' })).toBe(join(homedir(), '.wicked', 'learnings'));
+    // An empty override is unset (it used to name a relative '' dir, so handoffs landed in the daemon's cwd).
+    expect(defaultLearningsDir({ WICKED_HOME: scratch, WICKED_CREW_LEARNINGS_DIR: '' })).toBe(join(scratch, 'learnings'));
+  });
 });

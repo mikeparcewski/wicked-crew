@@ -78,9 +78,16 @@ export function runLearningsMode(env: NodeJS.ProcessEnv = process.env): RunLearn
   return env['VITEST'] !== undefined || env['NODE_ENV'] === 'test' ? 'off' : 'distill';
 }
 
-/** Where each source run's distil handoff lives: outside the daemon state home (the worker fence), like reviews. */
+/**
+ * Where each source run's distil handoff lives: outside the daemon state home (the worker fence), like reviews.
+ * `WICKED_CREW_LEARNINGS_DIR` names it; else `${WICKED_HOME:-~/.wicked}/learnings`, so a daemon on a scratch
+ * `WICKED_HOME` (a proof or test daemon) never writes into the person's live home (crew#1800). An empty value is unset.
+ */
 export function defaultLearningsDir(env: NodeJS.ProcessEnv = process.env): string {
-  return env['WICKED_CREW_LEARNINGS_DIR'] ?? join(homedir(), '.wicked', 'learnings');
+  const explicit = env['WICKED_CREW_LEARNINGS_DIR'];
+  if (explicit !== undefined && explicit !== '') return explicit;
+  const home = env['WICKED_HOME'];
+  return join(home !== undefined && home !== '' ? home : join(homedir(), '.wicked'), 'learnings');
 }
 
 export function loadDistillWorkflow(file = DISTILL_WORKFLOW_FILE): WorkflowDef {
