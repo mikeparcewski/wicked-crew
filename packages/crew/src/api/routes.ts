@@ -1312,11 +1312,14 @@ const memoryEditsInFlight = new Set<string>();
 const ESTATE_NO_ERASE_BY_ID = /scope_prefix \(non-empty\) required/i;
 
 /** crew#1697: how an estate without a tool refuses it. Before wicked-estate#552/#553 `memory.retire`,
- *  `memory.unretire` and `knowledge.forget` are unknown tools (-32602 "unknown tool: …"); an implementer without
- *  retirement answers -32601 "… not available". Either way nothing was changed. */
+ *  `memory.unretire` and `knowledge.forget` are unknown tools (-32602 "unknown tool: …"); a memory implementer
+ *  without retirement answers -32601 "… does not support retirement" / "… retirement is unsupported". Either way
+ *  nothing was changed. A domain whose store did not open (-32601 "memory domain not available: <why>") is NOT
+ *  this: it stays a 502 with its own words (codex review). */
 const estateLacksTool = (err: unknown): boolean =>
   err instanceof EstateMcpError &&
-  ((err.code === -32602 && /unknown tool/i.test(err.message)) || (err.code === -32601 && /not available/i.test(err.message)));
+  ((err.code === -32602 && /unknown tool/i.test(err.message)) ||
+    (err.code === -32601 && /does not support retirement|retirement is unsupported/i.test(err.message)));
 
 /** crew#1697: the count a one-memory estate tool answered (`deleted_count`, `retired_count`, `restored_count`):
  *  0 or 1. Any other answer is estate misbehaving, thrown as an upstream fault (502). */
@@ -11085,6 +11088,9 @@ export function registerRoutes(
         const body: ListMemoriesResponse = { memories, store: memoryStoreInfo() };
         return body;
       } catch (err) {
+        if (retired && estateLacksTool(err)) {
+          return reply.code(501).send(estateUpgrade('cannot list retired memories', '#552', 'nothing was changed'));
+        }
         return estateUpstreamError(reply, err);
       }
     },
@@ -11170,6 +11176,12 @@ export function registerRoutes(
       }
       const memoryId = parsed.data.memory_id.trim();
       if (memoryId === '') return reply.code(400).send({ error: '`memory_id` must not be empty' });
+      // An edit in flight ends by erasing the memory it replaces (retired or not), so a retire that slipped in
+      // between would be erased for good: the two take turns on one memory (codex review).
+      if (memoryEditsInFlight.has(memoryId)) {
+        return reply.code(409).send({ error: `memory ${memoryId} is being edited; retire it once the edit is done` });
+      }
+      memoryEditsInFlight.add(memoryId);
       try {
         const count = oneMemoryCount(await estateTool('memory.retire', { id: memoryId }), 'memory.retire', 'retired_count');
         if (count === 0) return reply.code(404).send({ error: `no live memory ${memoryId}` });
@@ -11178,6 +11190,8 @@ export function registerRoutes(
       } catch (err) {
         if (estateLacksTool(err)) return reply.code(501).send(estateUpgrade('cannot retire a memory and restore it later', '#552', 'nothing was changed'));
         return estateUpstreamError(reply, err);
+      } finally {
+        memoryEditsInFlight.delete(memoryId);
       }
     },
   );
@@ -11325,7 +11339,7 @@ export function registerRoutes(
       if (memoryId === '') return reply.code(400).send({ error: '`memory_id` must not be empty' });
       if (content === '') return reply.code(400).send({ error: '`content` must not be empty' });
       if (memoryEditsInFlight.has(memoryId)) {
-        return reply.code(409).send({ error: `memory ${memoryId} is already being edited` });
+        return reply.code(409).send({ error: `memory ${memoryId} is already being edited or retired` });
       }
       memoryEditsInFlight.add(memoryId);
       // Every estate call here is crew's own (no client argument reaches estate unchecked), so an

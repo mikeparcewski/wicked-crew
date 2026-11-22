@@ -407,6 +407,15 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
     expect(res.statusCode).toBe(501);
   });
 
+  it('codex review: a memory store that did not open stays a 502 with its words, never "upgrade estate"', async () => {
+    estateTool.mockRejectedValueOnce(new EstateMcpError('memory domain not available: unable to open database file', -32601));
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload: { memory_id: 'm1' } });
+
+    expect(res.statusCode).toBe(502);
+    expect((res.json() as { error: string }).error).toContain('unable to open database file');
+  });
+
   it('502s a retire that reports more than one memory for one id', async () => {
     estateTool.mockResolvedValueOnce({ retired_count: 2 });
 
@@ -460,6 +469,13 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
     const bad = await app.inject({ method: 'GET', url: '/api/v1/memory?retired=yes' });
     expect(bad.statusCode).toBe(400);
     expect(estateTool).toHaveBeenCalledTimes(1);
+  });
+
+  it('codex review: 501s a retired list the memory implementer refuses (-32601 retirement is unsupported)', async () => {
+    estateTool.mockRejectedValueOnce(new EstateMcpError('memory.list retired view not available: retirement is unsupported', -32601));
+    const res = await app.inject({ method: 'GET', url: '/api/v1/memory?retired=1' });
+    expect(res.statusCode).toBe(501);
+    expect((res.json() as { code: string }).code).toBe('estate_upgrade_required');
   });
 
   it('501s a retired list from an estate that ignored the flag (rows without retired_at), never showing live rows as retired', async () => {
@@ -1005,5 +1021,29 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
     expect((await edit({ memory_id: 'm1', content: 'other words' })).statusCode).toBe(409);
     release();
     expect((await first).statusCode).toBe(200);
+  });
+
+  it('codex review: a retire of a memory being edited is refused (409), so the edit\'s erase cannot destroy a retired row', async () => {
+    store([OLD]);
+    const base = estateTool.getMockImplementation()!;
+    let release!: () => void;
+    estateTool.mockImplementationOnce(async (tool: string, args: Record<string, unknown>) => { await new Promise<void>((r) => { release = r; }); return base(tool, args); });
+    const first = edit({ memory_id: 'm1', content: 'new words' });
+    await vi.waitFor(() => expect(estateTool).toHaveBeenCalledTimes(1));
+    const retire = await app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload: { memory_id: 'm1' } });
+    expect(retire.statusCode).toBe(409);
+    expect(estateTool).not.toHaveBeenCalledWith('memory.retire', expect.anything());
+    release();
+    expect((await first).statusCode).toBe(200);
+  });
+
+  it('codex review: an edit of a memory being retired is refused (409)', async () => {
+    let release!: () => void;
+    estateTool.mockImplementationOnce(async () => { await new Promise<void>((r) => { release = r; }); return { retired_count: 1 }; });
+    const retire = app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload: { memory_id: 'm1' } });
+    await vi.waitFor(() => expect(estateTool).toHaveBeenCalledTimes(1));
+    expect((await edit({ memory_id: 'm1', content: 'other words' })).statusCode).toBe(409);
+    release();
+    expect((await retire).statusCode).toBe(200);
   });
 });
