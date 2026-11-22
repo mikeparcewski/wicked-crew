@@ -8782,7 +8782,10 @@ export function registerRoutes(
 
   // ── Elicitation (DES-002) ────────────────────────────────────────────────────
   //
-  // GET returns the current pending elicitation prompt for a run (display-store read).
+  // GET returns the current pending elicitation prompt for a run (display-store read), or `null`
+  // (a 200) when the run exists and has none open: "nothing open" is the normal answer for every
+  // parked run a client polls, not an error (studio#984 logged one 404 per parked run per page load).
+  // 404 stays for a run that does not exist. Every studio already reads "nothing open" as `null`.
   // POST resolves it: the body carries the elicitationId to guard against stale tabs,
   // the action (accept|decline|cancel), and — for accept — the operator's response.
 
@@ -8792,7 +8795,7 @@ export function registerRoutes(
     // `entry` already carries `runId`; return it directly to avoid TS2783
     // ("runId is specified more than once") from a redundant spread.
     if (entry) return entry;
-    // Cache miss: check existence before returning 404.
+    // Cache miss: check existence first — an unknown run is the only 404.
     // Use sessions() (IDs only) — cheaper than sessionsDetail() on this read path.
     const ids = await adapter.sessions();
     if (!ids.includes(id)) return reply.code(404).send({ error: 'Run not found' });
@@ -8818,7 +8821,7 @@ export function registerRoutes(
         receivedAt: new Date(pending.created_at).toISOString(),
       };
     }
-    return reply.code(404).send({ error: 'No pending elicitation for this run' });
+    return reply.code(200).type('application/json').send('null');
   });
 
   const ElicitationRespondSchema = z.strictObject({

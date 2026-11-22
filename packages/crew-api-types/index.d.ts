@@ -7864,7 +7864,11 @@ export interface BlastRadius {
   truncated_dependents?: number;
 }
 
-/** An open elicitation as `GET /runs/:id/elicitation` returns it (DES-002). */
+/**
+ * An open elicitation as `GET /runs/:id/elicitation` returns it (DES-002). A run that exists with nothing open
+ * answers `200` with a JSON `null` body (after crew 0.18.20, studio#984; a 404 before); a 404 now means only that the run
+ * does not exist. So the route's body is `ElicitationInfo | null`.
+ */
 export interface ElicitationInfo {
   runId: string;
   elicitationId: string;
