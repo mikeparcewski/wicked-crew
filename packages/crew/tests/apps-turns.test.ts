@@ -601,6 +601,10 @@ describe('apps turns: check, land, refuse', () => {
       // Numbered item lists leave no stray numbers.
       ['1. ITEM 1: FAIL — The query leaks rows.\n2. ITEM 2: PASS — ok', 'The query leaks rows.'],
       ['1. ITEM 1: FAIL — The query leaks rows. 2. ITEM 2: PASS — ok', 'The query leaks rows.'],
+      // (coord fold check) A sentence's own closing number is a word, in a finding and after a record.
+      ['Expected 3 rows, got 2.', 'Expected 3 rows, got 2.'],
+      ['ITEM 1: FAIL — Expected 3 rows, got 2.', 'Expected 3 rows, got 2.'],
+      ['ITEM 1: FAIL — Expected 3 rows, got 2. ITEM 2: PASS — ok', 'Expected 3 rows, got 2.'],
       // Bookkeeping with no count.
       ['The chart is wrong.\nMemories proposed: none\nTREE: (none)\nCounts: 0/0/0', 'The chart is wrong.'],
       // A tail cut inside a fence (an odd count, the first closing): what follows is read as words, not as code.
@@ -623,6 +627,7 @@ describe('apps turns: check, land, refuse', () => {
     expect(lastParagraph('I declined.\n\nVERDICT:')).toBe('I declined.');
     // (coord r1) A builder's bookkeeping with no count stays out of its quote, as on main.
     expect(lastParagraph('I declined: no such table.\nMemories proposed: none\nTREE: (none)\nCounts: 0/0/0')).toBe('I declined: no such table.');
+    expect(lastParagraph('I made no change: the table has 3 columns, the message names 4.')).toBe('I made no change: the table has 3 columns, the message names 4.');
   });
 
   it('a build that made no change never quotes the STACK-CHECK footer or raw markdown (crew#1540)', async () => {

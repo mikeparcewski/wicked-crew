@@ -271,6 +271,7 @@ function personEntries(text: string, fences: 'keep' | 'skip'): PersonLine[] {
       continue;
     }
     const indented = /^\s/.test(raw);
+    const numbered = /^\s*\d{1,3}[.)]\s/.test(raw);
     let written = raw.trim();
     let headCut = false;
     for (const re of QUOTING_HEADS) {
@@ -306,8 +307,17 @@ function personEntries(text: string, fences: 'keep' | 'skip'): PersonLine[] {
     }
     const parts = line.split(CUT).flatMap((seg, i) => {
       const t = (i > 0 || lead ? seg.replace(/^[\s—–:;,.\-]+/, '') : seg).trim();
-      // A list number left between records (`1. ITEM 1: … 2. ITEM 2: …`) is no word.
-      return t === '' ? [] : t.split(ITEM_SPLIT).map((x) => x.replace(/\s+\d{1,3}[.)]$/, '').trim()).filter((x) => x !== '' && !/^\d{1,3}[.)]$/.test(x));
+      // A list number left between records (`1. ITEM 1: … 2. ITEM 2: …`) is no word: only on a line the list
+      // numbers, right before the record it numbers (an item of that number, or a rule), so a sentence's own closing
+      // number (`got 2.`) stays.
+      return t === '' ? [] : t.split(ITEM_SPLIT)
+        .map((x, j, all) => {
+          const n = /(?:^|\s+)(\d{1,3})[.)]$/.exec(x);
+          if (n === null || !numbered || j === all.length - 1) return x.trim();
+          const next = /^ITEM\s+(\d+)/i.exec(all[j + 1]!);
+          return next === null || next[1] === n[1] ? x.slice(0, n.index).trim() : x.trim();
+        })
+        .filter((x) => x !== '');
     });
     const restore = (k: string): string => k.replace(new RegExp(`${SPAN}(\\d+)${SPAN}`, 'g'), (_m, n: string) => spans[Number(n)] ?? '');
     let prose: string[] = [];
