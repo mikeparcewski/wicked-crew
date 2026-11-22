@@ -326,7 +326,7 @@ import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, 
 import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, removeStagedDocuments, stagedDocumentsRemoved, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
 import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks, webScopeReason } from './run-sources.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
-import { LaunchRefusal, ChatProposals, LaunchOnceRegistry, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
+import { CHAT_ENDED, LaunchRefusal, ChatProposals, LaunchOnceRegistry, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
 import { CATALOG_SEEDS } from '../workflow-catalog/catalog-data.js';
 import { registerInteractiveDocList } from '../interactive/doc-list-routes.js';
 import { REVIEWS_DIRNAME } from '../interactive/review-ledger.js';
@@ -5904,7 +5904,7 @@ export function registerRoutes(
     // studio#1094: the person route owns admission; the open's resolver validates their first repo pick.
     pickFirstRepo: async (chatId, repoRef, actor, pid) => {
       const previous = chatScopes.get(chatId);
-      if (previous === undefined) return { ok: false, status: 409, error: `chat ${chatId} has ended; start a new one` };
+      if (previous === undefined) return { ok: false, status: 409, error: CHAT_ENDED };
       if (previous.repos.length > 0) return { ok: false, status: 409, error: `chat ${chatId} already has a repository in scope` };
       if (previous.kind === 'everything') return { ok: false, status: 409, error: `chat ${chatId} already reads every registered repository` };
       const request: ChatScopeRequest = {
