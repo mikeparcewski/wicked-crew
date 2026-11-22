@@ -345,6 +345,15 @@ describe('publish discovery and produce CLI', () => {
     expect(await publishDiscovery(identity)).toEqual({ endpoints: null, why: 'it answered HTTP 404' });
     vi.mocked(dialFetch).mockRejectedValueOnce(new Error('offline'));
     expect(await publishDiscovery(identity)).toEqual({ endpoints: null, why: null });
+    // (xreview r1) A malformed issuer is described, never quoted: its password, path and query stay out of the finding.
+    const leaky = 'https://alice:secret@idp.example.com:bad/tenant?token=private';
+    const actual = await vi.importActual<typeof import('../src/sources/dialer.js')>('../src/sources/dialer.js');
+    const parseRefusal = await actual.dialFetch(`${leaky}/.well-known/openid-configuration`, {}, { allow: [], plaintext: false }).then(() => null, (e: unknown) => e);
+    expect(parseRefusal).toMatchObject({ code: 'url_refused' });
+    vi.mocked(dialFetch).mockRejectedValueOnce(parseRefusal);
+    const quoted = await publishDiscovery({ ...identity, issuer: leaky });
+    expect(quoted.why).toBe('the issuer is not a URL crew dials (https, a host, no credentials)');
+    for (const secret of ['alice', 'secret', 'tenant', 'private']) expect(quoted.why).not.toContain(secret);
     // The allowed range rides the dialer's policy (nothing is allowed that the sign-in does not allow).
     await publishDiscovery({ ...identity, allowRanges: ['10.0.0.0/8'] });
     expect(dialFetch).toHaveBeenLastCalledWith('https://dex.corp.test/.well-known/openid-configuration', expect.anything(), { allow: ['10.0.0.0/8'], plaintext: false });

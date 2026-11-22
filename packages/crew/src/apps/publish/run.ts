@@ -37,7 +37,7 @@ export async function publishEndpoints(identity: ManifestInput['body']['identity
 /**
  * (crew#1457) Why a discovery read nothing, in words for the Publish sheet: an issuer on a private (or loopback)
  * address the sign-in's allowed ranges do not cover names the range that would allow it; any other refusal of the
- * dialer is its own words; anything else is `null` (the finding then says only that it could not be read).
+ * dialer is its own words (a malformed URL is described, never quoted); anything else is `null` (the finding then says only that it could not be read).
  */
 function discoveryRefusal(err: unknown, issuer: string): string | null {
   if (!(err instanceof DialRefusedError)) return null;
@@ -54,6 +54,9 @@ function discoveryRefusal(err: unknown, issuer: string): string | null {
     const ranges = err.addresses.map((a) => `${a.address}/${a.address.includes(':') ? 128 : 32}`);
     return `${host} resolves to ${kind} (${where}), which crew reaches only when the sign-in allows its range (identity.allowRanges, e.g. ${ranges.join(', ')})`;
   }
+  // A URL the dialer would not parse is described, never quoted: the issuer as typed may carry a password, a path or a
+  // query (xreview r1). The other refusals name only the host, its addresses and the status.
+  if (err.code === 'url_refused') return 'the issuer is not a URL crew dials (https, a host, no credentials)';
   return err.message;
 }
 
