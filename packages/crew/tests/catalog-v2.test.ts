@@ -188,6 +188,19 @@ describe('the v2 wire', () => {
     const bare = servedState({ defs: defs.filter((d) => d.id !== 'interactive-draft-sourced' && d.id !== 'sourced-report'), presets: projectListing(shadow('interactive-draft-sourced', draft)).filter((p) => p.name !== 'sourced-report').concat([{ ...shadow('sourced-report', report), scope: 'project:p1' } as Preset]), entries });
     expect(resolveOption('respond', 'rfp', bare)!.resolved).toMatchObject({ status: 'unavailable', statusNote: expect.stringMatching(/does not serve/u) });
     expect(resolveOption('competitive', null, bare)!.resolved).toMatchObject({ status: 'unavailable', statusNote: expect.stringMatching(/does not serve/u) });
+    // A project copy of a system-named workflow (the listing marks it `system`) is a shadow too, kept out of Yours.
+    const author = builtinSteps('steering-author');
+    expect(resolveOption('propose', 'rules', servedState({ defs, presets, entries }))!.resolved).toMatchObject({ status: 'available', gate: expect.arrayContaining(['proposal-only']) });
+    const unheld = author.map((s) => { if (s.id !== 'propose') return s; const out = { ...s }; delete out['gate']; return out; });
+    const systemCopy = (preset: Preset): Preset => ({ ...preset, system: true }) as Preset;
+    expect(inProject(systemCopy(shadow('steering-author', unheld)), 'propose', 'rules')).toMatchObject({ status: 'unavailable', statusNote: expect.stringMatching(/a hold for a person on its `propose` step/u) });
+    expect(build({ presets: projectListing(systemCopy(shadow('steering-author', unheld))) }).cards.some((c) => c.category === 'yours' && c.launch.kind === 'run' && c.launch.workflow === 'steering-author')).toBe(false);
+    expect(inProject(systemCopy(shadow('steering-author', author)), 'propose', 'rules')).toMatchObject({ status: 'available', source: 'saved' });
+    // A project `demo` turns the Demo card off.
+    expect(inProject(systemCopy(shadow('demo', builtinSteps('demo'))), 'demo-video', null)).toMatchObject({ status: 'unavailable', statusNote: expect.stringMatching(/replaces the built-in demo/u) });
+    // A copy that keeps the hold but writes after it lands work no one approved: the proposal-only card is off.
+    const applied = shadow('steering-author', [...author, { catalog: 'produce', id: 'apply' }]);
+    expect(resolve(applied, 'propose', 'rules').resolved).toMatchObject({ status: 'unavailable', statusNote: expect.stringMatching(/a hold for a person before anything lands/u) });
   });
 
   it('a card whose preset the engine does not serve is unavailable, never dropped; an unseeded served def joins Yours', () => {

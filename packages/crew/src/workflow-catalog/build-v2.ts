@@ -236,6 +236,12 @@ export function shadowShortfall(builtinSteps: readonly PresetStep[], shadowSteps
   // A lost consent says its hold too: name it once.
   const consentLost = new Set(lost.filter((p) => p.what === 'consent before install').map((p) => p.step));
   for (const p of lost) if (!(p.what === 'a hold for a person' && consentLost.has(p.step))) out.push(`${p.what} on its \`${p.step}\` step`);
+  // A held built-in that lands nothing before a person says so promises that of its shadow too: a writing step after
+  // its last hold lands work no one approved (coord review F2; the stale-check rule below, for holds).
+  const builtinHeld = promisesOf(builtinSteps, entries).some((p) => p.what === 'a hold for a person');
+  if (builtinHeld && proposalOnly(builtinRead, 'none') && !proposalOnly(shadowRead, 'none')) {
+    out.push('a hold for a person before anything lands (a writing step runs after its last hold)');
+  }
   for (const p of promisesOf(builtinSteps, entries)) {
     if (!p.what.endsWith(' check') || !kept.has(`${p.step}\u0000${p.what}`)) continue;
     const allowed = new Set(writersAfter(builtinRead, p.step));
@@ -352,7 +358,10 @@ export interface ServedState {
 export function servedState(input: Pick<CatalogV2Inputs, 'defs' | 'presets' | 'entries'>): ServedState {
   const saved = new Map<string, Preset>();
   for (const p of input.presets) {
-    if (p.created_by === 'builtin' || p.system === true) continue;
+    // A saved row named like a system workflow (steering-author, capture-learnings, demo, the draft seams) is still
+    // what the engine runs under that name: it shadows the card's built-in like any other (coord review F1). It stays
+    // out of Yours.
+    if (p.created_by === 'builtin') continue;
     const held = saved.get(p.name);
     if (held === undefined || (held.scope === 'global' && p.scope !== 'global')) saved.set(p.name, p);
   }
@@ -665,7 +674,7 @@ export function buildWorkflowCatalogV2(input: CatalogV2Inputs): WorkflowCatalogV
       later: [], command: null, aliases: [], hidden: false, usage: { ...usageOfRuns(runs), byOption: {} },
     };
   };
-  const savedRows = [...served.saved.values()].filter((p) => !V2_EXCLUDED.has(p.name)).sort((a, b) => a.name.localeCompare(b.name));
+  const savedRows = [...served.saved.values()].filter((p) => p.system !== true && !V2_EXCLUDED.has(p.name)).sort((a, b) => a.name.localeCompare(b.name));
   for (const p of savedRows) {
     cards.push(yours(p.name, p.steps, instrumentsOf(p), p.title ?? p.name, p.summary ?? `Your saved steps: ${p.steps.map((s) => s.id || s.catalog).join(', ')}.`, 'saved'));
   }
