@@ -123,6 +123,9 @@ delete process.env['WICKED_SEAT_FLOOR'];
 // their REAL memory store. Cleared, the ladder resolves into the armed state home (`<state home>/mcp/memory.db`); a test
 // that wants an explicit store sets it and restores it itself.
 delete process.env['WICKED_MEMORY_DB'];
+// The default state home's arm of that ladder is `${WICKED_HOME:-~/.wicked}/memory.db`: an exported WICKED_HOME would aim
+// a test that unconfigures the state home at the operator's global store (coord F4 on #1758). Cleared too.
+delete process.env['WICKED_HOME'];
 
 // (DES-EDITOR-CONFORMANCE-HOST) An editor-plugin launch under a test server would start crew's real conformance
 // runtime (a venv, pip and Chromium in the OS cache). An interpreter named here is "the operator's own", which crew

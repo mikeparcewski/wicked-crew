@@ -912,8 +912,12 @@ accepts<keyof Wire.GovernanceEvalMemoryResult, keyof typeof ENGINE_MEMORY_RESULT
 accepts<keyof typeof ENGINE_MEMORY_RESULT, keyof Wire.GovernanceEvalMemoryResult>();
 accepts<keyof Wire.GovernanceEvalMemoryAxis['coverage'], keyof typeof ENGINE_MEMORY_AXIS.coverage>();
 accepts<keyof typeof ENGINE_MEMORY_AXIS.coverage, keyof Wire.GovernanceEvalMemoryAxis['coverage']>();
-// A sample that declares memories is a legal import body (the schema takes the engine's two matcher lists).
+// A sample that declares memories is a legal import body (the schema takes the engine's two matcher lists) …
 accepts<z.input<typeof ImportEvalCorpusSchema>, { name: string; samples: Array<Wire.GovernanceEvalSample & { expected_memories: string[]; unexpected_memories: string[] }> }>();
+// … and the schema TYPES those lists (coord F2 on #1758): a non-string matcher is refused. Without the schema's two
+// fields, `z.input` would not name them at all, this body would be accepted, and the directive below would be unused.
+// @ts-expect-error -- a matcher list is strings
+accepts<z.input<typeof ImportEvalCorpusSchema>, { name: string; samples: Array<Omit<Wire.GovernanceEvalSample, 'expected_memories'> & { expected_memories: number[] }> }>();
 // Steering `effect` (api-types 0.27.0): the operator-authorable `warn` band is a legal effect on
 // the wire alongside the policy-era three; a rule WITHOUT one stays recall-only (still legal).
 accepts<Wire.ConformanceRule['effect'], 'deny' | 'warn' | 'allow_with_conditions' | 'allow' | undefined>();

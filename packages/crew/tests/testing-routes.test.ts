@@ -527,9 +527,15 @@ describe('POST /api/v1/testing/corpora/import', () => {
     expect(importCaptured).toEqual({ name: 'memory-axis', samples: withMemories });
   });
 
-  it('400 on a blank memory matcher', async () => {
+  it.each([
+    ['expected_memories', ''],
+    ['expected_memories', ' '],
+    ['expected_memories', 'id:'],
+    ['unexpected_memories', 'id: '],
+    ['unexpected_memories', '  '],
+  ])('400 on a blank memory matcher (%s %j), the engine\'s own blank rule, never a 500 from the engine', async (field, matcher) => {
     evalsSupported = true;
-    const res = await post('/api/v1/testing/corpora/import', { name: 'memory-axis', samples: [{ ...SAMPLES[0], expected_memories: [''] }] });
+    const res = await post('/api/v1/testing/corpora/import', { name: 'memory-axis', samples: [{ ...SAMPLES[0], [field]: [matcher] }] });
     expect(res.status).toBe(400);
     expect(importCaptured).toBeNull();
   });

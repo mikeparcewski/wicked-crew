@@ -36,7 +36,11 @@ export const EvalSignalsSchema = z.strictObject({
  * (`unexpected_memories`) surface: `id:<memory id>` names one memory, any other entry is a case-insensitive content
  * substring. The engine validates the entries; a run over a sample that declares memories needs the memory store.
  */
-const MemoryMatchersSchema = z.array(z.string().min(1)).optional();
+// The engine's own blank rule (evals.rs `EvalSample::validate`): blank after an optional `id:` prefix and a trim is
+// refused here as a 400, never passed on to fail the engine's import as a 500 (coord F1 on #1758).
+const MemoryMatchersSchema = z
+  .array(z.string().refine((s) => (s.startsWith('id:') ? s.slice(3) : s).trim() !== '', 'a blank memory expectation (use `id:<memory id>` or a content substring)'))
+  .optional();
 
 export const EvalSampleSchema = z.strictObject({
   id: z.string().min(1),
