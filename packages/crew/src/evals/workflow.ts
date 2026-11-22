@@ -72,13 +72,16 @@ export interface RunEvalsScope {
 /**
  * (crew#1375) What a card's `run-evals` launch scores. A card's `evalSuites` (Evaluate rules: `steering`) limit the
  * suites, and a card that takes a project input scores the project the launch is filed in (none, or Unfiled, is every
- * project). No card (a schedule, `/workflow-run-evals`) or an unknown one scores everything, as before.
+ * project). No card (a schedule, `/workflow-run-evals`) or an unknown one scores everything, as before. A card whose
+ * `evalSuites` names no known suite throws (its launch is refused), so a renamed suite never scores everything.
  */
 export function runEvalsScopeOf(cardId: string | null, projectId: string | null): RunEvalsScope {
   const card = cardId === null ? undefined : CATALOG_V2_CARDS.find((c) => c.id === cardId);
   if (card === undefined) return { project: null };
   const known: readonly string[] = SUITE_IDS;
   const suites = (card.evalSuites ?? []).filter((s): s is SuiteId => known.includes(s));
+  // A card that names suites but no known one is refused, never widened to every suite (coord review).
+  if ((card.evalSuites ?? []).length > 0 && suites.length === 0) throw new Error(`${card.id} names no known eval suite (${card.evalSuites!.join(', ')})`);
   const takesProject = (card.inputs ?? []).some((i) => i === 'project' || i === 'project?');
   const project = takesProject && projectId !== null && projectId !== DEFAULT_PROJECT_ID ? projectId : null;
   return { project, ...(suites.length > 0 ? { suites } : {}) };

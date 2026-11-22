@@ -44,7 +44,9 @@ import { RIG_SEED } from '../src/evals/seed-rig.js';
 import { calibration, rate, trendOf } from '../src/evals/stats.js';
 import { DefaultEvalStore } from '../src/evals/store.js';
 import { generateSynthetic } from '../src/evals/synthetic.js';
-import type { DefaultEvalReport, EvalCase } from '../src/evals/types.js';
+import { SUITE_IDS, type DefaultEvalReport, type EvalCase } from '../src/evals/types.js';
+import { CATALOG_V2_CARDS } from '../src/workflow-catalog/catalog-data-v2.js';
+import type { CardSeedV2 } from '../src/workflow-catalog/seeds-v2.js';
 
 const NO_REPLAY: ReplaySet = { adapters: {}, missing: {} };
 
@@ -648,6 +650,21 @@ describe('a card launch of run-evals scores what its card asks for (crew#1375)',
     // No card (a schedule, /workflow-run-evals) or an unknown one: everything, as before.
     expect(runEvalsScopeOf(null, 'p1')).toEqual({ project: null });
     expect(runEvalsScopeOf('no-such-card', 'p1')).toEqual({ project: null });
+  });
+
+  it('every card names only known eval suites; a card that names none it knows is refused, never widened to all', () => {
+    for (const c of CATALOG_V2_CARDS) for (const s of c.evalSuites ?? []) expect(SUITE_IDS as readonly string[], c.id).toContain(s);
+    const cards = CATALOG_V2_CARDS as CardSeedV2[];
+    const base = cards.find((c) => c.id === 'evaluate-rules')!;
+    cards.push({ ...base, id: 'renamed-suite-card', evalSuites: ['no-such-suite'] });
+    try {
+      expect(() => runEvalsScopeOf('renamed-suite-card', null)).toThrow(/names no known eval suite \(no-such-suite\)/u);
+      // A known suite beside an unknown one still scopes to the known one.
+      cards[cards.length - 1] = { ...base, id: 'renamed-suite-card', evalSuites: ['no-such-suite', 'steering'] };
+      expect(runEvalsScopeOf('renamed-suite-card', null)).toEqual({ project: null, suites: ['steering'] });
+    } finally {
+      cards.splice(cards.findIndex((c) => c.id === 'renamed-suite-card'), 1);
+    }
   });
 
   it('the default problem line names the scope', async () => {
