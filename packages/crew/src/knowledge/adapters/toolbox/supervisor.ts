@@ -134,6 +134,14 @@ export class ToolboxProcess {
   /** Set the moment a stop begins: a process being stopped is never handed out again, even before it exits. */
   private stopping = false;
   private idleTimer: NodeJS.Timeout | null = null;
+  private settle: () => void = () => undefined;
+  /**
+   * Resolves once nothing of this process is left: it has exited and its run directory is removed (or it never
+   * spawned and its directory is removed). A shutdown awaits it before the state home goes (crew#1752).
+   */
+  readonly closed: Promise<void> = new Promise((resolve) => {
+    this.settle = resolve;
+  });
   verified: ToolboxVerified | null = null;
   readonly secrets: string[];
 
@@ -169,23 +177,31 @@ export class ToolboxProcess {
 
   /** Spawn, initialize and verify the session settings. */
   async start(): Promise<void> {
-    await mkdir(this.runDir, { recursive: true, mode: 0o700 });
     const config = join(this.runDir, 'tools.yaml');
-    await writeFile(config, this.doc.yaml, { mode: 0o600 });
-    if (this.doc.caPem !== null) await writeFile(join(this.runDir, 'ca.pem'), this.doc.caPem, { mode: 0o600 });
-    // crew#1320: GOMEMLIMIT is a soft GC target; the pending-call watchdog enforces the hard kill.
-    const env: Record<string, string> = { PATH: process.platform === 'win32' ? (process.env['PATH'] ?? '') : '/usr/bin:/bin', HOME: this.runDir, TMPDIR: this.runDir, GOMEMLIMIT: '256MiB' };
-    if (process.platform === 'win32' && process.env['SystemRoot'] !== undefined) env['SystemRoot'] = process.env['SystemRoot'];
-    if (this.doc.secretVar !== null) env[this.doc.secretVar] = yamlQuotedBody(this.secret ?? '');
-    // crew#495: every crew child routes its env through the boot-value helper; the adapter then gets no store at all.
-    const childEnv = childEnvWithBootEstateDb(env);
-    delete childEnv[ESTATE_DB_ENGINE_ENV];
-    const child = spawn(this.bin, ['--stdio', '--config', config, '--disable-reload', '--disable-version-check', '--log-level', 'ERROR'], {
-      cwd: this.runDir,
-      env: childEnv,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-    });
+    let child: ChildProcess;
+    try {
+      await mkdir(this.runDir, { recursive: true, mode: 0o700 });
+      await writeFile(config, this.doc.yaml, { mode: 0o600 });
+      if (this.doc.caPem !== null) await writeFile(join(this.runDir, 'ca.pem'), this.doc.caPem, { mode: 0o600 });
+      // crew#1320: GOMEMLIMIT is a soft GC target; the pending-call watchdog enforces the hard kill.
+      const env: Record<string, string> = { PATH: process.platform === 'win32' ? (process.env['PATH'] ?? '') : '/usr/bin:/bin', HOME: this.runDir, TMPDIR: this.runDir, GOMEMLIMIT: '256MiB' };
+      if (process.platform === 'win32' && process.env['SystemRoot'] !== undefined) env['SystemRoot'] = process.env['SystemRoot'];
+      if (this.doc.secretVar !== null) env[this.doc.secretVar] = yamlQuotedBody(this.secret ?? '');
+      // crew#495: every crew child routes its env through the boot-value helper; the adapter then gets no store at all.
+      const childEnv = childEnvWithBootEstateDb(env);
+      delete childEnv[ESTATE_DB_ENGINE_ENV];
+      child = spawn(this.bin, ['--stdio', '--config', config, '--disable-reload', '--disable-version-check', '--log-level', 'ERROR'], {
+        cwd: this.runDir,
+        env: childEnv,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+    } catch (err) {
+      // Never spawned (crew#1752): nothing will exit, so its directory goes here and `closed` settles.
+      this.exited = true;
+      void rm(this.runDir, { recursive: true, force: true }).catch(() => undefined).finally(this.settle);
+      throw err;
+    }
     this.child = child;
     child.stdout?.on('data', (chunk: Buffer) => this.onData(chunk));
     child.stderr?.on('data', (chunk: Buffer) => {
@@ -368,7 +384,7 @@ export class ToolboxProcess {
     this.pending = null;
     p?.reject(new ToolboxCallError('adapter_exited', 'the Toolbox process for this source exited during the call'));
     // The process's own directory (its document, its CA): nothing of it outlives the process.
-    void rm(this.runDir, { recursive: true, force: true }).catch(() => undefined);
+    void rm(this.runDir, { recursive: true, force: true }).catch(() => undefined).finally(this.settle);
     this.onGone(this);
   }
 
@@ -439,8 +455,18 @@ interface Slot {
 /** The daemon's Toolbox processes, by source id; a changed document or secret restarts the source's process. */
 export class ToolboxSupervisor {
   private readonly procs = new Map<string, Slot>();
+  /** Every process this supervisor made that is not yet `closed` (a replaced generation still exiting included). */
+  private readonly live = new Set<ToolboxProcess>();
+  /** The previews (`once`) in flight: each stops its own process when it ends. */
+  private readonly previews = new Set<Promise<unknown>>();
 
   constructor(private readonly deps: SupervisorDeps) {}
+
+  private track(p: ToolboxProcess): ToolboxProcess {
+    this.live.add(p);
+    void p.closed.then(() => this.live.delete(p));
+    return p;
+  }
 
   /** The running, verified process for `id` (started now if needed; spawn is not counted against a deadline). */
   async get(id: string, doc: ToolboxDocument, secret: string | null): Promise<ToolboxProcess> {
@@ -462,9 +488,9 @@ export class ToolboxSupervisor {
     const dir = join(this.deps.runRoot, id.replace(/[^A-Za-z0-9_-]/g, '_'), `${key.slice(0, 12)}-${randomBytes(4).toString('hex')}`);
     entry.starting = (async () => {
       const bin = await this.deps.binary();
-      const p = new ToolboxProcess(bin, dir, doc, secret, this.deps.idleMs ?? TOOLBOX_IDLE_MS, (gone) => {
+      const p = this.track(new ToolboxProcess(bin, dir, doc, secret, this.deps.idleMs ?? TOOLBOX_IDLE_MS, (gone) => {
         if (entry.proc === gone) entry.proc = null;
-      }, this.deps.memoryBytes, this.deps.memoryOf);
+      }, this.deps.memoryBytes, this.deps.memoryOf));
       await p.start();
       if (entry.retired) {
         p.stop();
@@ -487,11 +513,18 @@ export class ToolboxSupervisor {
    * A throwaway process for one preview (the registry's probe of a source not yet saved): started, handed to `fn`,
    * and stopped whatever `fn` does. Never kept in the map, so no saved source shares it.
    */
-  async once<T>(label: string, doc: ToolboxDocument, secret: string | null, fn: (p: ToolboxProcess) => Promise<T>): Promise<T> {
+  once<T>(label: string, doc: ToolboxDocument, secret: string | null, fn: (p: ToolboxProcess) => Promise<T>): Promise<T> {
+    const run = this.preview(label, doc, secret, fn);
+    this.previews.add(run);
+    void run.catch(() => undefined).finally(() => this.previews.delete(run));
+    return run;
+  }
+
+  private async preview<T>(label: string, doc: ToolboxDocument, secret: string | null, fn: (p: ToolboxProcess) => Promise<T>): Promise<T> {
     const bin = await this.deps.binary();
     // Its own directory per invocation: two previews (or Tests) of one entry never share or delete each other's.
     const dir = join(this.deps.runRoot, `preview-${label.replace(/[^A-Za-z0-9_-]/g, '_')}-${randomBytes(4).toString('hex')}`);
-    const p = new ToolboxProcess(bin, dir, doc, secret, this.deps.idleMs ?? TOOLBOX_IDLE_MS, () => undefined, this.deps.memoryBytes, this.deps.memoryOf);
+    const p = this.track(new ToolboxProcess(bin, dir, doc, secret, this.deps.idleMs ?? TOOLBOX_IDLE_MS, () => undefined, this.deps.memoryBytes, this.deps.memoryOf));
     try {
       await p.start();
       return await fn(p);
@@ -507,8 +540,17 @@ export class ToolboxSupervisor {
     return p?.alive === true ? p : null;
   }
 
-  stopAll(): void {
+  /**
+   * Stop every source's process, and resolve once none is left: each has exited and its run directory is removed.
+   * A start in flight is stopped when it resolves, and a preview in flight stops its own process when it ends;
+   * both are waited for. A caller that removes the state home after this finds nothing still writing into it
+   * (crew#1752: a removal that raced a process's own cleanup failed with ENOTEMPTY).
+   */
+  async stopAll(): Promise<void> {
+    const starts = [...this.procs.values()].map((s) => s.starting);
     for (const s of this.procs.values()) this.retire(s);
     this.procs.clear();
+    await Promise.allSettled([...starts, ...this.previews]);
+    await Promise.all([...this.live].map((p) => p.closed));
   }
 }
