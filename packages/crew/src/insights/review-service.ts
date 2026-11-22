@@ -13,7 +13,7 @@
  * The seat never files anything and never writes a number crew stores.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { SessionStatus, SessionView } from 'wicked-crew-api-types';
 import type { LaunchRunInput } from '../core/types.js';
@@ -37,6 +37,14 @@ export const BASELINE_WINDOWS = 4;
 const TERMINAL: ReadonlySet<string> = new Set(['completed', 'failed', 'cancelled']);
 /** A review run the daemon no longer lists is given up on after this long. */
 const LOST_AFTER_MS = 48 * HOUR;
+/** The error prefixes of a review that never reached the engine ({@link ReviewService.launchRefused}, `prepareRefused`). */
+const LAUNCH_REFUSED = 'the launch was refused: ';
+const PREPARE_REFUSED = 'the review could not be prepared: ';
+
+/** Whether a recorded review never reached the engine: its launch, or its preparation, was refused (crew#1375). */
+export function neverReachedEngine(review: Pick<Review, 'status' | 'error'>): boolean {
+  return review.status === 'failed' && review.error !== null && (review.error.startsWith(LAUNCH_REFUSED) || review.error.startsWith(PREPARE_REFUSED));
+}
 
 export interface ReviewServiceDeps {
   store: InsightsStore;
@@ -137,8 +145,11 @@ export class ReviewService {
     const now = this.now();
     const runId = input.sessionId;
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(runId) || runId.includes('..')) throw new Error(`a review run id must be one plain path segment: ${runId}`);
-    // One review per run id: a repeated id never touches the review already recorded under it.
-    if (this.deps.store.get(runId) !== undefined) throw new Error(`a review is already recorded for run ${runId}`);
+    // One review per run id: a repeated id never touches the review already recorded under it, unless that review never
+    // reached the engine (crew#1375): a chat job's Go retries the same derived run id, so a launch the engine (or the
+    // launch route) refused after the review was prepared is prepared again, its earlier attempt cleared.
+    const held = this.deps.store.get(runId);
+    if (held !== undefined && !neverReachedEngine(held)) throw new Error(`a review is already recorded for run ${runId}`);
     // (crew#1592) The workflow's own seat rule, within the seats new work may use: a seat turned off for new work never
     // interprets a review nobody named it on, and a setting that can't be honored refuses (its words) before anything
     // is written, never falling back to the whole roster.
@@ -159,6 +170,7 @@ export class ReviewService {
     const snap = await this.snapshot(projectIds, now.getTime());
     const dir = this.runDir(runId);
     mkdirSync(this.deps.reviewsDir, { recursive: true });
+    if (held !== undefined) rmSync(dir, { recursive: true, force: true });
     try {
       mkdirSync(dir); // exclusive: the filesystem decides who owns this id
     } catch (err) {
@@ -241,13 +253,13 @@ export class ReviewService {
       regressions: [],
       recommendations: [],
       watching: [],
-      error: `the review could not be prepared: ${reason.slice(0, 500)}`,
+      error: `${PREPARE_REFUSED}${reason.slice(0, 500)}`,
     });
   }
 
-  /** A launch the engine refused: the review never ran. */
+  /** A launch the engine (or the launch route, after the review was prepared) refused: the review never ran. */
   launchRefused(runId: string, reason: string): void {
-    this.deps.store.update(runId, { status: 'failed', endedAt: this.now().toISOString(), error: `the launch was refused: ${reason.slice(0, 500)}` });
+    this.deps.store.update(runId, { status: 'failed', endedAt: this.now().toISOString(), error: `${LAUNCH_REFUSED}${reason.slice(0, 500)}` });
   }
 
   /** Fold every running review whose run is terminal. Never throws. */

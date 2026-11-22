@@ -14,7 +14,7 @@ import { readNewWorkSeats } from '../src/core/adapter.js';
 import type { Actor, LaunchRunInput } from '../src/core/types.js';
 import { isSystemWorkflow } from '../src/core/run-identity.js';
 import { FACTS_FILE, REPORT_FILE, runAnalyze } from '../src/insights/analyze-cli.js';
-import { OUT_DIR, ReviewPreparationRefused, ReviewService, githubNewIssueUrl, pickSeat } from '../src/insights/review-service.js';
+import { OUT_DIR, ReviewPreparationRefused, ReviewService, githubNewIssueUrl, neverReachedEngine, pickSeat } from '../src/insights/review-service.js';
 import { registerInsightsRoutes } from '../src/insights/routes.js';
 import { InsightsStore } from '../src/insights/store.js';
 import { REVIEW_WORKFLOW, loadReviewWorkflow } from '../src/insights/workflow.js';
@@ -353,6 +353,40 @@ describe('ingest, Accept and Dismiss', () => {
     const before = JSON.stringify(r.store.get('rev-1'));
     await expect(r.service.prepareLaunch(launchInput(), { trigger: 'manual' })).rejects.toThrow(/already recorded/u);
     expect(JSON.stringify(r.store.get('rev-1'))).toBe(before);
+  });
+
+  it('crew#1375: a review that never reached the engine (its launch or its preparation was refused) is prepared again under its run id', async () => {
+    const r = rig();
+    await r.service.prepareLaunch(launchInput(), { trigger: 'manual' });
+    const dir = join(r.root, 'reviews', 'rev-1');
+    writeFileSync(join(dir, 'stale.txt'), 'from the refused attempt');
+    r.service.launchRefused('rev-1', 'no eligible seat');
+    expect(r.store.get('rev-1')).toMatchObject({ status: 'failed', error: 'the launch was refused: no eligible seat' });
+    expect(neverReachedEngine(r.store.get('rev-1')!)).toBe(true);
+    // The retry (a chat job's Go retries the same derived run id) prepares it again, the earlier attempt cleared.
+    const input = await r.service.prepareLaunch(launchInput(), { trigger: 'manual' });
+    expect(input.workflow).toBe(REVIEW_WORKFLOW);
+    expect(r.store.get('rev-1')).toMatchObject({ status: 'running', error: null });
+    expect(r.store.list().filter((x) => x.runId === 'rev-1')).toHaveLength(1);
+    expect(existsSync(join(dir, 'stale.txt'))).toBe(false);
+    expect(existsSync(join(dir, OUT_DIR))).toBe(true);
+    // A scheduled attempt whose preparation was refused is resumable the same way.
+    const s = rig();
+    s.service.prepareRefused('rev-1', { trigger: 'schedule' }, 'no seat');
+    await s.service.prepareLaunch(launchInput(), { trigger: 'schedule' });
+    expect(s.store.get('rev-1')?.status).toBe('running');
+  });
+
+  it('crew#1375: a review that reached the engine is never prepared again, whatever its outcome', async () => {
+    for (const end of ['completed', 'failed', 'running'] as const) {
+      const r = rig();
+      await r.service.prepareLaunch(launchInput(), { trigger: 'manual' });
+      if (end !== 'running') await r.service.reconcile(new Map([['rev-1', end]]));
+      const before = JSON.stringify(r.store.get('rev-1'));
+      expect(neverReachedEngine(r.store.get('rev-1')!), end).toBe(false);
+      await expect(r.service.prepareLaunch(launchInput(), { trigger: 'manual' }), end).rejects.toThrow(/already recorded/u);
+      expect(JSON.stringify(r.store.get('rev-1')), end).toBe(before);
+    }
   });
 
   it('refuses plainly when no seat is eligible', async () => {
