@@ -56,6 +56,9 @@ export const SYSTEM_WORKFLOWS: ReadonlySet<string> = new Set([
   // The interactive document seams (`interactive/*-events.ts`).
   'interactive-chat',
   'interactive-draft',
+  // wicked-core#1357: the Respond and Rework cards' draft (CS5), started from its card with its documents like
+  // `interactive-draft`; a hand launch would skip that document path and its proposal.
+  'interactive-draft-sourced',
   'interactive-edit',
   // wf-catalog (codex r1): the document review and theme-learning seams (`interactive/review-events.ts`,
   // `theme-events.ts`) run on a handoff their subscriber writes; a hand launch has none to run on.
