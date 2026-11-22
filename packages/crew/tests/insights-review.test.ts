@@ -393,7 +393,10 @@ describe('ingest, Accept and Dismiss', () => {
     for (const end of ['completed', 'failed', 'running'] as const) {
       const r = rig();
       await r.service.prepareLaunch(launchInput(), { trigger: 'manual' });
+      // A completed review needs its analyze step's facts (else it is recorded failed).
+      if (end === 'completed') runAnalyze(join(r.root, 'reviews', 'rev-1'));
       if (end !== 'running') await r.service.reconcile(new Map([['rev-1', end]]));
+      expect(r.store.get('rev-1')?.status, end).toBe(end);
       const before = JSON.stringify(r.store.get('rev-1'));
       expect(neverReachedEngine(r.store.get('rev-1')!), end).toBe(false);
       await expect(r.service.prepareLaunch(launchInput(), { trigger: 'manual' }), end).rejects.toThrow(/already recorded/u);
