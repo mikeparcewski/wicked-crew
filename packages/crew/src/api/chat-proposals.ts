@@ -98,6 +98,7 @@ import {
   seatsShortLine,
   briefOf,
   inputLines,
+  repoNamedIn,
   SELF_SEATED,
   type JobChat,
   type JobContext,
@@ -2246,7 +2247,9 @@ export class ChatProposals {
       });
       const g = d.guess;
       // The repository the block names, when it is one of this chat's (else the chat's own rule picks it).
-      const named = block.repos.map((want) => jc.repos.filter((r) => r.name === want || r.id === want)).find((hits) => hits.length === 1)?.[0];
+      // crew#1791: else the one the person's words clearly name ("In tiny-math-rd, fix …").
+      const named = block.repos.map((want) => jc.repos.filter((r) => r.name === want || r.id === want)).find((hits) => hits.length === 1)?.[0]
+        ?? repoNamedIn(words, jc.repos) ?? undefined;
       // A demo's address only from the person's own words (DES-CHAT-ARTIFACTS-001 §4.3), never the model's.
       const inputs: JobFacts['inputs'] = {};
       if (block.url !== undefined && block.url !== '' && personUrls(words).has(block.url)) inputs['url'] = { kind: 'url', value: block.url };
@@ -2867,7 +2870,8 @@ export class ChatProposals {
           depth: body.depth ?? null,
           words: (body.words ?? '').slice(0, 8000),
           details: [],
-          repoRef: null,
+          // crew#1791: the repository the person's words clearly name, else the question asks.
+          repoRef: repoNamedIn(body.words ?? '', chat.repos)?.id ?? null,
           projectId: chat.projectId,
           lead: null,
           seats: null,

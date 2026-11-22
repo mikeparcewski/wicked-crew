@@ -189,6 +189,62 @@ describe('a person-made job proposal', () => {
     expect((await pick(r, 'migrate', { option: 'upgrade', words: 'other words' })).body).toMatchObject({ code: 'request_reused' });
   });
 
+  // crew#1791: a chat with more than 4 repositories in scope; the request names the sixth.
+  const MANY = [
+    { id: 'r-pay', name: 'payments-service' }, { id: 'r-bill', name: 'billing-api' }, { id: 'r-web', name: 'web-app' },
+    { id: 'r-docs', name: 'docs' }, { id: 'r-ops', name: 'ops-tools' }, { id: 'r-tiny', name: 'tiny-math-rd' },
+    { id: 'r-acme', name: 'acme' }, { id: 'r-cli', name: 'cli-kit' }, { id: 'r-ui', name: 'ui-lib' }, { id: 'r-last', name: 'last-one' },
+  ];
+  const ALL = ['r-pay', 'r-bill', 'r-web', 'r-docs', 'r-tiny', 'r-acme', 'r-cli', 'r-ui', 'r-last'];
+
+  it('runs on the repository the words name, whatever its place in the scope (crew#1791)', async () => {
+    const r = rig({ repos: MANY });
+    expect((await pick(r, 'migrate', { option: 'upgrade', words: 'In tiny-math-rd, bump to node 22.' })).code).toBe(201);
+    const p = open(r);
+    expect(p.repoRefs).toEqual(['r-tiny']);
+    expect(p.sentence!.ask).not.toBe('Which repository?');
+  });
+
+  it('asks "Which repository?" with every repository in scope, those the words name first (crew#1791)', async () => {
+    // Two named: not clear, so the person picks, the named ones leading.
+    const r = rig({ repos: MANY });
+    expect((await pick(r, 'migrate', { option: 'upgrade', words: 'bump ops-tools and tiny-math-rd to node 22' })).code).toBe(201);
+    const p = open(r);
+    expect(p.repoRefs ?? []).toEqual([]);
+    expect(p.sentence!.ask).toBe('Which repository?');
+    // Ten in scope: every one is offered, past the former caps of 4 (question) and 8 (need).
+    const offered = ['r-ops', 'r-tiny', ...ALL.filter((id) => id !== 'r-tiny')];
+    expect(p.question!.choices.map((c) => c.edit.repoRef)).toEqual(offered);
+    expect(p.needs!.find((n) => n.id === 'repo')!.choices!.map((c) => c.value)).toEqual(offered);
+    // A link names its repository, so a linked one and a named one are two: the person picks (studio's rule).
+    const linked = rig({ repos: MANY });
+    expect((await pick(linked, 'migrate', { option: 'upgrade', words: 'Port https://github.com/acme/tiny-math-rd/pull/7 to node 22; billing-api has a similar fix' })).code).toBe(201);
+    expect(open(linked).repoRefs ?? []).toEqual([]);
+    expect(open(linked).question!.choices.slice(0, 2).map((c) => c.edit.repoRef)).toEqual(['r-bill', 'r-tiny']);
+    // A link alone names it clearly.
+    const only = rig({ repos: MANY });
+    expect((await pick(only, 'migrate', { option: 'upgrade', words: 'Port https://github.com/acme/tiny-math-rd/pull/7 to node 22.' })).code).toBe(201);
+    expect(open(only).repoRefs).toEqual(['r-tiny']);
+    // A plain word that is also a repository's name (`docs`) never picks it; a longer token never names a shorter one.
+    for (const words of ['update the docs for node 22', 'bump tiny-math-rd2 to node 22',
+      // An organisation's or a group's link names no repository, even one called like the owner.
+      'Upgrade the items in https://github.com/orgs/acme/projects/7 to node 22', 'Upgrade https://gitlab.com/groups/acme/-/merge_requests to node 22']) {
+      const q = rig({ repos: MANY });
+      expect((await pick(q, 'migrate', { option: 'upgrade', words })).code).toBe(201);
+      expect(open(q).repoRefs ?? []).toEqual([]);
+    }
+  });
+
+  it("a seat's block that names no repository takes the one the person's words name (crew#1791)", async () => {
+    const r = rig({ repos: MANY });
+    const said = { at: 900, kind: 'user', turnId: 't1', owner: true, text: 'In tiny-math-rd, plan the move to node 22', seats: ['claude'] } as const;
+    r.records.push(said as never);
+    const p = await r.svc.resolveDetected({ chatId: CHAT, turnId: 't1', seat: 'claude', records: [said as never],
+      block: { op: 'entry', entry: 'plan-it', confidence: 0.95, sources: [], repos: [] } as never });
+    expect(p).not.toBeNull();
+    expect(p!.repoRefs).toEqual(['r-tiny']);
+  });
+
   it('a hidden card is refused by id and reached by its alias', async () => {
     const r = rig();
     expect((await pick(r, 'test-analysis')).body).toMatchObject({ code: 'card_hidden' });

@@ -283,7 +283,7 @@ function needsOf(facts: JobFacts, ctx: JobContext, r: ResolvedOption): ProposalN
     }
     if (i.id === 'repo') {
       const hit = ctx.chat.repos.find((x) => x.id === facts.repoRef);
-      const choices = ctx.chat.repos.slice(0, 8).map((x) => ({ label: x.name, value: x.id }));
+      const choices = repoChoicesFor(facts.words, ctx.chat.repos).map((x) => ({ label: x.name, value: x.id }));
       out.push({ id: i.id, label: i.label, kind: i.kind, required: i.required, status: hit !== undefined ? 'met' : 'missing', ...(hit !== undefined ? { value: hit.id } : {}), ...(choices.length > 0 ? { choices } : {}) });
       continue;
     }
@@ -304,6 +304,89 @@ function needsOf(facts: JobFacts, ctx: JobContext, r: ResolvedOption): ProposalN
     out.push({ id: i.id, label: i.label, kind: i.kind, required: i.required, status: v !== undefined ? 'met' : 'missing', ...(v !== undefined ? { value: inputValueLabel(v).slice(0, 200) } : {}) });
   }
   return out;
+}
+
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Whether `words` name `term` as a whole token (case-insensitive): not inside a longer name (`rg1` is not named by
+ *  `rg10` or `rg1-old`); a sentence's punctuation after it still ends it. studio's `names` (repoProjects.ts), the same
+ *  rule, so the chips studio offers and the repository crew picks agree. */
+function namesTerm(words: string, term: string): boolean {
+  if (term.trim() === '') return false;
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}_./-])${escapeRe(term)}(?=$|[^\\p{L}\\p{N}_./-]|\\.(?:$|[^\\p{L}\\p{N}_./-]))`, 'iu').test(words);
+}
+
+/** A name distinct enough to be read as a repository rather than a word (`tiny-math-rd`, `billing-api`): it carries
+ *  something other than letters. `domain` or `docs` never is (studio's `distinctName`). */
+function distinctName(name: string): boolean {
+  return name.length >= 3 && /[^\p{L}]/u.test(name);
+}
+
+const REPO_OPS = new Set(['pull', 'pulls', 'pull-requests', 'merge_requests', 'tree', 'blob', 'commit', 'commits', 'compare']);
+/** First path segments that are a host's own pages, not an owner: an organisation's or a group's link names no
+ *  repository (`github.com/orgs/acme/projects/7`, `gitlab.com/groups/acme/-/merge_requests`), so it picks none. */
+const NOT_AN_OWNER = new Set(['orgs', 'users', 'enterprises', 'settings', 'sponsors', 'marketplace', 'apps', 'topics', 'collections', 'search', 'notifications', 'groups', 'dashboard', 'explore', 'workspace', 'account']);
+
+/** The repository one link names, or null: studio's `linkedRepo` (repoProjects.ts), and a host's own pages
+ *  ({@link NOT_AN_OWNER}) name none. GitHub and Bitbucket:
+ *  `<owner>/<repo>`, whatever follows. Elsewhere the segment before the first repository operation after it (or
+ *  GitLab's `-` before one; on gitlab.com any `-`); with no operation, a GitLab project home names its last segment and
+ *  a clone link (`…/<repo>.git`) its repository. Other links name nothing. */
+function linkedRepo(link: string): string | null {
+  let url: URL;
+  try { url = new URL(link); } catch { return null; }
+  const segs = url.pathname.split('/').filter((x) => x !== '').map((x) => { try { return decodeURIComponent(x); } catch { return x; } });
+  const host = url.hostname.toLowerCase().replace(/^www\./u, '');
+  if (NOT_AN_OWNER.has((segs[0] ?? '').toLowerCase())) return null;
+  let repo: string | undefined;
+  if (host === 'github.com' || host === 'bitbucket.org') repo = segs.length >= 2 ? segs[1] : undefined;
+  else {
+    const gitlab = host === 'gitlab.com';
+    const at = segs.findIndex((x, i) => i >= 2 && (REPO_OPS.has(x) || (x === '-' && (gitlab || REPO_OPS.has(segs[i + 1] ?? '')))));
+    if (at >= 2) repo = segs[at - 1];
+    else if (gitlab) repo = segs.length >= 2 ? segs[segs.length - 1] : undefined;
+    else if (segs.length >= 2 && /\.git$/iu.test(segs[segs.length - 1]!)) repo = segs[segs.length - 1];
+  }
+  const name = repo?.replace(/\.git$/iu, '').toLowerCase();
+  return name === undefined || name === '' || name === '-' ? null : name;
+}
+
+/** The repositories the links in the words name (lower-cased): studio's `linkedRepos`. A link ends at a space, a
+ *  bracket or a quote, and a sentence's punctuation after it is not part of it. */
+function linkedRepos(words: string): string[] {
+  const out: string[] = [];
+  for (const m of words.matchAll(/https?:\/\/[^\s<>()[\]"'`]+/giu)) {
+    const name = linkedRepo(m[0].replace(/[.,;:!?]+$/u, ''));
+    if (name !== null) out.push(name);
+  }
+  return out;
+}
+
+const linkedTo = (linked: readonly string[], r: { id: string; name: string }): boolean =>
+  linked.includes(r.name.toLowerCase()) || linked.includes(r.id.toLowerCase());
+
+/** The chat's repositories the words name, by name, id or link, in the chat's order (studio's `reposNamedIn`). */
+export function reposNamedIn<R extends { id: string; name: string }>(words: string, repos: readonly R[]): R[] {
+  const linked = linkedRepos(words);
+  return repos.filter((r) => namesTerm(words, r.name) || (r.id !== r.name && namesTerm(words, r.id)) || linkedTo(linked, r));
+}
+
+/** (crew#1791) The one repository the words clearly name ("In tiny-math-rd, fix …", or a link into it): named by a
+ *  link, a distinct name or id, and no other named. `null` = none or several: the proposal asks. Studio's
+ *  `repoNamedInWords`, so the repository crew picks is the one studio would. */
+export function repoNamedIn<R extends { id: string; name: string }>(words: string, repos: readonly R[]): R | null {
+  const named = reposNamedIn(words, repos);
+  if (named.length !== 1) return null;
+  const r = named[0]!;
+  const linked = linkedRepos(words);
+  return linkedTo(linked, r) || (distinctName(r.name) && namesTerm(words, r.name)) || (r.id !== r.name && distinctName(r.id) && namesTerm(words, r.id)) ? r : null;
+}
+
+/** (crew#1791) Every repository the person can pick, those the words name first: no cap, so the named one and every
+ *  other in the chat's scope are reachable from "Which repository?". */
+function repoChoicesFor<R extends { id: string; name: string }>(words: string, repos: readonly R[]): R[] {
+  const named = reposNamedIn(words, repos);
+  return [...named, ...repos.filter((r) => !named.includes(r))];
 }
 
 /** The repository a job runs on: the one named, else the chat's only one. */
@@ -424,7 +507,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
       question = {
         kind: 'missing',
         text: ctx.chat.repos.length === 0 ? 'Which repository? This chat has none in its scope: start a thread on one.' : 'Which repository?',
-        choices: ctx.chat.repos.slice(0, 4).map((x) => ({ label: x.name, edit: { repoRef: x.id } })),
+        choices: repoChoicesFor(facts.words, ctx.chat.repos).map((x) => ({ label: x.name, edit: { repoRef: x.id } })),
       };
     } else if (missing.kind === 'documents') {
       const why = ctx.documents?.find((s) => s.status === 'struck')?.reason;
