@@ -200,6 +200,16 @@ describe('RunSourcePicks: a lost store entry keeps the launch record\'s pick (cr
     // An ordinary launch entry still replaces every launch fact, its pick included.
     read.applyLaunchEntry(launchEntry('run-picked', 6, {}));
     expect(read.recordedPickOf('run-picked')).toBeNull();
+    // The next boot reads the trail newest first (audit.ts readAll): the re-record comes before the real launch, and
+    // the pick is still the real launch's.
+    const rebooted = new RunTimingIndex();
+    rebooted.hydrateFromLaunchEntries([launchEntry('run-picked', 5, recovered), launchEntry('run-picked', 4, { sourcePick: ['support-pg'] })]);
+    expect(rebooted.recordedPickOf('run-picked')).toEqual(['support-pg']);
+    expect(rebooted.chatIdFor('run-picked')).toBe('c1');
+    // A run known only through its re-record stays of unknown pick on a boot whose read succeeded too.
+    const later = new RunTimingIndex();
+    later.hydrateFromLaunchEntries([launchEntry('run-bound', 5, recovered)]);
+    expect(() => later.recordedPickOf('run-bound')).toThrow(/unknown/);
   });
 
   it('the store stays the authority for a run it holds', () => {

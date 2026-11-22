@@ -36,6 +36,11 @@ function toSeconds(millis: number): number {
   return Math.floor(millis / 1000);
 }
 
+/** crew#1742: a `run.launched` entry crew re-recorded at boot from a document binding (`recoveredLaunchDetail`). */
+function isRecoveredLaunch(entry: Pick<AuditEntry, 'detail'>): boolean {
+  return (entry.detail as Record<string, unknown> | undefined)?.['recoveredAtBoot'] === true;
+}
+
 export class RunTimingIndex {
   private readonly runToCreatedAt = new Map<string, number>();
   /** runId → terminal instant, unix SECONDS (`AgentSession.ended_at`; api-types 0.38.0, crew#496). */
@@ -94,6 +99,8 @@ export class RunTimingIndex {
   private readonly launchedRuns = new Set<string>();
   /** crew#1442: the boot read of the trail failed, so a run not launched since is of unknown pick. */
   private launchHistoryUnreadable = false;
+  /** crew#1742: runs known only through a boot re-record (`recoveredAtBoot`), which carries no pick: of unknown pick. */
+  private readonly unknownPickRuns = new Set<string>();
 
   /**
    * Consume pre-read `run.launched` entries — the seam that lets `createServer` feed this index
@@ -101,10 +108,18 @@ export class RunTimingIndex {
    * `GroupIndex`, so boot stays at the same full-file trail scans, not one more.
    */
   hydrateFromLaunchEntries(entries: AuditEntry[]): void {
+    // crew#1742: the trail is read newest first. A run whose newest entry is a boot re-record reads its source pick from
+    // its newest real launch, applied first (the re-record then keeps it); with none, its pick stays unknown.
+    const launched = new Map<string, AuditEntry>();
+    for (const entry of entries) {
+      if (typeof entry.runId === 'string' && !isRecoveredLaunch(entry) && !launched.has(entry.runId)) launched.set(entry.runId, entry);
+    }
     const seen = new Set<string>();
     for (const entry of entries) {
       if (typeof entry.runId !== 'string' || seen.has(entry.runId)) continue;
       seen.add(entry.runId);
+      const real = isRecoveredLaunch(entry) ? launched.get(entry.runId) : undefined;
+      if (real !== undefined) this.applyLaunchEntry(real);
       this.applyLaunchEntry(entry);
     }
   }
@@ -117,9 +132,9 @@ export class RunTimingIndex {
   applyLaunchEntry(entry: Pick<AuditEntry, 'runId' | 'ts' | 'actor' | 'detail'>): void {
     const runId = entry.runId;
     if (typeof runId !== 'string') return;
-    const recovered = (entry.detail as Record<string, unknown> | undefined)?.['recoveredAtBoot'] === true;
+    const recovered = isRecoveredLaunch(entry);
     const heldPick = recovered ? this.runToSourcePick.get(runId) : undefined;
-    const knownBefore = this.launchedRuns.has(runId);
+    const knownBefore = this.launchedRuns.has(runId) && !this.unknownPickRuns.has(runId);
     const previousFrom = this.runToChainedFrom.get(runId);
     if (previousFrom !== undefined && this.chainedRun.get(previousFrom) === runId) this.chainedRun.delete(previousFrom);
     this.runToCreatedAt.delete(runId);
@@ -140,7 +155,10 @@ export class RunTimingIndex {
     this.runToAddresses.delete(runId);
     this.runToSourcePick.delete(runId);
     if (heldPick !== undefined) this.runToSourcePick.set(runId, heldPick);
-    if (!recovered || knownBefore) this.launchedRuns.add(runId);
+    this.launchedRuns.add(runId);
+    // A boot re-record of a run no real launch entry names: its pick is unknown, whatever the boot read did.
+    if (recovered && !knownBefore) this.unknownPickRuns.add(runId);
+    else this.unknownPickRuns.delete(runId);
     if (typeof entry.ts === 'number' && entry.ts > 0) this.set(runId, entry.ts);
     const launcher = entry.actor;
     if (typeof launcher?.id === 'string' && launcher.kind !== 'system') this.setPrincipal(runId, launcher.id);
@@ -216,6 +234,7 @@ export class RunTimingIndex {
    */
   recordedPickOf(runId: string): string[] | null {
     if (!this.launchedRuns.has(runId) && this.launchHistoryUnreadable) throw new Error(`run ${runId}'s source pick is unknown: the launch history could not be read at boot`);
+    if (this.unknownPickRuns.has(runId)) throw new Error(`run ${runId}'s source pick is unknown: only its recovery at boot is recorded`);
     return this.sourcePickOf(runId);
   }
 

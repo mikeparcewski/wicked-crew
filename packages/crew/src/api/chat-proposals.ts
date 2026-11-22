@@ -862,9 +862,24 @@ function ownWordsTitle(block: ParsedMake, records: readonly ChatTranscriptRecord
   return rest;
 }
 
-/** (crew#1737) Whether the person's words name a seat, by its key or its roster name, as a whole word. */
+/**
+ * (crew#1737) The person's own request with what they only quoted taken out: fenced and inline code, `>` quote lines
+ * and text in quotation marks. A seat named only there was pasted or reported, not chosen.
+ */
+export function ownRequestWords(words: string): string {
+  return words
+    .replace(/```[\s\S]*?(?:```|$)/gu, ' ')
+    .replace(/`[^`\n]*`/gu, ' ')
+    .split(/\r?\n/u)
+    .filter((line) => !/^\s*>/u.test(line))
+    .join('\n')
+    .replace(/"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’/gu, ' ');
+}
+
+/** (crew#1737) Whether the person's words name a seat, by its key or its roster name, as a whole word, outside what
+ *  they quoted ({@link ownRequestWords}). */
 export function seatNamedIn(key: string, name: string | undefined, words: string): boolean {
-  const plain = words.toLowerCase();
+  const plain = ownRequestWords(words).toLowerCase();
   return [key, name].some((n) => {
     const w = (n ?? '').trim().toLowerCase();
     if (w === '') return false;
@@ -1114,7 +1129,7 @@ export class ChatProposals {
    * The block → a card's facts. `null` when the operation is not advertised (the seat was never told about it) or the
    * chat has ended: no card. Everything else resolves, with what cannot be resolved struck or blocking Go.
    */
-  async resolve(input: { chatId: string; turnId: string; seat: string; block: ParsedMake; records: readonly ChatTranscriptRecord[]; helperSeats?: readonly string[] }): Promise<ArtifactProposal | null> {
+  async resolve(input: { chatId: string; turnId: string; seat: string; block: ParsedMake; records: readonly ChatTranscriptRecord[]; helperSeats?: readonly string[]; helperWriterNamed?: boolean }): Promise<ArtifactProposal | null> {
     const { chatId, turnId, seat, block, records } = input;
     const flags = this.deps.flags();
     const chat = this.deps.chat(chatId);
@@ -1257,7 +1272,7 @@ export class ChatProposals {
       demo = { url, audience: block.audience ?? null, show: block.show ?? null };
     }
     const sources = kind === 'create' ? await this.resolveSources(block.sources, { chatId, turnId, records, binding, turnHas, chat, words, personNamed: false }) : [];
-    const { helpers, block: helperBlock, seatsUnread } = await this.docHelpers(chat, input.helperSeats);
+    const { helpers, block: helperBlock, seatsUnread } = await this.docHelpers(chat, input.helperSeats, input.helperWriterNamed ?? true);
     if (helperBlock !== null) blocked.push(helperBlock);
     return {
       pid, chatId, turnId, kind, seat,
@@ -2561,15 +2576,16 @@ export class ChatProposals {
   }
 
   /** A document's two default helpers from the pool, and the line that blocks it when there are none. */
-  private async docHelpers(chat: ProposalChat, chosen?: readonly string[]): Promise<{ helpers: ProposalHelpers | null; block: string | null; seatsUnread?: boolean }> {
+  private async docHelpers(chat: ProposalChat, chosen?: readonly string[], writerNamed = true): Promise<{ helpers: ProposalHelpers | null; block: string | null; seatsUnread?: boolean }> {
     const { pool, refusal } = await this.seatPool();
     const eligible = new Set(this.deps.rosterEligible().map((s) => s.key));
     let seats = chosen === undefined ? undefined : [...new Set(chosen)].filter((k) => eligible.has(k)).slice(0, 2);
-    // crew#1737: only the writer named: the checker is the one the card would draw, never the writer again.
+    // crew#1737: one helper named: the other is the one the card would draw, never the same seat again. A named writer
+    // writes; a seat named only to check (no writer named, or the one named can't work now) checks.
     if (seats !== undefined && seats.length === 1) {
       const drawn = [...(this.helpers(chat, undefined, pool)?.seats ?? []), ...pool.map((s) => s.key)];
       const other = drawn.find((k) => k !== seats![0] && eligible.has(k));
-      if (other !== undefined) seats = [seats[0]!, other];
+      if (other !== undefined) seats = writerNamed && chosen?.[0] === seats[0] ? [seats[0]!, other] : [other, seats[0]!];
     }
     const helpers = this.helpers(chat, seats, pool);
     return { helpers, block: helpers === null ? NEEDS_HELPER : null, ...(refusal !== undefined ? { seatsUnread: true } : {}) };
@@ -2686,7 +2702,7 @@ export class ChatProposals {
     const words = [r.resolved.brief ?? '', briefOf(facts)].filter((x) => x !== '').join('\n\n');
     const chosen = facts.lead === null && facts.seats === null ? undefined
       : [...new Set([facts.lead, ...(facts.seats ?? [])].filter((k): k is string => k !== null))];
-    const made = await this.resolve({ chatId, turnId, seat: ctx.seat, ...(chosen !== undefined ? { helperSeats: chosen } : {}), block: { op: 'entry', entry: seed.id, ...(facts.title !== null ? { title: facts.title } : {}), brief: words, sources: ['chat'], repos: facts.repoRef !== null ? [facts.repoRef] : [] }, records });
+    const made = await this.resolve({ chatId, turnId, seat: ctx.seat, ...(chosen !== undefined ? { helperSeats: chosen, helperWriterNamed: facts.lead !== null } : {}), block: { op: 'entry', entry: seed.id, ...(facts.title !== null ? { title: facts.title } : {}), brief: words, sources: ['chat'], repos: facts.repoRef !== null ? [facts.repoRef] : [] }, records });
     if (made === null) throw new JobRefusal('operation_unavailable', 'studio cannot start a document from a chat on this daemon yet', 409);
     const shape: ProposalShape = { card: card.id, option: r.option?.id ?? null, depth: null, by: facts.by, source: facts.source, ...(facts.guess !== undefined ? { guess: facts.guess } : {}) };
     const nameOf = (key: string): string => ctx.roster.find((s) => s.key === key)?.name ?? key;
