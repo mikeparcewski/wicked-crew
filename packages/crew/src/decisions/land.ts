@@ -417,6 +417,12 @@ export class DecisionService {
     return (listed.proposals ?? []).some((p) => p.id === proposalId);
   }
 
+  /** Withdraw a proposal crew filed itself (best effort); a withdrawal that happened is recorded as crew's (crew#1261). */
+  private async withdrawOwn(proposalId: string, actor: Actor): Promise<void> {
+    const rejected = await this.deps.estateTool('proposal.reject', { id: proposalId }).then(() => true, () => false);
+    if (rejected) recordProposalDecision(this.deps.audit, actor, proposalId, 'withdrawn');
+  }
+
   /** Approve a proposal; one already approved (a re-drive after a crash) is not an error. */
   private async approve(proposalId: string): Promise<void> {
     try {
@@ -499,6 +505,8 @@ export class DecisionService {
     if (view.proposal_id !== undefined) {
       try {
         await this.deps.estateTool('proposal.reject', { id: view.proposal_id });
+        // crew#1261: the person said it restates a rule they already have.
+        recordProposalDecision(this.deps.audit, actor, view.proposal_id, 'restated');
         // The rule lands before the approval: a landing_failed decision may have a live rule.
         const withdrawn = await withdrawLandedRule(this.deps.adapter, view.proposal_id);
         if (withdrawn !== null) throw new DecisionError(502, withdrawn);
@@ -553,7 +561,7 @@ export class DecisionService {
     });
     if (landing.outcome !== 'landed' || landing.ruleId === undefined) {
       // Withdraw the proposal this widening just filed: nothing landed, and a retry files its own.
-      await this.deps.estateTool('proposal.reject', { id: proposalId }).catch(() => undefined);
+      await this.withdrawOwn(proposalId, actor);
       throw new DecisionError(502, landing.error ?? 'the widening failed to land');
     }
     try {
@@ -568,7 +576,7 @@ export class DecisionService {
       } catch (retireErr) {
         retired = `retiring rule ${landing.ruleId} FAILED (${message(retireErr)})`;
       }
-      await this.deps.estateTool('proposal.reject', { id: proposalId }).catch(() => undefined);
+      await this.withdrawOwn(proposalId, actor);
       throw new DecisionError(502, `the review queue (estate) refused the widening after its rule landed: ${message(err)}; ${retired}`);
     }
     for (const old of supersedes) {
