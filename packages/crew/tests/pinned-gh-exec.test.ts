@@ -16,8 +16,9 @@ afterEach(() => {
 function checkout(url: string | null): string {
   const dir = mkdtempSync(join(tmpdir(), 'crew-1792-'));
   dirs.push(dir);
-  execFileSync('git', ['init', '-q', dir]);
-  if (url !== null) execFileSync('git', ['remote', 'add', 'origin', url], { cwd: dir });
+  // The hermetic arming rides into git as every test child's does (harness-hygiene).
+  execFileSync('git', ['init', '-q', dir], { env: { ...process.env } });
+  if (url !== null) execFileSync('git', ['remote', 'add', 'origin', url], { cwd: dir, env: { ...process.env } });
   return dir;
 }
 
