@@ -1707,8 +1707,7 @@ export interface WalkthroughRouteDeps {
 }
 
 export function registerWalkthroughRoutes(app: FastifyInstance, adapter: CoreAdapter, deps: WalkthroughRouteDeps = {}): void {
-  const runById = async (id: string): Promise<SessionView | null> =>
-    (await adapter.sessionsDetail()).find((v) => v.session.id === id) ?? null;
+  const runById = async (id: string): Promise<SessionView | null> => (await adapter.runView(id)) ?? null;
 
   // WT-W3: the operator edits the checks while the pair's escalation is open, then approves.
   app.put(

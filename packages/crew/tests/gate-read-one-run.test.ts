@@ -15,8 +15,10 @@ import { CoreAdapter } from '../src/core/adapter.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
-import type { AuditLog } from '../src/api/audit.js';
+import { AuditLog } from '../src/api/audit.js';
 import { removeScratch } from './setup/scratch.js';
+import { RunUnits, resyncRunUnits } from '../src/interactive/run-units.js';
+import { registerTestSetForRun, TestSetIndex } from '../src/qe/test-sets.js';
 
 let dir: string;
 let adapter: CoreAdapter;
@@ -115,5 +117,22 @@ describe('crew#1775: a gate read reads its one run, whatever the other runs are 
     await adapter.runView('run-1');
     await adapter.sessionsDetail();
     expect(folds).toBe(1);
+  });
+});
+
+describe('crew#1775: the other per-run reads on a page load or a gate also read their one run', () => {
+  it('GET /runs/:id/team reads the run alone', async () => {
+    const server = await routes();
+    frame({ type: 'unitStarted', session: 'run-120', ord: 1 });
+    await server.inject({ method: 'GET', url: '/api/v1/runs/run-3/team' }); // the stub engine has no team to answer with
+    expect(folds).toBe(0);
+    expect(oneRunReads).toBeGreaterThan(0);
+  });
+
+  it('the after-gate unit resync and the terminal test-set check read the run alone', async () => {
+    await resyncRunUnits(adapter, 'run-3', new RunUnits());
+    expect(await registerTestSetForRun({ adapter, audit: AuditLog.noop(), index: new TestSetIndex() }, 'run-3')).toBeNull();
+    expect(folds).toBe(0);
+    expect(oneRunReads).toBe(2);
   });
 });

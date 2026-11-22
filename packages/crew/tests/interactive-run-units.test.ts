@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent } from '../src/core/types.js';
 import { awaitingHumanLine, describeStep, plannedUnitOf, plannedUnitsOfRun, resyncRunUnits, ResyncGate, RunUnits } from '../src/interactive/run-units.js';
+import { withRunViews } from './support/run-views.js';
 
 const planned = (ord: number, id: string, role: string, executorType = 'agent'): CoreEvent =>
   ({ type: 'unitPlanned', session: 'r', ord, description: `${id} — the intent ||| do it`, role, executorType }) as unknown as CoreEvent;
@@ -94,19 +95,19 @@ describe('the fold re-read from the run, and the paused-run line', () => {
     for (const [ord, id, role] of [[1, 'pa-scope', 'neutral'], [2, 'understand', 'neutral'], [3, 'revise', 'creator']] as const) {
       u.observe(planned(ord, id, role));
     }
-    const adapter = {
+    const adapter = withRunViews({
       sessionsDetail: async () => [
         { session: { id: 'other' }, units: [{ id: 'other:x', ord: 1 }] },
         { session: { id: 'r' }, units: [{ id: 'r:pa-scope', ord: 1, role: 'neutral' }, { id: 'r:revise', ord: 2, role: 'creator' }] },
       ],
-    } as unknown as CoreAdapter;
+    }) as unknown as CoreAdapter;
     await resyncRunUnits(adapter, 'r', u);
     expect(u.idAt(2)).toBe('revise');
     expect(u.isWriter(2)).toBe(true);
     expect(u.position(2)).toBe('2/2');
     // An engine that cannot answer leaves the fold as it was.
     await resyncRunUnits({} as CoreAdapter, 'r', u);
-    await resyncRunUnits({ sessionsDetail: async () => { throw new Error('boom'); } } as unknown as CoreAdapter, 'r', u);
+    await resyncRunUnits(withRunViews({ sessionsDetail: async () => { throw new Error('boom'); } }) as unknown as CoreAdapter, 'r', u);
     expect(u.position(2)).toBe('2/2');
   });
   it('awaitingHumanLine names the plan approval (or the step) and where to answer', () => {

@@ -703,7 +703,7 @@ export async function startInteractiveReviewSubscriber(
     let seat: string | null = null;
     let report: Record<string, unknown> | null = null;
     try {
-      const view = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+      const view = await adapter.runView(runId);
       const units = [...(view?.units ?? [])].sort((a, b) => b.ord - a.ord);
       for (const unit of units) {
         if (unit.tool_cmd !== undefined && unit.tool_cmd !== null) continue;
