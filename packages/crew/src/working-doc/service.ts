@@ -752,7 +752,11 @@ export class WorkingDocService {
       await this.reconcile(runId);
       const rec = this.d.store.get(runId);
       if (rec === undefined) return [];
-      if (rec.pending != null) throw new Error('a write of unknown outcome has not settled yet');
+      // Only a write that may change the person's context (Goal, Approach, Constraints) holds the read back, as for
+      // `contextOwed`; crew's own Decisions or Next lines settling never stall a run's learnings (coord C1).
+      if (rec.pending != null && Object.keys(rec.pending.values).some((k) => CONTEXT_SECTIONS.includes(k as SectionId))) {
+        throw new Error('a write of unknown outcome has not settled yet');
+      }
       const head = await this.d.backend.read(rec.projectId, rec.docId);
       if (head === null) return [];
       return this.contextBlock(runId, head.head, sectionsOf(head.html), { kind: 'system', id: 'crew' }).block.sections.map((x) => ({ id: x.id, text: x.text }));
@@ -930,10 +934,12 @@ export class WorkingDocService {
     const got = sectionsOf(html);
     const ids = Object.keys(p.values) as SectionId[];
     const landed = ids.every((id) => got[id] === writtenText(p.values[id] ?? ''));
-    // One save: the write settled and, if it was crew's lines and landed, the ownership it carries (xreview r7).
-    this.d.store.update(runId, (r) => { r.pending = null; if (landed && p.ownedDecisions !== undefined) r.ownedDecisions = p.ownedDecisions; });
     if (landed) {
+      // `record` settles the journal, and installs the ownership it carries (xreview r7), in the same save as the
+      // version's trail entry: a crash between the two never leaves the version unattributed (coord C3).
       await this.record(runId, v, p.expectHead, p.author, p.surface, ids, p.values, p.actor, p.input, got);
+    } else {
+      this.d.store.update(runId, (r) => { r.pending = null; });
     }
   }
 

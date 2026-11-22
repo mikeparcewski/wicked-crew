@@ -208,6 +208,41 @@ describe('crew#1408: the person’s context for the run’s learnings', () => {
     ]);
   });
 
+  it('coord C1: a settling write of Decisions or Next only never holds the context back', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    await t.service.propose('run-1', { base: 0, author: 'operator', sections: { constraints: 'Reuse the stack’s route.' } }, HUMAN);
+    t.backend.crash = true;
+    void t.service.propose('run-1', { base: 1, author: 'operator', sections: { decisions: 'We keep the old endpoint.', next: 'Then the PDF.' } }, HUMAN);
+    await new Promise((r) => setTimeout(r, 20));
+    // A new daemon whose clock says the write is fresh, and interactive has not shown it yet.
+    const b = setup({ stateHome: t.stateHome, backend: new FakeBackend() });
+    b.backend.docs.set('working-run-1', t.backend.docs.get('working-run-1')!.slice(0, 2));
+    expect(b.store.get('run-1')!.pending).toMatchObject({ expectHead: 1 });
+    expect(await b.service.personContextOf('run-1')).toEqual([{ id: 'constraints', text: 'Reuse the stack’s route.' }]);
+  });
+
+  it('coord C3: a replayed write is settled in the same save as its trail entry', async () => {
+    const a = setup();
+    await a.service.ensure('run-1');
+    a.backend.crash = true;
+    void a.service.propose('run-1', { base: 0, author: 'operator', sections: { goal: 'EUR prints €1.240,00.' } }, HUMAN);
+    await new Promise((r) => setTimeout(r, 20));
+    const b = setup({ stateHome: a.stateHome, backend: a.backend });
+    // Every save after the restart: the journal is never gone while the version is still missing from the trail.
+    const saves: Array<{ pending: boolean; trailed: boolean }> = [];
+    const update = b.store.update.bind(b.store);
+    b.store.update = (runId, f) => {
+      const rec = update(runId, f);
+      if (rec !== undefined) saves.push({ pending: rec.pending != null, trailed: rec.trail.some((x) => x.version === 1) });
+      return rec;
+    };
+    await b.service.view('run-1');
+    expect(saves.length).toBeGreaterThan(0);
+    expect(saves.filter((s) => !s.pending && !s.trailed)).toEqual([]);
+    expect(b.store.get('run-1')!.pending).toBeNull();
+  });
+
   it('a write still settling is not read as the context: it throws, so the run’s end waits for it (review r1)', async () => {
     const t = setup();
     await t.service.ensure('run-1');
