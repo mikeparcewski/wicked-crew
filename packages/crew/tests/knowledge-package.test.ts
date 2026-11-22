@@ -3,7 +3,7 @@
 // re-check, and the value-free describe -> knowledge.replace_source projection.
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -521,25 +521,27 @@ describe('the describe -> knowledge.replace_source projection (§4.1): value-fre
         log: () => undefined,
         acksFile,
       });
+      // What a restarted daemon reads back (crew#1741: kept with its generation, provisional until estate confirms it).
+      const kept = (): string | null => (JSON.parse(readFileSync(acksFile, 'utf8')) as { acked: Record<string, { key: string }> }).acked[SUPPORT_ID]?.key ?? null;
       const first = new SourceProjector(deps([]));
       expect(await first.project('support-pg')).toBe(true);
       const key = projectionKey({ descriptorHash, viewsAllowed: [] });
-      // A restarted daemon admits the source at once (no wait for estate at boot).
-      expect(new SourceProjector(deps([])).projectedDescriptor(SUPPORT_ID)).toBe(key);
+      expect(first.projectedDescriptor(SUPPORT_ID)).toBe(key);
+      expect(kept()).toBe(key);
       // A projection under another key that estate refuses leaves NO acknowledgement on disk (it was dropped first).
       refuse = true;
       const second = new SourceProjector(deps(['s.v']));
       await expect(second.project('support-pg')).rejects.toThrow(/estate refused/);
-      expect(new SourceProjector(deps([])).projectedDescriptor(SUPPORT_ID)).toBeNull();
+      expect(kept()).toBeNull();
       // An erased (removed) source keeps none either.
       refuse = false;
       const third = new SourceProjector(deps([]));
       await third.project('support-pg');
-      expect(new SourceProjector(deps([])).projectedDescriptor(SUPPORT_ID)).toBe(key);
+      expect(kept()).toBe(key);
       const removed = new SourceProjector({ ...deps([]), store: { read: async () => ({ version: 1, servers: [], estateTombstones: [{ id: SUPPORT_ID, kind: 'source', at: DESCRIBED_AT }] }) as never, settled: async () => undefined } });
       removed.erase([SUPPORT_ID]);
       await removed.idle();
-      expect(new SourceProjector(deps([])).projectedDescriptor(SUPPORT_ID)).toBeNull();
+      expect(kept()).toBeNull();
       // A damaged file starts empty and says so, never throws.
       writeFileSync(acksFile, '{ not json');
       const logs: string[] = [];

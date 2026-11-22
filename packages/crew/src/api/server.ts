@@ -2768,8 +2768,9 @@ export async function createServer(
   });
   // DES-KNOWLEDGE-DATA-001 §4.1: every stored catalog's STRUCTURE (never a row) is projected into estate's knowledge
   // plane, keyed by the registry id; what was described before this release is projected once, off the boot path.
-  // crew#1328: the acknowledgements are kept beside the registry, so a restart does not hide a projected source until
-  // the boot projection lands (estate need not be up at boot for it).
+  // crew#1328: the acknowledgements are kept beside the registry with the generation estate took. After a restart one
+  // is provisional (crew#1741): the boot backfill admits the source once estate is seen to still hold that generation
+  // (one cheap read, before the source's projection), or once the projection lands.
   const sourceProjector = new SourceProjector({ store: mcpRegistryStore, catalogs: mcpRegistry.catalogs, log: (m) => app.log.warn(m), acksFile: join(mcpRegistryStore.directory, 'knowledge-acks.json') });
   mcpRegistry.catalogs.onWritten = (name) => sourceProjector.written(name);
   // crew#1328: a restored generation changes what estate must hold for a source with no catalog written.

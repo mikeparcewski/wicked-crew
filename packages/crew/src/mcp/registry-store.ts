@@ -266,6 +266,39 @@ export class McpRegistryStore {
     return next;
   }
 
+  /**
+   * (crew#1740) Housekeeping that changes the registry file but is no change of the operator's: `fn` edits the file and
+   * answers whether it changed anything. A change is written back in place, under the same one-at-a-time chain as
+   * `mutate`, with the SAME generation: no restore point is kept and none is pushed out of the kept window. Nothing is
+   * written when `fn` answers `false`. Answers what `fn` answered.
+   *
+   * Only for a field a restore does not read back (a restore replaces `servers` only): the estate tombstones.
+   */
+  amend(fn: (file: McpRegistryFile) => boolean | Promise<boolean>): Promise<boolean> {
+    const next = this.tail.then(async () => {
+      const file = await this.read();
+      if (!(await fn(file))) return false;
+      await this.replace(file);
+      return true;
+    });
+    this.tail = next.catch(() => undefined);
+    return next;
+  }
+
+  /** Write `file` over the registry atomically (a sibling temp file, then rename), keeping no generation. */
+  private async replace(file: McpRegistryFile): Promise<void> {
+    await mkdir(this.dir, { recursive: true, mode: 0o700 });
+    const tmp = join(this.dir, `${MCP_REGISTRY_FILENAME}.tmp-${randomUUID()}`);
+    try {
+      await writeFile(tmp, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
+      // A new inode: a kept generation is a hard link of an EARLIER file, so it never sees this write.
+      await rename(tmp, this.path);
+    } catch (err) {
+      await rm(tmp, { force: true });
+      throw err;
+    }
+  }
+
   private async write(file: McpRegistryFile): Promise<void> {
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
     // The generation on disk now. A file from before generations counts as generation 1 (kept as
