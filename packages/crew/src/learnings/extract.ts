@@ -8,7 +8,7 @@
  *
  * `material` candidates are raw evidence a person or a seat wrote: the operator's rulings at a
  * gate (a floor override, a QE skip, each with its reason), standing steers from the working
- * document, the orchestrator's recorded decisions and their reasons, a QE reviewer that could
+ * document (and, with the engine's context block, the person's Goal, Approach and Constraints read from it), the orchestrator's recorded decisions and their reasons, a QE reviewer that could
  * not run its checks, a reviewer that asked for changes, a check that was red on the base too
  * or ran out of time. They are long and run-specific, so at the end of the run ONE distinct,
  * cheap seat distils them into durable learnings (the builder never grades itself). When no
@@ -239,13 +239,40 @@ function fromEvents(events: readonly LooseEvent[]): LearningCandidate[] {
   return out;
 }
 
+/** A section of a person's context, as the run's context document holds it (`WorkingDocService.personContextOf`). */
+export interface PersonContextSection { id: string; text: string }
+
+const CONTEXT_LABELS: Readonly<Record<string, string>> = { goal: 'Goal', approach: 'Approach', constraints: 'Constraints' };
+
+/**
+ * (crew#1408) The person's Goal, Approach and Constraints from the run's context document. With the engine's context
+ * block they no longer travel as queued notes ({@link fromEvents}), so they are read here. A section whose words a
+ * queued steer already carried (the bridge's standing note) is not handed over twice.
+ */
+function fromPersonContext(context: readonly PersonContextSection[], steered: readonly LearningCandidate[]): LearningCandidate[] {
+  const carried = steered.filter((c) => c.source === 'steer').map((c) => normalizeLearning(c.content));
+  const out: LearningCandidate[] = [];
+  for (const section of context) {
+    const label = CONTEXT_LABELS[section.id];
+    const text = str(section.text);
+    if (label === undefined || text === null) continue;
+    const words = normalizeLearning(text);
+    if (carried.some((c) => c.includes(words))) continue;
+    const content = clip(`The operator's ${label} for this run: ${text.trim()}`);
+    out.push({ key: keyOf('steering', content), kind: 'steering', source: 'steer', form: 'material', content, ord: null, cli: null });
+  }
+  return out;
+}
+
 /**
  * Every learning candidate in a run's record so far. Safe to call at any point of a run (a checkpoint)
- * and again at its end: the same evidence yields the same keys.
+ * and again at its end: the same evidence yields the same keys. `context`: the person's current Goal, Approach and
+ * Constraints from the run's context document (crew#1408).
  */
-export function extractLearnings(view: SessionView, events: readonly LooseEvent[]): LearningCandidate[] {
+export function extractLearnings(view: SessionView, events: readonly LooseEvent[], context: readonly PersonContextSection[] = []): LearningCandidate[] {
   const repo = repoOf(view) ?? 'this repository';
-  const all = [...fromRepoChecks(view, repo), ...fromOperatorRulings(view), ...fromQeReview(view), ...fromEvents(events)];
+  const steered = fromEvents(events);
+  const all = [...fromRepoChecks(view, repo), ...fromOperatorRulings(view), ...fromQeReview(view), ...steered, ...fromPersonContext(context, steered)];
   const seen = new Set<string>();
   return all.filter((c) => (seen.has(c.key) ? false : (seen.add(c.key), true)));
 }

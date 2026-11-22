@@ -30,7 +30,7 @@ import { fileURLToPath } from 'node:url';
 import type { SessionView } from 'wicked-crew-api-types';
 import type { LaunchRunInput, WorkflowDef } from '../core/types.js';
 import type { LooseEvent } from '../insights/run-facts.js';
-import { creatorSeats, extractLearnings, normalizeLearning, projectOf, repoOf, type LearningCandidate, type LearningKind } from './extract.js';
+import { creatorSeats, extractLearnings, normalizeLearning, projectOf, repoOf, type LearningCandidate, type LearningKind, type PersonContextSection } from './extract.js';
 
 export const DISTILL_WORKFLOW = 'distill-learnings';
 export const DISTILL_WORKFLOW_FILE = fileURLToPath(new URL('../../workflows/distill-learnings.json', import.meta.url));
@@ -133,6 +133,8 @@ export interface RunLearningsDeps {
   listProposals(): Promise<ProposalRow[]>;
   /** The text of every memory in the store (the dedupe set). */
   listMemoryContents(): Promise<string[]>;
+  /** (crew#1408) The person's current Goal, Approach and Constraints in the run's context document (`[]` for none). */
+  personContext?(runId: string): Promise<readonly PersonContextSection[]>;
   /** The launch bookkeeping a chained run gets (launch entry, project filing, `runChained` frame). */
   launched?(distillRunId: string, sourceRunId: string, projectId: string | null): void;
   learningsDir: string;
@@ -321,7 +323,16 @@ export class RunLearningsService {
     const dir = this.dirOf(runId);
     if (phase === 'end' && (existsSync(join(dir, FILED_FILE)) || this.distillOf(runId) !== null)) return;
     const events = (await this.deps.adapter.runEvents(runId)) ?? [];
-    const candidates = extractLearnings(view, events);
+    // Only the end hands material to the distil seat: the person's context is read then (crew#1408).
+    let context: readonly PersonContextSection[] = [];
+    if (phase === 'end' && this.deps.personContext !== undefined) {
+      try {
+        context = await this.deps.personContext(runId);
+      } catch (err) {
+        this.deps.log(`[learnings] ${runId}: the person's context could not be read: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    const candidates = extractLearnings(view, events, context);
     const known = await this.knownTexts();
     const fresh = (c: LearningCandidate): boolean => !known.has(normalizeLearning(c.content));
     let failed = 0;

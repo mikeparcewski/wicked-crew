@@ -181,10 +181,29 @@ export function chatTurn(m: LinesModel): boolean {
     && [...m.steps].every(([ord, step]) => step !== null && /^answer-\d+$/u.test(step) && m.done.has(ord));
 }
 
-/** "14:05", in the daemon's local time (the studio it serves runs on the same machine). */
+/** "14:05 UTC+1", in the daemon's local time with its zone as an offset from UTC (crew#1240: a bare "14:05" read as
+ *  the reader's own time on a phone or a remote studio). The offset is the one in force at `ms`, so a line written
+ *  before a clock change keeps its words. */
 export function clock(ms: number): string {
   const d = new Date(ms);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')} ${zoneOf(d)}`;
+}
+
+/** "UTC", "UTC+1", "UTC-4", "UTC+5:30": the local zone's offset at `d`. */
+function zoneOf(d: Date): string {
+  const off = -d.getTimezoneOffset();
+  if (off === 0) return 'UTC';
+  const abs = Math.abs(off);
+  const mins = abs % 60;
+  return `UTC${off > 0 ? '+' : '-'}${Math.floor(abs / 60)}${mins !== 0 ? `:${String(mins).padStart(2, '0')}` : ''}`;
+}
+
+/** A time as {@link clock} writes it, and as crew wrote it before it named the zone (crew#1240). */
+const TIME = String.raw`\d{2}:\d{2}(?: UTC(?:[+-]\d{1,2}(?::\d{2})?)?)?`;
+/** A line's times without their zone: the line as crew wrote it before it named the zone. */
+const ZONE = /(\d{2}:\d{2}) UTC(?:[+-]\d{1,2}(?::\d{2})?)?/gu;
+export function zoneless(line: string): string {
+  return line.replace(ZONE, '$1');
 }
 
 const GATE_WORDS: Record<string, string> = {
@@ -225,7 +244,7 @@ export interface PersonNote { at: number; who: string; verb: NoteVerb; subject: 
 /** The closed set of what a person did, as the line says it. */
 export const NOTE_VERBS = [
   'approved', 'sent it back', 'overrode a failed check', 'rejected', 'answered', 'edited the plan', 'changed the goal',
-  'skipped rule', 'skipped QE acceptance', 'stopped the job', 'set guidance',
+  'skipped rule', 'skipped QE acceptance', 'stopped the job', 'set guidance', 'steered',
 ] as const;
 export type NoteVerb = (typeof NOTE_VERBS)[number];
 
@@ -244,7 +263,7 @@ export function notedActor(e: AuditLike): boolean {
 }
 
 /** The audit actions a person's words may come from ({@link personNotes}). */
-export const NOTE_ACTIONS: ReadonlySet<string> = new Set(['gate.decided', 'gate.rules_skipped', 'gate.qe_skipped', 'run.cancelled', 'guidance.set']);
+export const NOTE_ACTIONS: ReadonlySet<string> = new Set(['gate.decided', 'gate.rules_skipped', 'gate.qe_skipped', 'run.cancelled', 'guidance.set', 'run.injected']);
 
 /** A person's words on one line: whitespace collapsed, cut at a word boundary with an ellipsis. */
 function oneLine(v: unknown): string {
@@ -303,6 +322,8 @@ export function personNotes(entries: readonly AuditLike[]): PersonNote[] {
       case 'gate.qe_skipped': push('skipped QE acceptance', d['reason']); break;
       case 'run.cancelled': push('stopped the job', d['reason']); break;
       case 'guidance.set': push('set guidance', d['text']); break;
+      // (crew#1392) A dock steer (`POST /runs/:id/inject`): its words, as the route recorded them.
+      case 'run.injected': push('steered', d['words']); break;
       default: break;
     }
   }
@@ -382,7 +403,7 @@ export const LEGACY_GENERATED_DECISION = /^(?:.+ · answered \d{2}:\d{2}|Checkpo
 /** A generated decision line (an answered gate, an answered pause, a person's recorded answer): only these are ever
  *  trimmed. */
 const GENERATED_DECISION = new RegExp(
-  `^(?:.+ · answered \\d{2}:\\d{2}|Checkpoint \\d+ pause.* · \\d{2}:\\d{2}|[^·\\n]{1,40} · \\d{2}:\\d{2} · (?:${NOTE_VERBS.join('|')})(?: [A-Za-z0-9_.:-]{1,40})?: “.*”)$`,
+  `^(?:.+ · answered ${TIME}|Checkpoint \\d+ pause.* · ${TIME}|[^·\\n]{1,40} · ${TIME} · (?:${NOTE_VERBS.join('|')})(?: [A-Za-z0-9_.:-]{1,40})?: “.*”)$`,
   'u',
 );
 
@@ -400,7 +421,13 @@ export function isGenerated(section: 'decisions' | 'questions' | 'next', line: s
  * re-added what it had trimmed on every sync).
  */
 export function reconcileSection(section: 'decisions' | 'questions' | 'next', current: string, wantedNow: readonly string[], max = Infinity, owned?: ReadonlySet<string>): string | null {
-  const lines = current.split('\n').map((l) => l.trim()).filter((l) => l !== '');
+  const original = current.split('\n').map((l) => l.trim()).filter((l) => l !== '');
+  // (crew#1240) A line crew wrote before it named the zone, now wanted again with it: the zoned line replaces it in
+  // place of a second copy. Only crew's own (`owned`), never a person's line of that shape.
+  const twin = (l: string): boolean => section === 'decisions' && owned !== undefined && owned.has(l) && !wantedNow.includes(l)
+    && isGenerated(section, l) && wantedNow.some((w) => w !== l && zoneless(w) === l);
+  const replaced = new Set(original.filter(twin));
+  const lines = replaced.size > 0 ? original.filter((l) => !replaced.has(l)) : original;
   // (xreview r5) Decisions lines crew wrote earlier and no longer has a source for (`owned`: what its last write left
   // there) are still crew's: the oldest of its lines, trimmed first when the section is full, never a person's.
   const stale = section === 'decisions' && owned !== undefined
@@ -425,7 +452,7 @@ export function reconcileSection(section: 'decisions' | 'questions' | 'next', cu
     : lines.filter((l) => !mine(l) || fits.includes(l));
   const add = fits.filter((w) => !kept.includes(w));
   const out = [...kept, ...add];
-  return out.join('\n') === lines.join('\n') ? null : out.join('\n');
+  return out.join('\n') === original.join('\n') ? null : out.join('\n');
 }
 
 /** The event types after which the lines may read differently. */

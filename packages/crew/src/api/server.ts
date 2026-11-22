@@ -1534,6 +1534,9 @@ export async function createServer(
       },
     },
     submit: submitLearning,
+    // (crew#1408) The person's Goal, Approach and Constraints from the run's context document (made further down; a run
+    // ends well after start-up).
+    personContext: (runId) => workingDocs.personContextOf(runId),
     listProposals: async () => proposalRows(await callEstateTool('proposal.list', {})),
     listMemoryContents: async () => memoryContents(await callEstateTool('memory.list', {})),
     launched: (distillRunId, sourceRunId, projectId) => {

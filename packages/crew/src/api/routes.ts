@@ -1206,6 +1206,18 @@ const InjectSchema = z.strictObject({
   input: z.literal('voice').optional(),
 });
 
+/** (crew#1392) Most characters of a dock steer's words its `run.injected` audit line keeps. */
+export const INJECT_WORDS_MAX = 2_000;
+
+/** A dock steer's words as the audit line keeps them: at most {@link INJECT_WORDS_MAX} characters, never half a pair. */
+export function injectWords(message: string): string {
+  if (message.length <= INJECT_WORDS_MAX) return message;
+  let end = INJECT_WORDS_MAX;
+  const last = message.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return message.slice(0, end);
+}
+
 export const ResumeSchema = z.strictObject({ ord: z.int().nonnegative().optional() });
 
 // The manual reassign lever (crew#442): `cli` omitted lets the engine's council re-pick, the
@@ -8122,7 +8134,11 @@ export function registerRoutes(
         throw err;
       }
       if (token !== null) voiceInputs.settle(id);
-      audit.record('run.injected', actorOf(req), { runId: id, detail: { target: parsed.data.target, ...(spoken ? { input: 'voice' } : {}) } });
+      // (crew#1392) The words too, capped: the run's context document shows a person's steer under Decisions.
+      audit.record('run.injected', actorOf(req), {
+        runId: id,
+        detail: { target: parsed.data.target, words: injectWords(parsed.data.message), ...(spoken ? { input: 'voice' } : {}) },
+      });
       // DC-S4a host: the operator's mid-run steering text (review S9).
       if (decisions !== null) {
         decisions.track(ingestDecision(decisions, {

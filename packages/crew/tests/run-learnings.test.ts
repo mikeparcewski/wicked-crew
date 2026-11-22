@@ -144,7 +144,41 @@ describe('extractLearnings: what a run\'s record says it learned', () => {
   });
 });
 
-function harness(opts: { seats?: unknown[]; mode?: 'distill' | 'extract'; proposals?: ProposalRow[]; memories?: string[]; launchFails?: boolean; cancelFails?: number; view?: SessionView } = {}) {
+describe('crew#1408: the person’s Goal, Approach and Constraints from the context document', () => {
+  const context = [
+    { id: 'goal', text: 'EUR prints €1.240,00 and USD stays byte-identical.' },
+    { id: 'constraints', text: 'Reuse the stack’s route, never a hand-rolled one.' },
+  ];
+  it('are steering material, each once, named as the person’s section', () => {
+    const c = extractLearnings(runView(), [], context).filter((x) => x.source === 'steer');
+    expect(c.map((x) => [x.kind, x.form, x.content])).toEqual([
+      ['steering', 'material', 'The operator\'s Goal for this run: EUR prints €1.240,00 and USD stays byte-identical.'],
+      ['steering', 'material', 'The operator\'s Constraints for this run: Reuse the stack’s route, never a hand-rolled one.'],
+    ]);
+    // Next, Decisions or an empty section never come this way.
+    expect(extractLearnings(runView(), [], [{ id: 'next', text: 'Then the PDF.' }, { id: 'approach', text: '  ' }]).filter((x) => x.source === 'steer')).toEqual([]);
+  });
+
+  it('a section a queued steer already carried (the bridge’s standing note) is not handed over twice', () => {
+    const c = extractLearnings(runView(), events, [{ id: 'constraints', text: 'Every refusal line starts with "WICKED-RETRY none" and names the rule.' }]);
+    expect(c.filter((x) => x.source === 'steer')).toHaveLength(1);
+  });
+
+  it('the end sweep reads them for the distil seat; a read that fails leaves the rest of the evidence', async () => {
+    const h = harness({ personContext: async () => context });
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+    await settle();
+    const handoff = JSON.parse(readFileSync(join(h.dir, 'run-1', HANDOFF_FILE), 'utf8')) as { evidence: Array<{ text: string }> };
+    expect(handoff.evidence.map((e) => e.text)).toContain('The operator\'s Constraints for this run: Reuse the stack’s route, never a hand-rolled one.');
+    expect(handoff.evidence).toHaveLength(8);
+    const broken = harness({ personContext: async () => { throw new Error('interactive is down'); } });
+    broken.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+    await settle();
+    expect((JSON.parse(readFileSync(join(broken.dir, 'run-1', HANDOFF_FILE), 'utf8')) as { evidence: unknown[] }).evidence).toHaveLength(6);
+  });
+});
+
+function harness(opts: { seats?: unknown[]; mode?: 'distill' | 'extract'; proposals?: ProposalRow[]; memories?: string[]; launchFails?: boolean; cancelFails?: number; view?: SessionView; personContext?: () => Promise<Array<{ id: string; text: string }>> } = {}) {
   const dir = scratch();
   const view = opts.view ?? runView();
   const submitted: Array<{ runId: string; agent: string; args: SubmitArgs }> = [];
@@ -185,6 +219,7 @@ function harness(opts: { seats?: unknown[]; mode?: 'distill' | 'extract'; propos
     mode: opts.mode ?? 'distill',
     log: () => undefined,
     newRunId: () => `distill-${++n}`,
+    ...(opts.personContext !== undefined ? { personContext: opts.personContext } : {}),
   });
   return { svc, dir, submitted, queue, launches, views, cancels };
 }
