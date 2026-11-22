@@ -137,6 +137,7 @@ async function harness(opts: { authMode?: 'off' | 'required'; mode?: 'off' | 'le
       return r !== undefined;
     }),
     listConformanceRules: vi.fn(async () => [...rules.values()]),
+    projectList: vi.fn(async () => [{ id: 'kestrel', name: 'Kestrel' }, { id: 'heron', name: 'Heron' }]),
     considerRules: vi.fn(async (q: { projects?: string[] }) => ({
       in_force: [...rules.values()].filter(
         (r) => r.retired !== true && (r.targets.project === undefined || (q.projects ?? []).includes(r.targets.project)),

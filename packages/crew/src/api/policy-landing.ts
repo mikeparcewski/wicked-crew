@@ -45,7 +45,7 @@ export function policyProposalToRule(
   kindType: string,
   payload: unknown,
   facets: Record<string, string> | undefined,
-  scope: { runProject?: string; reach?: PolicyReach } = {},
+  scope: { runProject?: string; reach?: PolicyReach; projects?: readonly KnownProject[] } = {},
 ): { rule: ConformanceRule; steeringType: SteeringType; reach: PolicyReach } | { error: string } {
   const steeringType = kindType.startsWith('policy:') ? kindType.slice('policy:'.length) : '';
   if (!STEERING_TYPES.has(steeringType)) {
@@ -105,17 +105,18 @@ export function policyProposalToRule(
     };
   }
   const reach: PolicyReach = rawReach ?? (named(facetProject) || named(repo) ? 'project' : 'operator');
-  // DC-S3: a project rule's `targets.project` is the `project` facet, else the project of the run
-  // that filed it (`scope.runProject`, the caller's membership lookup of `provenance.run_id`).
-  const project =
-    reach === 'operator' ? undefined : named(facetProject) ? facetProject : named(scope.runProject) ? scope.runProject : undefined;
+  // DC-S3: a project rule's `targets.project` is the project the `project` facet names (crew#1774: resolved against
+  // the known projects, since proposers often write a repo-ish name the engine never matches), else the project of
+  // the run that filed it (`scope.runProject`, the caller's membership lookup of `provenance.run_id`).
+  const project = reach === 'operator' ? undefined : resolvePolicyProject(facetProject, scope.runProject, scope.projects ?? []);
   // The engine's Targets has no repo slot. A project-reach rule that resolves to no project would
   // land as a rule for EVERY project (the tiny-calc rules that went global), so it fails loud and
   // writes nothing; the person rejects it, or accepts it with reach "operator" on purpose.
   if (reach === 'project' && project === undefined) {
     return {
       error:
-        `the policy proposal's reach is one project${named(repo) ? ` (repo \`${repo}\`)` : ''}, but it names no project ` +
+        `the policy proposal's reach is one project${named(repo) ? ` (repo \`${repo}\`)` : ''}, but it names no ` +
+        `${named(facetProject) ? `known project (its project facet is ${JSON.stringify(facetProject)})` : 'project'} ` +
         'and the run that filed it is in no project; steering rules are scoped by project, so it would land ' +
         'as a rule for every project — reject it, or accept it with reach "operator" if it is meant for every project',
     };
@@ -144,6 +145,31 @@ export function policyProposalToRule(
   return { rule, steeringType: steeringType as SteeringType, reach };
 }
 
+/** A project a facet may name: its id, or its name. */
+export interface KnownProject {
+  id: string;
+  name?: string;
+}
+
+/**
+ * crew#1774: the project id a policy proposal's `project` facet names. The engine matches `targets.project` against
+ * the job's project id, so a facet that is a name (`wicked-crew`, `carddemo`) copied verbatim lands a rule that never
+ * applies. The facet resolves to the project with that id, else to the ONE project with that name (case and spaces
+ * ignored); a facet that names no known project (or a name two projects share) does not resolve.
+ */
+export function projectIdFor(facet: string | undefined, projects: readonly KnownProject[]): string | undefined {
+  if (typeof facet !== 'string' || facet.trim() === '') return undefined;
+  const byId = projects.find((p) => p.id === facet);
+  if (byId !== undefined) return byId.id;
+  const want = facet.trim().toLowerCase();
+  const byName = projects.filter((p) => typeof p.name === 'string' && p.name.trim().toLowerCase() === want);
+  return byName.length === 1 ? byName[0]!.id : undefined;
+}
+
+/** The project a project-reach policy rule targets: the one its facet names, else its filing run's, else none. */
+export function resolvePolicyProject(facet: string | undefined, runProject: string | undefined, projects: readonly KnownProject[]): string | undefined {
+  return projectIdFor(facet, projects) ?? (typeof runProject === 'string' && runProject !== '' ? runProject : undefined);
+}
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -249,4 +275,94 @@ export async function landPolicyRule(
     reach: built.reach ?? (project !== undefined ? 'project' : 'operator'),
     ...(project !== undefined ? { project } : {}),
   };
+}
+
+export interface InertRuleMigrationDeps {
+  adapter: PolicyLandingDeps['adapter'] & Pick<CoreAdapter, 'listConformanceRules' | 'projectList'>;
+  audit: AuditLog;
+  /** The approve queue (estate `proposal.*`): an approved proposal's `provenance.run_id`. */
+  estateTool: (tool: string, args: Record<string, unknown>) => Promise<unknown>;
+  /** The project a run is filed in (the membership index). */
+  projectOf: (runId: string) => string | undefined;
+  log: (msg: string) => void;
+}
+
+/** The actor the migration's audit lines name. */
+const MIGRATION_ACTOR: Actor = { id: 'crew', kind: 'system', trust: 'admin' };
+
+/**
+ * crew#1774: the rules a policy landing put in force before the facet was resolved, whose `targets.project` is a name
+ * no project has, apply to no run. Once per boot, each live proposal-sourced rule whose project is not a known project
+ * id (and not shaped like one: a deleted project's `proj_…` id is left alone) is retargeted to the project its facet
+ * names or its filing run's project, through THE landing (probe, upsert, read-back, audit `via:
+ * 'inert-project-migration'`). One that resolves to no project is retired (never deleted), audited with the name it
+ * carried, so the operator can author it again for the right project; when the approve queue cannot be read, none is
+ * retired (its run might have resolved it). Nothing to do = no estate call. Never throws.
+ */
+export async function migrateInertPolicyRules(deps: InertRuleMigrationDeps): Promise<{ retargeted: string[]; retired: string[] }> {
+  const done = { retargeted: [] as string[], retired: [] as string[] };
+  try {
+    const [rules, projects] = await Promise.all([deps.adapter.listConformanceRules(), deps.adapter.projectList()]);
+    const known = new Set(projects.map((p) => p.id));
+    const inert = rules.filter((r) => {
+      const target = r.targets?.project;
+      return (
+        r.retired !== true &&
+        r.provenance?.source === 'proposal' &&
+        typeof target === 'string' &&
+        target !== '' &&
+        !known.has(target) &&
+        !/^proj_/.test(target)
+      );
+    });
+    if (inert.length === 0) return done;
+    const runOf = new Map<string, string>();
+    let queueRead = true;
+    try {
+      const listed = (await deps.estateTool('proposal.list', { state: 'approved' })) as { proposals?: Array<{ id?: unknown; provenance?: Record<string, unknown> }> };
+      for (const p of listed.proposals ?? []) {
+        const run = p.provenance?.['run_id'];
+        if (typeof p.id === 'string' && typeof run === 'string' && run !== '') runOf.set(p.id, run);
+      }
+    } catch (err) {
+      queueRead = false;
+      deps.log(`[policy-landing] the approve queue could not be read for the inert-rule migration (${message(err)}); rules resolve by their project name only, and none is retired`);
+    }
+    for (const rule of inert) {
+      const facet = rule.targets.project as string;
+      const ref = rule.provenance.ref ?? '';
+      const proposalId = ref.startsWith('proposal:') ? ref.slice('proposal:'.length) : rule.id;
+      const run = runOf.get(proposalId);
+      const project = resolvePolicyProject(facet, run !== undefined ? deps.projectOf(run) : undefined, projects);
+      if (project !== undefined) {
+        const landing = await landPolicyRule(
+          deps,
+          { rule: { ...rule, targets: { ...rule.targets, project } }, steeringType: rule.steering_type as SteeringType, reach: 'project' },
+          MIGRATION_ACTOR,
+          { via: 'inert-project-migration', proposalId, from: facet },
+        );
+        if (landing.outcome === 'landed') {
+          done.retargeted.push(rule.id);
+          continue;
+        }
+        deps.log(`[policy-landing] retargeting rule ${rule.id} from ${JSON.stringify(facet)} to ${project} failed: ${landing.error ?? 'unknown'}`);
+        continue;
+      }
+      // Without the filing runs a rule might have resolved through its run: it is left for the next boot.
+      if (!queueRead) continue;
+      try {
+        await deps.adapter.retireConformanceRule(rule.id);
+        deps.audit.record('governance.rule.retired', MIGRATION_ACTOR, { detail: { id: rule.id, via: 'inert-project-migration', project: facet } });
+        done.retired.push(rule.id);
+      } catch (err) {
+        deps.log(`[policy-landing] retiring inert rule ${rule.id} (project ${JSON.stringify(facet)}) failed: ${message(err)}`);
+      }
+    }
+    if (done.retargeted.length + done.retired.length > 0) {
+      deps.log(`[policy-landing] rules that named no project: retargeted ${done.retargeted.join(', ') || 'none'}; retired ${done.retired.join(', ') || 'none'}`);
+    }
+  } catch (err) {
+    deps.log(`[policy-landing] the inert-rule migration could not run: ${message(err)}`);
+  }
+  return done;
 }

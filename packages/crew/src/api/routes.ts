@@ -170,6 +170,7 @@ import {
 import { DocRunIndex } from '../interactive/doc-run-index.js';
 import { listInteractiveDocs } from '../interactive/docs-index.js';
 import { SearchService, registerSearchRoutes } from './search-routes.js';
+import { RepoOrigins, originOf } from './repo-origins.js';
 import type { FreshenCheckout } from './chat-freshness.js';
 import { TestSetIndex } from '../qe/test-sets.js';
 import { estateExe, parseEstateTotals, projectGraphRefreshDiagnostics, readBlastRadiusPages, resolveProjectGraphBinding } from '../projects/graph.js';
@@ -303,7 +304,7 @@ import {
 import { createDocInProcess, registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { CreateLauncher } from '../interactive/proposal-create.js';
 import { ThemeLauncher } from './proposal-theme.js';
-import { CHAT_GIT_PROTOCOLS, OnboardLauncher, probeGitUrl, shownGitUrl, withoutCredentials } from './proposal-onboard.js';
+import { CHAT_GIT_PROTOCOLS, OnboardLauncher, probeGitUrl, withoutCredentials } from './proposal-onboard.js';
 import { RefineLauncher } from '../interactive/proposal-refine.js';
 import { lineageSteps, protectedEdits } from '../interactive/protected-edits.js';
 import type { DocBindingStore } from '../interactive/doc-binding.js';
@@ -1462,6 +1463,8 @@ interface RuntimeServices {
    *  `GET /runs/:id/events` at serve time so a reloaded page sees the `workerStalled` /
    *  `workerStallEscalated` facts the live socket carried. Absent ⇒ engine events only. */
   stallFrames?: (runId: string) => readonly RecordedStallFrame[];
+  /** (crew#1744) The daemon's one `git_url` reader, shared with the review service. Absent (route tests): one of its own. */
+  repoOrigins?: RepoOrigins;
   /** (DES-VOICE) The notes said by voice, shared with the `/ws` path that stamps their frames. Absent ⇒ this route
    *  set keeps its own (a directly-driven test). */
   voiceInputs?: VoiceInjectInputs;
@@ -1965,14 +1968,8 @@ export function registerRoutes(
   const proposalLaunchers = new LaunchOnceRegistry();
   proposalLaunchers.register('theme', new ThemeLauncher());
   // crew-0182: what an onboard card is resolved and its Go is checked against (one set of reads for both).
-  const originOf = async (rootPath: string): Promise<string | null> => {
-    try {
-      const out = await execCapped('git', ['-C', rootPath, 'remote', 'get-url', 'origin'], { timeout: 5_000 });
-      return out.stdout.trim() || null;
-    } catch {
-      return null;
-    }
-  };
+  // crew#1744: the one `git_url` reader (GET /repos, the repo search; the daemon hands the review service the same).
+  const repoOrigins = runtime.repoOrigins ?? new RepoOrigins();
   const onboardReads = {
     repos: () => adapter.listRepos(),
     projectRepoRefs: async (projectId: string) => (await adapter.projectMembers(projectId)).filter((m) => m.member_kind === 'crew.repo').map((m) => m.member_ref),
@@ -3319,46 +3316,9 @@ export function registerRoutes(
   });
 
   // Registered repos → target-repo picker. Each carries `git_url` (studio#1012: the repo page's "This repository"
-  // tracker row reads it): the address the engine recorded, else — it records none for its own clones — the checkout's
-  // `origin` through `originOf` (the onboard card's own read), held a minute per checkout and read at most eight at a
-  // time across every list, so a list never runs a `git` per repository per request. Shown through `shownGitUrl`
-  // (credentials and query removed, an address it can't vouch for dropped); none = no field.
-  const originCache = new Map<string, { at: number; url: Promise<string | null> }>();
-  let originReads = 0;
-  const originQueue: Array<() => void> = [];
-  const limitedOrigin = async (rootPath: string): Promise<string | null> => {
-    if (originReads < 8) originReads += 1;
-    else await new Promise<void>((go) => originQueue.push(go));
-    try {
-      return await originOf(rootPath);
-    } finally {
-      // The slot passes straight to the next waiter, so no new read can take it in between.
-      const next = originQueue.shift();
-      if (next !== undefined) next();
-      else originReads -= 1;
-    }
-  };
-  const listedOrigin = (rootPath: string): Promise<string | null> => {
-    const now = Date.now();
-    const hit = originCache.get(rootPath);
-    if (hit !== undefined && now - hit.at < 60_000) return hit.url;
-    const url = limitedOrigin(rootPath);
-    originCache.set(rootPath, { at: now, url });
-    return url;
-  };
-  const withGitUrl = async (r: RepoEntry): Promise<RepoEntry> => {
-    const { git_url: recorded, ...rest } = r;
-    const raw = typeof recorded === 'string' && recorded.trim() !== '' ? recorded : await listedOrigin(r.root_path);
-    const shown = raw === null ? null : shownGitUrl(raw);
-    return shown === null ? rest : { ...rest, git_url: shown };
-  };
-  app.get(`${V}/repos`, async () => {
-    const listed = await adapter.listRepos();
-    // A checkout no longer registered leaves the cache.
-    const roots = new Set(listed.map((r) => r.root_path));
-    for (const root of originCache.keys()) if (!roots.has(root)) originCache.delete(root);
-    return { repos: await Promise.all(listed.map(withGitUrl)) };
-  });
+  // tracker row reads it), through the daemon's one origin reader (repo-origins.ts, crew#1744): the review's issue
+  // link and the repo search read the same.
+  app.get(`${V}/repos`, async () => ({ repos: await repoOrigins.list(() => adapter.listRepos()) }));
 
   app.delete(`${V}/repos/:id`, { config: { manifest: { responseType: 'UnregisterRepoResponse', statusCodes: [200, 404, 409, 501] } } }, async (req, reply) => {
     const { id } = req.params as { id: string };
@@ -10823,15 +10783,22 @@ export function registerRoutes(
           `installed engine would silently drop the rule's steering fields; upgrade wicked-core-ts (>= 0.7.5)`,
       );
     }
-    // A proposal with no `project` facet keeps the project of the run that filed it.
+    // A proposal's `project` facet resolves to a known project (crew#1774); one that names none keeps the project of
+    // the run that filed it.
     const runId = policyRow.provenance?.['run_id'];
     const runProject = typeof runId === 'string' && runId !== '' ? projects.index.projectOf(runId) : undefined;
+    let knownProjects: Awaited<ReturnType<typeof adapter.projectList>>;
+    try {
+      knownProjects = await adapter.projectList();
+    } catch (err) {
+      return landFailed(`the projects could not be read to resolve the rule's project (${message(err)})`);
+    }
     const built = policyProposalToRule(
       id,
       policyRow.kind_type,
       policyRow.payload,
       isStringRecord(policyRow.facets) ? policyRow.facets : undefined,
-      { ...(runProject !== undefined ? { runProject } : {}), ...(policyReach !== undefined ? { reach: policyReach } : {}) },
+      { ...(runProject !== undefined ? { runProject } : {}), ...(policyReach !== undefined ? { reach: policyReach } : {}), projects: knownProjects },
     );
     if ('error' in built) {
       return landFailed(built.error);
@@ -12288,7 +12255,8 @@ export function registerRoutes(
     sessionsDetail: () => adapter.sessionsDetail(),
     workOutput: (unitId) => adapter.workOutput(unitId),
     projectList: () => adapter.projectList(),
-    listRepos: () => adapter.listRepos(),
+    // crew#1744: the repo search indexes each repo's remote, so it reads the same `git_url` GET /repos shows.
+    listRepos: () => repoOrigins.list(() => adapter.listRepos()),
     listRules: () => adapter.listConformanceRules(),
     projectOf: (id) => projects.index.projectOf(id),
     runFacts: runTimingIndex,

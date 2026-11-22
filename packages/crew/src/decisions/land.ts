@@ -357,7 +357,9 @@ export class DecisionService {
       proposalId,
       `policy:${steeringType}`,
       { rule: statement, severity: 'warn', reach: project !== undefined ? 'project' : 'operator' },
-      project !== undefined ? { project } : {},
+      {},
+      // The decision's own project id (the run or chat that made it), never a facet to resolve (crew#1774).
+      project !== undefined ? { runProject: project } : {},
     );
     if ('error' in built) throw new DecisionError(400, built.error);
     const rule: ConformanceRule = {
