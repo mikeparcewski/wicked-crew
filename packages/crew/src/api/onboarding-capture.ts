@@ -13,6 +13,9 @@
  *     new onboarding run and gets exactly one new capture. A failed onboarding launches nothing.
  *   - Serialized: one chained capture at a time (councils are the spikiest thing the platform does);
  *     the next waits for the running one's terminal frame.
+ *   - Never the person's to answer (crew#1365): nobody started the chained capture, so when it stops at a gate (a
+ *     small repository's first step has nothing to review, and its floor escalates) crew stops it and says why in
+ *     one line, on its `run.cancelled` audit entry as the onboarding actor. Only a capture THIS daemon launched.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -27,7 +30,7 @@ export const CAPTURE_LEARNINGS_WORKFLOW = 'capture-learnings';
 export const ONBOARDING_CHAIN_ACTOR: Actor = { id: 'onboarding', kind: 'system', trust: 'operator' };
 
 export interface OnboardingCaptureDeps {
-  adapter: Pick<CoreAdapter, 'onboardedRepoOf' | 'seatsForWorkflow' | 'launchRun' | 'getSettings' | 'listRepos'>;
+  adapter: Pick<CoreAdapter, 'onboardedRepoOf' | 'seatsForWorkflow' | 'launchRun' | 'getSettings' | 'listRepos' | 'cancelRun'>;
   runTimingIndex: RunTimingIndex;
   audit: AuditLog;
   /** The project a run is filed in (the membership index), if any. */
@@ -51,6 +54,10 @@ export class OnboardingCaptureChain {
   /** Terminal frames seen while a launch was in flight: a capture that ended before `launchRun`
    *  answered must not hold the slot (codex on #552). */
   private readonly endedWhileLaunching = new Set<string>();
+  /** crew#1365: the captures this chain launched and not yet seen end → their repository's name. */
+  private readonly launched = new Map<string, string>();
+  /** crew#1365: the captures being stopped (one stop per capture). */
+  private readonly stopping = new Set<string>();
 
   constructor(private readonly deps: OnboardingCaptureDeps) {}
 
@@ -62,6 +69,8 @@ export class OnboardingCaptureChain {
       if (!this.pending.includes(session) && session !== this.launchingFor) this.pending.push(session);
     }
     const terminal = event.type === 'sessionCompleted' || event.type === 'sessionFailed' || event.type === 'runCancelled';
+    if (event.type === 'awaitingHuman' && this.launched.has(session)) void this.stopParked(session, event);
+    if (terminal) this.launched.delete(session);
     if (terminal && session === this.active) this.active = null;
     if (terminal && this.launchingFor !== null) this.endedWhileLaunching.add(session);
     void this.next();
@@ -83,6 +92,30 @@ export class OnboardingCaptureChain {
       this.endedWhileLaunching.clear();
     }
     if (this.active === null) void this.next();
+  }
+
+  /**
+   * crew#1365: a capture this chain launched stopped at a gate. Nobody started it, so it never asks a person: crew stops
+   * it, with the gate and its prompt in one line on the audit entry. A stop the engine refuses is logged; the run then
+   * waits as before. Never throws.
+   */
+  private async stopParked(runId: string, event: CoreEvent): Promise<void> {
+    if (this.stopping.has(runId)) return;
+    this.stopping.add(runId);
+    const repo = this.launched.get(runId) ?? 'the repository';
+    const ev = event as unknown as Record<string, unknown>;
+    const gate = typeof ev['gateKind'] === 'string' && /^[A-Za-z0-9_.:-]{1,40}$/u.test(ev['gateKind']) ? ev['gateKind'].replace(/[_-]+/gu, ' ') : 'a gate';
+    const prompt = typeof ev['prompt'] === 'string' ? ev['prompt'].replace(/\s+/gu, ' ').trim().slice(0, 200) : '';
+    const reason = `Capture learnings from ${repo} stopped at ${gate}${prompt !== '' ? ` (${prompt})` : ''}: onboarding started it, so crew ends it rather than ask you. Run Capture learnings yourself to try again.`;
+    try {
+      const status = await this.deps.adapter.cancelRun(runId);
+      this.deps.audit.record('run.cancelled', ONBOARDING_CHAIN_ACTOR, { runId, detail: { status, reason } });
+      this.deps.log(`[onboarding] ${reason}`);
+    } catch (err) {
+      this.deps.log(`[onboarding] capture-learnings ${runId} stopped at ${gate}; crew could not end it: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      this.stopping.delete(runId);
+    }
   }
 
   /** The capture launch for one completed onboarding run, or `null` when it is switched off or done. */
@@ -119,6 +152,8 @@ export class OnboardingCaptureChain {
       deliver: 'none',
       ...(projectId !== undefined ? { projectId } : {}),
     });
+    // A capture that already ended while its launch was answered has nothing left to stop.
+    if (!this.endedWhileLaunching.has(runId)) this.launched.set(runId, repoName);
     if (projectId !== undefined) this.deps.fileRun(runId, projectId);
     this.deps.broadcast({
       type: 'runChained',

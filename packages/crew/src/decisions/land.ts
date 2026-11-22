@@ -14,6 +14,7 @@ import type { CoreAdapter } from '../core/adapter.js';
 import type { Actor, ConformanceRule, DecisionChangedFrame, SteeringType } from '../core/types.js';
 import { trustAtLeast, type AuthMode } from '../api/auth.js';
 import type { AuditLog } from '../api/audit.js';
+import { recordProposalDecision } from '../api/proposal-decisions.js';
 import { landPolicyRule, policyProposalToRule, withdrawLandedRule } from '../api/policy-landing.js';
 import type { InForceRule } from './derive.js';
 import {
@@ -459,6 +460,8 @@ export class DecisionService {
     if (view.proposal_id !== undefined) {
       try {
         await this.deps.estateTool('proposal.reject', { id: view.proposal_id });
+        // crew#1261: the person turned its proposal down.
+        recordProposalDecision(this.deps.audit, actor, view.proposal_id, 'rejected');
       } catch (err) {
         // A landing_failed decision's proposal may be approved (a pre-fix landing, or an approve
         // estate committed without confirming); estate rejects only pending ones. Still dismissable.

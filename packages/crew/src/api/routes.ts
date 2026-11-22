@@ -339,6 +339,7 @@ import type { TrackerProjector } from '../knowledge/trackers/projector.js';
 import { registerTrackerRoutes } from '../knowledge/trackers/routes.js';
 import { AuditLog } from './audit.js';
 import { auditFor } from './audit-view.js';
+import { ProposalDecisionIndex, recordProposalDecision } from './proposal-decisions.js';
 import {
   AcpFoldCache,
   EngineVersionCache,
@@ -1899,6 +1900,8 @@ export function registerRoutes(
       : {}),
   };
   const { audit } = security;
+  // crew#1261: who rejected a proposal and why, as crew recorded it (`GET /proposals` returns it on the row).
+  const proposalDecisions = new ProposalDecisionIndex(audit, (m) => app.log.warn(m));
   const seatHealth = runtime.seatHealth ?? new SeatHealthTracker();
   const deliveryFreeze = runtime.deliveryFreeze ?? new DeliveryFreeze();
   registerDeliveryFreezeRoutes(app, { freeze: deliveryFreeze, audit });
@@ -10554,11 +10557,22 @@ export function registerRoutes(
     const args: Record<string, unknown> = {};
     if (kindType !== undefined) args.kind_type = kindType;
     if (state !== undefined) args.state = state;
+    let listed: ListProposalsResponse;
     try {
-      return (await estateTool('proposal.list', args)) as ListProposalsResponse;
+      listed = (await estateTool('proposal.list', args)) as ListProposalsResponse;
     } catch (err) {
       return estateUpstreamError(reply, err);
     }
+    // crew#1261: a rejected row says who rejected it and why, when crew made that decision.
+    const decided = await proposalDecisions.decisions();
+    if (decided.size === 0 || !Array.isArray(listed?.proposals)) return listed;
+    return {
+      ...listed,
+      proposals: listed.proposals.map((p) => {
+        const decision = p.state === 'rejected' ? decided.get(p.id) : undefined;
+        return decision !== undefined ? { ...p, decision } : p;
+      }),
+    } satisfies ListProposalsResponse;
   });
 
   // POST /proposals {content, project?, source?} → proposal.submit → 201 { id } (api-types 0.54.0).
@@ -10685,7 +10699,9 @@ export function registerRoutes(
     }
     if (policyReach === undefined && (edit.data.content !== undefined || edit.data.reach !== undefined)) {
       try {
-        const done = await approveEdited(editTool, id, edit.data, (runId) => projects.index.projectOf(runId));
+        const done = await approveEdited(editTool, id, edit.data, (runId) => projects.index.projectOf(runId),
+          // crew#1261: the original replaced by the copy, or a copy withdrawn, is crew's decision on the person's behalf.
+          (pid, reason, copy) => recordProposalDecision(audit, actorOf(req), pid, reason, copy));
         return reply.code(done.status).send(done.body);
       } catch (err) {
         return estateUpstreamError(reply, err);
@@ -10862,6 +10878,8 @@ export function registerRoutes(
     } catch (err) {
       return estateUpstreamError(reply, err);
     }
+    // crew#1261: turned down by this caller (a person's rejection when it is a person).
+    recordProposalDecision(audit, actorOf(req), id.trim(), 'rejected');
     // A policy proposal's rule lands before its approval, so a still-pending proposal may already
     // have a live rule (a crash or an unconfirmed approve in between): rejecting it withdraws it.
     const withdrawn = await withdrawLandedRule(adapter, id.trim());

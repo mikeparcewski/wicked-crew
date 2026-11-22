@@ -271,6 +271,8 @@ export async function approveEdited(
   id: string,
   edit: z.infer<typeof ApproveEditSchema>,
   projectOf: (runId: string) => string | undefined,
+  /** (crew#1261) Told of each rejection this accept makes: the original replaced by its copy, or the copy withdrawn. */
+  decided?: (proposalId: string, reason: 'replaced-by-edit' | 'withdrawn-copy', copyId?: string) => void,
 ): Promise<EditedApproval> {
   // estate has no compare-and-swap: two accepts of one proposal racing (a double click, two tabs)
   // would each promote a copy. One daemon, so one accept per proposal at a time is enough.
@@ -279,7 +281,7 @@ export async function approveEdited(
   }
   editsInFlight.add(id);
   try {
-    return await acceptEdited(estateTool, id, edit, projectOf);
+    return await acceptEdited(estateTool, id, edit, projectOf, decided);
   } finally {
     editsInFlight.delete(id);
   }
@@ -299,6 +301,7 @@ async function acceptEdited(
   id: string,
   edit: z.infer<typeof ApproveEditSchema>,
   projectOf: (runId: string) => string | undefined,
+  decided?: (proposalId: string, reason: 'replaced-by-edit' | 'withdrawn-copy', copyId?: string) => void,
 ): Promise<EditedApproval> {
   const listed = (await estateTool('proposal.list', { state: 'pending' })) as {
     proposals?: {
@@ -362,12 +365,13 @@ async function acceptEdited(
     approved = (await estateTool('proposal.approve', { id: copy })) as Record<string, unknown>;
   } catch (err) {
     // Withdraw the copy so a retry of this accept leaves no stray duplicate pending in review.
-    await estateTool('proposal.reject', { id: copy }).catch(() => undefined);
+    if (await estateTool('proposal.reject', { id: copy }).then(() => true, () => false)) decided?.(copy, 'withdrawn-copy');
     throw err;
   }
   const edited: Record<string, unknown> = { from: id, to: copy };
   try {
     await estateTool('proposal.reject', { id });
+    decided?.(id, 'replaced-by-edit', copy);
   } catch {
     edited['originalPending'] = true;
   }
