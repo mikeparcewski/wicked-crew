@@ -1,5 +1,5 @@
 import type { SessionView } from '../core/types.js';
-import { isSafeRefName, type GhExec } from '../core/deliver.js';
+import { deliverRunBranch, isSafeRefName, type GhExec } from '../core/deliver.js';
 import { seatKey } from '../interactive/review-events.js';
 
 export const REVIEW_CHANGE_WORKFLOW = 'review-change';
@@ -18,11 +18,12 @@ export function parseReviewTarget(words: string): ReviewTarget | null {
     // A PR-shaped token with an impossible number names no target: never re-read its digits as a commit.
     return Number.isSafeInteger(number) && number > 0 ? { kind: 'pr', number } : null;
   }
-  const branch = /\bbranch\s+[`'"]?([^\s`'"<>]+)|\b(wicked\/[A-Za-z0-9._/-]+)/i.exec(words);
+  const branch = /\bbranch\s+(?:([`'"])([^\s`'"<>]+)\1|([^\s`'"<>]+))|\b(wicked\/[A-Za-z0-9._/-]+)/i.exec(words);
   if (branch !== null) {
-    // crew#1793: the sentence's punctuation after the name ("branch foo: is it right?", "… branch foo.") is not part
-    // of it; git refuses a ref that ends in `.` or holds `:`, so no real branch loses a character here.
-    const name = (branch[1] ?? branch[2]!).replace(/[.,:;!?)\]}]+$/, '');
+    // crew#1793: the sentence's punctuation after a bare name ("branch foo: is it right?", "… branch foo.") is not part
+    // of it. A quoted name is taken exactly as quoted: a name the safe-ref rule refuses names no branch, never a
+    // shorter one.
+    const name = branch[2] ?? (branch[3] ?? branch[4]!).replace(/[.,:;!?)\]}]+$/, '');
     if (isSafeRefName(name)) return { kind: 'branch', name };
   }
   const commit = /\b[0-9a-f]{7,40}\b/i.exec(words);
@@ -138,6 +139,14 @@ export async function reviewChangeExclusion(words: string, deps: ReviewChangeDep
     return { ok: false, code: 'review_authors_unknown', error: 'Crew cannot read the runs in this repository, so it will not pick a reviewer blindly.' };
   }
   const byId = new Map(views.map((view) => [view.session.id, view]));
+  /** (crew#1794) This repository's runs by the branch they work on: the recorded `run_branch`, and the name the engine
+   *  derives from the id (`wicked/<id>`, a campaign id's `:` as `-`), so a sanitized branch still finds its run. */
+  const runsOnBranch = new Map<string, string[]>();
+  for (const view of views) {
+    for (const name of new Set([runBranch(view), deliverRunBranch(view.session.id)])) {
+      if (name !== null) runsOnBranch.set(name, [...(runsOnBranch.get(name) ?? []), view.session.id]);
+    }
+  }
   const candidates = new Set<string>();
   /** Runs joined only because their branch contains a reviewed commit (crew#1794). */
   const contained = new Set<string>();
@@ -181,7 +190,7 @@ export async function reviewChangeExclusion(words: string, deps: ReviewChangeDep
         // crew#1794: a branch that merely CONTAINS the commit names a run only when that run is one of this
         // repository's on this daemon; another daemon's or another repository's run branch (copied to origin) is
         // no evidence of who wrote the commit, and its authors cannot be read here anyway.
-        if (match !== null && byId.has(match[1]!)) contained.add(match[1]!);
+        for (const id of match === null ? [] : runsOnBranch.get(`wicked/${match[1]!}`) ?? []) contained.add(id);
       }
       for (const id of contained) candidates.add(id);
     }

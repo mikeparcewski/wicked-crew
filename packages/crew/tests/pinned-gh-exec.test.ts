@@ -67,18 +67,35 @@ describe('pinnedGhExec (crew#1792)', () => {
     if (!r.ok) expect(r.error).toContain('gh holds no token for deliverbot');
   });
 
-  it('leaves gh as it is with an exported GH_TOKEN, no identity, or an origin that is not a github.com repository', async () => {
+  it('leaves gh as it is with no identity, or an origin that is absent or not a github.com repository', async () => {
     const github = checkout('https://github.com/acme/private-app.git');
-    for (const [root, identity, env] of [
-      [github, 'deliverbot', { GH_TOKEN: 'exported' }],
-      [github, null, {}],
-      [checkout('https://gitlab.com/acme/private-app.git'), 'deliverbot', {}],
-      [checkout(null), 'deliverbot', {}],
+    for (const [root, identity] of [
+      [github, null],
+      [checkout('https://gitlab.com/acme/private-app.git'), 'deliverbot'],
+      [checkout(null), 'deliverbot'],
     ] as const) {
       const { exec, calls } = fakeGh({ deliverbot: 'gho_deliverbot' });
-      await pinnedGhExec(async () => identity, exec, env)(['pr', 'view', '33'], { cwd: root, timeoutMs: 5000 });
+      await pinnedGhExec(async () => identity, exec, {})(['pr', 'view', '33'], { cwd: root, timeoutMs: 5000 });
       expect(calls).toEqual([{ args: ['pr', 'view', '33'], env: undefined }]);
     }
+  });
+
+  it('lets an exported GH_TOKEN win, still pinned to the origin so an inherited GH_REPO cannot retarget the read', async () => {
+    const root = checkout('https://github.com/acme/private-app.git');
+    const { exec, calls } = fakeGh({ deliverbot: 'gho_deliverbot' });
+    const identity = async (): Promise<string | null> => { throw new Error('an exported GH_TOKEN wins: the identity is not read'); };
+    await pinnedGhExec(identity, exec, { GH_TOKEN: 'exported', GH_REPO: 'github.com/other/repo' })(['pr', 'view', '33'], { cwd: root, timeoutMs: 5000 });
+    expect(calls).toEqual([{ args: ['pr', 'view', '33'], env: { GH_HOST: 'github.com', GH_REPO: 'github.com/acme/private-app' } }]);
+  });
+
+  it('fails by name, reading nothing, when the origin cannot be read and an identity is configured', async () => {
+    const notACheckout = mkdtempSync(join(tmpdir(), 'crew-1792-bare-'));
+    dirs.push(notACheckout);
+    const { exec, calls } = fakeGh({ deliverbot: 'gho_deliverbot' });
+    const out = await pinnedGhExec(async () => 'deliverbot', exec, {})(['pr', 'view', '33'], { cwd: notACheckout, timeoutMs: 5000 });
+    expect(out.code).toBe(1);
+    expect(out.stderr).toContain("could not read the repository's origin");
+    expect(calls).toEqual([]);
   });
 
   it('refuses an identity that is not a GitHub login before asking gh for anything', async () => {

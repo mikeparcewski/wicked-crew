@@ -422,14 +422,15 @@ export const defaultGhExec: GhExec = (args, opts) =>
  * (crew#1792) A gh exec whose reads run as the deliver identity, in the deliver script's own credential order
  * ({@link GITHUB_CREDENTIAL_LINES}, {@link GH_CALL_LINE}), so a PR the deliver identity can see is readable whatever
  * account gh has active on the host:
- *  - an origin that is not a github.com repository: the identity does not apply, gh runs as it is;
- *  - an exported `GH_TOKEN`: it wins, as in the script (gh reads it itself);
- *  - a configured identity (the repository's pin, the setting, else `GH_ACCOUNT`, {@link pushIdentityOf}): that
- *    account's own token from gh's keyring (`gh auth token --user`) rides this one call with `GH_HOST`/`GH_REPO`
- *    pinned to the origin. gh holding no token for it is a failed read that names the account, never a silent
- *    fall back to the active login;
- *  - none configured: gh's own login, as before.
- * `identity` is read per call (settings change at run time). The origin is the registered checkout's, read per call.
+ *  - an exported `GH_TOKEN` wins, as in the script; with no identity configured, gh's own login reads;
+ *  - on a github.com origin the call is pinned to it (`GH_HOST`/`GH_REPO`, so an inherited `GH_REPO` cannot point
+ *    the read at another repository), and a configured identity (the repository's pin, the setting, else
+ *    `GH_ACCOUNT`, {@link pushIdentityOf}) reads with that account's own token from gh's keyring
+ *    (`gh auth token --user`), passed to this one call only;
+ *  - an origin read as absent or not github.com: the identity does not apply, gh runs as it is;
+ *  - with an identity configured, an origin that cannot be read, or gh holding no token for the account, is a failed
+ *    read that says so, never a silent read as the active login.
+ * `identity` is read per call (settings change at run time); so is the registered checkout's origin.
  */
 export function pinnedGhExec(
   identity: () => Promise<string | null>,
@@ -437,17 +438,24 @@ export function pinnedGhExec(
   env: NodeJS.ProcessEnv = process.env,
 ): GhExec {
   return async (args, opts) => {
-    const repo = githubRepoOf(await readDeliverOriginUrl(opts.cwd).catch(() => null));
-    if (repo === null || (env['GH_TOKEN'] ?? '').trim() !== '') return exec(args, opts);
-    const login = await identity().catch(() => null);
-    if (login === null || login === '') return exec(args, opts);
-    if (!isGitHubLogin(login)) return { stdout: '', stderr: `the deliver identity ${JSON.stringify(login.slice(0, 60))} is not a GitHub login`, code: 1 };
+    const exported = (env['GH_TOKEN'] ?? '').trim() !== '';
+    const login = exported ? null : (await identity().catch(() => null)) || null;
+    if (!exported && login === null) return exec(args, opts);
+    if (login !== null && !isGitHubLogin(login)) return { stdout: '', stderr: `the deliver identity ${JSON.stringify(login.slice(0, 60))} is not a GitHub login`, code: 1 };
+    const origin = await readDeliverOriginUrl(opts.cwd).catch(() => null);
+    if (origin === null && login !== null) {
+      return { stdout: '', stderr: `could not read the repository's origin, so the read cannot be pinned to the deliver identity ${login}`, code: 1 };
+    }
+    const repo = githubRepoOf(origin);
+    if (repo === null) return exec(args, opts);
+    const pin = { GH_HOST: 'github.com', GH_REPO: `github.com/${repo}` };
+    if (login === null) return exec(args, { ...opts, env: { ...opts.env, ...pin } });
     const read = await exec(['auth', 'token', '--hostname', 'github.com', '--user', login], { cwd: opts.cwd, timeoutMs: opts.timeoutMs });
     const token = read.code === 0 ? read.stdout.trim() : '';
     if (token === '') {
       return { stdout: '', stderr: `gh holds no token for ${login} on this machine and no GH_TOKEN is exported, so it cannot read as the deliver identity`, code: 1 };
     }
-    return exec(args, { ...opts, env: { ...opts.env, GH_TOKEN: token, GH_HOST: 'github.com', GH_REPO: `github.com/${repo}` } });
+    return exec(args, { ...opts, env: { ...opts.env, ...pin, GH_TOKEN: token } });
   };
 }
 

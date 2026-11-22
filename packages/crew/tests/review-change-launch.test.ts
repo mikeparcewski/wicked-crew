@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import type { GhExec } from '../src/core/deliver.js';
 import { registerRoutes, type RuntimeDeps } from '../src/api/routes.js';
 import { AuditLog } from '../src/api/audit.js';
@@ -23,9 +23,15 @@ const BODY = { workflow: 'review-change', repoRef: 'repo', problem: 'review #12'
 const AUTHOR = { key: 'claude', work_eligible: true, council_eligible: true };
 const REVIEWER = { key: 'codex', work_eligible: true, council_eligible: true };
 const apps: FastifyInstance[] = [];
+// The PR read is pinned per the daemon's environment (crew#1792): these cases run as a daemon with none exported.
+beforeEach(() => {
+  vi.stubEnv('GH_TOKEN', '');
+  vi.stubEnv('GH_ACCOUNT', '');
+});
 afterEach(async () => {
   for (const app of apps.splice(0)) await app.close();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 /** Reuse the revision route's fake adapter seam: inspect exactly what the engine would receive. */
@@ -192,8 +198,6 @@ describe('review-change launch', () => {
   });
 
   it('reads a private PR as the repository\'s push identity, not gh\'s active account (crew#1792)', async () => {
-    vi.stubEnv('GH_TOKEN', '');
-    vi.stubEnv('GH_ACCOUNT', '');
     const root = mkdtempSync(join(tmpdir(), 'crew-1792-route-'));
     try {
       execFileSync('git', ['init', '-q', root]);
@@ -213,7 +217,6 @@ describe('review-change launch', () => {
       expect(gh).toHaveBeenCalledWith(['pr', 'view', '12', '--json', 'headRefName,headRefOid,url,state,isCrossRepository'],
         { cwd: root, timeoutMs: 5000, env: { GH_TOKEN: 'gho_deliverbot', GH_HOST: 'github.com', GH_REPO: 'github.com/org/repo' } });
     } finally {
-      vi.unstubAllEnvs();
       rmSync(root, { recursive: true, force: true });
     }
   });
