@@ -1046,8 +1046,7 @@ export function registerDemoDocumentRoute(app: FastifyInstance, adapter: CoreAda
     { config: { manifest: { responseType: 'DemoDocumentResponse', statusCodes: [200, 404, 409, 502, 503] } } },
     async (req, reply) => {
       const { id } = req.params as { id: string };
-      const views = await adapter.sessionsDetail();
-      const run = views.find((v) => v.session.id === id);
+      const run = await adapter.runView(id);
       if (run === undefined || !isDemoRun(run)) return reply.code(404).send({ error: 'no demo run with that id' });
       let pending = inFlight.get(id);
       if (pending === undefined) {
@@ -1107,9 +1106,9 @@ export function registerDemoRoutes(app: FastifyInstance, adapter: CoreAdapter, l
   // (a double click) joins the encode in flight; a different poster frame is refused until it ends,
   // so two encodes never race to replace the same file.
   const exportsInFlight = new Map<string, { atSec: number | undefined; answer: Promise<DemoExportAnswer> }>();
+  // crew#1775: studio's recording reader polls the demo view; it reads its run alone, never a fold of the store.
   const demoRun = async (id: string): Promise<SessionView | null> => {
-    const views = await adapter.sessionsDetail();
-    const run = views.find((v) => v.session.id === id);
+    const run = await adapter.runView(id);
     return run !== undefined && isDemoRun(run) ? run : null;
   };
   // A run launched from the demo preset stays one, and the file route needs nothing else from it: the

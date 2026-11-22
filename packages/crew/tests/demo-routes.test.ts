@@ -24,6 +24,7 @@ import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { LaunchRunInput } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 import { assertWickedRootsOutsideStateHome, StateHomePlacementError } from '../src/projects/state-home-preflight.js';
 
 function buildApp(adapter: Record<string, unknown>): FastifyInstance {
@@ -88,13 +89,13 @@ describe('the Demo experience routes', () => {
     launchRun = vi.fn(async (input: LaunchRunInput) => input.sessionId);
     sessionsDetail = vi.fn().mockResolvedValue([]);
     workOutput = vi.fn().mockResolvedValue(null);
-    app = buildApp({
+    app = buildApp(withRunViews({
       launchRun,
       sessionsDetail,
       workOutput,
       listRepos: vi.fn().mockResolvedValue([]),
       projectMembers: vi.fn().mockResolvedValue([]),
-    });
+    }));
     await app.ready();
   });
 
@@ -449,7 +450,7 @@ describe('the Demo experience routes', () => {
     expect(range.statusCode).toBe(416);
   });
 
-  it('the file route reads the run list once per demo run, not once per Range request', async () => {
+  it('the file route reads the run once per demo run, not once per Range request', async () => {
     reviewedRoot('c1');
     sessionsDetail.mockResolvedValue([demoRun('c1', 'review', 'awaiting_human')]);
     for (const range of ['bytes=0-3', 'bytes=4-7', 'bytes=8-9']) {
@@ -579,13 +580,13 @@ describe('the demo root follows the daemon state home, never the operator HOME (
     process.env.HOME = fakeHome;
     launchRun = vi.fn(async (input: LaunchRunInput) => input.sessionId);
     sessionsDetail = vi.fn().mockResolvedValue([]);
-    app = buildApp({
+    app = buildApp(withRunViews({
       launchRun,
       sessionsDetail,
       workOutput: vi.fn().mockResolvedValue(null),
       listRepos: vi.fn().mockResolvedValue([]),
       projectMembers: vi.fn().mockResolvedValue([]),
-    });
+    }));
     await app.ready();
   });
 

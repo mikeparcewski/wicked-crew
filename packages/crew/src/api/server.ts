@@ -165,7 +165,7 @@ import type { SearchService } from './search-routes.js';
 import { callEstateTool } from '../core/estate-mcp-client.js';
 import { seatParser } from '../standing-orders/parse.js';
 import { registerGateHistoryRoute, runBand, runPreset, runProject } from '../standing-orders/history.js';
-import { WorkingDocService, workingDocStep } from '../working-doc/service.js';
+import { WorkingDocService, workingDocStep, type RunFacts } from '../working-doc/service.js';
 import { PersonNotesIndex } from '../working-doc/notes-index.js';
 import { WorkingDocStore } from '../working-doc/store.js';
 import { isWorkingDoc as isWorkingDocAt } from '../interactive/chat-events.js';
@@ -3165,8 +3165,8 @@ export async function createServer(
   // `phase-report` — and the steering notes a person's edits of it become. Steering rides the engine's operator
   // inject only; nothing here answers a gate.
   const workingDocNotes = new PersonNotesIndex();
-  // The working documents read the run views (the engine's whole-store fold) at most once per 2 s between them: the
-  // catch-up and a burst of syncs share one read instead of one each (crew#944: run reads must stay fast).
+  // The working documents' live-run enumeration reads the run views (the engine's whole-store fold) at most once per 2 s:
+  // the catch-up shares one read instead of one each (crew#944: run reads must stay fast). One run is read alone (`run`).
   let workingDocViewsRead: { at: number; views: Promise<SessionView[]> } | null = null;
   const workingDocViews = (): Promise<SessionView[]> => {
     if (workingDocViewsRead === null || Date.now() - workingDocViewsRead.at > 2_000) {
@@ -3196,20 +3196,7 @@ export async function createServer(
       // (context-doc-switch) The person's Goal, Approach and Constraints as the engine's context block.
       setRunContext: (runId, ctx) => adapter.setRunContext(runId, ctx),
     },
-    run: async (runId) => {
-      const v = (await workingDocViews()).find((x) => x.session.id === runId);
-      if (v === undefined) return null;
-      return {
-        title: workingDocTitle(v.session.problem),
-        problem: v.session.problem ?? '',
-        projectId: runProject(v, runId, (id) => membershipIndex.projectOf(id)) ?? WORKING_DOC_DEFAULT_PROJECT,
-        terminal: ['completed', 'cancelled', 'failed'].includes(v.session.status),
-        stepOf: (ord) => workingDocStep(v.units.find((x) => x.ord === ord)),
-        power: v.session.power != null,
-        // The run's current plan (the engine's unit list): what a phased run's Approach says once its plan settles.
-        steps: v.units.map((u) => ({ ord: u.ord, name: workingDocStep(u), seat: u.assigned_cli ?? null })),
-      };
-    },
+    run: (runId) => workingDocRunFacts(adapter, (id) => membershipIndex.projectOf(id), runId),
     // A person's answers with their words (crew's own trail: the engine's log does not say who, or why), from memory,
     // once the start-up read of the trail is in (so a line never lands ahead of an older one).
     notes: async (runId) => { await workingDocNotesRead; return workingDocNotes.of(runId); },
@@ -3375,6 +3362,30 @@ export interface StartedServer {
 }
 
 /** The URL a worker on this host reaches the daemon at: a wildcard bind is reached on loopback. */
+/**
+ * What a run's working document needs to know about the run. crew#1775: one run as the engine holds it now, never a
+ * search of a shared list of every run, which a run launched after the list was read is missing from (its document
+ * would then never be made) and which costs a fold of the whole store.
+ */
+export async function workingDocRunFacts(
+  adapter: Pick<CoreAdapter, 'runView'>,
+  projectOf: (id: string) => string | undefined,
+  runId: string,
+): Promise<RunFacts | null> {
+  const v = await adapter.runView(runId);
+  if (v === undefined) return null;
+  return {
+    title: workingDocTitle(v.session.problem),
+    problem: v.session.problem ?? '',
+    projectId: runProject(v, runId, projectOf) ?? WORKING_DOC_DEFAULT_PROJECT,
+    terminal: ['completed', 'cancelled', 'failed'].includes(v.session.status),
+    stepOf: (ord) => workingDocStep(v.units.find((x) => x.ord === ord)),
+    power: v.session.power != null,
+    // The run's current plan (the engine's unit list): what a phased run's Approach says once its plan settles.
+    steps: v.units.map((u) => ({ ord: u.ord, name: workingDocStep(u), seat: u.assigned_cli ?? null })),
+  };
+}
+
 export function brokerUrlFor(host: string, port: number): string {
   const h = host === '0.0.0.0' || host === '' ? '127.0.0.1' : host === '::' ? '::1' : host;
   return `http://${h.includes(':') ? `[${h}]` : h}:${port}`;

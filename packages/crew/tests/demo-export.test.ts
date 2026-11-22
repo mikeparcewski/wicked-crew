@@ -27,6 +27,7 @@ import type { z } from '../src/zod.js';
 import type { DemoExportBody, DemoExportResponse } from 'wicked-crew-api-types';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 // Compile-time pin (typecheck): every body the contract lets a client send, the route's schema accepts.
 type ContractBodyAccepted = DemoExportBody extends z.input<typeof DemoExportSchema> ? true : never;
@@ -154,12 +155,12 @@ describe('POST /runs/:id/demo/export (EP-C3)', { timeout: 30_000 }, () => {
     delete process.env.FAKE_FFMPEG_MODE;
     delete process.env.FAKE_FFMPEG_SLEEP_MS;
     sessionsDetail = vi.fn().mockResolvedValue([demoRun('d1'), demoRun('nd', 'bug'), demoRun('rec', 'demo', true)]);
-    app = buildApp({
+    app = buildApp(withRunViews({
       sessionsDetail,
       workOutput: vi.fn().mockResolvedValue(null),
       listRepos: vi.fn().mockResolvedValue([]),
       projectMembers: vi.fn().mockResolvedValue([]),
-    });
+    }));
     await app.ready();
   });
 

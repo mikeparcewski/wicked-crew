@@ -11,7 +11,9 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { CoreAdapter } from '../src/core/adapter.js';
+import { CoreAdapter, RUN_READS_IN_FLIGHT } from '../src/core/adapter.js';
+import { registerDemoRoutes } from '../src/api/recording.js';
+import { workingDocRunFacts } from '../src/api/server.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -136,3 +138,52 @@ describe('crew#1775: the other per-run reads on a page load or a gate also read 
     expect(oneRunReads).toBe(2);
   });
 });
+
+describe('crew#1775 review: the demo view, the working document and the read bound', () => {
+  it('the demo view (polled by the recording reader) reads its one run', async () => {
+    const app = Fastify({ logger: false });
+    registerDemoRoutes(app, adapter, vi.fn() as never);
+    await app.ready();
+    try {
+      frame({ type: 'unitStarted', session: 'run-120', ord: 1 });
+      const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-3/demo' });
+      expect(res.statusCode).toBe(404); // run-3 is no demo run
+      expect(folds).toBe(0);
+      expect(oneRunReads).toBe(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('a working document sees a run launched after any list was read, without a fold', async () => {
+    await adapter.sessionsDetail(); // a list read, before the run exists
+    store.push(parkedRun('run-new'));
+    const facts = await workingDocRunFacts(adapter, () => undefined, 'run-new');
+    expect(facts?.title).toBeTruthy();
+    expect(facts?.terminal).toBe(false);
+    expect(await workingDocRunFacts(adapter, () => undefined, 'no-such-run')).toBeNull();
+    expect(folds).toBe(1);
+  });
+
+  it(`at most ${RUN_READS_IN_FLIGHT} one-run reads are in the engine at once; a waiting one starts when a slot frees`, async () => {
+    const started: string[] = [];
+    const release: Array<(ok: boolean) => void> = [];
+    core()['sessionDetail'] = (id: string) => new Promise<string>((resolve, reject) => {
+      started.push(id);
+      release.push((ok) => (ok ? resolve(JSON.stringify(store.find((v) => v.session['id'] === id) ?? null)) : reject(new Error('read failed'))));
+    });
+    const reads = Array.from({ length: 10 }, (_, i) => adapter.runView(`run-${i}`).then((v) => v?.session.id, () => 'failed'));
+    await new Promise((r) => setImmediate(r));
+    expect(started).toHaveLength(RUN_READS_IN_FLIGHT);
+    release.shift()!(false); // a failed read frees its slot too
+    await new Promise((r) => setImmediate(r));
+    expect(started).toHaveLength(RUN_READS_IN_FLIGHT + 1);
+    while (started.length < 10 || release.length > 0) {
+      release.shift()?.(true);
+      await new Promise((r) => setImmediate(r));
+    }
+    expect(await Promise.all(reads)).toStrictEqual(['failed', ...Array.from({ length: 9 }, (_, i) => `run-${i + 1}`)]);
+    expect(started).toStrictEqual(Array.from({ length: 10 }, (_, i) => `run-${i}`));
+  });
+});
+
