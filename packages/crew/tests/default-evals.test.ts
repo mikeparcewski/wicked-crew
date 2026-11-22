@@ -26,7 +26,8 @@ import {
 import { archetypeAdapter, type ReplaySet } from '../src/evals/replay.js';
 import { registerDefaultEvalRoutes } from '../src/evals/routes.js';
 import { previousScores, runDefaultEvals } from '../src/evals/runner.js';
-import { fillRunEvalsWorkflow, loadRunEvalsWorkflow, prepareRunEvalsLaunch } from '../src/evals/workflow.js';
+import { fillRunEvalsWorkflow, loadRunEvalsWorkflow, prepareRunEvalsLaunch, runEvalsScopeOf } from '../src/evals/workflow.js';
+import { servedFor } from '../src/workflow-catalog/shape.js';
 import type { LaunchRunInput } from '../src/core/types.js';
 import { registerRunEvals } from '../src/api/server.js';
 import { captureArchetypeCases } from '../src/evals/capture.js';
@@ -43,7 +44,9 @@ import { RIG_SEED } from '../src/evals/seed-rig.js';
 import { calibration, rate, trendOf } from '../src/evals/stats.js';
 import { DefaultEvalStore } from '../src/evals/store.js';
 import { generateSynthetic } from '../src/evals/synthetic.js';
-import type { DefaultEvalReport, EvalCase } from '../src/evals/types.js';
+import { SUITE_IDS, type DefaultEvalReport, type EvalCase } from '../src/evals/types.js';
+import { CATALOG_V2_CARDS } from '../src/workflow-catalog/catalog-data-v2.js';
+import type { CardSeedV2 } from '../src/workflow-catalog/seeds-v2.js';
 
 const NO_REPLAY: ReplaySet = { adapters: {}, missing: {} };
 
@@ -632,6 +635,84 @@ describe('the run-evals workflow (data)', () => {
     const report = JSON.parse(readFileSync(join(dir, launched[0]!.sessionId, 'report.json'), 'utf8')) as DefaultEvalReport;
     expect(report.project).toBeNull();
     expect(report.suites.length).toBe(9);
+    await app.close();
+  });
+});
+
+describe('a card launch of run-evals scores what its card asks for (crew#1375)', () => {
+  it('Evaluate rules scores the steering suite; a card with a project input scores the launch\'s project; no card scores all', () => {
+    expect(runEvalsScopeOf('evaluate-rules', null)).toEqual({ project: null, suites: ['steering'] });
+    expect(runEvalsScopeOf('evaluate-rules', 'p1')).toEqual({ project: 'p1', suites: ['steering'] });
+    expect(runEvalsScopeOf('analyze-runs', 'p1')).toEqual({ project: 'p1' });
+    // Unfiled (the default project) and no project are every project.
+    expect(runEvalsScopeOf('analyze-runs', 'default')).toEqual({ project: null });
+    expect(runEvalsScopeOf('analyze-runs', null)).toEqual({ project: null });
+    // No card (a schedule, /workflow-run-evals) or an unknown one: everything, as before.
+    expect(runEvalsScopeOf(null, 'p1')).toEqual({ project: null });
+    expect(runEvalsScopeOf('no-such-card', 'p1')).toEqual({ project: null });
+  });
+
+  it('every card names only known eval suites; a card that names none it knows is refused, never widened to all', () => {
+    for (const c of CATALOG_V2_CARDS) for (const s of c.evalSuites ?? []) expect(SUITE_IDS as readonly string[], c.id).toContain(s);
+    const cards = CATALOG_V2_CARDS as CardSeedV2[];
+    const base = cards.find((c) => c.id === 'evaluate-rules')!;
+    cards.push({ ...base, id: 'renamed-suite-card', evalSuites: ['no-such-suite'] });
+    try {
+      expect(() => runEvalsScopeOf('renamed-suite-card', null)).toThrow(/names no known eval suite \(no-such-suite\)/u);
+      // A known suite beside an unknown one still scopes to the known one.
+      cards[cards.length - 1] = { ...base, id: 'renamed-suite-card', evalSuites: ['no-such-suite', 'steering'] };
+      expect(runEvalsScopeOf('renamed-suite-card', null)).toEqual({ project: null, suites: ['steering'] });
+    } finally {
+      cards.splice(cards.findIndex((c) => c.id === 'renamed-suite-card'), 1);
+    }
+  });
+
+  it('the default problem line names the scope', async () => {
+    const dir = tmp();
+    const report = (await runDefaultEvals({ id: 'e1', now: new Date(0), project: null, cases: [], replay: NO_REPLAY, previous: {}, suites: ['steering'] })).report;
+    const input = { problem: '', sessionId: 'run-s', clisJson: '[]' } as unknown as LaunchRunInput;
+    await prepareRunEvalsLaunch(input, async () => report, dir, { project: 'p1', suites: ['steering'] });
+    expect(input.problem).toBe('Run the steering evals for project p1');
+  });
+
+  it('POST /runs with an Evaluate rules or Analyze runs shape scores its scope; with no shape, every suite and project', async () => {
+    const dir = tmp();
+    const launched: LaunchRunInput[] = [];
+    const def = loadRunEvalsWorkflow({ node: 'node', runCli: 'run-cli.js', runsDir: dir });
+    const adapter = {
+      sessionsDetail: vi.fn(async () => []),
+      sessions: vi.fn(async () => []),
+      runEvents: vi.fn(async () => []),
+      listWorkflows: vi.fn(() => [def]),
+      listPresets: vi.fn(async () => []),
+      catalog: vi.fn(async () => []),
+      launchRun: vi.fn(async (input: LaunchRunInput) => { launched.push(input); return input.sessionId; }),
+    } as unknown as CoreAdapter;
+    const app = Fastify({ logger: false });
+    registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: new AuditLog(join(dir, 'audit.log'), () => undefined), authMode: 'off' }, { evalRunsDir: dir });
+    const reads = { defs: () => [def], presets: async () => [], entries: async () => [] };
+    const launch = async (card: string, projectId?: string): Promise<DefaultEvalReport> => {
+      const catalogRev = (await servedFor(reads, projectId)).rev;
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/v1/runs',
+        payload: { problem: 'How do the rules do?', workflow: 'run-evals', shape: { card, option: null, depth: null, by: 'person', catalogRev }, ...(projectId !== undefined ? { projectId } : {}) },
+      });
+      expect(res.statusCode, res.body).toBe(201);
+      return JSON.parse(readFileSync(join(dir, launched[launched.length - 1]!.sessionId, 'report.json'), 'utf8')) as DefaultEvalReport;
+    };
+    const rules = await launch('evaluate-rules');
+    expect(rules.suites.map((x) => x.suite)).toEqual(['steering']);
+    expect(rules.project).toBeNull();
+    const runs = await launch('analyze-runs', 'p1');
+    expect(runs.project).toBe('p1');
+    expect(runs.suites.length).toBe(9);
+    // No shape (a schedule, /workflow-run-evals), even filed in a project: every suite, every project, as before.
+    const bare = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'Run the default evals', workflow: 'run-evals', projectId: 'p1' } });
+    expect(bare.statusCode, bare.body).toBe(201);
+    const all = JSON.parse(readFileSync(join(dir, launched[launched.length - 1]!.sessionId, 'report.json'), 'utf8')) as DefaultEvalReport;
+    expect(all.project).toBeNull();
+    expect(all.suites.length).toBe(9);
     await app.close();
   });
 });

@@ -3,7 +3,7 @@
 // is what the launch does — and both are what the launch route did before the decision was lifted out of it
 // (`mainSays`, the rules restated here independently of the code under test).
 
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -263,6 +263,68 @@ describe('POST /runs/preview == POST /runs (studio#1150)', () => {
       if (armed === undefined) delete process.env['WICKED_CREW_SYSTEM_SETTINGS'];
       else process.env['WICKED_CREW_SYSTEM_SETTINGS'] = armed;
     }
+  });
+
+  it('(crew#1375) a refusal after the review was prepared records it as refused, so a retry under the same run id prepares again', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'posture-review-retry-'));
+    const store = new InsightsStore(join(root, 'insights.json'));
+    const service = new ReviewService({
+      store,
+      adapter: { sessionsDetail: async () => [], runEvents: async () => [], seatsForWorkflow: async () => [{ key: 'claude' }] },
+      reviewsDir: join(root, 'reviews'),
+      estateTool: async () => ({}),
+      log: () => undefined,
+    });
+    const docs = join(root, 'run-documents');
+    const { app, adapter } = await daemon({ supports: false, setting: undefined, deliverDefault: 'none' }, {
+      reviewLaunch: async (input: LaunchRunInput) => { await service.prepareLaunch(input, { trigger: 'manual' }); },
+      reviewLaunchRefused: (runId: string, reason: string) => service.launchRefused(runId, reason),
+      runDocumentsRoot: docs,
+    });
+    adapter['sessions'] = vi.fn().mockResolvedValue(['run-0']);
+    // The earlier run's staged documents can't be read again: the launch is refused after the review was prepared.
+    mkdirSync(join(docs, 'run-0', 'records'), { recursive: true });
+    writeFileSync(join(docs, 'run-0', 'records', 'MANIFEST.json'), '{}');
+    const body = { problem: 'x', clisJson: '[]', workflow: 'review-recent-work', sessionId: 'rev-retry', retryOf: 'run-0' };
+    const refused = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: body });
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().code).toBe('documents_unavailable');
+    expect(adapter.launchRun!).not.toHaveBeenCalled();
+    expect(store.get('rev-retry')).toMatchObject({ status: 'failed', error: expect.stringMatching(/^the launch was refused: the documents of run run-0/u) });
+    // The cause is gone; the same run id is prepared again and launches.
+    rmSync(join(docs, 'run-0'), { recursive: true, force: true });
+    const retried = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: body });
+    expect(retried.statusCode, retried.body).toBe(201);
+    expect(adapter.launchRun!).toHaveBeenCalledTimes(1);
+    expect(store.get('rev-retry')).toMatchObject({ status: 'running', error: null });
+  });
+
+  it('(crew#1375) a failure after the engine took the review leaves it running: a retry under its id is refused', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'posture-review-taken-'));
+    const store = new InsightsStore(join(root, 'insights.json'));
+    const service = new ReviewService({
+      store,
+      adapter: { sessionsDetail: async () => [], runEvents: async () => [], seatsForWorkflow: async () => [{ key: 'claude' }] },
+      reviewsDir: join(root, 'reviews'),
+      estateTool: async () => ({}),
+      log: () => undefined,
+    });
+    const { app, adapter } = await daemon({ supports: false, setting: undefined, deliverDefault: 'none' }, {
+      reviewLaunch: async (input: LaunchRunInput) => { await service.prepareLaunch(input, { trigger: 'manual' }); },
+      reviewLaunchRefused: (runId: string, reason: string) => service.launchRefused(runId, reason),
+      // A skills seam that admits the launch and then fails the answer's garden read (after the engine took the run).
+      skills: { health: () => ({ findings: [] }), baseSkill: () => null, installedAheadFinding: async () => { throw new Error('the garden could not be read'); } } as never,
+    });
+    const body = { problem: 'x', clisJson: '[]', workflow: 'review-recent-work', sessionId: 'rev-taken' };
+    const first = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: body });
+    expect(first.statusCode).not.toBe(201);
+    expect(adapter.launchRun!).toHaveBeenCalledTimes(1);
+    expect(store.get('rev-taken')).toMatchObject({ status: 'running', error: null });
+    expect(existsSync(join(root, 'reviews', 'rev-taken'))).toBe(true);
+    const retried = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: body });
+    expect(retried.statusCode).toBe(409);
+    expect(retried.json().error).toMatch(/already recorded/u);
+    expect(adapter.launchRun!).toHaveBeenCalledTimes(1);
   });
 
   it('a run review on a daemon that does not prepare it is an ordinary launch: delivery as resolved', async () => {
