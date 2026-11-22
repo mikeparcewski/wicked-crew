@@ -367,6 +367,16 @@ describe('cost routing consults the seat (crew#1452)', () => {
     // With no seat reading, the words lead with the price of new work, never sure.
     expect(shape(detect({ text: t, seat: null, source: 'classify', catalogRev: 'r' }).guess)).toEqual(['estimate-price', 'likely']);
     expect(shape(chat(t, null))).toEqual(['estimate-price', 'likely']);
+    // A price given as context after a run budget question does not make it the price of new work (xreview r1): the
+    // words lead with the run cost model and, with the signal mixed, ask the seat rather than decide alone.
+    const budget = "Model our monthly cost budget for runs. Use last month's unit price.";
+    expect(costCardOf(budget)).toBe('run-cost');
+    expect(shape(chat(budget, null))[0]).toBe('run-cost');
+    expect(classifyPathSync({ text: budget, catalogRev: 'r' }, null).guess.card).toBe('run-cost');
+    expect(classifyPathSync({ text: budget, catalogRev: 'r' }, { card: 'run-cost', confidence: 0.9 }).guess.card).toBe('run-cost');
+    const later = 'How much would it cost per month? We need a quote for the partner portal.';
+    expect(wordsLayer(later).sure).toBe(false);
+    expect(classifyPathSync({ text: later, catalogRev: 'r' }, { card: 'estimate-price', confidence: 0.9 })).toMatchObject({ asked: true, guess: { card: 'estimate-price' } });
     // A forecast of run volume is still the run cost model's, decided by the words where they were sure before.
     expect(classifyPathSync({ text: 'What would 40 bug fixes a month cost?', catalogRev: 'r' }, { card: 'bug', confidence: 0.95 }).guess.card).toBe('run-cost');
   });
@@ -379,8 +389,14 @@ describe('cost routing consults the seat (crew#1452)', () => {
       const g = door === 'chat' ? chat(t, { card: 'bug', confidence: 0.95 }) : classifyPathSync({ text: t, catalogRev: 'r' }, { card: 'bug', confidence: 0.95 }).guess;
       expect(shape(g), door).toEqual(['run-cost', 'likely']);
     }
-    // The question itself about past spend is still Review recent work's (and a decimal is not a sentence end).
+    // The question itself about past spend is still Review recent work's (and a decimal or a dotted name is not a
+    // sentence end; xreview r1).
     expect(costAsked('estimate our spend on bug fixes last month')).toBe(false);
+    for (const dotted of ['Estimate our spend on .NET bug fixes last month', 'Estimate our spend on Node.js upgrades last month']) {
+      expect(costAsked(dotted), dotted).toBe(false);
+      expect(chat(dotted, { card: 'review-recent-work', confidence: 0.9 }).card, dotted).toBe('review-recent-work');
+      expect(classifyPathSync({ text: dotted, catalogRev: 'r' }, { card: 'review-recent-work', confidence: 0.9 }).guess.card, dotted).toBe('review-recent-work');
+    }
     expect(costAsked('What would 1.5 bug fixes a month have cost last month?')).toBe(false);
     expect(costAsked('What would 1.5 bug fixes a month cost?')).toBe(true);
   });

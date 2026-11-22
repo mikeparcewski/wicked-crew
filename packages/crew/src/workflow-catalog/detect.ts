@@ -332,8 +332,12 @@ const PRICE_OF_WORK = /\bcosts?\s+(?:us\s+)?to\s+(?:build|create|develop|impleme
 /** The cards that answer a cost question: the run cost model (the default answer), and the price of new work. */
 export const COST_CARDS: readonly string[] = ['run-cost', 'estimate-price'];
 
-/** The opening sentence: the words up to the first sentence end (a decimal point is not one). */
-const OPENING_SENTENCE = /^(?:[^.?!;]|\.(?=\d))*/u;
+/**
+ * The opening sentence: the words up to the first sentence end, a `.`, `?`, `!` or `;` followed by a space or the end
+ * (a decimal point, `.NET` or `Node.js` is not one; xreview r1).
+ */
+const OPENING_SENTENCE = /^(?:[^.?!;]|[.?!;](?!\s|$))*/u;
+const openingOf = (text: string): string => OPENING_SENTENCE.exec(text)?.[0] ?? text;
 
 /**
  * Whether the words open with a question about what work will cost (then a card that does not answer a cost is never
@@ -342,21 +346,27 @@ const OPENING_SENTENCE = /^(?:[^.?!;]|\.(?=\d))*/u;
  * context after it ("What would 40 bug fixes a month cost? Use last month as the baseline.") leaves it a forecast.
  */
 export function costAsked(text: string): boolean {
-  return COST_ASK.test(text) && !PAST_SPEND.test(OPENING_SENTENCE.exec(text)?.[0] ?? text);
+  return COST_ASK.test(text) && !PAST_SPEND.test(openingOf(text));
 }
 
-/** The cost card a cost question leads with: the price of new work, else the run cost model. */
+/**
+ * The cost card a cost question leads with: the price of new work, else the run cost model. Read from the question
+ * itself (the opening sentence), so a price given as context ("Use last month's unit price.") does not turn a run
+ * budget into the price of new work (xreview r1).
+ */
 export function costCardOf(text: string): string {
-  return PRICE_OF_WORK.test(text) ? COST_CARDS[1]! : COST_CARDS[0]!;
+  return PRICE_OF_WORK.test(openingOf(text)) ? COST_CARDS[1]! : COST_CARDS[0]!;
 }
 
 /**
  * Whether the words ask a cost question that the OTHER cost card answers (crew#1452): "How much would it cost to build a
- * checkout page?" ranks the run cost model on its cost words, but it asks the price of new work. The words then do not
- * decide alone; the seat reads it.
+ * checkout page?" ranks the run cost model on its cost words, but it asks the price of new work. Price words only in the
+ * context after the question are a mixed signal too ("How much would it cost per month? We need a quote for the portal."). The words
+ * then do not decide alone; the seat reads it.
  */
 export function costCardConflict(text: string, card: string): boolean {
-  return COST_CARDS.includes(card) && costAsked(text) && costCardOf(text) !== card;
+  if (!COST_CARDS.includes(card) || !costAsked(text)) return false;
+  return costCardOf(text) !== card || PRICE_OF_WORK.test(text) !== PRICE_OF_WORK.test(openingOf(text));
 }
 
 /**
