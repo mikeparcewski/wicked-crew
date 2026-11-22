@@ -1525,6 +1525,7 @@ export async function createServer(
   const runLearnings = new RunLearningsService({
     adapter: {
       sessionsDetail: () => adapter.sessionsDetail(),
+      runView: (id) => adapter.runView(id),
       runEvents: (id) => adapter.runEvents(id),
       seatsForWorkflow: (id) => adapter.seatsForWorkflow(id),
       launchRun: (input) => adapter.launchRun(input),

@@ -120,7 +120,10 @@ export interface SubmitArgs {
 
 export interface RunLearningsDeps {
   adapter: {
+    /** Every run (recovery's one pass over the learnings directory). */
     sessionsDetail(): Promise<SessionView[]>;
+    /** One run as the engine holds it now (crew#1775: a sweep reads its run alone, never a fold of the store). */
+    runView(runId: string): Promise<SessionView | undefined>;
     runEvents(runId: string): Promise<LooseEvent[] | null>;
     seatsForWorkflow(workflowId: string): Promise<unknown[]>;
     launchRun(input: LaunchRunInput): Promise<string>;
@@ -312,7 +315,7 @@ export class RunLearningsService {
   }
 
   private async viewOf(runId: string): Promise<SessionView | null> {
-    return (await this.deps.adapter.sessionsDetail()).find((v) => v.session.id === runId) ?? null;
+    return (await this.deps.adapter.runView(runId)) ?? null;
   }
 
   private async sweepOnce(runId: string, phase: 'checkpoint' | 'end'): Promise<void> {
