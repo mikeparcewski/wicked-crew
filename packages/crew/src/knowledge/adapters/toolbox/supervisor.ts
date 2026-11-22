@@ -136,8 +136,9 @@ export class ToolboxProcess {
   private idleTimer: NodeJS.Timeout | null = null;
   private settle: () => void = () => undefined;
   /**
-   * Resolves once nothing of this process is left: it has exited and its run directory is removed (or it never
-   * spawned and its directory is removed). A shutdown awaits it before the state home goes (crew#1752).
+   * Resolves once the process has exited (or never spawned) and the removal of its run directory has finished: from
+   * then on nothing of it writes under the run root. A removal that fails is not retried (as before), so the directory
+   * can outlive it then. A shutdown awaits this before the state home goes (crew#1752).
    */
   readonly closed: Promise<void> = new Promise((resolve) => {
     this.settle = resolve;
@@ -190,6 +191,8 @@ export class ToolboxProcess {
       // crew#495: every crew child routes its env through the boot-value helper; the adapter then gets no store at all.
       const childEnv = childEnvWithBootEstateDb(env);
       delete childEnv[ESTATE_DB_ENGINE_ENV];
+      // Stopped while its files were written (crew#1752: a shutdown began): it never spawns.
+      if (this.stopping) throw new ToolboxCallError('adapter_exited', 'the Toolbox process was stopped before it started');
       child = spawn(this.bin, ['--stdio', '--config', config, '--disable-reload', '--disable-version-check', '--log-level', 'ERROR'], {
         cwd: this.runDir,
         env: childEnv,
@@ -457,12 +460,15 @@ export class ToolboxSupervisor {
   private readonly procs = new Map<string, Slot>();
   /** Every process this supervisor made that is not yet `closed` (a replaced generation still exiting included). */
   private readonly live = new Set<ToolboxProcess>();
-  /** The previews (`once`) in flight: each stops its own process when it ends. */
-  private readonly previews = new Set<Promise<unknown>>();
+  /** Set by `stopAll`: from then on no process is made (crew#1752). */
+  private stopping: Promise<void> | null = null;
 
   constructor(private readonly deps: SupervisorDeps) {}
 
-  private track(p: ToolboxProcess): ToolboxProcess {
+  /** Every process is made here, so a stop sees all of them: none once `stopAll` has begun. */
+  private make(bin: string, dir: string, doc: ToolboxDocument, secret: string | null, onGone: (p: ToolboxProcess) => void): ToolboxProcess {
+    if (this.stopping !== null) throw new ToolboxCallError('adapter_exited', 'crew is stopping its Toolbox adapters');
+    const p = new ToolboxProcess(bin, dir, doc, secret, this.deps.idleMs ?? TOOLBOX_IDLE_MS, onGone, this.deps.memoryBytes, this.deps.memoryOf);
     this.live.add(p);
     void p.closed.then(() => this.live.delete(p));
     return p;
@@ -470,6 +476,7 @@ export class ToolboxSupervisor {
 
   /** The running, verified process for `id` (started now if needed; spawn is not counted against a deadline). */
   async get(id: string, doc: ToolboxDocument, secret: string | null): Promise<ToolboxProcess> {
+    if (this.stopping !== null) throw new ToolboxCallError('adapter_exited', 'crew is stopping its Toolbox adapters');
     const key = createHash('sha256').update(`${doc.yaml}\u0000${secret ?? ''}\u0000${doc.caPem ?? ''}`).digest('hex');
     let slot = this.procs.get(id);
     if (slot !== undefined && slot.key !== key) {
@@ -488,9 +495,9 @@ export class ToolboxSupervisor {
     const dir = join(this.deps.runRoot, id.replace(/[^A-Za-z0-9_-]/g, '_'), `${key.slice(0, 12)}-${randomBytes(4).toString('hex')}`);
     entry.starting = (async () => {
       const bin = await this.deps.binary();
-      const p = this.track(new ToolboxProcess(bin, dir, doc, secret, this.deps.idleMs ?? TOOLBOX_IDLE_MS, (gone) => {
+      const p = this.make(bin, dir, doc, secret, (gone) => {
         if (entry.proc === gone) entry.proc = null;
-      }, this.deps.memoryBytes, this.deps.memoryOf));
+      });
       await p.start();
       if (entry.retired) {
         p.stop();
@@ -513,18 +520,11 @@ export class ToolboxSupervisor {
    * A throwaway process for one preview (the registry's probe of a source not yet saved): started, handed to `fn`,
    * and stopped whatever `fn` does. Never kept in the map, so no saved source shares it.
    */
-  once<T>(label: string, doc: ToolboxDocument, secret: string | null, fn: (p: ToolboxProcess) => Promise<T>): Promise<T> {
-    const run = this.preview(label, doc, secret, fn);
-    this.previews.add(run);
-    void run.catch(() => undefined).finally(() => this.previews.delete(run));
-    return run;
-  }
-
-  private async preview<T>(label: string, doc: ToolboxDocument, secret: string | null, fn: (p: ToolboxProcess) => Promise<T>): Promise<T> {
+  async once<T>(label: string, doc: ToolboxDocument, secret: string | null, fn: (p: ToolboxProcess) => Promise<T>): Promise<T> {
     const bin = await this.deps.binary();
     // Its own directory per invocation: two previews (or Tests) of one entry never share or delete each other's.
     const dir = join(this.deps.runRoot, `preview-${label.replace(/[^A-Za-z0-9_-]/g, '_')}-${randomBytes(4).toString('hex')}`);
-    const p = this.track(new ToolboxProcess(bin, dir, doc, secret, this.deps.idleMs ?? TOOLBOX_IDLE_MS, () => undefined, this.deps.memoryBytes, this.deps.memoryOf));
+    const p = this.make(bin, dir, doc, secret, () => undefined);
     try {
       await p.start();
       return await fn(p);
@@ -541,16 +541,20 @@ export class ToolboxSupervisor {
   }
 
   /**
-   * Stop every source's process, and resolve once none is left: each has exited and its run directory is removed.
-   * A start in flight is stopped when it resolves, and a preview in flight stops its own process when it ends;
-   * both are waited for. A caller that removes the state home after this finds nothing still writing into it
-   * (crew#1752: a removal that raced a process's own cleanup failed with ENOTEMPTY).
+   * Stop every process this supervisor made (running, starting, a preview's, a replaced generation's) and resolve
+   * once each has exited and its run-directory removal has finished. From the call on no process is made: a start
+   * or preview still waiting for the binary is refused, and one not yet spawned never spawns. Bounded by `stop`'s
+   * SIGKILL after 2 s. A caller that removes the state home after this finds no adapter still writing into it
+   * (crew#1752: a removal that raced a process's own cleanup failed with ENOTEMPTY). Every call shares one stop.
    */
-  async stopAll(): Promise<void> {
-    const starts = [...this.procs.values()].map((s) => s.starting);
-    for (const s of this.procs.values()) this.retire(s);
-    this.procs.clear();
-    await Promise.allSettled([...starts, ...this.previews]);
-    await Promise.all([...this.live].map((p) => p.closed));
+  stopAll(): Promise<void> {
+    this.stopping ??= (() => {
+      for (const s of this.procs.values()) s.retired = true;
+      this.procs.clear();
+      const all = [...this.live];
+      for (const p of all) p.stop();
+      return Promise.all(all.map((p) => p.closed)).then(() => undefined);
+    })();
+    return this.stopping;
   }
 }

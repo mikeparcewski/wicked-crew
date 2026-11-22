@@ -117,6 +117,7 @@ describe.skipIf(process.platform === 'win32')('the data gate admits a first-use 
   let adapter: CoreAdapter;
   let sup: ToolboxSupervisor;
   let app: FastifyInstance;
+  let audit: AuditLog | undefined;
   /** Whether the engine has `judgeMcpCall` (false: one that predates crew#1337). */
   let judgeArgs = true;
   let record: SourceReadLog;
@@ -212,7 +213,7 @@ describe.skipIf(process.platform === 'win32')('the data gate admits a first-use 
       env: { KD_FIRST_USE_SECRET: SECRET },
       toolboxProbe: (c, s) => (prober as DataGate).toolboxProbe(c, s),
     });
-    const audit = new AuditLog(join(base, 'audit.log'), () => undefined);
+    audit = new AuditLog(join(base, 'audit.log'), () => undefined);
     record = new SourceReadLog(mcpDir);
     sup = new ToolboxSupervisor({ binary: async () => bin, runRoot: join(mcpDir, 'adapters', 'toolbox', 'run') });
     const gate = new DataGate({
@@ -252,6 +253,8 @@ describe.skipIf(process.platform === 'win32')('the data gate admits a first-use 
   afterAll(async () => {
     await sup?.stopAll();
     await app?.close();
+    // crew#1752: the trail's appends are fire-and-forget; drained before the base goes.
+    await audit?.flush();
     adapter?.close();
     if (base !== undefined) removeScratch(base);
   });

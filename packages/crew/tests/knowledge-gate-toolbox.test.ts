@@ -653,26 +653,44 @@ describe.skipIf(process.platform === 'win32')('stopping the Toolbox adapters (cr
       // A preview of the saved entry, started and not awaited: its process is starting when the stop begins.
       const preview = r.app.inject({ method: 'POST', url: '/api/v1/mcp/servers/tb/test' });
       await until(() => readdirSync(runRoot).some((d) => d.startsWith('preview-')));
-      await r.sup.stopAll();
+      const stop = r.sup.stopAll();
+      expect(r.sup.stopAll()).toBe(stop); // every call shares one stop
+      await stop;
       // Nothing of either process is left the moment the stop resolves: no process, no file under the run root.
       expect(alive(pid)).toBe(false);
       expect(files(runRoot)).toEqual([]);
       await preview;
+      // From the stop on no adapter is made: a Test (or a warm respawn) is refused and writes nothing.
+      expect((await r.app.inject({ method: 'POST', url: '/api/v1/sources/tb/test' })).json()).toMatchObject({ ok: false });
+      expect(files(runRoot)).toEqual([]);
     } finally {
       await quiesce(r);
       rmSync(r.base, { recursive: true, force: true });
     }
   }, 60_000);
 
-  it('a process that never spawned is closed at once, and leaves no directory', async () => {
+  it('a process that never spawns is closed, and leaves no directory: a write that failed, or a stop before the spawn', async () => {
     const base = mkdtempSync(join(tmpdir(), 'kd-b2-nospawn-'));
     try {
-      writeFileSync(join(base, 'file'), '');
       const doc = { yaml: 'sources: {}\n', secretVar: null, caPem: null } as unknown as ToolboxDocument;
-      const p = new ToolboxProcess(join(base, 'no-binary'), join(base, 'file', 'run'), doc, null, 60_000, () => undefined);
+      const made = (dir: string) => new ToolboxProcess(join(base, 'no-binary'), dir, doc, null, 60_000, () => undefined);
+      // Its document cannot be written (a directory holds its name): the directory it made goes.
+      const failed = join(base, 'failed');
+      mkdirSync(join(failed, 'tools.yaml'), { recursive: true });
+      const p = made(failed);
+      expect(p.closed).toBeInstanceOf(Promise);
       await expect(p.start()).rejects.toThrow();
       await p.closed;
       expect(p.pid).toBeNull();
+      expect(existsSync(failed)).toBe(false);
+      // Stopped before it spawned (a shutdown began while its files were written): it never spawns.
+      const stopped = made(join(base, 'stopped'));
+      const started = stopped.start();
+      stopped.stop();
+      await expect(started).rejects.toThrow(/stopped before it started/);
+      await stopped.closed;
+      expect(stopped.pid).toBeNull();
+      expect(existsSync(join(base, 'stopped'))).toBe(false);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
