@@ -91,7 +91,10 @@ function ageOf(page: RequirementsPage): { label: string; stale: boolean } {
 }
 
 function rowLine(r: RequirementSummary): string[] {
-  const flags = [r.placeholder ? 'placeholder, not counted as a real requirement' : null, r.uncounted !== null ? `not counted (${r.uncounted})` : null]
+  // crew#1699: a row whose code unit left the index (wicked-core#1446) is kept by the engine; it is not a placeholder.
+  const flags = (r.uncounted === 'unindexed'
+    ? ['code no longer indexed, not counted']
+    : [r.placeholder ? 'placeholder, not counted as a real requirement' : null, r.uncounted !== null ? `not counted (${r.uncounted})` : null])
     .filter((f): f is string => f !== null);
   const head = `- **${line(r.reqId, 80)}** (domain \`${line(r.domain, 120)}\`) ${line(r.title, 200)}: ${line(r.statement) || '(no statement)'}`;
   const out = [flags.length > 0 ? `${head} [${flags.join('; ')}]` : head];

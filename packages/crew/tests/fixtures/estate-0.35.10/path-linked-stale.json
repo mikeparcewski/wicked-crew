@@ -1,0 +1,97 @@
+{
+ "crossings": [
+  {
+   "depth": 1,
+   "evidence": {
+    "confidence": 0.6000000238418579,
+    "consumer_version": "1.0.0",
+    "ecosystem": "npm",
+    "identity": "registry-source(version-only)",
+    "package": "@fx/api",
+    "provider_version": "1.0.0",
+    "ranks": [
+     "package-manifest"
+    ],
+    "skew": false
+   },
+   "from": {
+    "repo": "web",
+    "symbol": "file . web/src/page.ts:"
+   },
+   "hops": [
+    {
+     "kind": "imports",
+     "resolved_by": "wicked-link"
+    }
+   ],
+   "id": "xd844539cff04463e",
+   "to": {
+    "repo": "api",
+    "symbol": "file . api/src/index.ts:"
+   }
+  }
+ ],
+ "depth_bounded": false,
+ "found": true,
+ "from": "web/src/page.ts",
+ "hops": [
+  {
+   "confidence": 0.6000000238418579,
+   "kind": "imports",
+   "provenance": "import_map",
+   "resolved_by": "wicked-link",
+   "source": {
+    "file": "web/src/page.ts",
+    "kind": "file",
+    "line": 0,
+    "line_1based": 1,
+    "name": "web/src/page.ts",
+    "symbol": "file . web/src/page.ts:"
+   },
+   "target": {
+    "file": "api/src/index.ts",
+    "kind": "file",
+    "line": 0,
+    "line_1based": 1,
+    "name": "api/src/index.ts",
+    "symbol": "file . api/src/index.ts:"
+   }
+  }
+ ],
+ "link": [
+  {
+   "coverage": [
+    {
+     "boundaries": {},
+     "incomplete": false,
+     "label": "api",
+     "links_in": 1,
+     "links_out": 0,
+     "manifests": 1,
+     "package_imports": 0
+    },
+    {
+     "boundaries": {},
+     "incomplete": false,
+     "label": "web",
+     "links_in": 0,
+     "links_out": 1,
+     "manifests": 2,
+     "package_imports": 1
+    }
+   ],
+   "generation": 5,
+   "last_error": null,
+   "project": "p1",
+   "stale": true,
+   "stale_labels": [
+    "web"
+   ]
+  }
+ ],
+ "node_bounded": false,
+ "resolved": true,
+ "to": "api/src/index.ts",
+ "unresolved": null,
+ "unresolved_on_frontier": null
+}
