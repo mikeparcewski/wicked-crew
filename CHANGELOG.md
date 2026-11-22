@@ -10,6 +10,96 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.18.20] — 2026-11-22
+
+Patch release on the train-11 cut 34beb673, carrying 48 PRs since 0.18.19: #1653, #1654, #1655, #1657, #1659, #1661, #1662, #1664, #1665, #1666, #1668, #1670, #1671, #1672, #1674, #1675, #1676, #1677, #1679, #1680, #1681, #1684, #1686, #1687, #1688, #1689, #1690, #1691, #1693, #1700, #1701, #1708, #1709, #1710, #1712, #1715, #1717, #1718, #1719, #1720, #1721, #1723, #1729, #1730, #1732, #1736, #1738, #1743. wicked-crew-api-types 0.223.0 releases with it: 0.216.0 plus the type changes from #1676, #1677, #1693, #1701, #1712, #1720 and #1723 (it stays a workspace link in this repository).
+
+### Added
+
+- fix(project graph): a paged blast radius keeps every page's freshness (#1556). `BlastRadius` types `depth`, `stale`, `resolved` and `freshness`, and project answers carry them, attributed (#1555). (#1680)
+- feat(project graph): `GET /projects/:id/graph/path` and `GET /projects/:id/graph/boundaries` (#1476, #1477). Project blast answers carry per-member link coverage. A refresh after a member is detached rebuilds the graph without it and reports `pruned` (#1476). (#1680)
+- **Added** Apps: `GET /apps/:app/calls` (observer) lists an app's last 200 query call records (never row values; memory only). (#1300) (#1693)
+- **Added** Sources: the preview's 409 `address_unconfirmed` carries `addresses` and `suggest` beside its unchanged words. (#1294) (#1693)
+- **Added** Apps: the daemon re-describes the SQL and GraphQL sources active apps use every 10 minutes, so a changed column is refused by name at the next read. (#1299) (#1693)
+- **Added** Sources: a person accepts each REST or MCP tool as an Apps read (save `acceptedReads`, `PATCH /mcp/tools/:subject {readAccepted}`; human operator only, audited, bound to the tool's schema). Apps refuse a query on a tool that isn't accepted. Existing read tools are migrated as accepted. (#1295) (#1693)
+- wicked-crew-api-types 0.219.0. (#1693)
+- Added: drain mode for upgrades and restarts. `POST /api/v1/maintenance {"drain": true}` refuses new launches, resumes and gate answers that start work (503 `maintenance_drain`), and `GET /api/v1/maintenance` reports when the daemon is idle. A restart clears it (#1475). (#1701)
+- Added: `DELETE /api/v1/repos/:id` removes a repository registration that no live run or project uses. Its checkout and graph stay on disk (#1230; needs wicked-core with `unregisterRepo`). (#1701)
+- api-types 0.220.0: `MaintenanceRequest`, `MaintenanceState`, `UnregisterRepoResponse`. (#1701)
+- **api-types 0.221.0:** `CoreEvent.consentAsks` on the install consent frame (#1424). (#1712)
+
+### Changed
+
+- Docs: the READMEs say crew needs a local Kubernetes cluster (Rancher Desktop with `pod-max-pids` at 4096 or less) and two signed-in coding agents, any two of the five, so one reviews the other's work (one alone waits at a gate unless launched as reduced assurance); they stop saying governed work needs exactly Claude Code and Codex (wicked-crew#1568). `catalog-data-v2.ts` says it is hand-maintained instead of generated from a seed that doesn't exist (wicked-crew#1552). (#1662)
+- None. This is a test-only change. (#1689)
+- Wait for the settled state, not a fixed sleep or a frame order (crew-C14). (#1729)
+- Fixtures never assume a host-assigned inode, pid or port is free (crew-C14). (#1730)
+
+### Fixed
+
+- `GET /api/v1/runs` and `GET /api/v1/runs/:id` now carry `session.person_needed` for a run waiting at a Power checkpoint, with the same reason `/system` gives; `status` is unchanged (crew#1572). (#1653)
+- A chat job card whose checks include a distinct judge (bug, feature, migrate, ...) now starts on two seats (builder + distinct evaluator) instead of "Needs 3 seats"; the card says the judge is the validator's author and a third seat would add an independent judge (#1587, #1588). (#1654)
+- **Fixed:** a scheduled run review that can't be prepared (no usable seat, or a bad `newWorkSeats`) now leaves a failed review with its reason in the review history, not only a note on the schedule (#1608). (#1655)
+- **A reshape launches on its seats' current standing (crew#1606).** Starting a held run again as another card used the held run's seat standing, so a seat signed out since still read usable: an inherited lead was not refused and an inherited helper was not benched. The reshape now reads every seat's standing from the current roster after the readiness wait, keeping the held run's seat configuration. A seat that is no longer on the roster is refused by name, as on a fresh Go. (#1657)
+- Ask a source: every table the question matches now ranks ahead of the unmatched ones in all three structure tiers, not only the first five; the foreign-key neighbour lookup keys on the (schema, name) pair, so dotted names such as `"a.b"."c"` and `"a"."b.c"` no longer promote the wrong neighbour (#1517). (#1659)
+- `wicked-crew governance replay` no longer hangs after printing its result on some runs: it returns its exit code instead of calling `process.exit`, which could deadlock in Node's teardown (#1660). (#1661)
+- **Fixed:** a cancelled run's final-codebase zip is no longer partial or missing when the engine's worktree reap runs past 500 ms. A cancelled run archives its `wicked/<run>` branch unless the engine keeps the worktree (`worktreeRetained`), and a late `worktreeRetained` refreshes the archive from the kept tree (#1508). (#1664)
+- Fixed: remedies crew sends (Nerve Center cluster and runtime rows, sign-in refusals) and the site name Rancher Desktop only; they no longer recommend Docker Desktop, whose Kubernetes cannot set the pod process limit crew needs. (#1665)
+- **Fixed:** a chat job card held on "Needs N seats that can work now" now picks up a seat that signs in. The next read of the chat (a reload or reopening it) redraws the card from the current seats and makes it startable. Previously it took another chat message, which ran a full model turn and renamed the chat. No model turn, launch or rename happens. (#1484) (#1666)
+- **Fixed:** A daemon on a non-default state home no longer touches the operator's default home. The estate cross-edge store is now `<state home>/mcp/xedge.db`, repo clones and inline scripts go to the `<state home>-repos` and `<state home>-scripts` siblings, and governance evals and corpus imports use `<state home>/mcp/evals-knowledge.db`. Explicit `WICKED_XEDGE_DB` and `WICKED_CREW_KNOWLEDGE_DB` values still win, and the default daemon's paths are unchanged. Existing clones stay where they are, and corpora a non-default daemon imported earlier need importing again. (#1470, #1473, #1474) (#1668)
+- **Fixed:** deliver commits the run's work with the git author it names on the deliver card ("Commits carry: …"), read once from the registered repository when the job is set up, instead of whatever git resolves at commit time with nothing shown. When none resolves the card says so. Runs carry it as `deliverAuthor` (crew-api-types). (#1667) (#1670)
+- fix(chats): under `auth: required`, another user's chat answers 404 on `GET /chats/:id`, `POST /chats/:id/seats`, `POST /chats/:id/messages` and `GET /chats/:id/turns/:turnId/considered`, the same 404 as an unknown id, before anything is read, changed or rechecked (crew#1669). It is the rule `GET /chats/:id/messages` already applied. Before, any signed-in user with a chat id could read another user's transcript, re-seat their chat, send into it, or redraw its held job card. Local mode is unchanged. `GET /chats/:id` lists 404 in the endpoint manifest. (#1671)
+- **Chat jobs: a repository picked for a job in a chat with no repository stays in that chat (studio#1094).** The person's answer to "Which repository?" now sets the chat's first repository: it is validated like a chat open, stated to the seats, and audited as `chat.scope.repo_picked`. A chat that already has repositories still refuses an outside one. If the chat's answers had already started, the next message is refused with `chat_scope_changed` and asks for a new chat; the job stays in the chat. (#1672)
+- **Editors:** updating a pack now removes the editors and run plugins the new version dropped, and withdraws their grants in the same ledger edit (`InstallEditorResponse.removed`) (#1430). The editor routes broadcast `editorGrantsChanged` on `/ws` after every install, update, removal, allow or revoke, so an open editor host can re-read its grants (#1423, crew half). wicked-crew-api-types 0.217.0. (#1674)
+- fix(chat): the citation check no longer moves a right line citation that sits inside the cited symbol's body (#1357). A failed `wicked-estate stats` probe no longer tells a chat's seat that an indexed repository has no code graph (#1356). `ChatMessageBody.context.instructions` carries studio's answer instructions in their own section, kept out of the person's words, the title and the transcript (`chatArtifacts.instructions`, #1463). (#1675)
+- Gates: `/resume`, `/reassign` and `/plan` take the gate `ord` the operator saw (409 `gate_changed` on a mismatch), and every operator confirm is checked by the engine against the gate crew judged. The stall watchdog's reassign waits for an operator decision and re-checks the run. `GET /gates/decided` reports re-check arms as `recheck`. A late live frame no longer overwrites a hydrated gate. `POST /governance/rules` takes `If-Match` (409 `rule_changed`). api-types 0.217.0. (#1090, #1390, #1088, #1386) (#1676)
+- **MCP:** a stdio server's environment variables are now its per-server allowlist: only a human operator may add or change them (403 `env_human_only`), the denylist stays as a second line, and the preview tags each name `runtime_control` or `app_setting` (#1558). wicked-crew-api-types 0.218.0. (#1677)
+- **Documents:** HTML served through the interactive proxy now carries a closed network policy and the WebRTC guard: only its own inline scripts run (each with the prelude first), and it cannot connect to, load from or open WebRTC to another host. Downloads and SSE are unchanged (#1277). (#1677)
+- A launch, and a chat job card, now say when the seats can't judge one another's work, using the engine's own judge coverage. The reason is named: the same CLI, a benched seat, or a shared provider. New `assuranceNotice.code` `no_independent_judge` (crew#972). (#1679)
+- A chat job's Start keeps a launch's typed refusal (for example 409 `no_independent_reviewer` with `excluded` and `retryWith`) and reopens the card. Go takes `reducedAssurance` (crew#1453). An interrupted job whose seats can no longer work reopens, so other seats can be picked (crew#1426). (#1679)
+- A corrupt shared settings file is no longer seeded into a new state home as empty settings. New work refuses with `settings_unavailable` until the file is fixed (crew#1600). (#1679)
+- `/health`, `GET /system` and `/diagnostics` name a seat whose image cannot be built (crew#1097). (#1679)
+- The "needs more seats" hold reads as a complete sentence with the real count (studio#1093). (#1679)
+- **Delivery integrity on every launch path (crew-C6).** A chat's own run no longer takes on a change it would deliver without QE acceptance (409 `chat_build_needs_job`; the chat points at a job instead) (#1259). Closing keywords quoted from the intent or seat reports in a delivered PR title, body and commit message no longer close issues; only crew's own `Fixes` lines do (#1377). The deliver gate names the committer, and the new opt-in setting `deliverAuthorNoreply` refuses a delivery whose author or committer email is not the push login's GitHub noreply address (#1471). Domain-mapping and run-evals launches record and hand the engine `deliver: none`, so a completed map no longer reads as a failed delivery (#1418, #1585). Test sets keep each file's `class` and the `failed_on_base` count (#1393). (#1681)
+- **Deliver finishes on a private repo on a free GitHub plan (#1683).** There, GitHub refuses the branch-rules API with "Upgrade to GitHub Pro", and since 0.18.18 every such deliver ended `checks_unknown`. That exact refusal now means that no checks are required by rules. The run says so and is judged by the PR's own checks; a PR with no checks is delivered. Any other refusal still stops the delivery. (#1684)
+- Fixed: a chat job proposal whose Start can choose a power run no longer marks "(asks you)" on steps a power run never stops at; consent steps stay marked (crew#1685). (#1686)
+- A capped review's Land that skips open steering rules (wicked-core#1683) is a human operator's alone, like `skip_rules`. A seat or a standing order gets 403 `human_operator_only`, and the person's Land is audited with each skipped rule and the reason. (#1687)
+- An answered chat's working document no longer lists its turn as an open question ("Waiting on you · Terminal"): the chat waits for your next message, not a decision (wicked-studio#1243). (#1688)
+- **Fixed** apps-server: the data volume is guarded by a crash-released exclusive lock (`node:sqlite` `BEGIN EXCLUSIVE` on `/data/.owner.lock`) instead of a heartbeat claim. A second server is refused at once, a crashed server's restart no longer waits 30 s, and a replaced lock file fences the server. (#1307) (#1690)
+- **Fixed** Apps: a query or action can name only data sources its app's project may see, in the check step, at every read and at every action step. Narrowing a source's projects stops a landed app at its next read. (#1533) (#1691)
+- **Fixed** Apps sources: MySQL and Postgres reads check their relations again after the statement, before commit. A table swapped for a view, or a foreign partition attached, between the check and the read drops the answer. (#1290) (#1691)
+- **Fixed** Apps actions: an HTTP error status whose deflate body never starts is `failed`, not `unknown`. (#1298) (#1691)
+- **Fixed** Sources: postgres.js idle and lifetime timers are off for hand-run transactions. (#1302) (#1691)
+- Fixed: a second daemon on another port installs its own login service (`com.wickedagile.wicked-crew.<port>`, `wicked-crew-<port>.service`). The default port keeps its unit. launchd restarts the daemon after a crash only, throttled, and systemd stops after 5 quick failures (#1469). Note: a daemon on a non-default port that was installed as a service before this release keeps the old shared name, so `--uninstall-service --port <port>` does not find it. Remove it with `wicked-crew serve --uninstall-service` (no `--port`, `CREW_PORT` unset), then install it again with `--port <port>`. (#1700)
+- Fixed: an interactive bridge left running from an older version below crew's floor is restarted or refused, never adopted (#1288). (#1700)
+- Fixed: a reused run id shows its newest launch's time, channel, launcher and retry link after a restart (#1264). (#1700)
+- Fixed: the repo watcher waits for runs launched through another registration of the same checkout (#1465). (#1700)
+- Fixed: a run's staged documents folder is removed when its launch is refused or the run is archived, and folders whose run never started are swept at boot (#1429). (#1700)
+- Boot reads wait for the skills ladder; the launch brief passes the checkout root (#1705, #1706). (#1708)
+- Register k8s-replica-git, the engine's k8s replica .git cache (wicked-core#1699). (#1709)
+- Fixed: the system snapshot sends a signed-out helper as signed out even when the engine has benched it, so the Nerve Center says "Signed out" like the Helpers page, not "Paused after errors" (#1707). (#1710)
+- Stall watchdog: host sleep no longer reads as a stalled worker. Quiet time is measured on awake time (wall clock minus the gap a monotonic clock did not see), so a laptop that sleeps mid-run no longer gets a `workerStalled` frame or an automatic reassign at wake (wicked-core#1151). (#1715)
+- **Apps server:** two servers started together on one data volume no longer both stop. Exactly one owns it, as intended. (#1717)
+- Host programs are a human operator's only under auth: required; chat actor matrix (crew-C1). (#1718)
+- **Fixed:** crew now bounds what it reads from sources (crew-C8): (#1719)
+  - MCP tool answers past 10 MiB are refused as `too_large` before the SDK parses them (http and stdio; no retry).
+  - A host-mode Toolbox adapter is stopped past 512 MiB of resident memory, and the read is refused.
+  - The data gate's read record is folded incrementally and compacted, instead of being re-read whole on each request. (#1297, #1320, #1319)
+- Chat-made documents keep the person's title and the helpers they pick; the card says who writes and who checks (#1537, #1538). (#1720)
+- A retried seeded chat open answers the chat it opened, or 410 once that chat was deleted, never another chat under the same id (#1422). (#1720)
+- Starting a chat document now waits for, and is waited on by, a run launch in the same chat, a delete of the document, and closing the chat (#1279). (#1720)
+- **Fixed:** untrusted files no longer stall the daemon (crew-C8): (#1721)
+  - CSV/XLSX uploads are parsed, typed and written in the killable runner child, never on the daemon's event loop; the deadline ends the child.
+  - Chat pdf text extraction does bounded, linear work, and every inflate attempt is charged to its budget. (#1289, #1428)
+- A change to a chat-made document reads the document's sources and the ones you name, and keeps your anchors when the document moved on; a retry remembers what you let change (#1406). (#1723)
+- Draft folders are keyed by project and document, so same-named documents in two projects never share one (#1280). (#1723)
+- PDF attachments are citable everywhere a chat document reads them; a source the card promised that cannot be staged stops Start with the list, instead of being left out (#1281). (#1723)
+- A restart settles a chat document's draft as landed only when the document records that run; crew CI runs garden's real claims check (#1282). (#1723)
+- Declare RuleVerdict.waivable and RuleCouncilRecord.arbiter; requirements route imports the business-domain shapes (crew-C13). (#1732)
+- An Unfiled chat document's Go and refine launch without a project graph (W24). (#1736)
+- fix(mcp): a GitHub Issues source that uses the GitHub CLI login now works for any signed-in gh account, not only the active one. It reads that account's own token and never switches gh's active account. (#1738)
+- `GET /api/v1/repos` carries each repo's `git_url`, read from its checkout's `origin` with credentials removed, so studio's "This repository" tracker row can show (studio#1012). (#1743)
+
 ## [0.18.19] — 2026-11-20
 
 Patch release on main a84a095c, carrying 27 PRs since 0.18.18: #1597, #1615, #1617, #1619, #1621, #1627, #1630, #1631, #1632, #1633, #1635, #1636, #1638, #1639, #1640, #1641, #1642, #1643, #1644, #1645, #1646, #1647, #1648, #1649, #1650, #1651, #1652. wicked-crew-api-types 0.216.0 carries the RunPullRequest and RedeliverRunResult types of `GET /runs/:id/pr` and `POST /runs/:id/redeliver` (#1650). Requires wicked-core-ts 0.15.47 and bundles wicked-studio 0.16.15.
