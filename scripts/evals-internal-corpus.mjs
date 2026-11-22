@@ -418,7 +418,15 @@ function withPublicationLock(lockPath, what, fn) {
           if (churn || (attempt === 1 && faultArmed('lock-released-after-eexist'))) rmSync(lockPath, { force: true });
           const holder = lockHolder(lockPath);
           if (churn) writeFileSync(lockPath, `pid ${process.pid} generation churn-${attempt}\n`, 'utf8'); // test hook: taken again
-          if (holder === null) continue; // released since the EEXIST: try again
+          if (holder === null) {
+            // A symlink to nothing refuses the link and reads as gone, forever: refuse it by name, never spin on it.
+            if (lstatSync(lockPath, { throwIfNoEntry: false })?.isSymbolicLink()) {
+              throw new RefusalError(
+                `${lockPath} is a symlink to nothing — refusing to publish \`${what}\` through it; remove it and retry`,
+              );
+            }
+            continue; // released since the EEXIST: try again
+          }
           throw new RefusalError(
             `another \`${what}\` publication holds ${lockPath}${holder === '' ? '' : ` (${holder})`} — refusing to interleave; if no ${what} is running, remove the lock and retry`,
           );

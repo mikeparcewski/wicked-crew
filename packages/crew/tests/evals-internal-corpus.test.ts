@@ -2404,6 +2404,22 @@ describe('publication — atomic (tmp+rename), locked, one generation per public
     rmSync(lock);
   });
 
+  it('a dangling symlink at the lock path is a refusal naming it — never a retake loop, never removed (crew#1771 coord F2)', async () => {
+    const m = await mod();
+    const lock = join(outDir, m.SAMPLES_LOCK);
+    mkdirSync(outDir, { recursive: true });
+    symlinkSync(join(outDir, 'nowhere'), lock); // the link refuses with EEXIST, its read is ENOENT
+    // runEnv's spawn with a deadline: the old loop never ended here.
+    const args = [SCRIPT, 'samples', outDir, '--pin', pinPath, '--source-root', sourceRoot, '--known-bad', knownBadPath];
+    const s = spawnSync(process.execPath, args, { env: { ...process.env, ...env }, encoding: 'utf8', timeout: 20_000 });
+    expect(s.error, 'the publication spun instead of refusing').toBeUndefined();
+    expect(s.status).toBe(1);
+    expect(s.stderr).toMatch(/\.samples\.lock is a symlink to nothing — refusing to publish `samples` through it/);
+    expect(lstatSync(lock).isSymbolicLink()).toBe(true); // not ours: left as found
+    expect(readdirSync(outDir)).toEqual([m.SAMPLES_LOCK]); // nothing published, no temp left
+    rmSync(lock);
+  });
+
   it('a failure removing the lock\'s temp name after the lock was taken still releases the lock (crew#1764)', async () => {
     const m = await mod();
     const lock = join(outDir, m.SAMPLES_LOCK);
