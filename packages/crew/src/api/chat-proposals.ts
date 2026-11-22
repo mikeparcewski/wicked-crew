@@ -1091,7 +1091,7 @@ export class ChatProposals {
     if (block.op === 'onboard') {
       // Only for a client that draws the card (its seat was told the block exists only then).
       if (flags.onboard !== true || this.deps.onboard === undefined || this.deps.acceptsOnboard?.(chatId) !== true) return this.refused(chatId, 'onboard');
-      return resolveOnboard(block, { pid, chatId, turnId, seat, chatProjectId: chat.projectId === null || chat.projectId === 'default' ? null : chat.projectId }, this.deps.onboard);
+      return resolveOnboard(block, { pid, chatId, turnId, seat, chatProjectId: chat.projectId === null || chat.projectId === 'default' ? null : chat.projectId, words }, this.deps.onboard);
     }
 
     if (block.op === 'theme') {

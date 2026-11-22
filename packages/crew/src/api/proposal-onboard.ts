@@ -12,6 +12,7 @@ import { execCapped } from '../core/exec.js';
 import type { Actor, ArtifactProposal, ProposalOnboard, RepoEntry } from '../core/types.js';
 import type { ProposalDispatch, ProposalDispatcher } from './chat-proposals.js';
 import { coreRepoSlug } from '../projects/repo-guard.js';
+import { CreateProjectSchema } from '../projects/routes.js';
 
 /** A registry name: what `POST /repos` accepts. */
 export const SAFE_REPO_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
@@ -226,6 +227,18 @@ export interface OnboardTurn {
   seat: string;
   /** The chat's own project (`null`: none, or Unfiled): the default when the words name none. */
   chatProjectId: string | null;
+  /** (crew#1694) The person's own words up to this turn: a project the card creates is one they named. */
+  words?: string;
+}
+
+/**
+ * (crew#1694) The name a card may create a project under: one the person's own words say (ignoring case and spacing),
+ * that `POST /projects` would take, and that could not carry an address or a credential (it is repeated on the card).
+ * `null` when it is none of these.
+ */
+function creatableName(name: string, words: string): string | null {
+  if (!CreateProjectSchema.shape.name.safeParse(name).success || /[@:/\\?#&=]/u.test(name)) return null;
+  return norm(words).includes(norm(name)) ? name : null;
 }
 
 /** A stored address's identity: its credentials (if any) set aside first, so a registered origin that carries a token
@@ -277,16 +290,22 @@ export async function resolveOnboard(block: OnboardBlockBody, turn: OnboardTurn,
 
   const projects = await deps.projects();
   let project: { id: string; name: string } | null = null;
+  let createProject: { name: string } | null = null;
   const words = block.onboard.project?.trim() ?? '';
   if (words !== '') {
     const m = matchProject(projects, words);
     if ('one' in m) project = m.one;
     else if ('many' in m) blocked.push(`more than one project has the name given (${m.many.map((p) => `${p.name}, ${p.id}`).join('; ')}): say which`);
     else {
-      // The seat's words are not repeated (they could carry anything); the projects that exist are.
-      const names = projects.map((p) => p.name);
-      blocked.push(`no project has the name given${names.length > 0 ? ` (projects here: ${names.join(', ')})` : ' (there are no projects yet)'}. `
-        + 'Create it on Projects → New project, or name one of these, then ask again');
+      // crew#1694: a name no project has is the project Go creates first, when the person said it and POST /projects
+      // would take it. Anything else is not repeated (the seat's words could carry anything); the projects that exist are.
+      const name = creatableName(words, turn.words ?? '');
+      if (name !== null) createProject = { name };
+      else {
+        const names = projects.map((p) => p.name);
+        blocked.push(`no project has the name given${names.length > 0 ? ` (projects here: ${names.join(', ')})` : ' (there are no projects yet)'}. `
+          + 'Name one of these, or say the new project\'s name (at most 120 characters), then ask again');
+      }
     }
   } else if (turn.chatProjectId !== null) {
     project = projects.find((p) => p.id === turn.chatProjectId) ?? null;
@@ -304,8 +323,8 @@ export async function resolveOnboard(block: OnboardBlockBody, turn: OnboardTurn,
     const same = await registeredAs(read.key, repos, deps.originOf);
     if (same !== null) {
       existing = { id: same.id, name: same.name };
-      if (project === null) blocked.push(`${same.name} is already registered; name the project to add it to`);
-      else if ((await deps.projectRepoRefs(project.id)).some((ref) => ref === same.id || ref === same.name)) {
+      if (project === null && createProject === null) blocked.push(`${same.name} is already registered; name the project to add it to`);
+      else if (project !== null && (await deps.projectRepoRefs(project.id)).some((ref) => ref === same.id || ref === same.name)) {
         blocked.push(`${same.name} is already in ${project.name}; nothing to add`);
       }
     } else if (name === '') {
@@ -330,8 +349,10 @@ export async function resolveOnboard(block: OnboardBlockBody, turn: OnboardTurn,
     projectId: project?.id ?? null,
     projectName: project?.name ?? null,
     existing,
+    ...(createProject !== null ? { createProject } : {}),
   };
-  const into = project !== null ? `, added to ${project.name}` : '';
+  const target = project?.name ?? (createProject !== null ? `the new project ${createProject.name}` : null);
+  const into = target !== null ? `, added to ${target}` : '';
   return {
     pid: turn.pid,
     chatId: turn.chatId,
@@ -339,7 +360,7 @@ export async function resolveOnboard(block: OnboardBlockBody, turn: OnboardTurn,
     kind: 'onboard',
     seat: turn.seat,
     what: existing !== null
-      ? { entry: null, title: existing.name, label: `Add to a project · ${existing.name}`, outcome: `Adds the registered ${existing.name} to ${project?.name ?? 'a project'}. Nothing is cloned and no onboarding starts.` }
+      ? { entry: null, title: existing.name, label: `Add to a project · ${existing.name}`, outcome: `Adds the registered ${existing.name} to ${target ?? 'a project'}. Nothing is cloned and no onboarding starts.` }
       : { entry: null, title: name || 'repository', label: `Add a repository · ${name || 'repository'}`, outcome: `Cloned to this computer, registered${into}, and onboarded: its code map is built so jobs and chats can read it.` },
     brief: null,
     // The seat's one line, unless it holds anything that could be a credential (an address with an `@`, a query).
@@ -349,7 +370,7 @@ export async function resolveOnboard(block: OnboardBlockBody, turn: OnboardTurn,
     helpers: null,
     time: null,
     stops: null,
-    filedIn: { projectId: project?.id ?? null, label: project?.name ?? 'Not in a project' },
+    filedIn: { projectId: project?.id ?? null, label: project?.name ?? (createProject !== null ? `Creates the project ${createProject.name}` : 'Not in a project') },
     onboard,
     blocked: blocked.length > 0 ? blocked[0]! : null,
   };
@@ -374,6 +395,9 @@ export interface OnboardLauncherDeps {
   attach(projectId: string, repoId: string, actor: Actor): Promise<void>;
   /** File the onboarding run in the project (`crew.run`, idempotent): what `recordOnboardingLaunch` does. */
   fileRun(projectId: string, runId: string, actor: Actor): Promise<void>;
+  /** (crew#1694) The projects that exist now, and the one project create (`createProjectRecorded`, as `POST /projects`). */
+  projects(): Promise<Array<{ id: string; name: string }>>;
+  createProject(name: string, actor: Actor): Promise<{ id: string; name: string }>;
 }
 
 /**
@@ -401,8 +425,9 @@ export class OnboardLauncher implements ProposalDispatcher {
   }
 
   async launch(d: ProposalDispatch): Promise<void> {
-    const o = d.resolution.onboard;
-    if (d.kind !== 'onboard' || o === undefined) throw new Error(`the onboard launcher takes only an onboard proposal (got ${d.kind})`);
+    const card = d.resolution.onboard;
+    if (d.kind !== 'onboard' || card === undefined) throw new Error(`the onboard launcher takes only an onboard proposal (got ${d.kind})`);
+    const o = await this.projectFor(card, d.actor);
     if (o.existing !== null) {
       if (o.projectId === null) throw new Error(`${o.existing.name} is already registered and no project was named`);
       await this.deps.attach(o.projectId, o.existing.id, d.actor);
@@ -441,6 +466,19 @@ export class OnboardLauncher implements ProposalDispatcher {
     }
     // Attached, but its run's filing failed: filed now (the run is this proposal's).
     if (o.projectId !== null && typeof out.body['projectAttachError'] === 'string') await this.deps.fileRun(o.projectId, d.identity.runId, d.actor);
+  }
+
+  /**
+   * (crew#1694) The card's project, created first when the card says so. A Go again after the create landed finds it by
+   * its name (the card's own words, matched as the card matched them) and never creates a second.
+   */
+  private async projectFor(o: NonNullable<ArtifactProposal['onboard']>, actor: Actor): Promise<NonNullable<ArtifactProposal['onboard']>> {
+    const want = o.createProject ?? null;
+    if (want === null) return o;
+    const m = matchProject(await this.deps.projects(), want.name);
+    if ('many' in m) throw new Error(`more than one project is named ${want.name} now; ask again and say which`);
+    const project = 'one' in m ? m.one : await this.deps.createProject(want.name, actor);
+    return { ...o, projectId: project.id, projectName: project.name, createProject: null };
   }
 
   /** The run exists: the repository joins the project and the run is filed there (each idempotent; the run by its own
