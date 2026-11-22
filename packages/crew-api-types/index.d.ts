@@ -18516,10 +18516,20 @@ export interface AppArchived {
 
 /**
  * `GET /apps` (observer); `?project=<id>` keeps one project's apps. (api-types 0.196.0) `?archived=` picks which:
- * `active` (the default: archived apps are hidden from every lister), `archived`, or `all`.
+ * `active` (the default: archived apps are hidden from every lister), `archived`, or `all`. The order is oldest first
+ * (`createdAt`, then `slug`).
+ *
+ * (crew#1678) `?limit=<1..200>` answers one page in that order, with {@link AppsListResponse.nextCursor}; the next
+ * page is `?limit=<n>&cursor=<nextCursor>` with the same `project` and `archived`. A cursor without `limit`, or one
+ * this list did not give, is `400`. Without `limit` the answer is every app, as before.
  */
 export interface AppsListResponse {
   apps: AppSummary[];
+  /**
+   * (crew#1678) Present only when `?limit=` was sent: the opaque cursor for the next page, `null` on the last page.
+   * ABSENT on an older daemon, which ignores `limit` and answers every app.
+   */
+  nextCursor?: string | null;
 }
 
 /**

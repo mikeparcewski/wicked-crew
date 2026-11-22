@@ -139,6 +139,17 @@ export interface AppPublisher {
 /** Which apps a list holds: the active ones (the default), the archived ones, or all of them. */
 export type AppListScope = 'active' | 'archived' | 'all';
 
+/** (crew#1678) Where an app sits in the list's order: when it was made, then its slug. */
+export interface AppListKey {
+  createdAt: number;
+  slug: string;
+}
+
+/** The list's order: oldest first, then by slug. */
+function listOrder(x: AppListKey, y: AppListKey): number {
+  return x.createdAt - y.createdAt || x.slug.localeCompare(y.slug);
+}
+
 /** How many turns an app's record keeps, and how many its detail answers. */
 export const TURN_LOG_MAX = 50;
 export const TURN_LOG_SHOWN = 20;
@@ -327,11 +338,26 @@ export class AppStore {
 
   /** The apps of one project (or every project), the active ones unless `scope` says otherwise. */
   list(projectId?: string, scope: AppListScope = 'active'): AppSummary[] {
+    return this.listed(projectId, scope).map((a) => this.summary(a));
+  }
+
+  /**
+   * (crew#1678) One page of {@link list}, in the same order: up to `limit` apps after `after` (the key of the previous
+   * page's last app; `null` = the first page), and the key to continue from (`null` on the last page). Keyed by
+   * position, never by offset, so an app made or removed between pages neither repeats one nor skips one.
+   */
+  listPage(projectId: string | undefined, scope: AppListScope, limit: number, after: AppListKey | null): { apps: AppSummary[]; next: AppListKey | null } {
+    const rest = this.listed(projectId, scope).filter((a) => after === null || listOrder(a, after) > 0);
+    const page = rest.slice(0, limit);
+    const last = page.at(-1);
+    return { apps: page.map((a) => this.summary(a)), next: rest.length > limit && last !== undefined ? { createdAt: last.createdAt, slug: last.slug } : null };
+  }
+
+  private listed(projectId: string | undefined, scope: AppListScope): StoredApp[] {
     return Object.values(this.state.apps)
       .filter((a) => projectId === undefined || a.projectId === projectId)
       .filter((a) => scope === 'all' || (scope === 'archived') === (a.archived != null))
-      .sort((x, y) => x.createdAt - y.createdAt || x.slug.localeCompare(y.slug))
-      .map((a) => this.summary(a));
+      .sort(listOrder);
   }
 
   private historyOf(a: StoredApp): AppHistory {

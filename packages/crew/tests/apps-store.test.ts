@@ -1283,3 +1283,55 @@ describe('apps: the version read (an accepted version as it was)', () => {
     expect(agent.lock.sources['support-pg']).toEqual({ kind: 'sql', descriptorHash: 'd-support-pg' });
   });
 });
+
+// crew#1678: GET /apps a page at a time (limit + cursor), in the list's own order; no limit = every app, as before.
+describe('apps: GET /apps pages', () => {
+  const slugsOf = (body: Record<string, unknown>) => (body['apps'] as Array<{ slug: string }>).map((a) => a.slug);
+
+  it('walks the whole list in pages that join to the unpaged answer, with nextCursor null on the last', async () => {
+    const s = setup();
+    for (const slug of ['alpha', 'bravo', 'charlie', 'delta', 'echo']) await newApp(s, slug);
+    const whole = await s.call('GET', '/apps');
+    expect(whole.body).not.toHaveProperty('nextCursor');
+    const pages: string[][] = [];
+    let cursor: string | null = null;
+    for (let i = 0; i < 5; i++) {
+      const res = await s.call('GET', `/apps?limit=2${cursor === null ? '' : `&cursor=${encodeURIComponent(cursor)}`}`);
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      pages.push(slugsOf(res.body));
+      expect(res.body).toHaveProperty('nextCursor');
+      cursor = res.body['nextCursor'] as string | null;
+      if (cursor === null) break;
+    }
+    expect(pages.map((p) => p.length)).toEqual([2, 2, 1]);
+    expect(pages.flat()).toEqual(slugsOf(whole.body));
+    // A page that ends exactly at the end says so.
+    expect((await s.call('GET', '/apps?limit=5')).body['nextCursor']).toBeNull();
+  });
+
+  it('an app made or archived between pages neither repeats nor skips one', async () => {
+    const s = setup();
+    for (const slug of ['alpha', 'bravo', 'charlie']) await newApp(s, slug);
+    const first = await s.call('GET', '/apps?limit=2');
+    expect(slugsOf(first.body)).toEqual(['alpha', 'bravo']);
+    expect((await s.call('POST', '/apps/alpha/archive', {})).status).toBe(200);
+    await newApp(s, 'delta');
+    const next = await s.call('GET', `/apps?limit=2&cursor=${encodeURIComponent(first.body['nextCursor'] as string)}`);
+    expect(slugsOf(next.body)).toEqual(['charlie', 'delta']);
+    expect(next.body['nextCursor']).toBeNull();
+  });
+
+  it('keeps ?project= and ?archived=; refuses a bad limit, a cursor without limit, and a cursor it did not give', async () => {
+    const s = setup();
+    for (const slug of ['alpha', 'bravo']) await newApp(s, slug);
+    expect((await s.call('POST', '/apps/bravo/archive', {})).status).toBe(200);
+    expect(slugsOf((await s.call('GET', '/apps?limit=10&archived=archived')).body)).toEqual(['bravo']);
+    expect(slugsOf((await s.call('GET', '/apps?limit=10&archived=all&project=p1')).body)).toEqual(['alpha', 'bravo']);
+    expect(slugsOf((await s.call('GET', '/apps?limit=10&project=other')).body)).toEqual([]);
+    for (const q of ['limit=0', 'limit=201', 'limit=two', 'limit=1.5', 'cursor=abc', 'limit=1&cursor=abc', `limit=1&cursor=${Buffer.from('[1]').toString('base64url')}`]) {
+      const res = await s.call('GET', `/apps?${q}`);
+      expect(res.status, q).toBe(400);
+      expect(res.body.code, q).toBe('bad_request');
+    }
+  });
+});
