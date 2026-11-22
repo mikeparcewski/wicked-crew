@@ -86,7 +86,11 @@ function object(value: unknown): value is Record<string, unknown> {
 export class RunSourcePicks {
   private readonly runs = new Map<string, StoredPick>();
 
-  constructor(private readonly file: string) {
+  /**
+   * `launched` (crew#1442): the pick a run's `run.launched` trail entry recorded. A run this store no longer holds (its
+   * file deleted or replaced) keeps that exact pick rather than reading as "no pick", which would widen it.
+   */
+  constructor(private readonly file: string, private readonly launched?: (runId: string) => string[] | null) {
     let raw: string;
     try {
       raw = readFileSync(file, 'utf8');
@@ -112,14 +116,30 @@ export class RunSourcePicks {
   get(runId: string): string[] | null {
     const pick = this.runs.get(runId);
     // Callers must not be able to widen the cached pick by mutating its array.
-    return pick === undefined ? null : [...pick.ids];
+    if (pick !== undefined) return [...pick.ids];
+    const recorded = this.launched?.(runId) ?? null;
+    return recorded === null ? null : [...recorded];
+  }
+
+  /**
+   * The pick the run's launch record holds, for `set`'s immutability check. A record that cannot be read (the boot read
+   * of the trail failed) counts as none here: refusing every new pick until a restart would stop every picked launch.
+   */
+  private launchedPick(runId: string): StoredPick | undefined {
+    try {
+      const ids = this.launched?.(runId) ?? null;
+      return ids === null ? undefined : { ids, at: 0 };
+    } catch {
+      return undefined;
+    }
   }
 
   set(runId: string, ids: readonly string[]): void {
     if (typeof runId !== 'string' || !RUN_ID_RE.test(runId)) throw new Error('invalid run id');
     if (!validIds(ids)) throw new Error(`pick at most ${RUN_SOURCES_MAX} registered source names`);
     const distinct = [...new Set(ids)];
-    const existing = this.runs.get(runId);
+    // A run's pick never changes, whether this store or only its launch record still holds it (crew#1442).
+    const existing = this.runs.get(runId) ?? this.launchedPick(runId);
     if (existing !== undefined) {
       if (existing.ids.length === distinct.length && distinct.every((id) => existing.ids.includes(id))) return;
       throw new Error("a run's source pick can't change");

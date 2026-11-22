@@ -42,19 +42,23 @@ describe('endpoint-manifest.json (TH-11)', () => {
 
   it('records the declared run-lifecycle bindings (the config.manifest channel works)', () => {
     const byKey = new Map(committed().endpoints.map((e) => [`${e.method} ${e.path}`, e]));
+    expect(byKey.get('GET /api/v1/maintenance')).toMatchObject({ responseType: 'MaintenanceState', statusCodes: [200] });
+    expect(byKey.get('POST /api/v1/maintenance')).toMatchObject({ requestType: 'MaintenanceRequest', responseType: 'MaintenanceState', statusCodes: [200, 400] });
+    expect(byKey.get('DELETE /api/v1/repos/:id')).toMatchObject({ responseType: 'UnregisterRepoResponse', statusCodes: [200, 404, 409, 501] });
     const launch = byKey.get('POST /api/v1/runs');
     expect(launch?.requestType).toBe('LaunchRunBody');
     // 501: campaignId attach on an engine addon without the campaign bindings (wicked-studio#27).
-    expect(launch?.statusCodes).toEqual([201, 400, 404, 409, 422, 501]);
+    expect(launch?.statusCodes).toEqual([201, 400, 404, 409, 422, 501, 503]);
     expect(byKey.get('GET /api/v1/runs/:id/pr')).toMatchObject({
       responseType: 'RunPullRequest', statusCodes: [200, 404, 409, 500],
     });
     expect(byKey.get('POST /api/v1/runs/:id/redeliver')).toMatchObject({
       responseType: 'RedeliverRunResult', statusCodes: [200, 404, 409, 500, 501],
     });
+    expect(byKey.get('POST /api/v1/chats/:id/proposals/:pid')?.statusCodes).toEqual([200, 400, 403, 404, 409, 422, 502]);
     const gate = byKey.get('POST /api/v1/runs/:id/gate');
     expect(gate?.requestType).toBe('GateDecision');
-    expect(gate?.statusCodes).toEqual([200, 400, 404, 409, 501]);
+    expect(gate?.statusCodes).toEqual([200, 400, 404, 409, 501, 503]);
     // wicked-core#406 follow-up: the project-graph routes declare their refusal codes — 501 (addon
     // predates code_graph_db), 503 (a current engine resolved no repo-graph root), 404/409/400.
     expect(byKey.get('GET /api/v1/projects/:id/graph')?.statusCodes).toEqual([200, 404, 501, 503]);

@@ -60,6 +60,8 @@ export interface McpToolRecord {
    * the tool to no agent.
    */
   disclosure?: ToolDisclosure | null;
+  /** The person's acceptance as an Apps read, bound to the saved schema; absent/null = not accepted. */
+  readAccepted?: { schemaHash: string } | null;
   /**
    * (DES-PM-001 §3, §3.1) PM entries only: crew's resource binding for the tool, bound to the schema hash it was
    * reviewed against. Absent/`null` = unbound: the gate offers the tool to no agent.
@@ -141,9 +143,26 @@ export interface McpServerRecord {
 
 export interface McpRegistryFile {
   version: 1;
+  /** Legacy Apps read acceptances have been migrated once; missing tool fields now mean unaccepted. */
+  readAcceptance?: 1;
   /** (DES-KNOWLEDGE-DATA-001 §5.5) Bumped by every write; absent = 0 (a file from before generations). */
   generation?: number;
   servers: McpServerRecord[];
+  /**
+   * (crew#1328, crew#1354) Estate source ids whose structure must be erased: a removed data source's entry id, a removed
+   * PM entry's trackers. Kept here, outside any entry, so it survives the entry, a restart and a restore (a restore
+   * replaces `servers` only). Its writer sends each an empty generation and drops it once estate takes it: the source
+   * projector for a data source (`kind: 'source'`), the tracker projector for a tracker. Unbounded on purpose: an
+   * erasure estate has not taken is never evicted (one per removed id; a second removal of the same id adds none).
+   */
+  estateTombstones?: EstateTombstone[];
+}
+
+/** One estate source id waiting for its empty generation, which writer owns it, and when it was asked for. */
+export interface EstateTombstone {
+  id: string;
+  kind: 'source' | 'tracker';
+  at: string;
 }
 
 /** One kept generation of the registry. */
@@ -232,6 +251,17 @@ export class McpRegistryStore {
       await this.write(file);
       return result;
     });
+    this.tail = next.catch(() => undefined);
+    return next;
+  }
+
+  /**
+   * Read under the same one-at-a-time chain as `mutate`, and write nothing back: for a step that must not interleave
+   * with a save but changes nothing in the registry file. No new generation is kept, so a step that runs often (the
+   * ten-minute Apps re-describe) never pushes the operator's restore points out of the kept window.
+   */
+  inspect<T>(fn: (file: McpRegistryFile) => T | Promise<T>): Promise<T> {
+    const next = this.tail.then(async () => fn(await this.read()));
     this.tail = next.catch(() => undefined);
     return next;
   }

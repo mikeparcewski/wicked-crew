@@ -516,17 +516,20 @@ export function effectiveDeps(rec: Record<string, unknown>): string[] {
 const within = (rec: Record<string, unknown>, visible: ReadonlySet<string>): boolean => effectiveDeps(rec).every((d) => visible.has(d));
 
 /** What {@link releaseVisible} decided: the result to hand back (possibly narrowed), or a withhold. */
-export type VisibleRelease = { ok: true; result: Record<string, unknown>; dropped: number } | { ok: false; reason: string };
+/** `dropped` counts every block and record left out; `withheld` only the records (items, nodes, edges) the visible set
+ *  left out, never a diagnostics block the relay cannot check (crew#1442: what a call record reports as withheld). */
+export type VisibleRelease = { ok: true; result: Record<string, unknown>; dropped: number; withheld: number } | { ok: false; reason: string };
 
 /**
  * The release re-check of a knowledge read (module doc): every record is checked against `visible`, read again just
  * before release. A tool error (estate's own words, no record) passes as it is.
  */
 export function releaseVisible(tool: string, result: Record<string, unknown>, visible: ReadonlySet<string>): VisibleRelease {
-  if (!ESTATE_VISIBLE_TOOLS.has(tool) || result['isError'] === true) return { ok: true, result, dropped: 0 };
+  if (!ESTATE_VISIBLE_TOOLS.has(tool) || result['isError'] === true) return { ok: true, result, dropped: 0, withheld: 0 };
   const content = result['content'];
   if (!Array.isArray(content)) return { ok: false, reason: `mcp:estate/${tool} answered no content the relay can check` };
   let dropped = 0;
+  let withheld = 0;
   const checked: unknown[] = [];
   for (const block of content) {
     // A block the relay cannot check (not JSON text, or not an object: a diagnostics line) is dropped, never passed.
@@ -547,6 +550,7 @@ export function releaseVisible(tool: string, result: Record<string, unknown>, vi
       if (items === null) return { ok: false, reason: 'mcp:estate/knowledge.recall answered no items list, so the answer is withheld' };
       const kept = items.filter((i) => isRecord(i) && within(i, visible));
       dropped += items.length - kept.length;
+      withheld += items.length - kept.length;
       // Only the checked list leaves: any other field estate might add is not passed unchecked.
       payload = { items: kept };
     } else if (tool === 'knowledge.source_catalog') {
@@ -568,6 +572,7 @@ export function releaseVisible(tool: string, result: Record<string, unknown>, vi
       };
       const keptEdges = edges.filter((e) => isRecord(e) && linked(e['from']) && linked(e['to']) && (!isRecord(e['meta']) || within({ deps: e['meta']['deps'] ?? [] }, visible)));
       dropped += nodes.length - keptNodes.length + edges.length - keptEdges.length;
+      withheld += nodes.length - keptNodes.length + edges.length - keptEdges.length;
       payload = { nodes: keptNodes, edges: keptEdges, truncated: payload['truncated'] === true };
     }
     checked.push({ type: 'text', text: JSON.stringify(payload) });
@@ -575,5 +580,5 @@ export function releaseVisible(tool: string, result: Record<string, unknown>, vi
   if (checked.length === 0) return { ok: false, reason: `mcp:estate/${tool} answered nothing the relay can check, so the answer is withheld` };
   // The released envelope is built, not copied: a second copy of the records (`structuredContent`, or any field
   // the relay does not know) never rides along unchecked.
-  return { ok: true, result: { content: checked, isError: false }, dropped };
+  return { ok: true, result: { content: checked, isError: false }, dropped, withheld };
 }

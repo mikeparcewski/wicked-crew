@@ -4,13 +4,15 @@
  */
 
 /** Why an upstream call failed. `boundary` = a `rest` request would have left its pinned host (I6). */
-export type UpstreamErrorClass = 'transport' | 'timeout' | 'http' | 'protocol' | 'boundary';
+export type UpstreamErrorClass = 'transport' | 'timeout' | 'http' | 'protocol' | 'boundary' | 'too_large';
 
 export class UpstreamCallError extends Error {
   constructor(
     readonly errorClass: UpstreamErrorClass,
     readonly retryable: boolean,
     message: string,
+    /** (crew#1367) The HTTP status the server answered, for an `http` failure whose status is known. */
+    readonly status?: number,
   ) {
     super(message);
   }

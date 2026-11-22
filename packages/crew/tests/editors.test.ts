@@ -5,7 +5,7 @@
 // fail-closed gate, then crew's own conformance run, then the registry (operator ruling X3); a pack
 // with skills or blocks is refused with its approval list.
 
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -979,10 +979,12 @@ describe('visuals: how an editor looks on the Plugins page (program DES-LEARN §
     symlinkSync(join(outside, 'x.svg'), join(dir, 'link.svg'));
     expect(() => readNoFollow(join(dir, 'link.svg'), 1024)).toThrow(/ELOOP|EMLINK/);
     const checked = statSync(join(dir, 'a.svg'));
-    rmSync(join(dir, 'a.svg'));
-    writeFileSync(join(dir, 'b.tmp'), SVG);
+    // crew#1458: the checked file stays alive (renamed) while its replacement is made, so the replacement cannot be
+    // handed the freed inode back: it is provably another file on any filesystem.
+    renameSync(join(dir, 'a.svg'), join(dir, 'old.svg'));
     writeFileSync(join(dir, 'a.svg'), SVG);
-    rmSync(join(dir, 'b.tmp'));
+    expect(statSync(join(dir, 'a.svg')).ino).not.toBe(checked.ino);
+    rmSync(join(dir, 'old.svg'));
     expect(readNoFollow(join(dir, 'a.svg'), 1024, checked)).toBeNull();
     expect(readNoFollow(join(dir, 'a.svg'), 1024)?.toString()).toBe(SVG);
     // A path out of the directory, a remote URL or an unknown type is never even tried.

@@ -131,6 +131,17 @@ describe('CS8: Respond and Rework on an engine without the sourced draft', () =>
 });
 
 describe('CS5 document input sources', () => {
+  it('#1281: a drawer card freezes its conversation before later turns arrive', async () => {
+    const r = rig();
+    r.records.push({ at: 1, turnId: 'before', kind: 'user', owner: true, text: 'Coverage reached 80%.', seats: ['claude'] });
+    const p = await r.pick('document');
+    r.records.push({ at: 2, turnId: 'after', kind: 'user', owner: true, text: 'A later claim: 99%.', seats: ['claude'] });
+    expect((await r.svc.decide('chat', p.pid, { decision: 'go' }, ME, 'instance')).code).toBe(200);
+    const conversation = r.packets[0]!.canonical.find((f) => f.name.startsWith('conversation-'))!.bytes.toString();
+    expect(conversation).toContain('Coverage reached 80%.');
+    expect(conversation).not.toContain('A later claim');
+  });
+
   it.each(['respond', 'rework'])('%s fills two attachments, displays their count and launches chat plus both sources', async (card) => {
     const r = rig();
     const p = await r.pick(card);
@@ -219,7 +230,7 @@ describe('CS5 document input sources', () => {
     const p = await r.pick();
     r.duringCreate(() => r.replaceBytes('a1', Buffer.alloc(5 * 1024 * 1024, 0x61)));
     const result = await r.svc.decide('chat', p.pid, { decision: 'go' }, ME, 'instance');
-    expect(result.code).toBe(502);
+    expect(result.code).toBe(409);
     expect(JSON.stringify(result.body)).toContain('attachment:a1 cannot be used (over 512 KB');
     expect(r.launches).toEqual([]);
   });
@@ -247,6 +258,23 @@ describe('CS5 document input sources', () => {
     const stale = { ...p, sources: [{ token: 'attachment:large', label: 'large.txt', status: 'ok' as const }],
       sentence: { ...p.sentence!, tokens: p.sentence!.tokens.map((t) => t.kind === 'documents' ? { ...t, documents: t.documents!.map((d) => ({ ...d, status: 'ok' as const })) } : t) } };
     expect((await r.packet(stale)).struck).toContainEqual({ token: 'attachment:large', reason });
+  });
+
+  it.each(['attachment:pdf', 'chat', 'message:turn'])('keeps a fitting scanned PDF whole and discloses it as readable, not citable on the %s source path', async (token) => {
+    const r = rig();
+    r.files.length = 0;
+    const header = Buffer.from('%PDF-1.4\nstream\nno text operators here\nendstream\n%%EOF\n');
+    const scan = Buffer.concat([header, Buffer.alloc(512 * 1024 - header.length, 0x20)]);
+    r.attach('pdf', 'scan.pdf', scan);
+    r.records.push({ at: 1, turnId: 'turn', kind: 'user', owner: true, text: 'Read this scan', seats: ['claude'], attachments: [{ id: 'pdf', chatId: 'chat', name: 'scan.pdf', mediaType: 'application/pdf', kind: 'pdf', bytes: scan.length, sha256: 'x', createdAt: '' }] });
+    // No documents chip: legacy sources and attachments on turns remain readable even without a text derivative.
+    const p = { pid: 'chat:turn', turnId: 'turn', what: { title: 'Scan', label: 'Document' }, brief: 'Read this scan', sources: [{ token, status: 'ok' }] } as ArtifactProposal;
+    const packet = await r.packet(p);
+    expect(packet.struck).toEqual([]);
+    expect(packet.canonical.find((f) => f.name === 'attachment-pdf-scan.pdf')?.bytes).toEqual(scan);
+    expect(packet.canonical.some((f) => f.name.endsWith('.pdf.txt'))).toBe(false);
+    expect(packet.tokens[token]).toContain('attachment-pdf-scan.pdf');
+    expect(packet.manifest.files.find((f) => f.token === token)?.note).toMatch(/no extractable text.*read.*not cit/);
   });
 
   it.each([[2048, 'evidence.pdf'], [300, 'evidence.pdf'], [2048, 'evidence.pdf ']] as const)('stages the citable derivative of a %i KB pdf named %s and only includes a fitting original', async (kb, name) => {
@@ -436,8 +464,8 @@ describe('CS5 document input sources', () => {
     expect(p.inputs).toBeUndefined();
     expect(p.needs).toBeUndefined();
     expect(p.sentence).toMatchObject({
-      text: "I'll make {kind} from this conversation, filed in project-a, checked by {checks}.",
-      tokens: [{ id: 'kind' }, { id: 'checks' }], ask: 'Start?',
+      text: "I'll make {kind} from this conversation, filed in project-a, written by {seats}, checked by {checks}.",
+      tokens: [{ id: 'kind' }, { id: 'seats' }, { id: 'checks' }], ask: 'Start?',
     });
     expect((await r.svc.decide('chat', p.pid, { decision: 'go' }, ME, 'instance')).code).toBe(200);
     expect(sources(r.launches[0]!.resolution)).toEqual(['chat']);

@@ -170,6 +170,17 @@ describe('the source packet (A3, §5.2-§5.3)', () => {
     expect(p.canonical.map((f) => f.name)).not.toContain('MANIFEST-run-a.json');
   });
 
+  it.each(['source', 'turn'] as const)('#1281: a PDF on the %s path carries citable text', async (path) => {
+    const dir = fresh('pdf');
+    const file = join(dir, 'pdf');
+    writeFileSync(file, '%PDF-1.4\nstream\nBT (Coverage 80 percent) Tj ET\nendstream\n%%EOF\n');
+    const res = proposal('c1:t2', { sources: [{ token: path === 'source' ? 'attachment:pdf' : 'chat', label: 'evidence', status: 'ok' }] });
+    const records: ChatTranscriptRecord[] = [{ at: 1, turnId: 't2', kind: 'user', text: 'use this', seats: [], owner: true, attachments: [{ id: 'pdf', chatId: 'c1', name: 'evidence.pdf', mediaType: 'application/pdf', kind: 'pdf', bytes: 80, sha256: 'x', createdAt: '' }] }];
+    const packet = await buildSourcePacket({ runId: 'pdf-run', chatId: 'c1', pid: res.pid, cutoffTurnId: 't2', resolution: res, records }, packetDeps([], () => null, { pdf: { name: 'evidence.pdf', path: file } }));
+    expect(packet.files.find((f) => f.name.endsWith('.pdf.txt'))?.bytes.toString()).toContain('Coverage 80 percent');
+    expect(packet.struck).toEqual([]);
+  });
+
   it('a `message:` source grounds the run-only figures its answer used, without the run being named again', async () => {
     const records = chatRecords('c1');
     const res = proposal('c1:t2', { sources: [{ token: 'message:t1', label: "claude's answer", status: 'ok', projectId: null }] });
@@ -424,6 +435,29 @@ function withChat(w: World, chatId: string): void {
 }
 
 describe('Go creates one grounded document and one run, exactly once (A3, §4.3)', () => {
+  it('#1281: every promised source lost at staging refuses Go with the whole list', async () => {
+    const w = world();
+    withChat(w, 'c1');
+    const file = join(fresh('large'), 'large');
+    writeFileSync(file, 'x'.repeat(PACKET_FILE_MAX_BYTES + 1));
+    const deps = (w.svc as unknown as { deps: ChatProposalDeps }).deps;
+    deps.attachments = () => ['a', 'b'].map((id) => ({ id, name: `${id}.txt`, bytes: 1 }));
+    const res = proposal('c1:t2', { sources: ['attachment:a', 'attachment:b'].map((token) => ({ token, label: token, status: 'ok' as const })), repos: [], repoRefs: [] });
+    w.records.get('c1')!.push({ at: 5, turnId: 't2', kind: 'proposal', proposal: res });
+    w.registry.register('create', new CreateLauncher({
+      bindings: w.bindings, runExists: async () => false, docsRoot: async () => join(w.docs, '_unfiled'),
+      createDoc: async () => ({ status: 200, body: {} }), launchBound: async (s) => { w.launches.push(s); },
+      records: () => w.records.get('c1')!, instanceOf: () => 'i1', chatIdOf: (id) => id,
+      repos: async () => [], graphFor: async () => null, clisJsonFor: () => '[]', styleOf: () => 'doc',
+      packetDeps: { ...packetDeps([]), attachment: () => ({ name: 'large.txt', path: file }) },
+    }));
+    const result = await w.svc.decide('c1', res.pid, { decision: 'go' }, ME, 'i1');
+    expect(result).toMatchObject({ code: 409, body: { code: 'packet_over_cap', view: { state: 'open' } } });
+    expect(result.body['error']).toContain('attachment:a');
+    expect(result.body['error']).toContain('attachment:b');
+    expect(w.launches).toHaveLength(0);
+  });
+
   it('zero creator dispatch before Go; Go records accepting, creates the derived document through the grant, and launches with the derived run id', async () => {
     const w = world();
     withChat(w, 'c1');
@@ -586,7 +620,20 @@ describe('Change something on a create: the project and the repositories (A3, §
 
 describe('the boot reconcile, before the resume sweep (A3, §6.2)', () => {
   const init = (ref: string, doc: string) => ({ ref, mount: '_unfiled', doc, projectId: null, owner: 'maria', chatId: 'c1', chatInstance: 'i1', scopeProject: null, proposalId: 'c1:t2', cutoffTurnId: 't2', repos: [], graphDb: null });
-  const versions = (head: number, byRun: Record<string, number> = {}, provenance = false) => ({ head, byRun: new Map(Object.entries(byRun)), provenance });
+  const versions = (head: number, byRun: Record<string, number> = {}) => ({ head, byRun: new Map(Object.entries(byRun)) });
+
+  it('#1282: a newer head without this run in the manifest is not a landing', async () => {
+    const bindings = new DocBindingStore(fresh('no-proof'));
+    bindings.begin(init('_unfiled/a', 'a'), { pid: 'c1:t2', runId: 'unproven', base: 0 });
+    bindings.markEmitted('_unfiled/a', 'unproven');
+    await reconcileBoundAttempts({
+      bindings, sessions: async () => [run('unproven')], cancelRun: async () => {},
+      docVersions: () => versions(2), chatIdOf: (id) => id,
+      settleAccepting: async () => true, ensureLaunchRecord: () => {},
+      hasLandingFailed: () => false, linkDocument: () => {}, onOutcome: () => {}, log: () => {},
+    });
+    expect(bindings.attemptOf('unproven')?.attempt.outcome).toMatchObject({ kind: 'failed', reason: 'interrupted by a restart' });
+  });
 
   it('a live run is cancelled to a confirmed terminal state, then released with "interrupted by a restart"; a landed one stays landed; an unlaunched one is left to Go again', async () => {
     const s = new DocBindingStore(fresh('bind'));
@@ -608,7 +655,7 @@ describe('the boot reconcile, before the resume sweep (A3, §6.2)', () => {
         cancelled.push(id);
         status.set(id, 'cancelled');
       },
-      docVersions: (_p, doc) => (doc === 'b' ? versions(1) : versions(0)),
+      docVersions: (_p, doc) => (doc === 'b' ? versions(1, { 'run-done': 1 }) : versions(0)),
       chatIdOf: (c) => c,
       settleAccepting: async (_c, pid) => {
         settled.push(pid);
@@ -773,7 +820,7 @@ describe('xreview r1 folds (A3)', () => {
       sessions: async () => [run('run-a'), run('run-b')],
       cancelRun: async () => 'cancelled',
       // a: the head moved (a hand edit), but the manifest names no version by run-a; b: v1 is run-b's.
-      docVersions: (_p, doc) => (doc === 'a' ? { head: 1, byRun: new Map([['someone-else', 1]]), provenance: true } : { head: 1, byRun: new Map([['run-b', 1]]), provenance: true }),
+      docVersions: (_p, doc) => (doc === 'a' ? { head: 1, byRun: new Map([['someone-else', 1]]) } : { head: 1, byRun: new Map([['run-b', 1]]) }),
       chatIdOf: (c) => c,
       settleAccepting: async () => false,
       ensureLaunchRecord: () => undefined,
@@ -980,7 +1027,7 @@ describe('xreview r4 folds (A3)', () => {
     expect(p.files.find((f) => f.name === 'attachment-rep1-report.txt')?.bytes.toString()).toBe('measured: 3585 of 5786');
   });
 
-  it('an archived chat’s retry is filed under the chat as it is kept now, never the chat that reused the id', async () => {
+  it('an archived chat’s retry carries the original instance for filing at the draft seam', async () => {
     const w = world();
     withChat(w, 'c1');
     await w.svc.decide('c1', 'c1:t2', { decision: 'go' }, ME, 'i1');
@@ -994,7 +1041,7 @@ describe('xreview r4 folds (A3)', () => {
     ((w.registry as unknown as { dispatchers: Map<string, { deps: { chatIdOf: unknown } }> }).dispatchers.get('create')!.deps).chatIdOf = (c: string, inst: string | null) => (c === 'c1' && inst === 'i1' ? 'c1--1' : c);
     const retryPid = (await w.svc.appendRetry('c1--1', 'c1:t2', first.runId, first.artifactRef, 'the run was stopped', 'i1'))!;
     expect((await w.svc.decide('c1--1', retryPid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
-    expect(w.launches[1]!.chatId).toBe('c1--1');
+    expect(w.launches[1]).toMatchObject({ chatId: 'c1', chatInstance: 'i1' });
   });
 
   it('a person who cleared the repositories gets no graph either; attachments over the packet together are refused', async () => {

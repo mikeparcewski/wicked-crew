@@ -55,6 +55,7 @@ import { removeScratch } from '../setup/scratch.js';
 import { baseSkillOff } from '../setup/base-skill-off.js';
 import { createRequire } from 'node:module';
 import { deliveryCannotCome, optInWhenFloorCannotArm } from '../support/nested-floor.js';
+import { cancelBooked, reapSettled } from '../support/cancel-reap.js';
 
 /**
  * Is the installed `wicked-core-ts` at least `maj.min.pat`? A tests-only twin of the adapter's
@@ -672,13 +673,21 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
       expect(decided.body['status']).toBe('cancelled');
       run = await waitForRun(runId, (s) => TERMINAL.has(String(s['status'])), 'terminal status after the gate reject', 120_000);
       expect(run.session['status']).toBe('cancelled');
-      const { body: trailBody } = await getJson(`/api/v1/runs/${runId}/events`);
-      const trail = trailBody['events'] as Array<Record<string, unknown>>;
-      expect(trail[trail.length - 1]?.['type'], 'the cancel is the terminal frame').toBe('runCancelled');
-      expect(trail.some((e) => e['type'] === 'sessionFailed')).toBe(false);
-      const retained = trail.some((e) => e['type'] === 'worktreeRetained');
+      // crew#1509: the engine emits runCancelled after at most 500 ms of reap and the reap goes on, so a dirty
+      // tree's worktreeRetained may follow it, and a clean tree may still be on disk being deleted. Wire and disk
+      // are compared once the reap has settled (tests/support/cancel-reap.ts), never mid-reap.
       const workdir = run.session['workdir'];
-      expect(retained, 'retained on the wire ⇔ the worktree is still on disk').toBe(typeof workdir === 'string' && existsSync(workdir));
+      const settled = await waitFor(async () => {
+        // The disk first, then the trail: the trail read is at least as fresh as what the disk showed.
+        const onDisk = typeof workdir === 'string' && existsSync(workdir);
+        const { body: trailBody } = await getJson(`/api/v1/runs/${runId}/events`);
+        const trail = trailBody['events'] as Array<Record<string, unknown>>;
+        return reapSettled(trail, onDisk) ? { trail, onDisk } : null;
+      }, 'the cancelled run\'s worktree reap to settle', 60_000);
+      expect(cancelBooked(settled.trail), 'the cancel is booked; only a retention frame may follow it').toBe(true);
+      expect(settled.trail.some((e) => e['type'] === 'sessionFailed')).toBe(false);
+      const retained = settled.trail.some((e) => e['type'] === 'worktreeRetained');
+      expect(retained, 'retained on the wire ⇔ the worktree is still on disk').toBe(settled.onDisk);
     } else {
       // A dispatch-time refusal or a Tool-executor exit ≠ 0 is not a fold denial: still terminal.
       expect(run.session['status']).toBe('failed');

@@ -90,18 +90,6 @@ describe('gh-cli references', () => {
     expect(store.sets).toBe(0);
   });
 
-  it('refuses another active account by name, without reading any token', async () => {
-    const gh = fakeGh({ statusText: status(block('alice', false), block('bob', true)) });
-    await expect(resolveSecret('gh-cli:alice', new MemorySecretStore(), {}, gh)).rejects.toMatchObject({ code: 'gh_account_mismatch' });
-    expect(tokenCalls(gh)).toEqual([]);
-  });
-
-  it('refuses several accounts with no provable active one', async () => {
-    const gh = fakeGh({ statusText: status(block('alice', null), block('bob', null)) });
-    await expect(resolveSecret('gh-cli:alice', new MemorySecretStore(), {}, gh)).rejects.toMatchObject({ code: 'gh_account_mismatch' });
-    expect(tokenCalls(gh)).toEqual([]);
-  });
-
   it('names signed-out, not-installed and no-token, and never falls back to GH_TOKEN', async () => {
     const env = { GH_TOKEN: 'ghp_env_token', GITHUB_TOKEN: 'ghp_env_token2' };
     const store = new MemorySecretStore();
@@ -110,10 +98,31 @@ describe('gh-cli references', () => {
     await expect(resolveSecret('gh-cli:alice', store, env, fakeGh({ statusText: status(block('alice', true)), tokenCode: 1 }))).rejects.toMatchObject({ code: 'gh_token_unavailable' });
   });
 
+  it('a source pinned to a non-active account resolves with that account\'s own token and never switches gh', async () => {
+    // alice is pinned; bob is gh's active account. The token is read with --user alice; the active account is untouched.
+    const gh = fakeGh({ statusText: status(block('alice', false), block('bob', true)) });
+    const store = new MemorySecretStore();
+    expect(await resolveSecret('gh-cli:alice', store, {}, gh)).toBe('ghp_synthetic_one');
+    expect(await secretIsSet('gh-cli:alice', store, {}, gh)).toBe(true);
+    expect(tokenCalls(gh)).toEqual([['auth', 'token', '--hostname', 'github.com', '--user', 'alice']]);
+    expect(gh.calls.some((c) => c[1] === 'switch')).toBe(false);
+    // Several accounts with no provable active one: the pinned one is still read by name.
+    const unmarked = fakeGh({ statusText: status(block('alice', null), block('bob', null)) });
+    expect(await resolveSecret('gh-cli:alice', store, {}, unmarked)).toBe('ghp_synthetic_one');
+    expect(store.sets).toBe(0);
+  });
+
+  it('a refusal names logins only: gh\'s token output never reaches the error text', async () => {
+    const gh = fakeGh({ statusText: status(block('alice', false), block('bob', true)), token: 'ghp_synthetic_leak', tokenCode: 1 });
+    const err = await resolveSecret('gh-cli:alice', new MemorySecretStore(), {}, gh).catch((e: unknown) => e as Error);
+    expect(err).toMatchObject({ code: 'gh_token_unavailable' });
+    expect(String((err as Error).message)).not.toContain('ghp_synthetic_leak');
+  });
+
   it('secretIsSet answers from the status alone', async () => {
     const gh = fakeGh({ statusText: status(block('alice', true)) });
     expect(await secretIsSet('gh-cli:alice', new MemorySecretStore(), {}, gh)).toBe(true);
-    gh.state.statusText = status(block('alice', false), block('bob', true));
+    gh.state.statusText = status(block('bob', true));
     expect(await secretIsSet('gh-cli:alice', new MemorySecretStore(), {}, gh)).toBe(false);
     expect(tokenCalls(gh)).toEqual([]);
   });
@@ -175,15 +184,16 @@ describe('a GitHub source saved with gh-cli', () => {
     expect(stored).not.toContain('ghp_synthetic');
   });
 
-  it('refuses a different active account on preview and on a read, and sends nothing', async () => {
-    const p = await registry.preview(config());
-    await registry.save(p.previewHash);
-    seen.length = 0;
+  it('tests and reads a source pinned to a non-active account with that account\'s credential, storing none', async () => {
     gh.state.statusText = status(block('alice', false), block('bob', true));
-    await expect(registry.preview(config())).rejects.toMatchObject({ status: 409, code: 'gh_account_mismatch' });
-    await expect(registry.callSecret(config())).rejects.toMatchObject({ status: 409, code: 'gh_account_mismatch' });
-    expect(seen).toEqual([]);
-    expect(tokenCalls(gh).length).toBe(1); // the first preview's, none after the switch
+    const p = await registry.preview(config());
+    expect(seen).toEqual(['ghp_synthetic_one']);
+    await registry.save(p.previewHash);
+    expect(await registry.callSecret(config())).toEqual({ secret: 'ghp_synthetic_one', missing: false });
+    expect(JSON.stringify(await registry.list())).not.toContain('ghp_synthetic');
+    expect(tokenCalls(gh).every((c) => c.join(' ') === 'auth token --hostname github.com --user alice')).toBe(true);
+    expect(gh.calls.some((c) => c[1] === 'switch')).toBe(false);
+    expect(secrets.sets).toBe(0);
   });
 
   it('reports gh missing, signed out and signed in on the listing, and never reads a token for it', async () => {

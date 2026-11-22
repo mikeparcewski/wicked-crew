@@ -63,6 +63,8 @@ export interface RuleMatchJob {
   project?: string | null;
   /** (DES-RULE-CHECK-001, coord E7 rerun) The job's repository: a rule that names it applies. */
   repo?: string | null;
+  /** wicked-crew#1706: the registered checkout root for the engine's repository facts. */
+  repoRoot?: string | null;
 }
 
 type BriefRule = Pick<ConformanceRule, 'id' | 'severity' | 'statement'> & Partial<ConformanceRule>;

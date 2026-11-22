@@ -17,14 +17,14 @@
 // this test hands. On the pinned addon `Core.preflightStateHome` is absent, so crew classifies with
 // its registry copy (`source: 'crew'`); an addon carrying it answers `engine` — both are accepted.
 
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { DiagnosticsResponse, HealthResponse, StateHomeBlockerBody } from 'wicked-crew-api-types';
 
-import type { CoreAdapter } from '../src/core/adapter.js';
+import { CoreAdapter } from '../src/core/adapter.js';
 import type { LaunchRunInput } from '../src/core/types.js';
 import { createServer } from '../src/api/server.js';
 import { crewStateHome } from '../src/projects/state-home.js';
@@ -71,6 +71,7 @@ function stubAdapter(dbPath: string): CoreAdapter {
 }
 
 beforeAll(async () => {
+  vi.spyOn(CoreAdapter, 'judgeCoverage').mockReturnValue(JSON.stringify({ covered: false, singleIdentity: true, authors: [{ seat: 'claude', judges: [], notJudges: [] }], benched: [] }));
   scratch = mkdtempSync(join(tmpdir(), 'crew-state-home-routes-'));
   // The state home the handed snapshot derives: `<home>/skills/snapshots/000001` — with the live
   // daemon's debris shape, a stray file, and a scratch dir under the skills root.
@@ -101,6 +102,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  vi.restoreAllMocks();
   await app.close();
   if (savedSnapshot === undefined) delete process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
   else process.env[SKILLS_SNAPSHOT_ENGINE_ENV] = savedSnapshot;
@@ -216,13 +218,33 @@ describe('a state home the fence cannot classify — said at boot, on /diagnosti
     expect(launched).toEqual(['run-after-repair']);
   });
 
+  it('wicked-core#1699: after a k8s seat arm leaves <state home>/k8s-replica-git, the next POST /runs is still admitted', async () => {
+    // wicked-core#1699: a seat arm must not block the next launch. Whoever classifies (the engine's
+    // preflight on an addon that carries it, else crew's registry copy) must know the name.
+    const cache = join(home, 'k8s-replica-git');
+    try {
+      mkdirSync(join(cache, 'a'.repeat(64), '.git', 'objects'), { recursive: true });
+      if (process.platform !== 'win32') chmodSync(cache, 0o700);
+      const res = await app.inject({
+        method: 'POST', url: '/api/v1/runs',
+        payload: { problem: 'fix the thing', sessionId: 'run-after-arm' },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(launched.at(-1)).toBe('run-after-arm');
+      const diag = (await app.inject({ method: 'GET', url: '/api/v1/diagnostics' })).json() as DiagnosticsResponse;
+      expect(diag.stateHome?.unregistered).toEqual([]);
+    } finally {
+      rmSync(cache, { recursive: true, force: true });
+    }
+  });
+
   it('OS metadata beside a REAL unknown entry: only the unknown entry is named, and the launch is still refused', async () => {
     writeFileSync(join(home, 'stray2.txt'), '', 'utf8');
     try {
       const res = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'still refused' } });
       expect(res.statusCode).toBe(409);
       expect((res.json() as StateHomeBlockerBody).unregistered.map((u) => u.name)).toEqual(['stray2.txt']);
-      expect(launched).toEqual(['run-after-repair']);
+      expect(launched).toEqual(['run-after-repair', 'run-after-arm']);
     } finally {
       rmSync(join(home, 'stray2.txt'));
     }
@@ -238,7 +260,7 @@ describe('a state home the fence cannot classify — said at boot, on /diagnosti
     expect(body.error).toBe(CORE_REFUSAL);
     expect(body.unregistered).toEqual([]);
     expect(body.remedy).toBe(STATE_HOME_REMEDY);
-    expect(launched).toEqual(['run-after-repair']);
+    expect(launched).toEqual(['run-after-repair', 'run-after-arm']);
   });
 });
 

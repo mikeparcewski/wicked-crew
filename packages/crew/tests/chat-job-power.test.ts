@@ -71,7 +71,9 @@ describe('a chat job Start chooses power (server, real job launcher)', () => {
     workflowCatalog: async () => ({ workflows: BUILTIN_WORKFLOWS, unavailable: [] }),
     getWorkflow: (id: string) => BUILTIN_WORKFLOWS.find((w) => w.id === id),
     catalog: async () => [],
-    listPresets: async () => presets.map((name) => ({ name, scope: 'global', steps: [{ id: 'fix' }], created_by: systemPreset ? 'operator' : 'builtin', ...(systemPreset ? { system: true } : {}), updated_at: 1 })),
+    // A saved system-stamped row shadows the card's built-in like any other (crew#1445 coord F1): it keeps the built-in's
+    // instruments, so the card stays on and this tests only that the launch accepts it.
+    listPresets: async () => presets.map((name) => ({ name, scope: 'global', steps: [{ id: 'fix' }], created_by: systemPreset ? 'operator' : 'builtin', ...(systemPreset ? { system: true, required_instruments: ['distinct_evaluator', 'judge', 'qe_acceptance'] } : {}), updated_at: 1 })),
     supportsPowerMode: () => {
       powerReads += 1;
       if (powerReadsLeft === null) return powerMode;
@@ -176,8 +178,9 @@ describe('a chat job Start chooses power (server, real job launcher)', () => {
     const before = launches.length;
     settingsLeft = perStart - 1;
     const out = await start(chatId, pid, { power: true });
-    expect(out.statusCode, out.body).toBe(502);
-    expect(out.json()).toMatchObject({ code: 'launch_failed', error: expect.stringContaining('Power mode for new jobs is off') });
+    // (crew#1453) The launch's typed refusal passes through and the card reopens: nothing was started.
+    expect(out.statusCode, out.body).toBe(409);
+    expect(out.json()).toMatchObject({ code: 'power_unavailable', error: expect.stringContaining('Power mode for new jobs is off'), view: { state: 'open' } });
     expect(launches.length).toBe(before);
   });
 
@@ -244,11 +247,12 @@ describe('a chat job Start chooses power (server, real job launcher)', () => {
     // Every check before the last answers yes; launchRun's own check (the last) answers no.
     powerReadsLeft = perStart - 1;
     const out = await start(chatId, pid, { power: true });
-    expect(out.statusCode, out.body).toBe(502);
-    expect(out.json()).toMatchObject({ code: 'launch_failed', error: expect.stringContaining('power_unavailable') });
+    // (crew#1453) The launch's typed refusal passes through and the card reopens: nothing was started.
+    expect(out.statusCode, out.body).toBe(409);
+    expect(out.json()).toMatchObject({ code: 'power_unavailable', view: { state: 'open' } });
     expect(launches.length).toBe(before);
     powerReadsLeft = null;
-    // Go again resumes the choices it was accepted with (no edits), now held at its plan.
+    // Start again on the reopened card, now held at its plan.
     const again = await start(chatId, pid, { power: false, edits: undefined });
     expect(again.statusCode, again.body).toBe(200);
     expect(launches.length).toBe(before + 1);

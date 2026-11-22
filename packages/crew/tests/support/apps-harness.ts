@@ -55,7 +55,7 @@ export interface Harness {
   env: Record<string, string>;
   call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: unknown, as?: keyof typeof TOKENS): Promise<{ status: number; body: Record<string, unknown> & { code?: string } }>;
   /** Save any server through the real preview/save (a REST origin the spec does not list is confirmed). */
-  register(config: Record<string, unknown>): Promise<McpServer>;
+  register(config: Record<string, unknown>, acceptedReads?: string[]): Promise<McpServer>;
   /** Save a Postgres source through the real preview/save, with its password in an env secret. */
   addPg(name: string, opts: { port: number; database: string; user: string; password: string }): Promise<McpServer>;
   /** A new app (priya's first version). */
@@ -65,7 +65,7 @@ export interface Harness {
   close(): Promise<void>;
 }
 
-export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick<Harness, 'registry' | 'store' | 'audit' | 'executor'>) => void | Promise<void>; now?: () => number; crewDeadlineMs?: number; knowledge?: AppKnowledgeDeps; routes?: Pick<AppRoutesDeps, 'publish' | 'verifyUnitToken'> } = {}): Promise<Harness> {
+export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick<Harness, 'registry' | 'store' | 'audit' | 'executor'>) => void | Promise<void>; now?: () => number; crewDeadlineMs?: number; snapshotDir?: string; visibleSources?: (projectId: string | null) => Promise<ReadonlySet<string>>; knowledge?: AppKnowledgeDeps; routes?: Pick<AppRoutesDeps, 'publish' | 'verifyUnitToken'> } = {}): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'apps-k2b-'));
   const env: Record<string, string> = {};
   const secrets: SecretStore = { available: false, get: async () => null, has: async () => false, set: async () => undefined, delete: async () => undefined };
@@ -82,7 +82,8 @@ export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick
   // (DES-KNOWLEDGE-DATA-001 §9.1) With `knowledge`, recall queries are checked and read against it, in the app's project.
   let storeRef: AppStore | null = null;
   const projectOf = (slug: string): string | null => storeRef?.projectOf(slug) ?? null;
-  const store = new AppStore({ stateFile: join(dir, 'daemon-apps.json'), appsRoot: join(dir, 'apps'), registry: repoRegistry, sourceStage: new AppsSourceStage({ registry, ...(opts.knowledge !== undefined ? { knowledge: opts.knowledge, projectOf } : {}) }) });
+  const visibleSources = opts.visibleSources ?? (async () => new Set((await registry.listForAgents()).servers.map((s) => s.name)));
+  const store = new AppStore({ stateFile: join(dir, 'daemon-apps.json'), appsRoot: join(dir, 'apps'), registry: repoRegistry, sourceStage: new AppsSourceStage({ registry, visibleSources, projectOf, ...(opts.snapshotDir !== undefined ? { snapshotDir: opts.snapshotDir } : {}), ...(opts.knowledge !== undefined ? { knowledge: opts.knowledge } : {}) }) });
   storeRef = store;
   const app = Fastify({ logger: false });
   const viewers: Record<string, Viewer> = {};
@@ -90,6 +91,9 @@ export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick
   const executor = new AppExecutor({
     store,
     registry,
+    visibleSources,
+    projectOf,
+    ...(opts.snapshotDir !== undefined ? { snapshotDir: opts.snapshotDir } : {}),
     crewInject: async (r) => {
       const res = await app.inject({ method: r.method, url: r.url, headers: r.headers });
       return { statusCode: res.statusCode, body: res.body };
@@ -97,12 +101,12 @@ export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick
     viewerOf,
     ...(opts.now !== undefined ? { now: opts.now } : {}),
     ...(opts.crewDeadlineMs !== undefined ? { crewDeadlineMs: opts.crewDeadlineMs } : {}),
-    ...(opts.knowledge !== undefined ? { knowledge: opts.knowledge, projectOf } : {}),
+    ...(opts.knowledge !== undefined ? { knowledge: opts.knowledge } : {}),
   });
   const actions = new AppActionStore(join(dir, 'daemon-apps-actions.json'), opts.now);
   const writeEnv: Record<string, string> = {};
   const hooks: WriteHooks = {};
-  const writePath = new AppWritePath({ store, actions, registry, audit, viewerOf, executor, env: writeEnv, hooks, ...(opts.now !== undefined ? { now: opts.now } : {}) });
+  const writePath = new AppWritePath({ store, actions, registry, visibleSources, projectOf, audit, viewerOf, executor, env: writeEnv, hooks, ...(opts.now !== undefined ? { now: opts.now } : {}) });
   registerAuthHooks(app, { mode: 'required', verifiers: [{ name: 'test', verify: async (t) => TOKENS[t] ?? null }], allowedOrigins: null });
   const actorOf = (req: { actor?: Actor | null }): Actor => req.actor ?? LOCAL_ACTOR;
   registerMcpRoutes(app, { registry, audit, actorOf });
@@ -134,11 +138,11 @@ export async function appsHarness(opts: { extra?: (app: FastifyInstance, h: Pick
     viewers,
     env,
     call,
-    async register(config) {
+    async register(config, acceptedReads) {
       const p = await call('POST', '/mcp/servers/preview', config);
       expect(p.status, JSON.stringify(p.body)).toBe(200);
       const preview = p.body as unknown as McpPreviewResponse;
-      const saved = await call('POST', '/mcp/servers', { previewHash: preview.previewHash, ...(preview.egress?.confirmRequired === true ? { allowOrigin: preview.egress.origin } : {}) });
+      const saved = await call('POST', '/mcp/servers', { previewHash: preview.previewHash, acceptedReads: acceptedReads ?? preview.tools.filter((t) => t.class === 'read').map((t) => t.name), ...(preview.egress?.confirmRequired === true ? { allowOrigin: preview.egress.origin } : {}) });
       expect(saved.status, JSON.stringify(saved.body)).toBe(201);
       return saved.body as unknown as McpServer;
     },

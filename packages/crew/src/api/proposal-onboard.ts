@@ -31,6 +31,9 @@ export type GitUrlReading = { ok: true; url: string; key: string; name: string }
 // User and host start with a letter or digit (never `-`: an ssh option).
 const SCP = /^([A-Za-z0-9][A-Za-z0-9._-]*)@([A-Za-z0-9][A-Za-z0-9.-]*):(?!\/)([A-Za-z0-9._~/-]+)$/;
 
+/** The ssh transport's spellings (`git+ssh://`, `ssh+git://` are git's aliases for `ssh://`). */
+const SSH_PROTOCOLS: ReadonlySet<string> = new Set(['ssh:', 'git+ssh:', 'ssh+git:']);
+
 /** Hosts whose repository paths are case-insensitive: only there do two spellings that differ in case name one repo. */
 const CASELESS_HOSTS: ReadonlySet<string> = new Set(['github.com', 'gitlab.com', 'bitbucket.org']);
 
@@ -48,15 +51,46 @@ export function withoutCredentials(raw: string): string {
     const plain = u.search === '' && u.hash === '';
     u.search = '';
     u.hash = '';
-    // An ssh user without a password is part of the address (which account's repository), not a secret.
-    if (u.password === '' && (u.username === '' || u.protocol === 'ssh:')) return plain ? t : u.toString();
-    if (u.protocol !== 'ssh:') u.username = '';
+    // An ssh user without a password is part of the address (which account's repository), not a secret; git spells the
+    // ssh transport three ways.
+    const ssh = SSH_PROTOCOLS.has(u.protocol);
+    if (u.password === '' && (u.username === '' || ssh)) return plain ? t : u.toString();
+    if (!ssh) u.username = '';
     u.password = '';
     return u.toString();
   } catch {
     // Not a URL (an scp spelling keeps its `git@`; anything else loses whatever sits before an `@` in its authority).
     return SCP.test(t) ? t : t.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@\s]*@/i, '$1');
   }
+}
+
+/** Transports `GET /repos` shows a `git_url` for. */
+const SHOWN_PROTOCOLS: ReadonlySet<string> = new Set(['https:', 'http:', 'git:', 'file:', ...SSH_PROTOCOLS]);
+/** An ssh login as an scp address spells it (no `%`, no `:`). */
+const SSH_USER = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * A recorded or checkout address as `GET /repos` may send it (`git_url`, studio#1012): {@link withoutCredentials}, then
+ * only a shape it can vouch for holds no secret — an scp address, an absolute local path, or a URL on a git transport with
+ * a parsed host (`file:` none), no password, no `@` in its path and at most an ssh login. Anything else (a remote-helper
+ * `https::…`, an opaque `scheme:user:token@…`, a query left on an scp address, an encoded login) gives `null`, never the
+ * raw text.
+ */
+export function shownGitUrl(raw: string): string | null {
+  const s = withoutCredentials(raw);
+  if (s === '' || /[?#\s\\]/.test(s)) return null;
+  if (SCP.test(s)) return s;
+  if (s.startsWith('/')) return s.includes('@') ? null : s;
+  let u: URL;
+  try {
+    u = new URL(s);
+  } catch {
+    return null;
+  }
+  if (!SHOWN_PROTOCOLS.has(u.protocol) || u.password !== '' || u.pathname.includes('@')) return null;
+  if (u.protocol === 'file:') return u.hostname === '' && !s.includes('@') ? s : null;
+  if (u.hostname === '') return null;
+  return u.username === '' || (SSH_PROTOCOLS.has(u.protocol) && SSH_USER.test(u.username)) ? s : null;
 }
 
 /**

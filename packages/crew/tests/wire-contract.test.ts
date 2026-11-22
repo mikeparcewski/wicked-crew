@@ -934,7 +934,8 @@ respondsWith<Wire.RequirementsCoverage, RequirementsCoverage>();
   void [older, newer, badWeightedPct, nullWeightedPct];
 }
 respondsWith<Wire.RequirementDetail, RequirementDetail>();
-// The business domain (wicked-core#1425): optional on a row (omitted, never null), a catalog on the page.
+// The business domain (wicked-core#1425): optional on a row (omitted, never null), a catalog on the page. The route
+// re-exports the published shapes (crew#1510), so these two hold by construction; the field checks below still bite.
 respondsWith<Wire.RequirementBusinessDomain, RequirementBusinessDomain>();
 respondsWith<Wire.RequirementBusinessDomainCatalogEntry, RequirementBusinessDomainCatalogEntry>();
 respondsWith<Wire.RequirementSummary['businessDomain'], RequirementSummary['businessDomain']>();
@@ -960,6 +961,44 @@ respondsWith<Wire.RequirementsPage['businessDomains'], RequirementsPage['busines
 }
 // The not-generated 404 is typed (0.154.0): `code` is the discriminator, never the sentence.
 respondsWith<Wire.RequirementsNotGenerated, typeof REQUIREMENTS_NOT_GENERATED>();
+
+// An assurance receipt's rule rows as the engine writes them (core `src/rule_check.rs` `RuleVerdict` and `RuleCouncil`,
+// camelCase, an unset optional field omitted). `waivable` (core-ts 0.15.34, crew#1455) is only ever `true`: core sets
+// it with `.then_some(true)` in `mark_waivable`. `arbiter` (crew#1658) is the seat and its footing, set only when one
+// arbiter sat. Both are optional, never null.
+{
+  const arbitrated: Wire.RuleCouncilRecord = {
+    taskId: 'task-1',
+    positions: [
+      { by: 'rule_judge', seat: 'codex', status: 'broken', cite: 'src/a.ts:1' },
+      { by: 'reviewer', seat: 'pi', status: 'kept', cite: 'src/a.ts:1' },
+    ],
+    ruling: 'broken',
+    votes: [{ seat: 'claude', status: 'broken', counted: true }],
+    seated: 1,
+    returned: 1,
+    agreementPct: 100,
+    consensus: true,
+    seed: 7,
+    eligible: ['claude'],
+    arbiter: 'claude (distinct from every party)',
+  };
+  const waivable: Wire.RuleVerdict = {
+    ruleId: 'POL-1',
+    status: 'broken',
+    how: 'council',
+    reason: 'no issue to name',
+    ruleKey: 'k',
+    council: arbitrated,
+    waivable: true,
+  };
+  const unmarked: Wire.RuleVerdict = { ruleId: 'POL-2', status: 'kept', how: 'judge', reason: 'r', ruleKey: 'k' };
+  // @ts-expect-error a row the person may not waive omits the mark, never `false`
+  const falseMark: Wire.RuleVerdict = { ruleId: 'POL-3', status: 'broken', how: 'judge', reason: 'r', ruleKey: 'k', waivable: false };
+  // @ts-expect-error a council with no arbiter omits it, never `null`
+  const nullArbiter: Wire.RuleCouncilRecord = { ...arbitrated, arbiter: null };
+  void [waivable, unmarked, falseMark, nullArbiter];
+}
 // PUT /repos/:id/requirements/minimum (0.197.0): the minimum in force after the change.
 respondsWith<Wire.RequirementsMinimum, RequirementsMinimum>();
 respondsWith<Wire.RequirementsMinimumResponse, { minimum: RequirementsMinimum | null }>();
@@ -1244,6 +1283,8 @@ accepts<z.input<typeof AppActionPrepareSchema>, Wire.AppActionPrepareBody>();
 accepts<z.input<typeof AppActionRunSchema>, Wire.AppActionRunBody>();
 accepts<z.input<typeof AppActionGrantSchema>, Wire.AppActionGrantBody>();
 respondsWith<Wire.AppQueryResponse, Awaited<ReturnType<AppExecutor['runQuery']>>>();
+respondsWith<Wire.AppCallRecord[], ReturnType<AppExecutor['callRecords']>>();
+respondsWith<Wire.AppCallRecordsResponse, { app: string; records: ReturnType<AppExecutor['callRecords']> }>();
 respondsWith<Wire.AppActionPrepareResponse, Awaited<ReturnType<AppWritePath['prepareAction']>>>();
 respondsWith<Wire.AppActionRunResponse, Awaited<ReturnType<AppWritePath['runAction']>>>();
 respondsWith<Wire.AppActionRecordView, ReturnType<AppWritePath['recordView']>>();

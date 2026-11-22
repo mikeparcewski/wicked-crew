@@ -128,7 +128,7 @@ async function connectOn(args: SqlConnectArgs, stream: Socket, address: string, 
 
 export function mysqlError(err: unknown): SourceQueryError {
   if (err instanceof SourceQueryError) return err;
-  if (err instanceof DialRefusedError) return new SourceQueryError(null, 'refused', err.message, err.code);
+  if (err instanceof DialRefusedError) return new SourceQueryError(null, 'refused', err.message, err.code, err.detail);
   const e = err as { errno?: unknown; sqlState?: unknown; code?: unknown; message?: unknown };
   const message = typeof e?.message === 'string' ? e.message : String(err);
   const sqlstate = typeof e?.sqlState === 'string' ? e.sqlState : null;
@@ -156,10 +156,15 @@ export async function mysqlDescribe(args: SqlConnectArgs, text: string, expect?:
     );
   });
   const work = (async (): Promise<SqlDescribe> => {
+    // A second live check must see changes since the first, then settle before releasing metadata locks.
+    await conn.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
+    await conn.query('START TRANSACTION READ ONLY');
     if (expect !== undefined) await mysqlExpectRelations(conn, expect);
     const stmt = await conn.prepare(text);
     try {
       const info = (stmt as unknown as { statement: { columns?: Array<FieldPacket & { columnType?: number }>; parameters?: unknown[] } }).statement;
+      if (expect !== undefined) await mysqlExpectRelations(conn, expect);
+      await conn.query('COMMIT');
       return {
         columns: (info.columns ?? []).map((c) => ({ name: c.name, type: typeName(c) })),
         params: (info.parameters ?? []).map(() => 'unknown'),
@@ -230,7 +235,11 @@ async function mysqlExpectRelations(conn: Connection, expect: readonly MysqlRela
  * Run one read (the policy has already passed). READ ONLY, prepared, `max_execution_time` at the
  * source, and `KILL QUERY` from a second dialled connection at the deadline.
  */
-export async function mysqlRead(args: SqlConnectArgs, text: string, params: unknown[], opts: ReadOptions & { expect?: readonly MysqlRelationExpectation[] } = {}): Promise<SqlReadResult> {
+export async function mysqlRead(args: SqlConnectArgs, text: string, params: unknown[], opts: ReadOptions & {
+  expect?: readonly MysqlRelationExpectation[];
+  /** TESTS ONLY: swap a relation between the first live check and the statement. */
+  afterExpect?: () => Promise<void>;
+} = {}): Promise<SqlReadResult> {
   const deadlineMs = opts.deadlineMs ?? STATEMENT_DEADLINE_MS;
   const maxRows = opts.maxRows ?? READ_MAX_ROWS;
   const started = Date.now();
@@ -298,9 +307,13 @@ export async function mysqlRead(args: SqlConnectArgs, text: string, params: unkn
   opts.signal?.addEventListener('abort', () => void kill(), { once: true });
   // Every step races the dropped-connection signal: a command pending on a dropped connection need not settle.
   const work = (async (): Promise<SqlReadResult> => {
+    // READ COMMITTED keeps the second catalog check out of the first check's snapshot.
+    await conn.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
     await conn.query('START TRANSACTION READ ONLY');
     if (opts.expect !== undefined) await mysqlExpectRelations(conn, opts.expect);
+    await opts.afterExpect?.();
     // Streamed: rows past the cap are never held; the query is stopped at the source once it is hit.
+    let capStop: Promise<void> | undefined;
     const core = (conn as unknown as { connection: { execute: (o: unknown, p: unknown) => NodeJS.EventEmitter } }).connection;
     const streamed = new Promise<{ rows: unknown[][]; fields: FieldPacket[]; truncated: boolean }>((resolve, reject) => {
       const rows: unknown[][] = [];
@@ -315,7 +328,7 @@ export async function mysqlRead(args: SqlConnectArgs, text: string, params: unkn
         if (rows.length >= maxRows || (opts.maxBytes !== undefined && bytes >= opts.maxBytes)) {
           if (!truncated) {
             truncated = true;
-            void kill();
+            capStop = kill();
           }
           return;
         }
@@ -326,6 +339,11 @@ export async function mysqlRead(args: SqlConnectArgs, text: string, params: unkn
       q.on('end', () => resolve({ rows, fields, truncated }));
     });
     const { rows, fields, truncated } = await streamed;
+    // A cap's KILL must finish before the recheck, or it could interrupt that check instead.
+    await capStop;
+    // The read now holds its relations' metadata locks. Drop even a capped answer if a swap won
+    // before the statement took them; only release the transaction after this check.
+    if (opts.expect !== undefined) await mysqlExpectRelations(conn, opts.expect);
     if (!truncated) await conn.query('COMMIT');
     return {
       columns: (fields ?? []).map((f) => ({ name: f.name, type: typeName(f as { columnType?: number }) })),

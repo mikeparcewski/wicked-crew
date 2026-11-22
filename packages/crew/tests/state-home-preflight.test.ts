@@ -14,7 +14,7 @@
 // Every message is in operator terms: the entry, the state home, the variable, what to do — and none
 // cites a repository test-fixture path (F-033). The route half is tests/state-home-routes.test.ts.
 
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -221,6 +221,15 @@ describe('assertWickedRootsOutsideStateHome — the boot refusal (F-RC1-011)', (
 describe('surveyStateHome — crew’s own classification (the fallback for an addon without Core.preflightStateHome)', () => {
   it('a fully registered state home — sidecars, the env-placed names, a daemon- prefix, the skills root’s own children — surveys clean', () => {
     const { home } = cleanStateHome(scratch());
+    expect(surveyStateHome(home)).toEqual([]);
+  });
+
+  it("wicked-core#1699: the engine's k8s replica .git cache a seat arm leaves (k8s-replica-git) is registered, not a finding", () => {
+    const { home } = cleanStateHome(scratch());
+    // wicked-core#1699: the first k8s seat arm leaves a private replica cache.
+    const cache = join(home, 'k8s-replica-git');
+    mkdirSync(join(cache, 'a'.repeat(64), '.git', 'objects'), { recursive: true });
+    if (process.platform !== 'win32') chmodSync(cache, 0o700);
     expect(surveyStateHome(home)).toEqual([]);
   });
 

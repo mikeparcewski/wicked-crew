@@ -125,7 +125,11 @@ function failure(err: unknown, what: string, sent: boolean): ApiOutcome {
   if (err instanceof DialRefusedError) return { state: 'failed', reason: `the connection to ${what} was refused (${err.code}); nothing was sent` };
   if (err instanceof UpstreamCallError) {
     if (err.errorClass === 'boundary') return { state: 'failed', reason: `crew refused the request to ${what} (${err.errorClass}); nothing was sent` };
-    if (err.errorClass === 'http') return { state: 'failed', reason: `${what} answered an HTTP error` };
+    if (err.errorClass === 'http') {
+      // The REST invoker's error is crew's own: keep only its numeric status, never source body text.
+      const status = /HTTP ([1-5][0-9]{2})\b/.exec(err.message)?.[1];
+      return { state: 'failed', reason: `${what} answered an HTTP error${status !== undefined ? ` (HTTP ${status})` : ''}` };
+    }
     if (err.errorClass === 'protocol' && sent) return { state: 'failed', reason: `${what} answered an error (the call was refused)` };
   }
   if (!sent) return { state: 'failed', reason: `${what} could not be reached; nothing was sent` };

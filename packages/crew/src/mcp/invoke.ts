@@ -109,7 +109,7 @@ export function classifyUpstreamError(err: unknown): UpstreamCallError {
   const message = err instanceof Error ? err.message : String(err);
   if (err instanceof StreamableHTTPError) {
     const status = typeof err.code === 'number' ? err.code : 0;
-    return new UpstreamCallError('http', status === 429 || status >= 500, message);
+    return new UpstreamCallError('http', status === 429 || status >= 500, message, Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined);
   }
   if (err instanceof McpError) {
     if (err.code === (ErrorCode.ConnectionClosed as number)) return new UpstreamCallError('transport', true, message);
@@ -126,7 +126,7 @@ export const invokeMcpTool: Invoker = async (config, secret, tool, args, timeout
     if (rest === null) throw new UpstreamCallError('protocol', false, `${tool} has no REST mapping; test and save the server again`);
     return invokeRestTool(config, secret, rest, args, timeoutMs, {}, onDispatch);
   }
-  const { transport, stderrTail } = transportFor(config, secret);
+  const { transport, stderrTail, bound } = transportFor(config, secret);
   const client = new Client({ name: 'wicked-crew-mcp-broker', version: '1' }, { capabilities: {} });
   let timer: NodeJS.Timeout | undefined;
   /** Which half of the call the deadline caught: the connection, or the tool's own answer. */
@@ -153,12 +153,13 @@ export const invokeMcpTool: Invoker = async (config, secret, tool, args, timeout
     return (await client.callTool({ name: tool, arguments: args }, undefined, sdkTimeout)) as UpstreamToolResult;
   })();
   try {
-    return await Promise.race([work, deadline]);
+    return await Promise.race([work, deadline, bound.promise]);
   } catch (err) {
     work.catch(() => undefined);
-    const classified = classifyUpstreamError(err);
+    // crew#1297: the SDK may report a stream cut or connection close before the bound's rejection.
+    const classified = bound.tripped ? bound.error : classifyUpstreamError(err);
     const tail = stderrTail().trim();
-    throw tail === '' ? classified : new UpstreamCallError(classified.errorClass, classified.retryable, `${classified.message}; stderr: ${tail}`);
+    throw tail === '' ? classified : new UpstreamCallError(classified.errorClass, classified.retryable, `${classified.message}; stderr: ${tail}`, classified.status);
   } finally {
     clearTimeout(timer);
     await client.close().catch(() => undefined);

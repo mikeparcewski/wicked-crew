@@ -35,6 +35,7 @@ import {
   pidAlive,
   processStartedAt,
   readCrewSidecar,
+  readLock,
   sidecarNamesBridge,
   SPAWN_TOKEN_ENV,
   spawnLineage,
@@ -125,11 +126,13 @@ function spawnSleeper(): ChildProcess {
   return child;
 }
 
-/** Launch a bridge into `root` OUTSIDE the pool (an operator's own `wicked-interactive serve`). */
+/** Launch a bridge into `root` OUTSIDE the pool (an operator's own `wicked-interactive serve`). It is up once ITS
+ *  lockfile parses (crew#1346): the file exists from the bridge's open, before its record is written, so existing
+ *  is not ready; the same reader the pool uses (`readLock`) decides, and the record must name this child. */
 async function operatorBridge(root: string, env: NodeJS.ProcessEnv = { ...process.env }): Promise<number> {
   const child = spawn(process.execPath, ['-e', FAKE_BRIDGE, root], { stdio: 'ignore', env });
   children.push(child);
-  await waitFor(() => existsSync(join(root, LOCK_NAME)));
+  await waitFor(() => readLock(root)?.pid === child.pid);
   return child.pid!;
 }
 
@@ -401,10 +404,8 @@ describe('the spawn env + the sidecar (F-042 / F-043)', () => {
     const root = join(dir, 'root-c');
     // An operator's own `wicked-interactive serve`: no sidecar, no crew env.
     mkdirSync(root, { recursive: true });
-    const child = spawn(process.execPath, ['-e', FAKE_BRIDGE, root], { stdio: 'ignore', env: { ...process.env } });
-    children.push(child);
-    await waitFor(() => existsSync(join(root, LOCK_NAME)));
-    const operatorPid = lock(root).pid;
+    const operatorPid = await operatorBridge(root);
+    expect(lock(root).pid).toBe(operatorPid);
     expect(existsSync(join(root, CREW_SIDECAR_NAME))).toBe(false);
 
     const logged: string[] = [];
@@ -657,6 +658,17 @@ describe('a sidecar names a bridge INSTANCE, not a pid (crew#510)', () => {
     expect(sidecar.bridgeStartedAt).toBe(lockJson.startedAt);
   }, 30_000);
 
+  it('crew#1346: an operator bridge counts as up only once its lockfile parses, not once the file exists', async () => {
+    const root = join(dir, 'root-lock-mid-write');
+    mkdirSync(root, { recursive: true });
+    // The window a bridge's write leaves open: the lockfile exists (the open truncated it) and holds no record yet.
+    writeFileSync(join(root, LOCK_NAME), '');
+    const pid = await operatorBridge(root);
+    const record = JSON.parse(readFileSync(join(root, LOCK_NAME), 'utf8')) as { pid: number; startedAt: string };
+    expect(record.pid).toBe(pid);
+    expect(typeof record.startedAt).toBe('string');
+  }, 30_000);
+
   it('a STALE sidecar on a reused pid is never a kill licence: the foreign bridge that holds the pid is adopted with a warning, not recycled, and the stale record is dropped', async () => {
     const root = join(dir, 'root-reused-pid');
     // A bridge crew never started (an operator's `wicked-interactive serve`, or another daemon's
@@ -709,4 +721,31 @@ describe('a sidecar names a bridge INSTANCE, not a pid (crew#510)', () => {
     expect(upgraded.env).toEqual(recorded.env);
     expect(upgraded.startedAt).toBe(recorded.startedAt);
   }, 30_000);
+});
+
+describe('crew#1288 bridge version adoption', () => {
+  function belowFloor(root: string): void {
+    const path = join(root, LOCK_NAME);
+    writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, 'utf8')), version: '0.14.1' }));
+  }
+
+  it('recycles a below-floor bridge with matching env and a gone owner', async () => {
+    const root = join(dir, 'below-floor-owned');
+    mkdirSync(root);
+    const pair = { origin: 'http://127.0.0.1:60785', bus: join(dir, 'state', 'bus') };
+    const { pid } = await orphanedMismatch(root);
+    belowFloor(root);
+    const replacement = await poolWith(pair).ensure(root);
+    expect(replacement.pid).not.toBe(pid);
+    expect(pidAlive(pid)).toBe(false);
+  });
+
+  it('refuses an unrecorded below-floor bridge without killing it', async () => {
+    const root = join(dir, 'below-floor-unrecorded');
+    mkdirSync(root);
+    const pid = await operatorBridge(root);
+    belowFloor(root);
+    await expect(poolWith({ origin: null, bus: null }).ensure(root)).rejects.toMatchObject({ hint: expect.stringContaining(`kill ${pid}`) });
+    expect(pidAlive(pid)).toBe(true);
+  });
 });

@@ -22,7 +22,7 @@ import { createHash } from 'node:crypto';
 
 import { callEstateTool } from '../../core/estate-mcp-client.js';
 import { canonicalJson } from '../../mcp/classify.js';
-import { entryId, normalizeRegistryFile } from '../../mcp/registry.js';
+import { dropEstateTombstones, entryId, estateSourceIds, normalizeRegistryFile } from '../../mcp/registry.js';
 import type { McpRegistryStore } from '../../mcp/registry-store.js';
 import { replaceSource } from '../estate-write.js';
 import { pmOf, type StoredTracker, trackersOf } from '../registry/entry.js';
@@ -33,6 +33,8 @@ import type { TrackerProjectionState } from './view.js';
 export const TRACKER_PROJECTION_FORMAT = 1;
 /** At most this many issue_ref documents per tracker generation (the newest runs first). */
 export const TRACKER_ISSUE_REFS_MAX = 2_000;
+/** The runs kept per issue_ref (the newest): each gives at most two links, and a document holds at most 200. */
+const REF_RUNS_MAX = 200;
 /** Under estate's 20,000 links per generation. */
 export const GENERATION_LINKS_MAX = 19_000;
 const RETRY_BASE_MS = 5_000;
@@ -132,8 +134,11 @@ export function trackerGenerationBody(
       links,
     },
   ];
-  // issue_refs: every issue a run addresses through this tracker, each owning its runs' `addresses` links.
+  // issue_refs: every issue a run addresses through this tracker, each owning its runs' `addresses` links. Collected
+  // newest run first and bounded as it goes (crew#1352: the launch record keeps every run, so `runs` is the whole
+  // history): at most TRACKER_ISSUE_REFS_MAX issues, and per issue the newest REF_RUNS_MAX runs, deduplicated by a set.
   const byRef = new Map<string, Array<{ runId: string; deps: string[]; pr: string | null }>>();
+  const runsOfRef = new Map<string, Set<string>>();
   for (const r of [...runs].reverse()) {
     const deps = r.projectId !== null ? [`project:${r.projectId}`] : r.repoId !== null ? [`repo:${r.repoId}`] : [];
     if (deps.length === 0) continue;
@@ -143,10 +148,16 @@ export function trackerGenerationBody(
     const pr = n !== null && r.repoId !== null ? `pr:${r.repoId}#${n[1]}` : null;
     for (const a of r.addresses) {
       if (a.trackerId !== trackerId) continue;
+      if (!byRef.has(a.ref) && byRef.size >= TRACKER_ISSUE_REFS_MAX) continue;
       const list = byRef.get(a.ref) ?? [];
+      const seenRuns = runsOfRef.get(a.ref) ?? new Set<string>();
       // `closes` only for an issue the run's PR closes (Fixes, or a Jira key the title carries): a mention is not one.
-      if (!list.some((x) => x.runId === r.runId)) list.push({ runId: r.runId, deps, pr: a.closing === true ? pr : null });
+      if (!seenRuns.has(r.runId) && list.length < REF_RUNS_MAX) {
+        seenRuns.add(r.runId);
+        list.push({ runId: r.runId, deps, pr: a.closing === true ? pr : null });
+      }
       byRef.set(a.ref, list);
+      runsOfRef.set(a.ref, seenRuns);
     }
   }
   // estate's generation-wide link bound (20,000): the newest issues' trail links first, the tracker's own links kept.
@@ -158,9 +169,9 @@ export function trackerGenerationBody(
       title: ref,
       entry: { kind: 'issue_ref', system: source.system, ref },
       sections: [{ key: 'ref', text: `issue ${ref} of tracker ${t.key}.` }],
-      // Each run that addresses it, and the PR it delivered (`closes`): at most 200 links (estate's per-document bound).
+      // Each run that addresses it, and the PR it delivered (`closes`): at most 200 links (estate's per-document bound),
+      // the newest runs first (`rs` is in recency order; a run id says nothing of age, coord on #1734).
       links: rs
-        .sort((a, b) => a.runId.localeCompare(b.runId))
         .flatMap((x): TrackerGenerationLink[] => [
           { rel: 'addresses', dir: 'in', end: { store: 'control', id: `run:${x.runId}` }, deps: x.deps },
           ...(x.pr !== null ? [{ rel: 'closes' as const, dir: 'in' as const, end: { store: 'control' as const, id: x.pr } }] : []),
@@ -176,6 +187,11 @@ export function trackerGenerationBody(
     catalog: { system: source.system, key: t.key, format: TRACKER_PROJECTION_FORMAT },
     docs,
   };
+}
+
+/** The empty generation that erases a removed PM entry's tracker from estate. */
+export function removedGenerationBody(sourceId: string): Omit<TrackerGeneration, 'generation'> {
+  return { sourceId, label: 'removed source', catalog: { removed: true, format: TRACKER_PROJECTION_FORMAT }, docs: [] };
 }
 
 interface TrackerState {
@@ -242,6 +258,36 @@ export class TrackerProjector {
   async reconcile(): Promise<void> {
     await this.deps.store.settled();
     const file = normalizeRegistryFile(await this.deps.store.read());
+    // (crew#1354) The registry's tracker tombstones: a removed PM entry's trackers. Each gets one empty generation and
+    // leaves the list once estate takes it, so a removal before a restart is erased after it. They need no run
+    // addresses, so an unreadable address record does not hold them up (codex on #1735). An id live again (a restore
+    // linked it back) is not erased: its own projection below replaces it. A data source's tombstone is the source
+    // projector's (the one writer of that id).
+    const live = new Set(file.servers.flatMap(estateSourceIds).filter((t) => t.kind === 'tracker').map((t) => t.id));
+    const tombstoned = new Set<string>();
+    const tombstonesDone = new Set<string>();
+    let tombstoneFailed = false;
+    for (const t of file.estateTombstones ?? []) {
+      if (t.kind !== 'tracker') continue;
+      if (live.has(t.id)) {
+        tombstonesDone.add(t.id);
+        continue;
+      }
+      tombstoned.add(t.id);
+      try {
+        await replaceSource(this.call, { ...removedGenerationBody(t.id), generation: this.nextGeneration(t.id) } as unknown as Record<string, unknown>, this.deps);
+        tombstonesDone.add(t.id);
+        // Nothing of it is acknowledged now: linked again later, it is projected again (codex on #1735).
+        this.states.delete(t.id);
+      } catch (err) {
+        this.deps.log?.(`[knowledge] tracker ${t.id} of a removed source was not erased from estate (it is retried): ${message(err)}`);
+        tombstoneFailed = true;
+      }
+    }
+    if (tombstoneFailed) (this.deps.schedule ?? ((fn, ms) => void setTimeout(fn, ms).unref?.()))(() => this.changed(), RETRY_MAX_MS);
+    // Only this projector writes a tracker id, one pass at a time, so the last generation estate took for an id dropped
+    // here is this pass's empty one (or the id is live, and the next pass projects it), even if it was removed again.
+    if (tombstonesDone.size > 0) await this.deps.store.mutate((f) => dropEstateTombstones(f, 'tracker', tombstonesDone));
     // An unreadable address record is not "no issues": nothing is projected this time, and the reconcile retries.
     let runs: Awaited<ReturnType<NonNullable<TrackerProjectorDeps['addresses']>>> = [];
     if (this.deps.addresses !== undefined) {
@@ -292,13 +338,14 @@ export class TrackerProjector {
         }
       }
     }
-    // A tracker this process projected whose PM entry is gone (the source removed): tombstoned once, so estate keeps
-    // nothing of it. (Across a restart such a tracker's documents stay, invisible: no tracker set holds its id.)
+    // A tracker this process projected whose PM entry is gone by a path that left no tombstone: tombstoned once.
     for (const [id, st] of this.states) {
-      if (seen.has(id) || st.state === 'retired') continue;
+      if (seen.has(id) || tombstoned.has(id) || st.state === 'retired') continue;
       try {
         await replaceSource(this.call, { ...trackerGenerationBody({ name: 'removed source', system: 'unknown' }, id, null, []), generation: this.nextGeneration(id) } as unknown as Record<string, unknown>, this.deps);
         st.state = 'retired';
+        // Nothing of it is acknowledged now: linked again later, it is projected again (codex on #1735).
+        st.acked = null;
       } catch (err) {
         this.deps.log?.(`[knowledge] tracker ${id} of a removed source was not tombstoned in estate: ${message(err)}`);
       }

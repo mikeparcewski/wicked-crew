@@ -31,7 +31,7 @@ const H = 3_600_000;
 
 const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled']);
 
-function rig(opts: { path?: string; refuse?: boolean; cancelFails?: boolean; cancelHangs?: boolean; onSessions?: (calls: number) => void; beforeFresh?: () => void; duringCancel?: () => void } = {}) {
+function rig(opts: { path?: string; refuse?: boolean; refusalHookThrows?: boolean; cancelFails?: boolean; cancelHangs?: boolean; onSessions?: (calls: number) => void; beforeFresh?: () => void; duringCancel?: () => void } = {}) {
   const path = opts.path ?? join(scratch(), 'daemon-schedules.json');
   const runs: Record<string, string> = {};
   const clis: Record<string, string[]> = {};
@@ -47,6 +47,7 @@ function rig(opts: { path?: string; refuse?: boolean; cancelFails?: boolean; can
     return runId;
   };
   const ticks: number[] = [];
+  const refusals: { id: string; reason: string }[] = [];
   const scheduler = new WorkflowScheduler({
     store,
     sessionsDetail: async () => {
@@ -69,11 +70,15 @@ function rig(opts: { path?: string; refuse?: boolean; cancelFails?: boolean; can
       return 'cancelled';
     },
     onTick: [async () => { ticks.push(1); }],
+    onScheduledRefusal: (row, reason) => {
+      refusals.push({ id: row.id, reason });
+      if (opts.refusalHookThrows === true) throw new Error('the trail is down');
+    },
     log: () => undefined,
     now: () => clock.now,
   });
   const at = (h: number): void => { clock.now = new Date(T0.getTime() + h * H); };
-  return { path, store, scheduler, runs, clis, cancels, launches, at, ticks, clock };
+  return { path, store, scheduler, runs, clis, cancels, launches, at, ticks, clock, refusals };
 }
 
 describe('the schedule store', () => {
@@ -465,6 +470,37 @@ describe('the scheduler', () => {
     expect(row?.lastNote).toBe('engine said no');
     expect(row?.nextDueAt).toBe(new Date(T0.getTime() + 26 * H).toISOString());
     expect(r.store.get('off')?.lastOutcome).toBeNull();
+  });
+
+  it('a refused scheduled launch is told once, off the schedule row; Run it now answers its own refusal (crew#1656)', async () => {
+    const r = rig({ refuse: true });
+    r.store.put('evals', { workflow: 'run-evals', everyHours: 48 }, T0);
+    r.at(48);
+    await r.scheduler.sweep();
+    expect(r.refusals).toEqual([{ id: 'evals', reason: 'engine said no' }]);
+    // Backed off: the next sweeps do not attempt (or tell) it again.
+    await r.scheduler.sweep();
+    expect(r.refusals).toHaveLength(1);
+    // A person's Run it now gets the refusal as its answer, and is not told a second time.
+    await expect(r.scheduler.runNow('evals')).rejects.toThrow('engine said no');
+    expect(r.refusals).toHaveLength(1);
+    // Once due again after the back-off, the next refused attempt is told again.
+    r.at(48 + 24);
+    await r.scheduler.sweep();
+    expect(r.refusals).toHaveLength(2);
+  });
+
+  it('a failing refusal hook never changes the refusal the row records (crew#1656)', async () => {
+    const r = rig({ refuse: true, refusalHookThrows: true });
+    r.store.put('nightly', { workflow: 'review-recent-work', everyHours: 24 }, T0);
+    r.at(24);
+    await r.scheduler.sweep();
+    expect(r.refusals).toHaveLength(1);
+    const row = r.store.get('nightly');
+    expect(row?.lastOutcome).toBe('refused');
+    expect(row?.lastNote).toBe('engine said no');
+    expect(row?.failures).toBe(1);
+    expect(row?.nextDueAt).toBe(new Date(T0.getTime() + 26 * H).toISOString());
   });
 
   it('Run it now obeys the same guards and keeps the cadence from the run', async () => {

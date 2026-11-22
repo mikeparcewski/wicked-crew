@@ -3,7 +3,7 @@
 // re-check, and the value-free describe -> knowledge.replace_source projection.
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -18,7 +18,8 @@ import type { McpCallResponse } from '../src/core/types.js';
 import { agentAccessOf, type SourceAgentAccess } from '../src/knowledge/gate/access.js';
 import type { GateSource } from '../src/knowledge/gate/sources.js';
 import { KNOWLEDGE_PACKAGE_MAX_BYTES, knowledgePackageFor, packageJson, projectionKey, visibleDeps } from '../src/knowledge/package.js';
-import { DOC_RECORD_MAX_BYTES, PROJECTION_CONCURRENCY, PROJECTION_FORMAT, relationKey, SourceProjector, sourceGeneration } from '../src/knowledge/projector.js';
+import { DOC_RECORD_MAX_BYTES, GENERATION_MAX_DOCS, NOT_LISTED_KEY, PROJECTION_CONCURRENCY, PROJECTION_FORMAT, relationKey, SourceProjector, sourceGeneration } from '../src/knowledge/projector.js';
+import { readCatalog } from '../src/knowledge/shapes/shapes.js';
 import { McpBroker } from '../src/mcp/broker.js';
 import { McpCallRecordFile } from '../src/mcp/call-records.js';
 import { effectiveDeps, EstateRelay, type EstateRelayInvocation, type EstateUnitScope, releaseVisible, UNREADABLE_DEPS, type VisibleRelease } from '../src/mcp/estate-relay.js';
@@ -461,9 +462,92 @@ describe('the describe -> knowledge.replace_source projection (§4.1): value-fre
     expect(g2.docs.map((d) => d.key)).toEqual(['s.ok']);
   });
 
-  it('refuses a source over one generation rather than send a partial one that would tombstone the rest', () => {
+  it('(crew#1328) a source over one generation lists what fits and one note of what it does not, never refused whole', () => {
     const huge = Array.from({ length: 5_001 }, (_, i) => rel('s', `t${i}`, { columns: [], primaryKey: [], foreignKeys: [] }));
-    expect(() => sourceGeneration(source('pg', SUPPORT_ID, {}, { description: { catalog: catalog(huge), descriptorHash: 'h' } }), 1)).toThrow(/over what one estate generation holds/);
+    // Before the fix this threw, and none of the source's structure reached recall.
+    const gen = sourceGeneration(source('pg', SUPPORT_ID, {}, { description: { catalog: catalog(huge), descriptorHash: 'h' } }), 1)!;
+    expect(gen.docs).toHaveLength(GENERATION_MAX_DOCS);
+    expect(gen.docs.slice(0, 3).map((d) => d.key)).toEqual(['s.t0', 's.t1', 's.t2']);
+    const note = gen.docs[gen.docs.length - 1]!;
+    expect(note.key).toBe(NOT_LISTED_KEY);
+    expect(note.entry).toEqual({ kind: 'not_listed', relationsNotListed: 2 });
+    expect(note.sections[0]?.text).toMatch(/2 more relations .* mcp:pg\/list_tables/);
+    expect(gen.catalog).toMatchObject({ relations: GENERATION_MAX_DOCS - 1, relationsNotListed: 2 });
+    // A source within the bounds has no note.
+    const small = sourceGeneration(source('pg', SUPPORT_ID, {}, { description: { catalog: catalog(huge.slice(0, 10)), descriptorHash: 'h' } }), 1)!;
+    expect(small.docs.map((d) => d.key)).not.toContain(NOT_LISTED_KEY);
+    expect(small.catalog).not.toHaveProperty('relationsNotListed');
+    expect(small.docs[0]!.entry).not.toHaveProperty('catalogPartial');
+    expect(small.docs[0]!.sections[0]!.text).not.toContain('partial');
+  });
+
+  it('(coord on #1735, 1735-1) an agent\'s recall hit on a cut catalog carries the partial label through the relay', () => {
+    const huge = Array.from({ length: 5_001 }, (_, i) => rel('s', `t${i}`, { columns: [], primaryKey: [], foreignKeys: [] }));
+    const gen = sourceGeneration(source('pg', SUPPORT_ID, {}, { description: { catalog: catalog(huge), descriptorHash: 'h' } }), 1)!;
+    const doc = gen.docs[1]!;
+    expect(doc.entry).toMatchObject({ catalogPartial: true });
+    // Estate answers a recall hit with the section's text as its snippet; the relay's release re-check passes it on.
+    const hit = { node_id: `section ${doc.key}#columns`, class: 'section', label: doc.title, body_snippet: doc.sections[0]!.text, score: 1, source: `source:${SUPPORT_ID}/${doc.key}#columns`, scope: `source:${SUPPORT_ID}`, deps: [`source:${SUPPORT_ID}`], untrusted: true };
+    const released = releaseVisible('knowledge.recall', { content: [{ type: 'text', text: JSON.stringify({ items: [hit] }) }], isError: false }, new Set([`source:${SUPPORT_ID}`]));
+    if (!released.ok) throw new Error(`withheld: ${released.reason}`);
+    const items = (JSON.parse((released.result['content'] as Array<{ text: string }>)[0]!.text) as { items: Array<{ body_snippet: string }> }).items;
+    expect(items).toHaveLength(1);
+    expect(items[0]!.body_snippet).toMatch(/^s\.t1: a \w+ in data source pg \(whose knowledge catalog is partial: not every relation is listed; read one by name with mcp:pg\/list_tables and table_names\)\. Columns:/);
+  });
+
+  it('(crew#1328) the catalog read skips the note and says the catalog is incomplete', async () => {
+    const page = { sourceId: SUPPORT_ID, generation: 7, pages: 1, docs: [{ key: 's.t0', title: 'pg · s.t0', entry: { relation: 's.t0' } }, { key: NOT_LISTED_KEY, title: 'pg · relations not listed here', entry: { kind: 'not_listed', relationsNotListed: 2 } }] };
+    const got = await readCatalog(async () => page, SUPPORT_ID, [`source:${SUPPORT_ID}`]);
+    expect(got?.docs.map((d) => d.key)).toEqual(['s.t0']);
+    expect(got?.truncated).toBe(true);
+  });
+
+  it('(crew#1328) acknowledgements survive a restart, and one for another key is dropped before a send (fails before the fix)', async () => {
+    const { sourceDescriptorHash } = await import('../src/sources/kinds.js');
+    const { configOf } = await import('../src/mcp/registry.js');
+    const record = { id: SUPPORT_ID, name: 'support-pg', kind: 'sql', command: null, args: [], url: null, auth: null, enabled: true, health: { state: 'ok', consecutiveFailures: 0, checkedAt: DESCRIBED_AT, lastError: null }, registeredAt: DESCRIBED_AT, updatedAt: DESCRIBED_AT, tools: [], sql: { driver: 'postgres', host: 'db.test', port: 5432, database: 'd', user: 'u', tls: 'disable' }, viewsAllowed: [] as string[], address: { allow: ['127.0.0.0/8'], plaintext: false } };
+    const descriptorHash = sourceDescriptorHash(configOf(record as never));
+    const dir = mkdtempSync(join(tmpdir(), 'c11-acks-'));
+    try {
+      const acksFile = join(dir, 'mcp', 'knowledge-acks.json');
+      let refuse = false;
+      const deps = (views: string[]) => ({
+        store: { read: async () => ({ version: 1, servers: [{ ...record, viewsAllowed: views }] }) as never, settled: async () => undefined },
+        catalogs: { read: async () => ({ catalog: catalog(), descriptorHash }) } as never,
+        call: async () => {
+          if (refuse) throw new Error('estate refused');
+          return {};
+        },
+        log: () => undefined,
+        acksFile,
+      });
+      const first = new SourceProjector(deps([]));
+      expect(await first.project('support-pg')).toBe(true);
+      const key = projectionKey({ descriptorHash, viewsAllowed: [] });
+      // A restarted daemon admits the source at once (no wait for estate at boot).
+      expect(new SourceProjector(deps([])).projectedDescriptor(SUPPORT_ID)).toBe(key);
+      // A projection under another key that estate refuses leaves NO acknowledgement on disk (it was dropped first).
+      refuse = true;
+      const second = new SourceProjector(deps(['s.v']));
+      await expect(second.project('support-pg')).rejects.toThrow(/estate refused/);
+      expect(new SourceProjector(deps([])).projectedDescriptor(SUPPORT_ID)).toBeNull();
+      // An erased (removed) source keeps none either.
+      refuse = false;
+      const third = new SourceProjector(deps([]));
+      await third.project('support-pg');
+      expect(new SourceProjector(deps([])).projectedDescriptor(SUPPORT_ID)).toBe(key);
+      const removed = new SourceProjector({ ...deps([]), store: { read: async () => ({ version: 1, servers: [], estateTombstones: [{ id: SUPPORT_ID, kind: 'source', at: DESCRIBED_AT }] }) as never, settled: async () => undefined } });
+      removed.erase([SUPPORT_ID]);
+      await removed.idle();
+      expect(new SourceProjector(deps([])).projectedDescriptor(SUPPORT_ID)).toBeNull();
+      // A damaged file starts empty and says so, never throws.
+      writeFileSync(acksFile, '{ not json');
+      const logs: string[] = [];
+      expect(new SourceProjector({ ...deps([]), log: (m: string) => logs.push(m) }).projectedDescriptor(SUPPORT_ID)).toBeNull();
+      expect(logs.join('\n')).toMatch(/acknowledgements could not be read/);
+    } finally {
+      removeScratch(dir);
+    }
   });
 
   it('a legal name with a control character, a quote or a backslash is a distinct, control-free key and title; a long one is hashed (codex r2)', () => {

@@ -589,7 +589,7 @@ export async function probeRestServer(config: McpUpstreamConfig, secret: string 
     return scrubSecrets({ ok: true as const, serverInfo: imported.serverInfo, tools: imported.tools, skipped: imported.skipped, egress }, secrets);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return scrubSecrets({ ok: false as const, error: message, ...(err instanceof DialRefusedError ? { refusal: err.code } : {}) }, secrets);
+    return scrubSecrets({ ok: false as const, error: message, ...(err instanceof DialRefusedError ? { refusal: err.code, detail: err.detail } : {}) }, secrets);
   }
 }
 
@@ -704,20 +704,20 @@ function refuseRedirect(config: McpUpstreamConfig, url: URL, status: number, loc
   const base = parseBaseUrl(config.url);
   const escape = target !== null && base !== null ? boundaryEscape(base, target) : null;
   if (escape !== null) throw new RestBoundaryError(`the API redirected off its pin (${escape}); not followed`);
-  throw new UpstreamCallError('http', false, `the API answered HTTP ${status} (a redirect); redirects are not followed`);
+  throw new UpstreamCallError('http', false, `the API answered HTTP ${status} (a redirect); redirects are not followed`, status);
 }
 
 async function readRestResult(res: Response, droppedArgs: string[]): Promise<UpstreamToolResult> {
   if (res.status === 429 || res.status >= 500) {
     await res.body?.cancel().catch(() => undefined);
-    throw new UpstreamCallError('http', true, `the API answered HTTP ${res.status}`);
+    throw new UpstreamCallError('http', true, `the API answered HTTP ${res.status}`, res.status);
   }
   let read: { text: string; truncated: boolean };
   try {
     read = await readCapped(res, REST_RESPONSE_MAX_BYTES);
   } catch (err) {
     // The status arrived before the body: an error status is an answer even when its body cannot be read (K2b).
-    if (res.status >= 400) throw new UpstreamCallError('http', false, `the API answered HTTP ${res.status} (its body could not be read)`);
+    if (res.status >= 400) throw new UpstreamCallError('http', false, `the API answered HTTP ${res.status} (its body could not be read)`, res.status);
     throw new UpstreamCallError('transport', true, `reading the response failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   let structured: Record<string, unknown> | undefined;

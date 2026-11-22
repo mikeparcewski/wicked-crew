@@ -4,6 +4,7 @@
  *   GET    /mcp/servers                 upstreams, their tools (class, subject, status), health,
  *                                       auth state, and the servers discovered in CLI homes (names only)
  *   POST   /mcp/servers/preview         probe (45 s budget, hardened env): tools, classes and a previewHash
+ *                                       `mcp-stdio` runs on the daemon host: human operator only (403 `host_program_human_only`)
  *                                       (`kind: "rest"`, slice S5a: the tools of an OpenAPI 3 document,
  *                                       each pinned to the base `url`; see `mcp/rest.ts`)
  *   POST   /mcp/servers                 save: `{previewHash, enabledWrites?, allowOrigin?}`; missing, unknown or expired → 409.
@@ -24,12 +25,13 @@
  *                                       `env:` reference, a keychain entry crew already holds) probes with that
  *                                       secret: human operator only (403 `stored_secret_human_only`)
  *                                       (crew#1558) stdio env is a per-server allowlist approved by a human
- *                                       operator: any change of names or values at preview or save needs that
+ *                                       operator: any change of names or values at save needs that
  *                                       person (403 `env_human_only`). The denylist stays the second line;
  *                                       each name's warning class in `envNames` is advice for the approver.
  *   PATCH  /mcp/servers/:name           `{enabled}`
  *   DELETE /mcp/servers/:name           remove the server and the keychain secret it owns
  *   POST   /mcp/servers/:name/test      probe again: health plus the tool diff
+ *                                       `mcp-stdio` runs on the daemon host: human operator only (403 `host_program_human_only`)
  *   PATCH  /mcp/tools/:subject          `{enabled?, classOverride?}`; `:subject` is `mcp:<server>/<tool>`, URL-encoded.
  *                                       (G1) leaving a tool enabled AND a write when it was not both (turning
  *                                       a write on, or re-classing an enabled read) is a grant: human
@@ -69,8 +71,8 @@
  *   POST   /mcp/servers/preview         also `kind: "toolbox-source"` (Toolbox's own source document, checked
  *                                       against the deployment policy: 400 with the policy's code); a `sql`
  *                                       Postgres body is saved as the same document (descriptor version 2)
- *   POST   /mcp/servers                 also `disclosures` (each tool's disclosure class): human operator only
- *   PATCH  /mcp/tools/:subject          also `disclosure`: setting one is human operator only
+ *   POST   /mcp/servers                 also `disclosures` and `acceptedReads`: human operator only
+ *   PATCH  /mcp/tools/:subject          also `disclosure` and `readAccepted`: read acceptance/withdrawal is human operator only
  *   GET    /mcp/registry/generations    the kept generations (human operator only)
  *   POST   /mcp/registry/restore        `{generation}`: restore one, failing closed (human operator only)
  *
@@ -278,12 +280,14 @@ export const SaveMcpServerSchema = z.strictObject({
   enabledWrites: z.array(z.string().min(1).max(256)).max(512).optional(),
   /** (G2) The exact origin a `rest` server's calls go to, confirmed by a human operator. */
   allowOrigin: z.string().min(1).max(4096).optional(),
+  /** The preview's read tools the human operator accepts for Apps. */
+  acceptedReads: z.array(z.string().min(1).max(256)).max(512).optional(),
   /** (DES-KNOWLEDGE-DATA-001 §5.1) Each tool's disclosure class, reviewed by a human operator. */
   disclosures: record(z.string().min(1).max(256), disclosureClass).refine((d) => Object.keys(d).length <= 512, { error: 'at most 512 tools' }).optional(),
 });
 export const PatchMcpServerSchema = z.strictObject({ enabled: z.boolean() });
-export const PatchMcpToolSchema = z.strictObject({ enabled: z.boolean().optional(), classOverride: toolClass.nullable().optional(), disclosure: disclosureClass.nullable().optional() })
-  .refine((p) => p.enabled !== undefined || p.classOverride !== undefined || p.disclosure !== undefined, { error: 'set enabled, classOverride, disclosure or a combination' });
+export const PatchMcpToolSchema = z.strictObject({ enabled: z.boolean().optional(), classOverride: toolClass.nullable().optional(), disclosure: disclosureClass.nullable().optional(), readAccepted: z.boolean().optional() })
+  .refine((p) => p.enabled !== undefined || p.classOverride !== undefined || p.disclosure !== undefined || p.readAccepted !== undefined, { error: 'set enabled, classOverride, disclosure, readAccepted or a combination' });
 /** Unknown query parameters (a cache-buster) are ignored, as they always were. */
 export const McpServersQuerySchema = z.object({ view: z.enum(['full', 'agent']).optional() });
 export const McpRegistryRestoreSchema = z.strictObject({ generation: z.int().min(1).max(Number.MAX_SAFE_INTEGER) });
@@ -351,7 +355,7 @@ function fail(reply: FastifyReply, err: unknown, actor?: Actor): FastifyReply {
   if (err instanceof McpRegistryError) {
     // A source's own words go to a human only (DES-APPS-001 §5.2); an agent gets crew's sentence.
     const words = actor?.kind === 'human' && err.humanMessage !== undefined ? err.humanMessage : err.message;
-    return reply.code(err.status).send({ error: words, code: err.code });
+    return reply.code(err.status).send({ error: words, code: err.code, ...err.detail });
   }
   if (err instanceof McpRegistryCorruptError) return reply.code(503).send({ error: err.message, code: 'registry_corrupt' });
   if (err instanceof SecretStoreError) return reply.code(502).send({ error: err.message, code: 'secret_store_failed' });
@@ -565,6 +569,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       const parsed = McpServerConfigSchema.safeParse(req.body);
       if (!parsed.success) return invalidBody(reply, parsed.error);
       const actor = deps.actorOf(req);
+      if (parsed.data.kind === 'mcp-stdio' && !mayGrantWrite(actor)) return humanOperatorOnly(reply, actor, "run a program on the daemon host (an mcp-stdio server's preview)", 'host_program_human_only');
       // (DES-APPS-001 §5.2) The preview DIALS: a confirmed private range is used now, so only a
       // human operator may name one, here as at the save.
       if (confirmsAddress(parsed.data.address) && !mayGrantWrite(actor)) return addressConfirmRefused(reply, actor);
@@ -574,8 +579,6 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       // previews a save over one.
       const over = await r.get(parsed.data.name).catch(() => null);
       if ((parsed.data.pm !== undefined || over?.pm !== undefined) && !mayGrantWrite(actor)) return humanOperatorOnly(reply, actor, 'register a project-management source', 'pm_source_human_only');
-      // The preview spawns the program: only the exact names AND values already approved may be reused.
-      if (parsed.data.kind === 'mcp-stdio' && !mayGrantWrite(actor) && envFingerprint(parsed.data.env) !== envFingerprint(over?.env)) return envRefused(reply, actor);
       try {
         const full = await r.preview(toConfig(parsed.data), parsed.data.secret ?? null);
         // (DES-KNOWLEDGE-DATA-001 §5.2) A source's structure reaches an agent only through estate and the gate.
@@ -612,6 +615,8 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       // (G2) So is an egress confirmation from anyone but a human operator.
       const allowOrigin = parsed.data.allowOrigin ?? null;
       if (allowOrigin !== null && !mayGrantWrite(deps.actorOf(req))) return egressConfirmRefused(reply, deps.actorOf(req));
+      const acceptedReads = [...new Set(parsed.data.acceptedReads ?? [])];
+      if (acceptedReads.length > 0 && !mayGrantWrite(deps.actorOf(req))) return humanOperatorOnly(reply, deps.actorOf(req), 'accept a tool as an Apps read', 'read_accept_human_only');
       // (DES-KNOWLEDGE-DATA-001 §5.1) So is a review of what a tool discloses.
       const disclosures = parsed.data.disclosures ?? {};
       if (Object.keys(disclosures).length > 0 && !mayGrantWrite(deps.actorOf(req))) return humanOperatorOnly(reply, deps.actorOf(req), 'review what a tool discloses', 'disclosure_review_human_only');
@@ -624,6 +629,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
           // (G2) An unconfirmed egress is refused before any approval is withdrawn, too.
           await r.checkEgress(parsed.data.previewHash, allowOrigin);
           r.checkDisclosures(parsed.data.previewHash, disclosures);
+          await r.checkAcceptedReads(parsed.data.previewHash, acceptedReads);
         }
         const held = parsed.data.previewHash === undefined ? null : r.peekPreview(parsed.data.previewHash);
         // The confirmation rides in the previewed config; saving it is the human operator's, too.
@@ -644,7 +650,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
               for (const id of rules) deps.audit.record('governance.rule.upserted', deps.actorOf(req), { detail: { id, source: 'mcp-approval' } });
             }
           }
-          return r.save(parsed.data.previewHash, enabledWrites, allowOrigin, disclosures);
+          return r.save(parsed.data.previewHash, enabledWrites, allowOrigin, disclosures, acceptedReads);
         };
         // (crew#993) The withdrawal and the save are one step for the server: an approval for it
         // waits until the save commits, then is judged against the new registration. With no held
@@ -673,6 +679,10 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
           const tool = server.tools.find((t) => t.name === name);
           if (tool === undefined) continue;
           deps.audit.record('mcp.tool.write_granted', deps.actorOf(req), { detail: { subject: tool.subject, class: tool.class, via: 'save' } });
+        }
+        for (const name of acceptedReads) {
+          const tool = server.tools.find((t) => t.name === name);
+          if (tool !== undefined) deps.audit.record('mcp.tool.read_accepted', deps.actorOf(req), { detail: { subject: tool.subject, via: 'save' } });
         }
         for (const [name, disclosure] of Object.entries(disclosures)) {
           const tool = server.tools.find((t) => t.name === name);
@@ -748,11 +758,14 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   app.post<{ Params: { name: string } }>(
     `${V}/mcp/servers/:name/test`,
-    { config: { manifest: { responseType: 'McpServerTestResponse | McpServerTestAgentResponse', statusCodes: [200, 404, 409, 503] } } },
+    { config: { manifest: { responseType: 'McpServerTestResponse | McpServerTestAgentResponse', statusCodes: [200, 403, 404, 409, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
       try {
+        const server = await r.get(req.params.name);
+        const actor = deps.actorOf(req);
+        if (server.kind === 'mcp-stdio' && !mayGrantWrite(actor)) return humanOperatorOnly(reply, actor, "run a program on the daemon host (an mcp-stdio server's test)", 'host_program_human_only');
         const t: McpServerTestResponse = await r.test(req.params.name);
         if (sees(deps.actorOf(req)) === 'full') return t;
         // A probe's error can name the host it could not reach: an agent gets that it failed.
@@ -766,7 +779,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
 
   app.patch<{ Params: { subject: string } }>(
     `${V}/mcp/tools/:subject`,
-    { config: { manifest: { requestType: 'PatchMcpToolBody', responseType: 'McpTool', statusCodes: [200, 400, 403, 404, 503] } } },
+    { config: { manifest: { requestType: 'PatchMcpToolBody', responseType: 'McpTool', statusCodes: [200, 400, 403, 404, 409, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
@@ -774,11 +787,12 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       if (!parsed.success) return invalidBody(reply, parsed.error);
       try {
         const actor = deps.actorOf(req);
-        const { tool, grantedWrite } = await r.patchTool(req.params.subject, parsed.data, { mayGrantWrite: mayGrantWrite(actor), mayReviewDisclosure: mayGrantWrite(actor) });
+        const { tool, grantedWrite } = await r.patchTool(req.params.subject, parsed.data, { mayGrantWrite: mayGrantWrite(actor), mayReviewDisclosure: mayGrantWrite(actor), mayAcceptRead: mayGrantWrite(actor) });
         deps.audit.record('mcp.tool.updated', actor, { detail: { subject: tool.subject, ...parsed.data } });
         if (grantedWrite) {
           deps.audit.record('mcp.tool.write_granted', actor, { detail: { subject: tool.subject, class: tool.class, via: 'toggle' } });
         }
+        if (parsed.data.readAccepted !== undefined) deps.audit.record(parsed.data.readAccepted ? 'mcp.tool.read_accepted' : 'mcp.tool.read_withdrawn', actor, { detail: { subject: tool.subject, via: 'patch' } });
         if (parsed.data.disclosure !== undefined) deps.audit.record('mcp.tool.disclosure_reviewed', actor, { detail: { subject: tool.subject, disclosure: parsed.data.disclosure, via: 'patch' } });
         return tool;
       } catch (err) {

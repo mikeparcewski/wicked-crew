@@ -87,6 +87,11 @@ export function effectiveDisclosure(t: { disclosure?: ToolDisclosure | null; sch
   return DISCLOSURE_CLASSES.includes(d.class) ? d.class : null;
 }
 
+/** A person's Apps read acceptance is in force only for the saved schema they accepted. */
+export function effectiveReadAccepted(t: { readAccepted?: { schemaHash: string } | null; schemaHash: string | null }): boolean {
+  return t.schemaHash !== null && t.readAccepted?.schemaHash === t.schemaHash;
+}
+
 /**
  * The class crew proposes at preview for a tool it knows: only the tools of crew's own Toolbox configuration on a
  * `toolbox-source` entry, never by the name another server gives its tool (a server could call anything

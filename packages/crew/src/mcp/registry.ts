@@ -29,6 +29,7 @@ import { isIP } from 'node:net';
 import { join } from 'node:path';
 
 import type {
+  AddressConfirmationDetail,
   McpAuthConfig,
   McpAuthState,
   McpDiscoveredServer,
@@ -49,14 +50,14 @@ import type {
   McpRegistryRestoreResponse,
   TrackerLink,
 } from '../core/types.js';
-import { agentAccessOf, effectiveDisclosure, hasPmMarker, legacyEntryId, pmOf, type PmSystem, proposedDisclosure, type ToolboxSourceEntry, type ToolDisclosure, type ToolDisclosureClass, trackersOf } from '../knowledge/registry/entry.js';
+import { agentAccessOf, effectiveDisclosure, effectiveReadAccepted, hasPmMarker, legacyEntryId, pmOf, type PmSystem, proposedDisclosure, type ToolboxSourceEntry, type ToolDisclosure, type ToolDisclosureClass, trackersOf } from '../knowledge/registry/entry.js';
 import { bindingFor, bindingInForce, bindingOnSave } from '../knowledge/trackers/bindings.js';
 import { PROJECTION_UNKNOWN, type TrackerProjectionLookup, trackerLinkViews } from '../knowledge/trackers/view.js';
 import { checkSourceDocument, DeploymentPolicyError, policyVersionOf } from '../knowledge/registry/policy.js';
 import { canonicalJson, deriveToolClass, effectiveToolClass, APPS_SERVER, ESTATE_SERVER, type HashedRestTarget, type HashedToolShape, MCP_SERVER_NAME_RE, mcpSubject, parseMcpSubject, sha256Hex, toolSchemaHash } from './classify.js';
 import { envFingerprint } from './env.js';
 import type { McpUpstreamConfig, ProbedTool, ProbeResult, Prober } from './probe.js';
-import { GENERATIONS_KEPT, type McpRegistryFile, type McpRegistryStore, type McpServerRecord, type McpToolRecord } from './registry-store.js';
+import { type EstateTombstone, GENERATIONS_KEPT, type McpRegistryFile, type McpRegistryStore, type McpServerRecord, type McpToolRecord } from './registry-store.js';
 import { restTarget } from './rest.js';
 import { type AddressPolicy, classifyAddress, exactRangesFor, NO_CONFIRMATION } from '../sources/dialer.js';
 import { CREW_SOURCE, type SourceDescription, sourceDescriptorHash, sqlFromToolboxEntry, toolboxEntryFromSql } from '../sources/kinds.js';
@@ -81,6 +82,7 @@ export class McpRegistryError extends Error {
     message: string,
     /** (DES-APPS-001 §5.2) Fuller words that hold a source's own text: answered to a HUMAN only. */
     readonly humanMessage?: string,
+    readonly detail: AddressConfirmationDetail = {},
   ) {
     super(message);
   }
@@ -192,6 +194,11 @@ export class McpRegistry {
   trackerProjection: TrackerProjectionLookup = PROJECTION_UNKNOWN;
   /** (DES-PM-001 §3.4) Called once a restore has landed (the daemon points it at the tracker projector). */
   onRestored: (() => void) | undefined;
+  /**
+   * (crew#1328, crew#1354) Called once a removal or a restore that dropped records has landed, with the estate source
+   * ids it tombstoned ({@link estateSourceIds}); the daemon has their writers erase them. Never throws in.
+   */
+  onTombstoned: ((targets: EstateTarget[]) => void) | undefined;
 
   constructor(private readonly deps: McpRegistryDeps) {
     this.now = deps.now ?? Date.now;
@@ -275,7 +282,7 @@ export class McpRegistry {
       // (DES-APPS-001 §5.2) The dialer refused the connection: a 409 naming why (an unconfirmed range
       // to confirm, an always-refused address, plaintext), not an upstream failure.
       const human = result.sourceDetail !== undefined ? `${what}: ${result.sourceDetail}` : undefined;
-      if (result.refusal !== undefined) throw new McpRegistryError(409, result.refusal, `${what}: ${result.error}`, human);
+      if (result.refusal !== undefined) throw new McpRegistryError(409, result.refusal, `${what}: ${result.error}`, human, result.detail);
       throw new McpRegistryError(502, 'probe_failed', `${what}: ${result.error}`, human);
     }
     const tools = result.tools.map((t) => ({ ...t, schemaHash: hashOf(config, t) }));
@@ -314,6 +321,7 @@ export class McpRegistry {
         schemaHash: t.schemaHash,
         enabledOnSave: enabledOnSave(was(t.name), t),
         disclosure: reviewed(t),
+        readAccepted: effectiveReadAccepted({ schemaHash: t.schemaHash, readAccepted: was(t.name)?.readAccepted ?? null }),
         ...(config.pm != null ? { binding: bindingOnSave(config.pm.system, t) === null ? null : { policy: bindingOnSave(config.pm.system, t)!.policy } } : {}),
         ...(config.kind === 'rest' ? { rest: t.rest ?? null } : {}),
       })),
@@ -343,8 +351,9 @@ export class McpRegistry {
    * (DES-KNOWLEDGE-DATA-001 §5.1) `disclosures` is the operator's review of each tool's disclosure class (human
    * operator only, like a write grant). A tool it does not name keeps its class while its schema is unchanged;
    * a tool of crew's own Toolbox configuration gets crew's class; any other tool has none until reviewed.
+   * `acceptedReads` records the human operator's Apps read acceptances, bound to each previewed schema.
    */
-  async save(previewHash: string | undefined, enabledWrites: readonly string[] = [], allowOrigin: string | null = null, disclosures: Readonly<Record<string, ToolDisclosureClass>> = {}): Promise<McpServer> {
+  async save(previewHash: string | undefined, enabledWrites: readonly string[] = [], allowOrigin: string | null = null, disclosures: Readonly<Record<string, ToolDisclosureClass>> = {}, acceptedReads: readonly string[] = []): Promise<McpServer> {
     if (previewHash === undefined) {
       throw new McpRegistryError(409, 'preview_required', 'saving a server needs the previewHash of a preview of it: POST /mcp/servers/preview first');
     }
@@ -357,7 +366,9 @@ export class McpRegistry {
     await this.checkWriteGrants(previewHash, enabledWrites);
     await this.checkEgress(previewHash, allowOrigin);
     this.checkDisclosures(previewHash, disclosures);
+    await this.checkAcceptedReads(previewHash, acceptedReads);
     const granted = new Set(enabledWrites);
+    const accepted = new Set(acceptedReads);
     this.previews.delete(previewHash);
     const stamp = new Date(this.now()).toISOString();
     // (crew#719) The staged secret and the registry row commit TOGETHER. Studio used to write the
@@ -380,6 +391,9 @@ export class McpRegistry {
     }
     const prior = held.secret === null ? null : await this.deps.secrets.get(held.config.name);
     if (held.secret !== null) await this.deps.secrets.set(held.config.name, held.secret);
+    // (crew#1328 item 3) A save that changes a source's allowed views with no new description changes its projection key
+    // with no catalog written: it is named once the write lands, so its structure is projected again now.
+    let viewsChanged = false;
     const saved = await this.restoreSecretOnFailure(held.config.name, held.secret !== null, prior, () => this.mutate(async (file) => {
       const prior = file.servers.find((s) => s.name === held.config.name);
       // (DES-PM-001 §3) A PM entry stays the PM system it was registered as: a re-save that drops the marker, or
@@ -409,6 +423,7 @@ export class McpRegistry {
           present: true,
           ...(t.rest != null ? { rest: t.rest } : {}),
           disclosure: disclosureOnSave(t, was, disclosures[t.name], held.config.kind, held.config.pm?.system ?? null),
+          readAccepted: accepted.has(t.name) ? { schemaHash: t.schemaHash } : was?.readAccepted?.schemaHash === t.schemaHash ? was.readAccepted : null,
           // (DES-PM-001 §3) A PM tool's binding: crew's current policy, bound to the schema this save registers.
           ...(held.config.pm != null ? { binding: bindingOnSave(held.config.pm.system, t) } : {}),
         };
@@ -467,9 +482,21 @@ export class McpRegistry {
       // The description lands INSIDE the record's own write (the store serializes mutations), so a
       // record and its description can never be paired with another save's.
       if (held.source !== null) await this.catalogs.write(record.name, { ...held.source, descriptorHash: sourceDescriptorHash(configOf(record)) });
+      const viewsOf = (r: McpServerRecord | undefined): string => JSON.stringify([...new Set(r?.viewsAllowed ?? [])].sort());
+      viewsChanged = held.source === null && prior !== undefined && isSourceRecord(record) && viewsOf(prior) !== viewsOf(record);
       return record;
     }));
+    if (viewsChanged) this.sourceChanged(saved.name);
     return this.view(saved);
+  }
+
+  private tombstoned(targets: EstateTarget[]): void {
+    if (targets.length === 0) return;
+    try {
+      this.onTombstoned?.(targets);
+    } catch {
+      // the listener's own failure; the tombstones are in the registry and the next reconcile sends them
+    }
   }
 
   private sourceChanged(name: string): void {
@@ -570,6 +597,21 @@ export class McpRegistry {
     }
   }
 
+  /** Refuse acceptances outside the preview's effective reads before any approval is withdrawn or saved. */
+  async checkAcceptedReads(previewHash: string, acceptedReads: readonly string[]): Promise<void> {
+    const held = this.previews.get(previewHash);
+    if (held === undefined || held.expiresAt <= this.now() || acceptedReads.length === 0) return;
+    const prior = (await this.readFile()).servers.find((s) => s.name === held.config.name);
+    for (const name of acceptedReads) {
+      const t = held.tools.find((t) => t.name === name);
+      const was = prior?.tools.find((t) => t.name === name);
+      const override = t !== undefined && was?.schemaHash === t.schemaHash ? was.classOverride : null;
+      if (t === undefined || effectiveToolClass(deriveToolClass(t.annotations), override) !== 'read') {
+        throw new McpRegistryError(409, 'not_a_read', `${name} is not a read tool of this preview`);
+      }
+    }
+  }
+
   /**
    * (G2) Whether every saved tool of the `rest` server `name` has a hash that covers the server's
    * target. `false` for a registration saved before G2 (or whose url or auth header changed outside
@@ -609,14 +651,18 @@ export class McpRegistry {
 
   /** Remove a server, and the keychain secret it owns (`keychain:wicked-mcp/<name>`). */
   async remove(name: string): Promise<void> {
-    const removed = await this.mutate(async (file) => {
+    const { removed, tombstoned } = await this.mutate(async (file) => {
       const s = this.find(file.servers, name);
       file.servers = file.servers.filter((x) => x.name !== name);
       // Inside the mutation, serialized with every save and upload: a source saved under this name
       // next writes its catalog after this deletion, never before it.
       if (isSourceRecord(s)) await this.catalogs.remove(name);
-      return s;
+      // (crew#1328, crew#1354) What estate holds of it is erased, in this same write, so a restart never forgets it.
+      const ids = estateSourceIds(s);
+      addEstateTombstones(file, ids, new Date(this.now()).toISOString());
+      return { removed: s, tombstoned: ids };
     });
+    this.tombstoned(tombstoned);
     if (removed.auth?.ref === keychainRef(name) && this.deps.secrets.available) {
       try {
         await this.deps.secrets.delete(name);
@@ -639,8 +685,8 @@ export class McpRegistry {
    */
   async patchTool(
     subject: string,
-    patch: { enabled?: boolean | undefined; classOverride?: McpToolClass | null | undefined; disclosure?: ToolDisclosureClass | null | undefined },
-    opts: { mayGrantWrite?: boolean; mayReviewDisclosure?: boolean } = {},
+    patch: { enabled?: boolean | undefined; classOverride?: McpToolClass | null | undefined; disclosure?: ToolDisclosureClass | null | undefined; readAccepted?: boolean | undefined },
+    opts: { mayGrantWrite?: boolean; mayReviewDisclosure?: boolean; mayAcceptRead?: boolean } = {},
   ): Promise<{ tool: McpTool; grantedWrite: boolean }> {
     const parts = parseMcpSubject(subject);
     if (parts === null) throw new McpRegistryError(404, 'unknown_tool', `no tool ${subject}`);
@@ -655,6 +701,14 @@ export class McpRegistry {
         if (opts.mayReviewDisclosure !== true) throw new McpRegistryError(403, 'disclosure_review_human_only', `only a human operator reviews what ${subject} discloses`);
         if (t.schemaHash === null || t.schemaHash !== t.observedSchemaHash) throw new McpRegistryError(409, 'not_registered', `${subject}'s schema is not the saved one: preview and save the server again, then review it`);
       }
+      if (patch.readAccepted !== undefined) {
+        if (opts.mayAcceptRead !== true) throw new McpRegistryError(403, 'read_accept_human_only', `only a human operator accepts or withdraws ${subject} as an Apps read`);
+        if (patch.readAccepted) {
+          const override = patch.classOverride !== undefined ? patch.classOverride : t.classOverride;
+          if (effectiveToolClass(deriveToolClass(t.annotations), override) !== 'read') throw new McpRegistryError(409, 'not_a_read', `${subject} is not a read tool`);
+          if (t.schemaHash === null || t.schemaHash !== t.observedSchemaHash) throw new McpRegistryError(409, 'not_registered', `${subject}'s schema is not the saved one: preview and save the server again, then accept it`);
+        }
+      }
       const before = t.enabled && isWriteGrant(t.annotations, t.classOverride);
       const enabled = patch.enabled ?? t.enabled;
       const override = patch.classOverride !== undefined ? patch.classOverride : t.classOverride;
@@ -665,6 +719,7 @@ export class McpRegistry {
       t.enabled = enabled;
       t.classOverride = override;
       if (patch.disclosure !== undefined) t.disclosure = patch.disclosure === null || t.schemaHash === null ? null : { class: patch.disclosure, schemaHash: t.schemaHash };
+      if (patch.readAccepted !== undefined) t.readAccepted = patch.readAccepted && t.schemaHash !== null ? { schemaHash: t.schemaHash } : null;
       s.updatedAt = stamp;
       return { server: s, tool: t, grant };
     });
@@ -857,9 +912,12 @@ export class McpRegistry {
 
   /** Store a fresh description of a source (a re-describe), bound to the descriptor it was taken under. */
   async saveDescription(name: string, description: SourceDescription, descriptorHash: string): Promise<void> {
-    // Checked and written inside one registry mutation (serialized with every save), so a save that
-    // lands while the source was being described always wins.
-    await this.mutate(async (file) => {
+    // Checked and written in the registry's one-at-a-time chain (serialized with every save), so a save that
+    // lands while the source was being described always wins. The description lives in the catalog store, not the
+    // registry file, so this writes no registry generation (crew#1299 review: the ten-minute re-describe of every
+    // used source would otherwise flush the operator's restore points).
+    await this.deps.store.inspect(async (raw) => {
+      const file = normalizeRegistryFile(raw);
       const s = this.find(file.servers, name);
       if (sourceDescriptorHash(configOf(s)) !== descriptorHash) throw new McpRegistryError(409, 'server_changed', `${name} was saved again while it was being described; describe it again`);
       await this.catalogs.write(name, { ...description, descriptorHash });
@@ -1032,14 +1090,21 @@ export class McpRegistry {
       s.health = { ...s.health, checkedAt: stamp, lastError: `secret_missing: ${s.auth.ref} resolves to no secret; set it, then switch ${s.name} on` };
       s.updatedAt = stamp;
     }
-    const current = await this.mutate((file) => {
+    const { current, tombstoned } = await this.mutate((file) => {
       if (expected !== undefined) {
         const late = file.servers.map((s) => s.name).filter((n) => !expected.includes(n));
         if (late.length > 0) throw new McpRegistryError(409, 'registry_busy', `${late.join(', ')} was registered while the restore ran; nothing was restored: try again`);
       }
+      // (crew#1328, crew#1354) A source or tracker the restored generation does not hold is erased from estate too; one
+      // it brings back is not (its own projection replaces what estate holds).
+      const kept = servers.flatMap(estateSourceIds);
+      const dropped = file.servers.flatMap(estateSourceIds).filter((t) => !kept.some((k) => k.id === t.id && k.kind === t.kind));
+      for (const kind of ['source', 'tracker'] as const) dropEstateTombstones(file, kind, new Set(kept.filter((k) => k.kind === kind).map((k) => k.id)));
+      addEstateTombstones(file, dropped, stamp);
       file.servers = servers;
-      return file.generation ?? 0;
+      return { current: file.generation ?? 0, tombstoned: dropped };
     });
+    this.tombstoned(tombstoned);
     for (const s of servers) if (isSourceRecord(s)) this.sourceChanged(s.name);
     // (DES-PM-001 §3.4) A restored generation brings its tracker links back: the projection reconciles to them.
     this.onRestored?.();
@@ -1047,7 +1112,7 @@ export class McpRegistry {
   }
 
   /**
-   * `resolveSecret` for this registry: a gh refusal (not installed, signed out, another active account) is a named 409,
+   * `resolveSecret` for this registry: a gh refusal (not installed, signed out, no token) is a named 409,
    * so every route that reads a source's secret answers its code instead of a 500.
    */
   private async resolve(ref: string): Promise<string | null> {
@@ -1387,6 +1452,7 @@ function toolView(s: McpServerRecord, t: McpToolRecord): McpTool {
     schemaHash: t.schemaHash,
     observedSchemaHash: t.observedSchemaHash,
     disclosure: effectiveDisclosure(t),
+    readAccepted: effectiveReadAccepted(t),
     ...(pm !== null ? { binding: t.binding == null ? null : { policy: t.binding.policy, schemaHash: t.binding.schemaHash, inForce: bindingInForce(pm.system, t) !== null } } : {}),
   };
 }
@@ -1407,6 +1473,40 @@ export function diffTools(registered: ReadonlyArray<Pick<McpToolRecord, 'name' |
 }
 
 // ── The one registry's entry (DES-KNOWLEDGE-DATA-001 §5) ─────────────────────────────────────────
+
+/** An estate source id a record's structure lives under, and which projector writes it. */
+export type EstateTarget = Pick<EstateTombstone, 'id' | 'kind'>;
+
+/**
+ * (crew#1328, crew#1354) The estate source ids a record's structure lives under: a data source's entry id (its
+ * projected catalog), and a PM entry's trackers, retired ones included.
+ */
+export function estateSourceIds(s: McpServerRecord): EstateTarget[] {
+  const out: EstateTarget[] = [];
+  if (isSourceRecord(s)) out.push({ id: entryId(s), kind: 'source' });
+  if (pmOf(s) !== null) {
+    for (const t of trackersOf(s)) out.push({ id: t.id, kind: 'tracker' });
+    for (const r of s.retired ?? []) out.push({ id: r.id, kind: 'tracker' });
+  }
+  return out;
+}
+
+/**
+ * Add `targets` to the registry's tombstones. An id already waiting keeps its tombstone (its writer erases by id, after
+ * reading the registry, so one is enough); nothing is ever evicted (codex on #1735: a dropped one is never erased).
+ */
+export function addEstateTombstones(file: McpRegistryFile, targets: readonly EstateTarget[], at: string): void {
+  const list = file.estateTombstones ?? [];
+  for (const t of targets) if (!list.some((x) => x.id === t.id && x.kind === t.kind)) list.push({ id: t.id, kind: t.kind, at });
+  if (list.length > 0) file.estateTombstones = list;
+}
+
+/** Drop the tombstones of `kind` whose id `settled` names (their writer erased them, or the id is live again). */
+export function dropEstateTombstones(file: McpRegistryFile, kind: EstateTombstone['kind'], settled: ReadonlySet<string>): void {
+  if (file.estateTombstones === undefined) return;
+  file.estateTombstones = file.estateTombstones.filter((t) => t.kind !== kind || !settled.has(t.id));
+  if (file.estateTombstones.length === 0) delete file.estateTombstones;
+}
 
 /** A data source of any form: K1 `sql`/`graphql`, or a Toolbox-form database source. */
 export function isSourceRecord(s: Pick<McpServerRecord, 'kind'>): boolean {
@@ -1460,6 +1560,17 @@ function entryOf(s: McpServerRecord): ToolboxSourceEntry | null {
  * Pure and idempotent: the first write after an upgrade persists the mapped form.
  */
 export function normalizeRegistryFile(file: McpRegistryFile): McpRegistryFile {
+  // Studio required the person's "Accept these as reads" tick before saving these legacy previews.
+  // Carry that decision forward once; after the marker, absent fields must never imply acceptance.
+  if (file.readAcceptance !== 1) {
+    for (const s of file.servers) {
+      for (const t of s.tools) {
+        t.readAccepted = ['rest', 'mcp-http', 'mcp-stdio'].includes(s.kind) && t.schemaHash !== null && effectiveToolClass(deriveToolClass(t.annotations), t.classOverride) === 'read'
+          ? { schemaHash: t.schemaHash } : null;
+      }
+    }
+    file.readAcceptance = 1;
+  }
   for (const [i, s] of file.servers.entries()) {
     if (s.id === undefined) s.id = legacyEntryId(s.name, s.registeredAt);
     if (s.kind !== 'sql' || s.sql?.driver !== 'postgres') continue;

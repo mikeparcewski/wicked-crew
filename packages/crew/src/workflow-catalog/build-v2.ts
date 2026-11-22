@@ -9,8 +9,9 @@
  *   The seeds only say which of the plan's always-present mechanisms the card is judged by (`evidence-floor`, `pick`,
  *   `review`): they can name one the plan carries, never add one it lacks.
  * - **A saved shadow** (a preset the operator saved under a built-in's name, project first) is what a launch runs: with
- *   at least the built-in's instruments the option resolves to it ("Your version", `source: 'saved'`, its own gates);
- *   with fewer the option is `unavailable` and the shadow is reachable from `yours` only.
+ *   at least the built-in's instruments AND the promises its steps carry ({@link promisesOf}: each rubric check,
+ *   consent and hold, on the same step) the option resolves to it ("Your version", `source: 'saved'`, its own gates);
+ *   with fewer the option is `unavailable` and the shadow is reachable from `yours` only (crew#1445).
  * - **Never lose a card.** An option whose preset this engine does not serve is `unavailable`, never dropped. A served
  *   non-system def no card launches, and every saved preset, joins `yours`.
  * - **Usage by recorded shape** (`run.launched.shape`); a run from before v2 counts under the card whose default option
@@ -192,6 +193,111 @@ export function proposalOnly(steps: readonly ReadStep[], delivers: CatalogResolv
   return steps.slice(lastWrite).some((s) => unconditionalGate(s.gate));
 }
 
+/** One thing a plan's step promises beyond the plan's instruments ({@link promisesOf}). */
+export interface StepPromise {
+  step: string;
+  what: string;
+}
+
+/**
+ * What a plan promises beyond its instruments (crew#1445), step by step: each rubric check core serves, consent before
+ * the step runs (`consent_before`), and a hold for a person (an unconditional human gate; consent before the step is a
+ * hold too, xreview r1). Read the way crew reads a composed plan (each step laid over its phase-catalog entry), so a
+ * step that inherits its gate from the catalog counts. Keyed by step, so a promise moved off the step it protects is a
+ * promise lost.
+ */
+export function promisesOf(steps: readonly PresetStep[], entries: readonly CatalogEntry[]): StepPromise[] {
+  const out: StepPromise[] = [];
+  for (const s of readSteps(steps, entries)) {
+    if (s.rubric !== null && RUBRICS.has(s.rubric as CatalogGateId)) out.push({ step: s.id, what: `the ${s.rubric} check` });
+    if (s.gate === 'consent_before') out.push({ step: s.id, what: 'consent before install' });
+    if (unconditionalGate(s.gate)) out.push({ step: s.id, what: 'a hold for a person' });
+  }
+  return out;
+}
+
+/** The ids of the writing steps after step `id` in a plan read by {@link readSteps}. */
+function writersAfter(read: readonly ReadStep[], id: string): string[] {
+  const at = read.findIndex((s) => s.id === id);
+  return at < 0 ? [] : read.slice(at + 1).filter((s) => s.writes).map((s) => s.id);
+}
+
+/**
+ * The built-in's promises a saved shadow of it lacks on the same step, as plain words; empty when it keeps them all. A
+ * rubric check is kept only while it still judges what lands: a writing step after it that the built-in does not have
+ * there makes the check stale (xreview r2).
+ */
+export function shadowShortfall(builtinSteps: readonly PresetStep[], shadowSteps: readonly PresetStep[], entries: readonly CatalogEntry[]): string[] {
+  const kept = new Set(promisesOf(shadowSteps, entries).map((p) => `${p.step}\u0000${p.what}`));
+  const builtinRead = readSteps(builtinSteps, entries);
+  const shadowRead = readSteps(shadowSteps, entries);
+  const out: string[] = [];
+  const lost = promisesOf(builtinSteps, entries).filter((p) => !kept.has(`${p.step}\u0000${p.what}`));
+  // A lost consent says its hold too: name it once.
+  const consentLost = new Set(lost.filter((p) => p.what === 'consent before install').map((p) => p.step));
+  for (const p of lost) if (!(p.what === 'a hold for a person' && consentLost.has(p.step))) out.push(`${p.what} on its \`${p.step}\` step`);
+  // A held built-in that lands nothing before a person says so promises that of its shadow too: a writing step after
+  // its last hold lands work no one approved (coord review F2; the stale-check rule below, for holds).
+  const builtinHeld = promisesOf(builtinSteps, entries).some((p) => p.what === 'a hold for a person');
+  if (builtinHeld && proposalOnly(builtinRead, 'none') && !proposalOnly(shadowRead, 'none')) {
+    out.push('a hold for a person before anything lands (a writing step runs after its last hold)');
+  }
+  for (const p of promisesOf(builtinSteps, entries)) {
+    if (!p.what.endsWith(' check') || !kept.has(`${p.step}\u0000${p.what}`)) continue;
+    const allowed = new Set(writersAfter(builtinRead, p.step));
+    const added = writersAfter(shadowRead, p.step).filter((w) => !allowed.has(w));
+    if (added.length > 0) out.push(`${p.what} on what lands (its \`${added.join('`, `')}\` step rewrites the output after \`${p.step}\`)`);
+  }
+  return out;
+}
+
+/** What reads a sourced draft's preset needs ({@link sourcedDraftRefusal}): the engine's preset listing and phase catalog. */
+export interface DraftPresetReads {
+  /** The engine's effective rows for a scope (a project's row replaces the global one by name; none = global). */
+  listPresets(projectId?: string): Promise<Preset[]>;
+  catalog(): Promise<CatalogEntry[]>;
+  /** The served def by name, a built-in's first (the def crew derived from the engine at boot), as the catalog reads it. */
+  getWorkflow?(id: string): WorkflowDef | null;
+}
+
+/**
+ * (crew#1445) Why a draft on `workflow` in `projectId` must not launch, or `null`. The preset the engine will run is
+ * the scope's effective row: the built-in is fine; a saved row runs only when it keeps the built-in's promises
+ * ({@link shadowShortfall}), compared with the global built-in row. With no built-in to compare to (an older engine, or a
+ * saved row and no built-in at all) the engine has no sourced draft to offer.
+ */
+export async function sourcedDraftRefusal(reads: DraftPresetReads, projectId: string | undefined, workflow: string): Promise<string | null> {
+  const noDraft = "this engine has no sourced draft yet; update wicked-crew's engine";
+  let builtin: Preset | undefined;
+  let effective: Preset | undefined;
+  try {
+    effective = (await reads.listPresets(projectId)).find((p) => p.name === workflow);
+    if (effective === undefined) return noDraft;
+    if (effective.created_by === 'builtin') return null;
+    builtin = projectId === undefined ? undefined : (await reads.listPresets()).find((p) => p.name === workflow && p.created_by === 'builtin');
+  } catch {
+    return noDraft;
+  }
+  // The same baseline the catalog uses (`resolveOption`): the built-in row, else the built-in def (a saved global row
+  // replaces the built-in's row in the global listing too; agy r2).
+  let def: WorkflowDef | null = null;
+  try {
+    def = builtin === undefined ? (reads.getWorkflow?.(workflow) ?? null) : null;
+  } catch {
+    def = null;
+  }
+  const baseline = builtin?.steps ?? (def !== null ? stepsOfDef(def) : null);
+  if (baseline === null) return noDraft;
+  let entries: CatalogEntry[];
+  try {
+    entries = await reads.catalog();
+  } catch (err) {
+    return `your saved \`${workflow}\` could not be checked against the built-in (the phase catalog is unreadable: ${err instanceof Error ? err.message : String(err)}); try again`;
+  }
+  const missing = shadowShortfall(baseline, effective.steps, entries);
+  return missing.length === 0 ? null : `your saved \`${workflow}\` has fewer checks than the built-in (it lacks ${missing.join(', ')}); delete it or add them back`;
+}
+
 /** Share the source-check decision with the launcher so a document's displayed gates match its run. */
 export function draftPresetFor(
   card: string | null | undefined,
@@ -252,7 +358,10 @@ export interface ServedState {
 export function servedState(input: Pick<CatalogV2Inputs, 'defs' | 'presets' | 'entries'>): ServedState {
   const saved = new Map<string, Preset>();
   for (const p of input.presets) {
-    if (p.created_by === 'builtin' || p.system === true) continue;
+    // A saved row named like a system workflow (steering-author, capture-learnings, demo, the draft seams) is still
+    // what the engine runs under that name: it shadows the card's built-in like any other (coord review F1). It stays
+    // out of Yours.
+    if (p.created_by === 'builtin') continue;
     const held = saved.get(p.name);
     if (held === undefined || (held.scope === 'global' && p.scope !== 'global')) saved.set(p.name, p);
   }
@@ -336,9 +445,15 @@ export function resolveOption(cardId: string, optionId: string | null, served: S
     const def = served.defs.get(workflow);
     const shadow = served.saved.get(workflow);
     const builtinInstruments = builtin !== undefined && QE_PRESETS.has(workflow) ? BUILTIN_QE_INSTRUMENTS : (def?.required_instruments ?? []);
-    if (shadow !== undefined && !coming) {
+    // A saved row with no built-in or def behind it is not a shadow: the card's own workflow is not served (agy r1).
+    if (shadow !== undefined && !coming && (builtin !== undefined || def !== undefined)) {
       const mine = instrumentsOf(shadow);
-      const missing = builtinInstruments.filter((i) => !mine.includes(i));
+      // (crew#1445) The built-in's instruments AND the steps its promise rests on (its rubric checks, consent and
+      // holds): a shadow without them would launch the standard card below what the card promises.
+      const missing = [
+        ...builtinInstruments.filter((i) => !mine.includes(i)),
+        ...shadowShortfall(builtin?.steps ?? (def !== undefined ? stepsOfDef(def) : []), shadow.steps, served.entries),
+      ];
       if (missing.length === 0) {
         source = 'saved';
         steps = shadow.steps;
@@ -366,9 +481,22 @@ export function resolveOption(cardId: string, optionId: string | null, served: S
     // Respond and Rework draft on the sourced preset (CS5). An engine without it would refuse the draft at Start, so
     // the option is off here, with why, instead of offering a Start that cannot run.
     const preset = draftPresetFor(card.id, option?.id ?? null);
-    if (!coming && preset !== 'interactive-draft' && !served.builtins.has(preset)) {
+    // (crew#1445) A saved shadow of the draft preset is what the draft runs, compared with the built-in: its row (when the
+    // listing still carries it) or the built-in def crew derived from the engine at boot (a project's row replaces the
+    // built-in's in that project's listing). Without the built-in's checks the card is off; the draft launcher refuses it
+    // too (`sourcedDraftRefusal`).
+    const shadow = served.saved.get(preset);
+    const builtinDef = served.defs.get(preset);
+    const baseline = served.builtins.get(preset)?.steps ?? (shadow !== undefined && builtinDef !== undefined ? stepsOfDef(builtinDef) : null);
+    if (!coming && preset !== 'interactive-draft' && baseline === null) {
       status = 'unavailable';
       statusNote = `This daemon's engine does not serve the \`${preset}\` workflow; update wicked-crew to get it.`;
+    } else if (!coming && shadow !== undefined && baseline !== null) {
+      const missing = shadowShortfall(baseline, shadow.steps, served.entries);
+      if (missing.length > 0) {
+        status = 'unavailable';
+        statusNote = `Your saved \`${preset}\` has fewer checks than the built-in (it lacks ${missing.join(', ')}), so this option is off.`;
+      }
     }
   }
   if (!coming && status === 'available' && Object.hasOwn(CREW_PENDING, card.id)) {
@@ -546,7 +674,7 @@ export function buildWorkflowCatalogV2(input: CatalogV2Inputs): WorkflowCatalogV
       later: [], command: null, aliases: [], hidden: false, usage: { ...usageOfRuns(runs), byOption: {} },
     };
   };
-  const savedRows = [...served.saved.values()].filter((p) => !V2_EXCLUDED.has(p.name)).sort((a, b) => a.name.localeCompare(b.name));
+  const savedRows = [...served.saved.values()].filter((p) => p.system !== true && !V2_EXCLUDED.has(p.name)).sort((a, b) => a.name.localeCompare(b.name));
   for (const p of savedRows) {
     cards.push(yours(p.name, p.steps, instrumentsOf(p), p.title ?? p.name, p.summary ?? `Your saved steps: ${p.steps.map((s) => s.id || s.catalog).join(', ')}.`, 'saved'));
   }

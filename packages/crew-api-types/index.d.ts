@@ -1743,6 +1743,30 @@ export interface SessionView {
  */
 export type RegisterRepoRefusalCode = 'repo_path_missing' | 'repo_path_relative' | 'repo_clone_denied';
 
+/** `POST /api/v1/maintenance` (api-types 0.220.0). Strict body; drain state lasts until restart. */
+export interface MaintenanceRequest {
+  drain: boolean;
+}
+
+/** `GET` and `POST /api/v1/maintenance` (api-types 0.220.0): admission and current work. */
+export interface MaintenanceState {
+  draining: boolean;
+  /** Unix milliseconds when drain was enabled; `null` while admitting work. */
+  since: number | null;
+  /** No run is planning, distributing or executing. Parked and human-held runs are idle. */
+  idle: boolean;
+  active: Array<{ runId: string; status: string }>;
+}
+
+/** `DELETE /api/v1/repos/:id` success (api-types 0.220.0). Checkout and graph files stay on disk.
+ *  Refusals: 404 `repo_not_found`; 409 `repo_in_use` (with `runIds` when crew's own check finds the
+ *  live runs; an engine refusal names them in `error`) or `repo_in_project` (the projects named in
+ *  `error`); 501 `repo_unregister_unsupported` on an older engine. */
+export interface UnregisterRepoResponse {
+  repoId: string;
+  removed: true;
+}
+
 /** A registered git repository (`RepoEntry`). */
 export interface RepoEntry {
   id: string;
@@ -1750,7 +1774,8 @@ export interface RepoEntry {
   root_path: string;
   default_branch: string;
   registered_at: number;
-  /** Remote git URL the repo was cloned from (undefined for locally-registered repos). */
+  /** The repo's git remote. On `GET /repos`: the address the engine recorded, else the checkout's `origin`, credentials
+   *  and query removed; absent when neither has one or it can't be shown safely. Other responses carry the engine's record. */
   git_url?: string;
   /**
    * ABSOLUTE path of this repo's code graph, resolved by the engine (wicked-core#170).
@@ -2873,6 +2898,15 @@ export interface CoreEvent {
   writePlanOrd?: number;
   /** `awaitingHuman{gateKind: 'consent'}` (core#820): CLIs the plan leaves out, and why. */
   writeTargetsSkipped?: Array<{ cli: string; why: string }>;
+  /**
+   * `awaitingHuman{gateKind: 'consent'}` (crew#1424): what each editor or run plugin in an editor install plan
+   * asks to do (garden `install.py --dry-run` `asks`, passed on by wicked-core), in manifest order. ABSENT when the
+   * plan names none. Information for the person approving the install: the rows grant nothing, and each one is
+   * allowed later in Plugins. A permission the install consent itself grants (garden `INSTALL_GRANTED`, e.g.
+   * `mcp.session`, which has no Plugins switch) is never listed here: it is a `writeTargets` row on the
+   * `EDITOR-GRANTS` rule. Crew relays the frame verbatim.
+   */
+  consentAsks?: Array<{ editor: string; permission: string; why: string }>;
   /** `awaitingHuman{gateKind: 'consent'}` (core#820): why no write targets are listed (no dry run
    *  ran before the gate, or it printed no plan); the gate is then a plain approve / reject. */
   writeTargetsMissing?: string;
@@ -3612,6 +3646,11 @@ export interface RuleVerdict {
   /** (api-types 0.193.0) The council a dispute on this rule went to: its ruling (`status` is it, with
    *  `how: 'council'` or `cache`), or why there is none (`status: 'disputed'`). */
   council?: RuleCouncilRecord;
+  /** (crew#1455, core-ts 0.15.34) `true` on a `broken` row of a rule the person may waive with a written
+   *  reason (severity `warn` or `info`, not a process rule): the gate's `skip_rules` takes it. A broken
+   *  `error` or `critical` rule is reworked instead. ABSENT on every other row, and from an older engine;
+   *  never `false` or `null`. */
+  waivable?: true;
 }
 
 /** (api-types 0.193.0) One side's reading of a rule in a dispute. */
@@ -3671,6 +3710,12 @@ export interface RuleCouncilRecord {
   /** Why there is no ruling: `no_quorum`, `timeout`, `seats_benched`, `cap`, `error`,
    *  `incomplete_evidence` or `identity_unknown`, then the detail. ABSENT on a ruling. */
   reason?: string;
+  /** (crew#1658, core crew#972) Set when ONE arbiter sat in place of a council, because no three seats
+   *  distinct from every party could: the seat and its footing, in words (`claude (distinct from every
+   *  party)`). It says who sat, not that the dispute was settled: an arbiter's vote that did not count leaves
+   *  no `ruling` (the row stays `disputed`). ABSENT unless an arbiter sat and voted, and from an older
+   *  engine; never `null`. */
+  arbiter?: string;
 }
 
 /** (api-types 0.190.0) One skip in a `skip_rules` gate answer. */
@@ -3732,20 +3777,26 @@ export interface QeAcceptanceRefusal {
 }
 
 /**
- * (crew ≥ 0.9.0, EX-01/EX-02) `LaunchRunResponse.assuranceNotice`: the run launched under FULL
- * assurance on a roster whose WORK seats (not benched, not ballot-only) all invoke ONE CLI binary
- * (the engine's judge identity), so no other seat can evaluate its work and no other identity can
- * judge it. If the run reviews or changes code, the engine refuses the review on its builder's seat
- * (`dead_seat` gate) or holds a gate that needs a judge (`judge_unavailable`), and the run waits.
- * The ways forward are explicit: sign a second CLI in, or relaunch with `retryWith` merged into the
- * launch body (the creator's seat then evaluates its own work, disclosed on every receipt). A client
- * shows `message` and asks its operator; crew never applies the opt-in by itself.
+ * A launch whose seats have no independent judge (api-types 0.217.0). `single_cli_roster` means
+ * every work seat (neither benched nor ballot-only) invokes one CLI binary, the engine's judge
+ * identity: no other seat can evaluate its work and no other CLI identity can judge it.
+ * `no_independent_judge` means another uncovered pool: the engine's coverage answer names
+ * seats using the same CLI, seats that cannot work on this run, and seats seen calling the same
+ * provider. The run starts under full assurance: the engine refuses a review on its builder's
+ * seat (`dead_seat`) and holds a gate without a judge (`judge_unavailable`), so work that needs
+ * review or judging waits for a distinct seat. A client shows `message` and lets the person
+ * sign in another CLI or relaunch with `retryWith`
+ * merged into the launch body to allow self-evaluation, disclosed on every receipt; crew never
+ * applies the opt-in itself.
  */
 export interface LaunchAssuranceNotice {
-  code: 'single_cli_roster';
+  /** One CLI identity across work seats, or another lack of independent judges. */
+  code: 'single_cli_roster' | 'no_independent_judge';
+  /** The engine's full-assurance limits and the person's ways to proceed. */
   message: string;
-  /** The work seats, all one CLI identity. */
+  /** The seats that can author work. */
   seats: string[];
+  /** An explicit reduced-assurance opt-in for a new launch linked to this run. */
   retryWith: { retryOf: string; reducedAssurance: true };
 }
 
@@ -7719,9 +7770,34 @@ export interface RequirementPatch {
 }
 
 // ── Blast radius (wicked-estate blast-radius --json via crew) ──
+/** crew#1555: studio can delete its hand-declared subset. Freshness is merged across pages by crew, crew#1556. */
+export interface BlastRadiusFreshness {
+  commits_behind?: number | null;
+  indexing?: string[];
+  roots?: unknown[];
+  stale_files?: Array<{ file: string; status: 'modified' | 'deleted' }>;
+  /** Per-page counts summed; a file spanning pages counts once per page (crew#1556). */
+  stale_files_total: number;
+  unindexed_files?: number | null;
+  checked_files: number;
+  not_file_backed: number;
+}
+
 export interface BlastRadius {
   target: string;
-  dependents: Array<{ id: string; name: string; kind: string; file: string; line: number }>;
+  /** crew#1555: estate's depth and drift; studio can delete its hand-declared subset. */
+  dependents: Array<{
+    id: string; name: string; kind: string; file: string; line: number;
+    /** Hops from the target; 1 = direct dependent. */
+    depth?: number;
+    stale?: 'modified' | 'deleted';
+    via_crossing?: string | null;
+  }>;
+  /** crew#1555: false means no symbol by that name. */
+  resolved?: boolean;
+  freshness?: BlastRadiusFreshness;
+  next_cursor?: string | null;
+  page?: { from: number; count: number; total: number };
   /**
    * References to the target that no resolver bound (ENGINE-CONTRACT §2.1). Repeat call-sites of
    * an already-bound relationship are NOT counted, so 0 is a legitimate value for a fully-resolved
@@ -9321,7 +9397,7 @@ export interface ChatSingleSeatDegradation {
   message: string;
 }
 
-/** `POST /chats` → 201. */
+/** `POST /chats` → 201; a seeded retry → 200, or 410 `chat_gone` if its chat was deleted (api-types 0.222.0). */
 export interface ChatOpenResponse {
   chatId: string;
   seats: ChatSeatOutcome[];
@@ -9920,6 +9996,8 @@ export interface ArtifactProposal {
   seat: string;
   /** The "What" line: `label` is "Slides · Domain coverage for new engineers"; `outcome` is the catalog entry's. */
   what: { entry: string | null; title: string; label: string; outcome: string | null };
+  /** (api-types 0.222.0) A document job: the title in the person's words; absent = the catalog's name. */
+  namedTitle?: string;
   /** The brief (create), the ask (refine), or what to show (demo), as the seat wrote it. */
   brief: string | null;
   reason: string | null;
@@ -9951,6 +10029,10 @@ export interface ArtifactProposal {
   target?: { ref: string; title: string; base: number };
   /** refine: the parts the seat pointed at (`data-wid`s); hand edits are kept unless the person says otherwise. */
   touches?: string[];
+  /** (api-types 0.223.0) refine: the person's selected anchors, kept on a head refresh. */
+  anchors?: string[];
+  /** (api-types 0.223.0) refine retry: ids preselected Let this change, from the failed attempt. */
+  allow?: string[];
   /**
    * (api-types 0.197.0, DES-CHAT-ARTIFACTS-001 §6.1-6.2, A5) refine: the person's own edits this revision keeps,
    * recomputed by crew from the document's version lineage on the proposal's `target.base`. Each is kept unless the
@@ -10119,6 +10201,9 @@ export interface ChatProposalView {
 export interface ChatProposalDecisionBody {
   decision: 'go' | 'not_now';
   edits?: ProposalEdits;
+  /** Accept reduced assurance on a job's Go. Else 400 `reduced_assurance_not_applicable`.
+   * A refused launch's `retryWith: { reducedAssurance: true }` can be sent with Go again. */
+  reducedAssurance?: boolean;
   /**
    * (api-types 0.196.0, operator ruling 2026-11-06) How a JOB's Start runs: `true` = a power run (one orchestrator
    * session, no plan-approval gate; the deliver gate and what policy requires still hold), `false` = it stops at its
@@ -10127,8 +10212,9 @@ export interface ChatProposalDecisionBody {
    * run THIS job as a power run (a workflow run on a repository, a preset workflow, an engine with power mode) and its
    * Power mode for new jobs (`powerModeDefault`) is on: chat starts follow the setting. Else 409 `power_unavailable`
    * with the reason, and nothing is recorded or started. If that changes between this check and the engine call (the
-   * launcher checks again, as does the launch itself), the answer is 502 `launch_failed` with the reason and the
-   * proposal is interrupted: Go again resumes it with that press's choice. Never run phased silently. Where a job's
+   * launcher checks again, as does the launch itself), the launch's own refusal is answered (api-types 0.217.0: 409
+   * `power_unavailable`, the card reopened; a launcher-side refusal with no code stays 502 `launch_failed`, the
+   * proposal interrupted, and Go again resumes it with that press's choice). Never run phased silently. Where a job's
    * Start can choose (power mode and the setting on, the job fits), its `sentence` promises no plan review and its
    * `stops` is null: the client shows the choice beside Start.
    */
@@ -10148,7 +10234,9 @@ export interface ChatProposalDecisionBody {
  * correction is in flight), `proposal_reopened` (a gone turn's hold was released: look again), `catalog_changed` (the
  * refreshed proposal is the `view`), `card_not_available`, `proposal_stale`, and for a reshape the held plan's own
  * answers (`reshape_after_work`, `gate_changed`). (api-types 0.196.0) `power` adds 400 `power_not_applicable` and
- * 409 `power_unavailable`. A 409 carries the current `view` when there is one.
+ * 409 `power_unavailable`. (api-types 0.217.0) A typed 4xx launch refusal passes through its status, `code`,
+ * `error`, `excluded` and `retryWith`, with an open `view` so Start can be tried again. `reducedAssurance` adds
+ * 400 `reduced_assurance_not_applicable` on a non-job or with Not now. A 409 carries the current `view` when there is one.
  */
 export interface ChatProposalDecisionResponse {
   view: ChatProposalView;
@@ -10722,6 +10810,8 @@ export interface RepoReindexResult {
 }
 
 export interface ProjectGraphRefreshResult {
+  /** crew#1476: removed labels pruned by rebuilding the database on refresh. */
+  pruned?: string[];
   status: ProjectGraphStatus;
   /** Labels re-indexed this run. */
   indexed: string[];
@@ -10737,6 +10827,9 @@ export interface ProjectGraphRefreshResult {
 
 /** One hit, always attributed: a cross-repo answer that does not say WHERE is not an answer. */
 export interface ProjectGraphHit {
+  /** crew#1555: hops from the target, 1 = direct; absent when estate omits it. */
+  depth?: number;
+  stale?: 'modified' | 'deleted';
   /** The repo's registry id. */
   repoId: string;
   /** The repo's estate label. */
@@ -10770,6 +10863,11 @@ export interface ProjectGraphRepoCount {
 
 /** `GET /projects/:id/graph/blast-radius?name=` — dependents across every member repo. */
 export interface ProjectBlastRadius {
+  /** crew#1555: false means no symbol by that name. */
+  resolved?: boolean;
+  freshness?: ProjectBlastRadiusFreshness;
+  /** crew#1476: current members' link coverage, when estate names this project. */
+  coverage?: ProjectGraphMemberCoverage[];
   projectId: string;
   target: string;
   dependents: ProjectGraphHit[];
@@ -10813,6 +10911,85 @@ export interface ProjectBlastRadius {
    */
   link_stale?: boolean;
   link_stale_labels?: string[];
+}
+
+/** crew#1555, crew#1556: merged freshness with member attribution and no host roots. */
+export interface ProjectBlastRadiusFreshness extends Omit<BlastRadiusFreshness, 'roots' | 'stale_files'> {
+  stale_files?: Array<{ repoId: string; repo: string; file: string; status: 'modified' | 'deleted' }>;
+}
+
+/** crew#1476, crew#1477: estate's per-member link coverage; omitted numbers are unknown. */
+export interface ProjectGraphMemberCoverage {
+  repoId: string;
+  repo: string;
+  links_in?: number;
+  links_out?: number;
+  incomplete?: boolean;
+  package_imports?: number;
+  manifests?: number;
+  boundary_counts?: Record<string, number>;
+}
+
+/** crew#1476: one endpoint of a project path, attributed to a current member. */
+export interface ProjectGraphPathEnd {
+  repoId: string;
+  repo: string;
+  symbol: string;
+  name: string;
+  kind: string;
+  file: string;
+  /** estate's line_1based. */
+  line: number;
+}
+
+export interface ProjectGraphPathHop {
+  source: ProjectGraphPathEnd;
+  target: ProjectGraphPathEnd;
+  kind: string;
+  confidence?: number;
+}
+
+/** crew#1476: `GET /projects/:id/graph/path?from=&to=&maxDepth=`. */
+export interface ProjectGraphPath {
+  projectId: string;
+  from: string;
+  to: string;
+  found: boolean;
+  resolved?: boolean;
+  unresolved: 'from' | 'to' | null;
+  hops: ProjectGraphPathHop[];
+  depth_bounded: boolean;
+  node_bounded: boolean;
+  crossings?: ProjectGraphCrossing[];
+  reposSearched: string[];
+  missingRepos: string[];
+  linkage: ProjectGraphLinkage;
+  note: string;
+  /** The route crossed a detached repository; refresh to rebuild without it. */
+  excluded?: string;
+}
+
+/** crew#1477: an import estate could not prove is a member link; never an edge. */
+export interface ProjectGraphPossible {
+  repoId: string;
+  repo: string;
+  reason: string;
+  package: string;
+}
+
+/** crew#1477: `GET /projects/:id/graph/boundaries`. */
+export interface ProjectGraphBoundaries {
+  projectId: string;
+  linked: boolean;
+  generation?: number;
+  stale?: boolean;
+  stale_labels?: string[];
+  last_error?: string | null;
+  members: ProjectGraphMemberCoverage[];
+  possible: ProjectGraphPossible[];
+  possible_total?: number;
+  possible_truncated?: boolean;
+  note: string;
 }
 
 /** `GET /projects/:id/graph/search?name=` — exact-name symbol resolution across member repos. */
@@ -11314,6 +11491,8 @@ export interface DiagnosticsSeatGovernance {
    * explicit `seat_eligible_for_work` (true or false) silences it. ABSENT on an older daemon.
    */
   roleFindings?: HealthWarning[];
+  /** Seats whose image cannot be built or obtained, also carried in `GET /health.warnings`. */
+  imageFindings?: HealthWarning[];
 }
 
 export interface DiagnosticsSeatGovernanceEntry {
@@ -14155,8 +14334,9 @@ export interface McpAuthConfig {
    * The secret reference: `keychain:wicked-mcp/<name>`, `env:<NAME>`, or (api-types 0.206.0, wicked-crew#1500; a GitHub project-management source over
    * `mcp-http` / `mcp-stdio` only) `gh-cli:<github login>` — the GitHub CLI's sign-in for that account. A `gh-cli`
    * reference stores the account name only: crew reads the token from gh at the moment of each call and never keeps
-   * it. The account is pinned: when gh's active account is another one, or gh is not installed or not signed in, the
-   * call is refused with a named 409 (`gh_account_mismatch`, `gh_not_installed`, `gh_signed_out`,
+   * it. The account is pinned: crew reads that account's own token (`gh auth token --user <login>`) whichever account
+   * is gh's active one, and never switches gh's active account. When gh is not installed, is not signed in as that
+   * account or holds no token for it, the call is refused with a named 409 (`gh_not_installed`, `gh_signed_out`,
    * `gh_token_unavailable`) and nothing is sent. A `gh-cli` ref on any other source is a 400 `gh_cli_not_allowed`.
    */
   ref: string;
@@ -14352,6 +14532,8 @@ export interface McpTool {
   observedSchemaHash: string;
   /** (api-types 0.183.0) The disclosure class in force; `null` = none reviewed for the saved schema. */
   disclosure: McpToolDisclosure | null;
+  /** The person's Apps read acceptance is in force for this schema. */
+  readAccepted: boolean;
   /** (api-types 0.187.0) PM entries only: the tool's resource binding; `null` = unbound, so unavailable to agents. */
   binding?: McpToolBinding | null;
 }
@@ -14565,8 +14747,22 @@ export interface McpPreviewTool {
    * class while its schema is unchanged, crew's own class for a tool of crew's Toolbox configuration, else `null`.
    */
   disclosure: McpToolDisclosure | null;
+  /** The person's Apps read acceptance is in force for this schema. */
+  readAccepted: boolean;
   /** (api-types 0.187.0) PM entries only: the binding a save gives the tool; `null` = crew has none, so agents never get it. */
   binding?: { policy: string } | null;
+}
+
+/** Addresses still needing the person's confirmation; suggestions correspond in the same order. */
+export interface AddressConfirmationDetail {
+  addresses?: Array<{ address: string; class: 'loopback' | 'private' }>;
+  suggest?: string[];
+}
+
+/** A connector route's refusal, including the preview's 409 `address_unconfirmed`. */
+export interface McpErrorBody extends AddressConfirmationDetail {
+  error: string;
+  code: string;
 }
 
 /**
@@ -14674,6 +14870,12 @@ export interface SaveMcpServerBody {
    * `mcp.tool.disclosure_reviewed`.
    */
   disclosures?: Record<string, McpToolDisclosure>;
+  /**
+   * Accept these preview tool names as Apps reads, bound to their schema hashes. Human operator only
+   * (403 `read_accept_human_only`); a name outside the preview's effective reads is 409 `not_a_read`.
+   * Audited `mcp.tool.read_accepted`. Unlisted tools keep acceptance only for an unchanged schema.
+   */
+  acceptedReads?: string[];
 }
 
 /**
@@ -14734,6 +14936,12 @@ export interface PatchMcpToolBody {
    * offered to no agent).
    */
   disclosure?: McpToolDisclosure | null;
+  /**
+   * Accept the saved schema as an Apps read, or withdraw that acceptance. Both are human operator only
+   * (403 `read_accept_human_only`), audited `mcp.tool.read_accepted` / `mcp.tool.read_withdrawn`.
+   * Acceptance requires an effective read (409 `not_a_read`) and a registered schema (409 `not_registered`).
+   */
+  readAccepted?: boolean;
 }
 
 /**
@@ -14861,6 +15069,14 @@ export interface McpCallRecord {
     'wicked.carrier': 'shim';
     'bytes.out': number;
     retries: number;
+    /**
+     * (crew#1442) `mcp:estate/<tool>` knowledge reads: how many records (recalled items, graph nodes and edges) the
+     * relay's release re-check left out of the answer, as outside what the step may see. When the run has a source
+     * pick, `decision.ruleIds` also names `crew:source-pick`. Carried on the call's record whatever its outcome (an
+     * answer, or a later refusal such as the result bound). Absent = no record was left out; an answer withheld whole
+     * (outcome `withheld`, `estate:visible`) has no count.
+     */
+    'estate.withheld'?: number;
   };
 }
 
@@ -18047,6 +18263,21 @@ export interface AppTurnRecord {
   /** Not landed: a stable code (`check_failed`, `review_refused`, `launch_refused`, `cancelled`, …) and crew's words. */
   code: string | null;
   reason: string | null;
+  /**
+   * (crew#1379) Refused: the steering rules the refused step was found to BREAK (the engine's `rule_check` denial,
+   * winning or behind the reviewer's), each with the judge's cite as text (for the person; never instructions).
+   * A client links each id to the rule in Steering. ABSENT when no broken rule refused the turn, and on turns
+   * recorded before it.
+   */
+  rules?: AppTurnRule[];
+}
+
+/** (crew#1379) A steering rule a refused app turn broke. */
+export interface AppTurnRule {
+  /** The rule's id (as Steering names it). */
+  id: string;
+  /** Why the judge found it broken: its cite, else its reason (one line, at most 300 characters); `''` when none was recorded. */
+  reason: string;
 }
 
 /** `GET /apps` item. */
@@ -18209,6 +18440,26 @@ export interface AppTurnBody {
 export interface AppTurnResponse {
   runId: string;
   turn: AppTurnState;
+}
+
+/** One call's metadata, never row values. Kept in memory only; a daemon restart starts empty. */
+export interface AppCallRecord {
+  at: number;
+  viewer: string;
+  app: string;
+  version: number | null;
+  tree: string;
+  query: string;
+  ms: number;
+  rows: number;
+  bytes: number;
+  outcome: string;
+}
+
+/** `GET /apps/:app/calls` (human operator; the records name viewers): at most 200 records, newest last. Not persisted across restarts. */
+export interface AppCallRecordsResponse {
+  app: string;
+  records: AppCallRecord[];
 }
 
 /** `POST /apps/:app/query` (observer): run one named query of an accepted version (DES §7.2). */

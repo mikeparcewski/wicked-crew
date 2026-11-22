@@ -15,6 +15,7 @@
  */
 import { createHash } from 'node:crypto';
 
+import { coverageNote, type JudgeCoverage } from '../core/assurance.js';
 import { SEAT_STANDING_FIELDS } from '../core/engine-roster.js';
 import type {
   ArtifactProposal,
@@ -135,6 +136,7 @@ export interface JobChat {
 /** Everything a job proposal is resolved from (a fresh proposal, a merged revision, a reshape). */
 export interface JobFacts {
   card: string;
+  title: string | null;
   /** `undefined`: the card's default option. */
   option: string | null | undefined;
   depth: 'quick' | 'standard' | 'deep' | null;
@@ -153,6 +155,8 @@ export interface JobFacts {
 }
 
 export interface JobContext {
+  /** The engine's judge coverage for the card's seats and repository binding; absent means unknown. */
+  coverage?: (keys: readonly string[], bound: boolean) => JudgeCoverage | null;
   /** The seat pool was drawn without a readable newWorkSeats setting. */
   seatsUnread?: boolean;
   chatId: string;
@@ -204,8 +208,9 @@ export function seatsNeeded(r: ResolvedOption): number {
   return 1 + (r.resolved.seats.distinctEvaluator ? 1 : 0);
 }
 
-export function seatsShortLine(r: ResolvedOption): string {
-  return `Needs ${seatsNeeded(r)} seats that can work now (one builds, the others check it); sign another seat in`;
+export function seatsShortLine(r: ResolvedOption, have: number): string {
+  if (seatsNeeded(r) === 1) return 'Needs a seat that can work now to build it, and none can. Sign in a seat to start it.';
+  return `Needs 2 seats that can work now, one to build it and one to check it, and ${have === 0 ? 'none' : `only ${have}`} can. ${have === 0 ? 'Sign in 2 more seats' : 'Sign in another seat'} to start it.`;
 }
 
 /** At the minimum seat count, disclose that the judge is the validator's author. */
@@ -228,16 +233,13 @@ function drawOrder(lead: string | null, ctx: { chat: JobChat; roster: JobContext
 
 /**
  * (F1/F2) What a revision's `removeSeats` did, said from the card as published: the seats that left it, and who works.
- * `after` is the published card's workers (a job's seats, a document's helpers). `job` false (the revision made it a
- * document, whose helpers are picked again): an asked seat that is still a helper is said to still work on it.
+ * `after` is the published card's workers (a job's seats, a document's helpers).
  */
-export function seatRemovalNote(asked: readonly string[] | undefined, before: readonly string[], after: readonly string[], nameOf: (k: string) => string, job = true): string[] {
+export function seatRemovalNote(asked: readonly string[] | undefined, before: readonly string[], after: readonly string[], nameOf: (k: string) => string): string[] {
   if (asked === undefined) return [];
   const notes: string[] = [];
   const off = before.filter((k) => asked.includes(k) && !after.includes(k));
   if (off.length > 0) notes.push(`${list(off.map(nameOf))} ${off.length === 1 ? 'is' : 'are'} off this job; ${after.length === 0 ? 'no seat works on it' : `${list(after.map(nameOf))} ${after.length === 1 ? 'works' : 'work'} on it`}`);
-  const still = job ? [] : asked.filter((k) => after.includes(k));
-  if (still.length > 0) notes.push(`Not changed: ${list(still.map(nameOf))} still ${still.length === 1 ? 'works' : 'work'} on it (its helpers are picked again; change them on the card)`);
   return notes;
 }
 
@@ -413,7 +415,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     blockedBy.push('What to show is over 4000 characters with your corrections: say it shorter');
   }
   // A self-seated workflow picks its own seat at launch: the roster's count is not its requirement (codex r3).
-  if (short && coming === undefined && !(r.workflow !== null && SELF_SEATED.has(r.workflow))) blockedBy.push(seatsShortLine(r));
+  if (short && coming === undefined && !(r.workflow !== null && SELF_SEATED.has(r.workflow))) blockedBy.push(seatsShortLine(r, seats.keys.length));
   // The one question: the first required need that is missing.
   let question: ProposalQuestion | null = null;
   const missing = needs.find((n) => n.required && n.status === 'missing');
@@ -460,7 +462,9 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     swap: ctx.chat.repos.length > 1 ? { choices: ctx.chat.repos.filter((x) => x.id !== repo.id).slice(0, 4).map((x) => ({ label: x.name, edit: { repoRef: x.id } })) } : null,
   });
   const selfSeated = r.workflow !== null && SELF_SEATED.has(r.workflow);
-  const disclosure = !short && !selfSeated ? judgeDisclosure(r, seats.keys.length) : null;
+  const disclosure = !short && !selfSeated
+    ? coverageNote(ctx.coverage?.(seats.keys, repo !== null) ?? null, (key) => ctx.roster.find((s) => s.key === key)?.name ?? key) ?? judgeDisclosure(r, seats.keys.length)
+    : null;
   if (disclosure !== null) notes.push(disclosure);
   // Lead swaps come from the pool work is drawn from; the row shows only when it offers a choice (crew#1590).
   const swapChoices = (ctx.pool ?? ctx.roster).filter((x) => x.key !== seats.lead).slice(0, 4).map((x) => ({ label: `${x.name} leads`, edit: { lead: x.key } }));
@@ -616,14 +620,15 @@ export function factsOf(p: ArtifactProposal): JobFacts {
   const shape = p.shape!;
   return {
     card: shape.card,
+    title: p.namedTitle ?? null,
     option: shape.option,
     depth: shape.depth,
     words: p.words ?? p.brief ?? '',
     details: [...(p.details ?? [])],
     repoRef: p.repoRefs?.[0] ?? null,
     projectId: p.filedIn.projectId,
-    lead: p.seats?.lead ?? null,
-    seats: p.seats !== undefined ? [...p.seats.keys] : null,
+    lead: p.seats?.lead ?? p.helpers?.seats[0] ?? null,
+    seats: p.seats !== undefined ? [...p.seats.keys] : p.helpers !== null ? [...p.helpers.seats] : null,
     inputs: inputsOfProposal(p),
     skipQe: p.skipQe ?? null,
     by: shape.by,
@@ -780,6 +785,7 @@ export function mergeRevision(
   //    workflow picks its own seat: a seat edit there changes nothing (codex r2).
   const card4 = CATALOG_V2_CARDS.find((c) => c.id === facts.card)!;
   const r4 = resolveOption(card4.id, optionFor(card4, facts.option), ctx.served);
+  if (r4 === null || proposalKindOf(r4) !== 'create') facts.title = null;
   if (r4?.workflow !== null && r4?.workflow !== undefined && SELF_SEATED.has(r4.workflow) && (edits.lead !== undefined || edits.addSeats !== undefined || edits.removeSeats !== undefined)) {
     notes.push(`Not changed: ${card4.title} picks its own seat`);
     edits = { ...edits };
@@ -803,7 +809,7 @@ export function mergeRevision(
   }
   if (edits.removeSeats !== undefined && edits.removeSeats.length > 0) {
     const r = resolveOption(facts.card, optionFor(CATALOG_V2_CARDS.find((c) => c.id === facts.card)!, facts.option), ctx.served);
-    const need = r === null ? 1 : seatsNeeded(r);
+    const need = r !== null && proposalKindOf(r) === 'create' ? 2 : r === null ? 1 : seatsNeeded(r);
     const current = facts.seats ?? drawOrder(facts.lead, ctx).filter((k) => can.has(k));
     // (F1/F2) A removal is applied or refused in the card's words; what WAS applied is said from the published card
     // (`seatRemovalNote`), never from this intermediate merge. The count reads only the seats that can work now.

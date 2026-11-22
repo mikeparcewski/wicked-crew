@@ -18,7 +18,7 @@ import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 
 const armedStateHome = crewStateHome();
 const armedSettings = process.env['WICKED_CREW_SYSTEM_SETTINGS'];
-const NEEDS_TWO = 'Needs 2 seats that can work now (one builds, the others check it); sign another seat in';
+const NEEDS_TWO = 'Needs 2 seats that can work now, one to build it and one to check it, and only 1 can. Sign in another seat to start it.';
 
 describe('held job seats rechecked by the real GET routes (crew#1484)', () => {
   let scratch: string;
@@ -63,6 +63,7 @@ describe('held job seats rechecked by the real GET routes (crew#1484)', () => {
   }) as unknown as CoreAdapter;
 
   beforeAll(async () => {
+    vi.spyOn(CoreAdapter, 'judgeCoverage').mockReturnValue(JSON.stringify({ covered: true, singleIdentity: false, authors: [], benched: [] }));
     scratch = mkdtempSync(join(tmpdir(), 'chat-job-held-seats-'));
     home = join(scratch, 'state-home');
     mkdirSync(home);

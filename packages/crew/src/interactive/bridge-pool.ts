@@ -334,6 +334,8 @@ export const START_TIMEOUT_MS = 60_000;
 
 /** A bridge that answered `/api/health` for its root. */
 export interface LiveBridge {
+  /** crew#1288: the lockfile's `version`, when it records one; outside the interactive range it is never adopted. */
+  version?: string | null;
   host: string;
   port: number;
   pid: number;
@@ -586,6 +588,8 @@ export function readLock(root: string): LiveBridge | null {
       startedAt: typeof raw.startedAt === 'string' && raw.startedAt !== '' ? raw.startedAt : null,
       // crew#509: present only when the lockfile echoes one (the shape of a pre-token lockfile is unchanged).
       ...(typeof raw.spawnToken === 'string' && raw.spawnToken !== '' ? { spawnToken: raw.spawnToken } : {}),
+      // crew#1288: the bridge's version, when the lockfile records one (a lockfile without it reads as before).
+      ...(typeof raw.version === 'string' && raw.version !== '' ? { version: raw.version } : {}),
     };
   } catch {
     return null;
@@ -817,8 +821,16 @@ export class InteractiveBridgePool {
    */
   private async adoptOrRecycle(root: string, live: LiveBridge): Promise<LiveBridge> {
     const expected = bridgeEnvFor(this.io);
+    const range = resolveInteractiveSpec().range;
+    const versionMismatch = live.version != null && semver.valid(live.version) !== null && !semver.satisfies(live.version, range, { includePrerelease: true });
     const sidecar = readCrewSidecar(root);
     const match: SidecarMatch = sidecar === null ? 'other-pid' : sidecarNamesBridge(sidecar, live);
+    if (versionMismatch && match !== 'names-it') {
+      throw new BridgeUnavailableError(
+        `the interactive bridge for ${root} (pid ${live.pid}) has version ${live.version}; this daemon needs ${range}`,
+        `stop it yourself (kill ${live.pid}); the next request starts a compatible bridge`,
+      );
+    }
     // crew#510: a sidecar that names this pid but a DIFFERENT bridge instance is about a bridge
     // that died and left its pid to somebody else's. It is discarded — it describes a process that
     // is gone — and the live bridge takes the adopt-with-a-warning path below: never adopted as
@@ -834,7 +846,7 @@ export class InteractiveBridgePool {
       return this.adoptUnrecorded(root, live, expected);
     }
     if (sidecar !== null && match === 'names-it') {
-      if (bridgeEnvMatches(sidecar.env, expected)) {
+      if (!versionMismatch && bridgeEnvMatches(sidecar.env, expected)) {
         this.claimSidecar(root, sidecar, live);
         return live;
       }
@@ -848,7 +860,7 @@ export class InteractiveBridgePool {
             `${describeEnv(sidecar.env)}; this daemon needs ${describeEnv(expected)} — NOT recycling a bridge of unproven ownership`,
         );
         throw new BridgeUnavailableError(
-          `the interactive bridge for ${root} (pid ${live.pid}) was started for a different bus or crew API ` +
+          `the interactive bridge for ${root} (pid ${live.pid}) was started with an incompatible version, bus or crew API ` +
             `(${ownerOrigin}) by a daemon this one cannot identify`,
           `stop it yourself (kill ${live.pid}) if no other crew daemon is using it, or give this daemon its own ` +
             `interactive root (WICKED_INTERACTIVE_ROOT, or the project's interactiveRoot setting); the next request starts a bridge for this one`,
@@ -862,14 +874,15 @@ export class InteractiveBridgePool {
         );
         throw new BridgeUnavailableError(
           `the interactive bridge for ${root} is owned by another running crew daemon (pid ${owner}, ${ownerOrigin}) ` +
-            `on a different bus or crew API — two daemons cannot share one interactive docs root`,
+            `with an incompatible version, bus or crew API — two daemons cannot share one interactive docs root`,
           `give this daemon its own interactive root (WICKED_INTERACTIVE_ROOT, or the project's interactiveRoot ` +
             `setting) or stop the other daemon (pid ${owner}); the next request starts a bridge for this one`,
         );
       }
       this.io.log?.(
         `interactive bridge pid ${live.pid} for ${root} was started by crew${owner !== undefined ? ` (daemon pid ${owner}, gone)` : ''} ` +
-          `with ${describeEnv(sidecar.env)}, but this daemon needs ${describeEnv(expected)} — recycling it so its events reach this daemon`,
+          `with ${describeEnv(sidecar.env)}${versionMismatch ? ` at version ${live.version}` : ''}, but this daemon needs ` +
+          `${describeEnv(expected)}${versionMismatch ? ` and ${INTERACTIVE_PACKAGE}@${range}` : ''} — recycling it so its events reach this daemon`,
       );
       await this.terminate(root, live.pid, owner);
       return this.start(root, live.pid);

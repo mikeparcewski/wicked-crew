@@ -23,10 +23,10 @@ import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { readFileSync, existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
-import { basename, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { videoPalette } from '../appearance/video-palette.js';
-import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, readNewWorkSeats, settingsFilePath, type RunViewsSnapshot } from '../core/adapter.js';
+import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, MaintenanceDrainError, RepoUnregisterUnsupportedError, TERMINAL_RUN_STATUSES, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, readNewWorkSeats, settingsFilePath, type RunViewsSnapshot } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, repoFolderMissing, repoFolderMissingBody } from '../core/repoPaths.js';
 import type {
   ConformanceRule,
@@ -192,11 +192,11 @@ import {
 } from './governance-steering.js';
 import { atProposeGate, draftedSteeringRules, isSteeringAuthorRun, landSteeringProposal, type SteeringProposalSnapshot } from './steering-landing.js';
 import { inventoryComplete, parseInventoryClaims, type InventoryClaim } from '../core/inventory-claim.js';
-import type { GateAction, LaunchPreviewPosture, LaunchPreviewResponse, RejudgeOffer, RunInventoryResponse, RunLearningsResponse, SeatRecordResponse, SkipQeOffer } from 'wicked-crew-api-types';
+import type { GateAction, LaunchPreviewPosture, LaunchPreviewResponse, MaintenanceRequest, RejudgeOffer, RunInventoryResponse, RunLearningsResponse, SeatRecordResponse, SkipQeOffer, UnregisterRepoResponse } from 'wicked-crew-api-types';
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
 import { registerDefaultEvalRoutes, runAndRecord, type DefaultEvalDeps } from '../evals/routes.js';
-import { prepareRunEvalsLaunch, RUN_EVALS_WORKFLOW } from '../evals/workflow.js';
+import { prepareRunEvalsLaunch, RUN_EVALS_WORKFLOW, runEvalsScopeOf, type RunEvalsScope } from '../evals/workflow.js';
 import { DOMAIN_MAPPING } from '../projects/repo-watch.js';
 import { defaultReplaySet } from '../evals/replay.js';
 import type { DefaultEvalStore } from '../evals/store.js';
@@ -237,7 +237,7 @@ import { REQUIRED_GARDEN_VERSION } from '../skills/plugin-source.js';
 import type { EvalRunStore } from './eval-store.js';
 import { isSeatKeyList } from '../core/job-seats.js';
 import { engineRosterJson, noEligibleSeatBody, parseNoEligibleSeat, toEngineSeat } from '../core/engine-roster.js';
-import { launchAssuranceNotice } from '../core/assurance.js';
+import { launchAssuranceNotice, readJudgeCoverage } from '../core/assurance.js';
 import { launchPosture, type PostureFacts } from '../core/launch-posture.js';
 import { launchRequiresQe, mayRequireQe, qeAcceptanceMode, qeSettingSkipReason } from '../core/qe-acceptance-setting.js';
 import {
@@ -303,7 +303,7 @@ import {
 import { createDocInProcess, registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { CreateLauncher } from '../interactive/proposal-create.js';
 import { ThemeLauncher } from './proposal-theme.js';
-import { CHAT_GIT_PROTOCOLS, OnboardLauncher, probeGitUrl, withoutCredentials } from './proposal-onboard.js';
+import { CHAT_GIT_PROTOCOLS, OnboardLauncher, probeGitUrl, shownGitUrl, withoutCredentials } from './proposal-onboard.js';
 import { RefineLauncher } from '../interactive/proposal-refine.js';
 import { lineageSteps, protectedEdits } from '../interactive/protected-edits.js';
 import type { DocBindingStore } from '../interactive/doc-binding.js';
@@ -319,10 +319,10 @@ import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.j
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
 import { crewStateHome, stateHomeOfDb, wickedWorkRoot } from '../projects/state-home.js';
 import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, jobLaunchRoster, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
-import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
+import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, removeStagedDocuments, stagedDocumentsRemoved, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
 import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks, webScopeReason } from './run-sources.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
-import { ChatProposals, LaunchOnceRegistry, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
+import { LaunchRefusal, ChatProposals, LaunchOnceRegistry, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
 import { CATALOG_SEEDS } from '../workflow-catalog/catalog-data.js';
 import { registerInteractiveDocList } from '../interactive/doc-list-routes.js';
 import { REVIEWS_DIRNAME } from '../interactive/review-ledger.js';
@@ -353,7 +353,7 @@ import {
 } from './diagnostics.js';
 import { GovernanceDiagnostics } from './governance-health.js';
 import { ATTACHMENT_LIMITS, ATTACHMENT_MAX_MESSAGE_BYTES, AttachmentError, ChatAttachmentStore, attachmentWire, attachmentsBlock, boundaryOf, parseMultipart, stageForSeat } from './chat-attachments.js';
-import { CHAT_HISTORY_MAX_LIMIT, ChatHistoryStore, decodeCursor } from './chat-history.js';
+import { CHAT_HISTORY_MAX_LIMIT, ChatHistoryStore, SeedRequestStore, decodeCursor } from './chat-history.js';
 import {
   PROBE_TIMEOUT_MS,
   SYSTEM_BUDGET_MS,
@@ -575,6 +575,29 @@ export class LaunchReply {
     this.payload = payload;
     return this;
   }
+}
+
+/** Keep correctable launch refusals typed, and preserve error codes in other launch failures. */
+/**
+ * (crew#1442, coord on #1734) A held run's source pick, for a reshape that keeps it. A pick that can't be read (its
+ * store entry gone and the launch trail not read at boot) refuses the launch, 409 `sources_unavailable`, rather than
+ * launch it as if the held run had no pick.
+ */
+export function heldSourcePick(picks: Pick<RunSourcePicks, 'get'>, runId: string): string[] | null {
+  try {
+    return picks.get(runId);
+  } catch (err) {
+    throw jobRefusal(409, { code: 'sources_unavailable', error: `the held run's source pick could not be read: ${message(err)}` });
+  }
+}
+
+export function jobRefusal(status: number, payload: unknown): Error {
+  const b = payload as { error?: unknown; code?: unknown } | undefined;
+  if (status >= 400 && status < 500 && typeof b?.code === 'string') {
+    return new LaunchRefusal(status, b as Record<string, unknown> & { code: string });
+  }
+  const error = typeof b?.error === 'string' ? b.error : 'The launch was refused.';
+  return new Error(`${error}${typeof b?.code === 'string' ? ` (${b.code})` : ''}`);
 }
 
 /** Who launches, and where the launch logs. The rest is crew's own and never a client field. */
@@ -1340,14 +1363,14 @@ export interface RegisteredRoutes {
    *  (DES-RUNS-REVIEW-001: the run review folds these, never the engine's bare record). */
   decorateRun: (view: SessionView) => SessionView;
   /** DES-DEFAULT-EVALS-001 §7: prepare a `run-evals` launch (run the evals in-process, write the report copy). */
-  runEvalsPrepare: (input: LaunchRunInput) => Promise<void>;
+  runEvalsPrepare: (input: LaunchRunInput, scope?: RunEvalsScope) => Promise<void>;
   /** DES-CHAT-ARTIFACTS-001 §4 (A2): proposals from a seat's `wicked-make` block (the reply fold feeds `onReply`). */
   chatProposals: ChatProposals;
   /** A3: the one launcher per run id (the draft seam's bus trigger and the boot reconcile go through it). */
   proposalLaunchers: LaunchOnceRegistry;
 }
 
-export interface RuntimeDeps {
+interface RuntimeServices {
   /** Recheck the rebased tree before redelivery; default reads Core.checkRunTree at call time. */
   checkRunTree?: CheckRunTree;
   /** Run a refresh script; tests supply a temp HOME with stub gh and a local origin. */
@@ -1367,7 +1390,7 @@ export interface RuntimeDeps {
    *  registered; absent (no draft seam armed) = `create` stays off. */
   launchBoundDraft?: (spec: BoundDraft) => Promise<void>;
   /** A3: remove a bound document's earlier attempt folders before a new attempt reads its base. */
-  fenceBoundDraft?: (documentId: string, runIds: readonly string[]) => void;
+  fenceBoundDraft?: (documentId: string, runIds: readonly string[], mount: string) => void;
   /** A5: the chat seam's proposal-bound refine. With {@link docBindings}, `refine` is advertised and its launcher
    *  registered; absent (no chat seam armed) = `refine` stays off. */
   launchBoundRefine?: (spec: BoundRefine) => Promise<void>;
@@ -1539,6 +1562,7 @@ export interface RuntimeDeps {
    *  same seats (F-RECON-002/003); a directly-driven route set builds one over `seatHealth` +
    *  `signedIn` above. */
   rosterWithStanding?: RosterWithStanding;
+  judgeCoverage?: typeof CoreAdapter.judgeCoverage;
   /** Injectable so container-login route tests never spawn the engine or a login container. */
   seatLoginExec?: ExecLike;
   /** The `/ws` fan-out, for the few routes that say something to a thread themselves (a refused
@@ -1583,10 +1607,6 @@ export interface RuntimeDeps {
   editorUnitTokenProbe?: (token: string) => Promise<UnitTokenVerdict>;
   /** EP-C1 (tests): where `daemon-editors.json` lives; default = the crew state home. */
   editorsStateHome?: string;
-  /** DES-APPS-001 (K2a): the app store behind `/apps` and `POST /repos {create}`. `createServer` builds it over
-   *  the state home's `daemon-apps.json` and the apps root; a directly-driven route set gets the routes only when it
-   *  injects one (so a test never makes a repo under the real `~/.wicked/apps`). */
-  apps?: AppStore;
   /** (DES-APPS-001 K5) A unit token → its run and step, for `POST /apps/check`; absent = that route answers 503. */
   appsVerifyUnitToken?: (token: string) => Promise<{ runId: string; phase: string } | null>;
   /** (K2b) Grants and action records (`daemon-apps-actions.json`); with `apps`, the action routes serve for real. */
@@ -1666,6 +1686,15 @@ export interface RuntimeDeps {
    *  its own default (shells `estate stats --db`). */
   entityCount?: (dbPath: string) => Promise<number>;
 }
+
+/** An Apps runtime always supplies project visibility; a route set without Apps needs neither. */
+export type RuntimeDeps = RuntimeServices & ({
+  /** DES-APPS-001 (K2a): the app store behind `/apps` and `POST /repos {create}`. `createServer` builds it over
+   *  the state home's `daemon-apps.json` and the apps root; a directly-driven route set gets the routes only when it
+   *  injects one (so a test never makes a repo under the real `~/.wicked/apps`). */
+  apps: AppStore;
+  appsVisibleSources: (projectId: string | null) => Promise<ReadonlySet<string>>;
+} | { apps?: undefined; appsVisibleSources?: never });
 
 /**
  * The daemon REST surface. Every endpoint is a thin wrapper over one adapter /
@@ -1896,6 +1925,8 @@ export function registerRoutes(
   const chatTranscripts = runtime.chatTranscripts;
   const chatAttachments = runtime.chatAttachments ?? new ChatAttachmentStore();
   const chatHistory = runtime.chatHistory ?? (chatTranscripts !== undefined ? new ChatHistoryStore(chatTranscripts, chatAttachments) : null);
+  // crew#1422: beside the history (its own folder: DELETE /chats/:id never removes a record).
+  const seedRequests = chatHistory !== null ? new SeedRequestStore(join(dirname(chatHistory.dir), 'seed-requests')) : null;
   // DES-CHAT-ARTIFACTS-001 §14 (A2): what a chat can do with artifacts. Production: `proposals` on, and each operation
   // on once its slice registers its launcher (A3 create, A7 theme). The TEST configuration (§13 A2) turns every
   // operation's resolution on and registers a recording stub that starts nothing.
@@ -2122,6 +2153,7 @@ export function registerRoutes(
       ? new AppExecutor({
           store: runtime.apps,
           registry: runtime.mcp ?? null,
+          visibleSources: runtime.appsVisibleSources,
           ...(appsKnowledge !== undefined ? { knowledge: appsKnowledge } : {}),
           projectOf: (slug) => runtime.apps!.projectOf(slug),
           crewInject: async (r) => {
@@ -2138,6 +2170,8 @@ export function registerRoutes(
           store: runtime.apps,
           actions: runtime.appsActions,
           registry: runtime.mcp ?? null,
+          visibleSources: runtime.appsVisibleSources,
+          projectOf: (slug) => runtime.apps!.projectOf(slug),
           audit,
           viewerOf: runtime.appsViewerOf ?? localViewerOf,
           ...(appsExecutor !== undefined ? { executor: appsExecutor } : {}),
@@ -2154,6 +2188,8 @@ export function registerRoutes(
           return JSON.stringify(launchRosterNaming(rosterWithStanding({ launch: true }), undefined));
         },
         registry: runtime.mcp ?? null,
+        visibleSources: runtime.appsVisibleSources,
+        projectOf: (slug) => runtime.apps!.projectOf(slug),
         grantOf: (slug, action) => appsWritePath?.getGrant(slug, action) ?? null,
       },
       ...(appsExecutor !== undefined ? { executor: appsExecutor } : {}),
@@ -2489,7 +2525,7 @@ export function registerRoutes(
       // boundary, are named before any run starts.
       ...(() => {
         const gov = seatGovernanceSnapshot();
-        return seatGovernanceWarnings(gov.diagnostics, hostSandboxLauncher(), gov.workEligible);
+        return [...seatGovernanceWarnings(gov.diagnostics, hostSandboxLauncher(), gov.workEligible), ...gov.imageFindings];
       })(),
       // crew 0.15.2 (#916): a custom seat written council-off with no work flag is now work-eligible
       // by the engine default; each is named once, so the operator can keep it off work.
@@ -2668,6 +2704,7 @@ export function registerRoutes(
         governanceDiagnostics.health(),
         floorCacheCache.get(),
       ]);
+      const seatGovernance = seatGovernanceSnapshot();
       const uptimeMs = Math.round(process.uptime() * 1000);
       const addr = app.server.address();
       const port = typeof addr === 'object' && addr !== null ? addr.port : 7701;
@@ -2705,9 +2742,10 @@ export function registerRoutes(
         seatGovernance: {
           rosterFile: seatRosterFile(),
           hostBoundary: hostSandboxLauncher(),
-          seats: seatGovernanceSnapshot().diagnostics,
+          seats: seatGovernance.diagnostics,
           // The same `seat.work_default` findings `/health.warnings` carries (api-types 0.133.0).
           roleFindings: seatWorkDefaultNow(),
+          imageFindings: seatGovernance.imageFindings,
         },
         // crew#740: which memory store this daemon reads and writes, and the isolation notice.
         memoryStore: memoryStoreInfo(),
@@ -2823,17 +2861,20 @@ export function registerRoutes(
   );
   /** crew#742: the seats' governance standing, read from the standing roster (empty when the
    *  roster cannot be read — the roster route reports that failure itself). */
-  const seatGovernanceSnapshot = (): { diagnostics: SeatGovernanceDiagnostic[]; workEligible: ReadonlySet<string> } => {
+  const seatGovernanceSnapshot = (): { diagnostics: SeatGovernanceDiagnostic[]; workEligible: ReadonlySet<string>; imageFindings: Array<{ kind: string; severity: 'warning'; message: string }> } => {
     try {
       // One roster read feeds both: the warnings follow the work role flag (not the council flag, and
       // not the runtime-gated `work_eligible`), which the published diagnostics do not carry.
       const roster = rosterWithStanding();
       return {
         diagnostics: seatGovernanceDiagnostics(roster as unknown as DiagnosticSeatInput[]),
+        imageFindings: roster.filter((seat) => seat.seat_image_unavailable !== undefined).map((seat) => ({
+          kind: 'seat.image_unavailable', severity: 'warning', message: `${seat.display_name ?? seat.key}: ${seat.seat_image_unavailable}`,
+        })),
         workEligible: new Set(roster.filter((seat) => seat.seat_eligible_for_work !== false).map((seat) => String(seat.key))),
       };
     } catch {
-      return { diagnostics: [], workEligible: new Set() };
+      return { diagnostics: [], workEligible: new Set(), imageFindings: [] };
     }
   };
 
@@ -3249,8 +3290,79 @@ export function registerRoutes(
     }
   });
 
-  // Registered repos → target-repo picker.
-  app.get(`${V}/repos`, async () => ({ repos: await adapter.listRepos() }));
+  const maintenanceDrainBody = (err: MaintenanceDrainError) => ({ code: err.code, error: err.message, hint: err.hint });
+  const MaintenanceSchema = z.strictObject({ drain: z.boolean() });
+  app.get(`${V}/maintenance`, { config: { manifest: { responseType: 'MaintenanceState', statusCodes: [200] } } },
+    async () => adapter.maintenanceState());
+  app.post(`${V}/maintenance`, { config: { manifest: { requestType: 'MaintenanceRequest', responseType: 'MaintenanceState', statusCodes: [200, 400] } } }, async (req, reply) => {
+    const parsed = MaintenanceSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+    const body: MaintenanceRequest = parsed.data;
+    adapter.setDraining(body.drain);
+    return adapter.maintenanceState();
+  });
+
+  // Registered repos → target-repo picker. Each carries `git_url` (studio#1012: the repo page's "This repository"
+  // tracker row reads it): the address the engine recorded, else — it records none for its own clones — the checkout's
+  // `origin` through `originOf` (the onboard card's own read), held a minute per checkout and read at most eight at a
+  // time across every list, so a list never runs a `git` per repository per request. Shown through `shownGitUrl`
+  // (credentials and query removed, an address it can't vouch for dropped); none = no field.
+  const originCache = new Map<string, { at: number; url: Promise<string | null> }>();
+  let originReads = 0;
+  const originQueue: Array<() => void> = [];
+  const limitedOrigin = async (rootPath: string): Promise<string | null> => {
+    if (originReads < 8) originReads += 1;
+    else await new Promise<void>((go) => originQueue.push(go));
+    try {
+      return await originOf(rootPath);
+    } finally {
+      // The slot passes straight to the next waiter, so no new read can take it in between.
+      const next = originQueue.shift();
+      if (next !== undefined) next();
+      else originReads -= 1;
+    }
+  };
+  const listedOrigin = (rootPath: string): Promise<string | null> => {
+    const now = Date.now();
+    const hit = originCache.get(rootPath);
+    if (hit !== undefined && now - hit.at < 60_000) return hit.url;
+    const url = limitedOrigin(rootPath);
+    originCache.set(rootPath, { at: now, url });
+    return url;
+  };
+  const withGitUrl = async (r: RepoEntry): Promise<RepoEntry> => {
+    const { git_url: recorded, ...rest } = r;
+    const raw = typeof recorded === 'string' && recorded.trim() !== '' ? recorded : await listedOrigin(r.root_path);
+    const shown = raw === null ? null : shownGitUrl(raw);
+    return shown === null ? rest : { ...rest, git_url: shown };
+  };
+  app.get(`${V}/repos`, async () => {
+    const listed = await adapter.listRepos();
+    // A checkout no longer registered leaves the cache.
+    const roots = new Set(listed.map((r) => r.root_path));
+    for (const root of originCache.keys()) if (!roots.has(root)) originCache.delete(root);
+    return { repos: await Promise.all(listed.map(withGitUrl)) };
+  });
+
+  app.delete(`${V}/repos/:id`, { config: { manifest: { responseType: 'UnregisterRepoResponse', statusCodes: [200, 404, 409, 501] } } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const runIds = (await adapter.sessionsDetail())
+      .filter((v) => v.session.repo_ref === id && !TERMINAL_RUN_STATUSES.has(v.session.status))
+      .map((v) => v.session.id);
+    if (runIds.length > 0) return reply.code(409).send({ code: 'repo_in_use', error: `Repository ${id} is held by non-terminal runs: ${runIds.join(', ')}`, runIds });
+    if (!(await adapter.listRepos()).some((r) => r.id === id)) return reply.code(404).send({ code: 'repo_not_found' });
+    try {
+      if (!(await adapter.unregisterRepo(id))) return reply.code(404).send({ code: 'repo_not_found' });
+      audit.record('repo.unregistered', actorOf(req), { detail: { repoId: id } });
+      return { repoId: id, removed: true } satisfies UnregisterRepoResponse;
+    } catch (err) {
+      if (err instanceof RepoUnregisterUnsupportedError) return reply.code(501).send({ code: 'repo_unregister_unsupported', error: message(err) });
+      // The engine's refusal names the runs or projects in its text (a lease taken after crew's check, or a project).
+      const refused = /^(repo_in_use|repo_in_project): /u.exec(message(err));
+      if (refused !== null) return reply.code(409).send({ code: refused[1], error: message(err) });
+      throw err;
+    }
+  });
 
   /** Filing for an onboarding run: what `POST /runs` does for a launch, for the runs `POST /repos`
    *  and `POST /repos/:id/onboard` start (crew#496). The launch entry (`run.launched`, which dates
@@ -3480,13 +3592,24 @@ export function registerRoutes(
     const p = chatScopes.get(chatId)?.projectId ?? chatHistory?.stateOf(chatId)?.projectId ?? null;
     return p === null || p === DEFAULT_PROJECT_ID ? null : p;
   };
+  /** crew#1429: a run's staged documents folder goes with the run (a refused launch, an archive). Logged, never fatal:
+   *  the run's own outcome stands. */
+  const freeStagedDocuments = (runId: string, archived: boolean): void => {
+    if (runtime.runDocumentsRoot === undefined) return;
+    try {
+      removeStagedDocuments(runId, runtime.runDocumentsRoot, archived);
+    } catch (err) {
+      app.log.warn(`[runs] staged documents of ${runId} not removed: ${message(err)}`);
+    }
+  };
   /**
    * (CS4) The documents an earlier run was given, to be authorised and staged again for its retry: its tokens and chat
    * from its staged manifest, hash-checked. `null` = it had none; `'unreadable'` = it had some that can't be read back.
    */
-  const stagedTokensOf = (runId: string, root: string): { chatId: string; tokens: string[] } | null | 'unreadable' => {
+  const stagedTokensOf = (runId: string, root: string): { chatId: string; tokens: string[] } | null | 'unreadable' | 'removed' => {
     const staged = stagedDocumentsOf(runId, root);
     if (staged === null) {
+      if (stagedDocumentsRemoved(runId, root)) return 'removed';
       try {
         readFileSync(join(root, runId, 'records', 'MANIFEST.json'));
       } catch {
@@ -3784,7 +3907,14 @@ export function registerRoutes(
     // retry or reshape that sends none keeps the earlier run's pick; a run without a pick reads what the switches allow.
     let sourcePick: string[] | null = null;
     // An inherited pick is checked like a sent one (the switches may have changed since the earlier run).
-    const wantedPick = b.sources ?? (b.retryOf !== undefined ? (runtime.runSourcePicks?.get(b.retryOf) ?? undefined) : undefined);
+    let wantedPick: string[] | undefined;
+    try {
+      wantedPick = b.sources ?? (b.retryOf !== undefined ? (runtime.runSourcePicks?.get(b.retryOf) ?? undefined) : undefined);
+    } catch (err) {
+      // (crew#1442, coord on #1734) The earlier run's pick can't be read (its store entry is gone and the launch trail
+      // was not read at boot): refused, never launched as if it had no pick.
+      return reply.code(409).send({ code: 'sources_unavailable', error: `the earlier run's source pick could not be read: ${message(err)}` });
+    }
     if (wantedPick !== undefined) {
       if (runtime.runSourcePicks === undefined || runtime.dataGate === undefined) {
         return reply.code(400).send({ code: 'sources_refused', error: 'this daemon cannot limit a run to picked sources' });
@@ -3835,12 +3965,17 @@ export function registerRoutes(
     // only (a named workflow or an explicit plan); best-effort: an unreadable store launches without it.
     const briefRules = async (workflow: string | null): Promise<void> => {
       try {
+        // wicked-crew#1706: the registered checkout root lets the engine judge pack fit from the repo's manifests;
+        // an unreadable registry leaves it unknown (the rule still matches, as before).
+        const repoRoot = b.repoRef !== undefined ? await repoRootOf(b.repoRef).catch(() => undefined) : undefined;
         const read = await considerations.inForceFor(b.projectId ?? null);
         const def = workflow === null ? null : adapter.getWorkflow(workflow);
         const kinds = def === null ? null : def.phases.map((p) => String(p.kind ?? 'build'));
         const rules = read.source === 'unavailable' ? [] : read.rules;
         // (coord, E7 rerun) The job's repository: a rule that names it (its statement or its source doc) applies.
-        const job = { workflow, steps: null, kinds, project: b.projectId ?? null, repo: b.repoRef ?? null };
+        const job = { workflow, steps: null, kinds, project: b.projectId ?? null, repo: b.repoRef ?? null,
+          ...(repoRoot !== undefined ? { repoRoot } : {}),
+        };
         const matches = await matchRulesForJob(rules, job, runtime.matchRules ?? CoreAdapter.ruleMatcher(), (m) => req.log.warn(m));
         const briefed = withRulesBrief(input.problem, rules, matches);
         input.problem = briefed.problem;
@@ -3869,7 +4004,11 @@ export function registerRoutes(
         if (linked.block !== null) input.problem = `${intent.trimEnd()}\n\n${linked.block}`;
         // crew#825: an all-excluded intent appends nothing but still answers what it left out.
         if (linked.issues.length > 0) linkedIssues = linked.issues;
-        if (linked.addresses !== undefined && linked.addresses.length > 0) linkedAddresses = linked.addresses;
+        if (linked.addresses !== undefined && linked.addresses.length > 0) {
+          linkedAddresses = linked.addresses;
+          // crew#1352: known before the engine is called, so the deliver script's embedded fallback links them back.
+          input.trackerRefs = linked.addresses.map((a) => ({ system: a.system, ref: a.ref, ...(a.asked !== undefined ? { asked: a.asked } : {}) }));
+        }
       } catch (err) {
         req.log.warn(`linked-issue resolution failed; launching on the intent alone: ${message(err)}`);
       }
@@ -3897,7 +4036,10 @@ export function registerRoutes(
     // the evals in-process and writes the report copy its Tool step reads; it delivers nothing.
     if (b.workflow === RUN_EVALS_WORKFLOW) {
       try {
-        await runEvalsPrepare(input);
+        // (crew#1375) A card launch scores what its card asks for: Evaluate rules the steering suite, and a card that takes
+        // a project input (Evaluate rules, Analyze runs) the project the launch is filed in. A launch with no shape (a
+        // schedule, `/workflow-run-evals`) scores every suite and project.
+        await runEvalsPrepare(input, runEvalsScopeOf(shapeChecked?.shape.card ?? null, b.projectId ?? null));
       } catch (err) {
         return reply.code(409).send({ error: `the default evals could not be prepared: ${message(err)}` });
       }
@@ -3910,6 +4052,12 @@ export function registerRoutes(
         return reply.code(409).send({ error: `the review could not be prepared: ${message(err)}` });
       }
     }
+    // (crew#1375) Every refusal from here to the engine call leaves a prepared review that never ran: it is recorded as
+    // refused, so a retry under the same run id (a chat job's Go) prepares it again instead of being refused.
+    const refuse = (code: number, body: { error: string; [k: string]: unknown }) => {
+      if (isReview) runtime.reviewLaunchRefused?.(input.sessionId, body.error);
+      return reply.code(code).send(body);
+    };
     if (b.workflow !== undefined && postureFacts.preparationDropsDelivery(b.workflow)) {
       deliver = 'none';
       delete input.deliver;
@@ -3918,7 +4066,7 @@ export function registerRoutes(
     // a chat whose proposal's document attempt has no outcome yet is refused, as Go is refused the other way round.
     if (b.chatId !== undefined && chatArtifactFlags.proposals) {
       const live = await chatProposals.liveJobOf(b.chatId).catch(() => null);
-      if (live !== null) return reply.code(409).send({ code: 'chat_busy', error: `This chat already has a job running (${live}). Wait, or stop that run.` });
+      if (live !== null) return refuse(409, { code: 'chat_busy', error: `This chat already has a job running (${live}). Wait, or stop that run.` });
     }
     // DES-CATALOG-002 §4.4 (codex r1): the effective resolution a shape was judged by is read again right before the
     // engine resolves the preset, so a preset saved during this launch's awaits refuses it rather than running a shape
@@ -3927,10 +4075,10 @@ export function registerRoutes(
       try {
         const again = checkLaunchShape(shapeChecked.shape, shapeChecked.target, await servedFor(shapeReads, b.projectId));
         if (!again.ok || again.resolved.resolved.resolution !== shapeChecked.resolution) {
-          return reply.code(409).send({ code: 'catalog_changed', error: 'the catalog changed while this was starting; check the job again' });
+          return refuse(409, { code: 'catalog_changed', error: 'the catalog changed while this was starting; check the job again' });
         }
       } catch (err) {
-        return reply.code(409).send({ code: 'catalog_unavailable', error: message(err) });
+        return refuse(409, { code: 'catalog_unavailable', error: message(err) });
       }
     }
     // (CS4) The pick is recorded before anything is staged and before the engine is called, so no unit of the run ever
@@ -3939,14 +4087,14 @@ export function registerRoutes(
       try {
         runtime.runSourcePicks!.set(input.sessionId, sourcePick);
       } catch (err) {
-        return reply.code(409).send({ code: 'sources_unavailable', error: `the source pick could not be recorded: ${message(err)}` });
+        return refuse(409, { code: 'sources_unavailable', error: `the source pick could not be recorded: ${message(err)}` });
       }
     }
     // (DES-CATALOG-002 §2.d piece 2, CS4) The documents: every token authorised again with the chat's own rules (this
     // chat, its project, the document's version now) and staged whole, read-only, in the run's own folder outside the
     // state home; a retry or reshape that sends none reuses the earlier run's staged folder (hash-checked). The folder
     // is a READ root only: the run can read its documents and never write there. The brief says where they are.
-    let staged: StagedDocuments | null = null;
+    let staged: (StagedDocuments & { published: boolean }) | null = null;
     // What to stage: the documents sent, or (a retry that sends none) the earlier run's tokens under the earlier run's
     // chat, authorised again now; never the earlier folder mounted as it is. `[]` = none, inherit nothing.
     let docTokens: { chatId: string; tokens: string[] } | null = null;
@@ -3954,8 +4102,11 @@ export function registerRoutes(
       if (b.documents.length > 0 && b.chatId !== undefined) docTokens = { chatId: b.chatId, tokens: b.documents };
     } else if (b.retryOf !== undefined && runtime.runDocumentsRoot !== undefined) {
       const earlier = stagedTokensOf(b.retryOf, runtime.runDocumentsRoot);
+      if (earlier === 'removed') {
+        return refuse(409, { code: 'documents_unavailable', error: `the documents of run ${b.retryOf} were removed when it was archived; start the job again from its chat` });
+      }
       if (earlier === 'unreadable') {
-        return reply.code(409).send({ code: 'documents_unavailable', error: `the documents of run ${b.retryOf} can't be read again; start the job again from its chat` });
+        return refuse(409, { code: 'documents_unavailable', error: `the documents of run ${b.retryOf} can't be read again; start the job again from its chat` });
       }
       if (earlier !== null) docTokens = earlier;
     }
@@ -3965,7 +4116,7 @@ export function registerRoutes(
       const runProject = b.projectId !== undefined && b.projectId !== DEFAULT_PROJECT_ID ? b.projectId : null;
       if ((chatProject ?? null) !== runProject) {
         // A bare retry sends no projectId: it is filed Unfiled, so it is told where its documents belong (fail closed).
-        return reply.code(400).send({
+        return refuse(400, {
           code: 'documents_refused',
           error: chatProject !== null && runProject === null
             ? `the documents belong to project ${chatProject}: file this run there (send projectId)`
@@ -3989,21 +4140,23 @@ export function registerRoutes(
         });
       } catch (err) {
         if (err instanceof DocumentsRefused) {
-          return reply.code(400).send({
+          return refuse(400, {
             code: 'documents_refused',
             error: `can't read ${err.refused.map((r) => `${r.token} (${r.reason})`).join(', ')}`,
             refused: err.refused,
           });
         }
-        return reply.code(409).send({ code: 'documents_unavailable', error: `the documents could not be staged: ${message(err)}` });
+        return refuse(409, { code: 'documents_unavailable', error: `the documents could not be staged: ${message(err)}` });
       }
     }
     if (staged !== null) {
       input.extraReadRoots = [...(input.extraReadRoots ?? []), staged.root];
       input.problem = `${input.problem.trimEnd()}\n\n${documentsClause(staged)}`;
     }
+    let launched = false;
     try {
       const runId = await adapter.launchRun(input);
+      launched = true;
       // crew#641/#642 (item 5): when a run is promoted from a chat, record how many seats
       // participated and whether the chat was grounded — so an intent authored by a single
       // ungrounded model is distinguishable from one that survived a disagreement.
@@ -4071,6 +4224,12 @@ export function registerRoutes(
         ...(b.actor !== undefined ? { actor: b.actor } : {}),
         // crew#627: which linked issues the daemon read into the problem, and which it could not.
         ...(linkedIssues !== undefined ? { linkedIssues } : {}),
+        // crew#1352: the issues the run addresses, as its tracker set resolved them. The trail is the durable record for
+        // the run's lifetime (the tracker-addresses store is a bounded cache, and its write may fail); the run-timing
+        // index reads them back, live and after a restart.
+        ...(linkedAddresses !== undefined ? { trackerAddresses: linkedAddresses } : {}),
+        // crew#1442: the run's source pick, so a pick store that loses the run still narrows it (fail closed).
+        ...(sourcePick !== null ? { sourcePick } : {}),
         // DES-CATALOG-002 §4.4: the shape it was launched as, what it was launched with, and the proposal behind it.
         ...(b.shape !== undefined ? { shape: launchShapeOf(b.shape) } : {}),
         ...(ctx.fromProposal !== undefined ? { fromProposal: ctx.fromProposal } : {}),
@@ -4100,8 +4259,7 @@ export function registerRoutes(
       if (chatSeatCount !== undefined && chatGrounded !== undefined) {
         runTimingIndex.setChatPromotion(runId, chatSeatCount, chatGrounded);
       }
-      if (b.retryOf !== undefined) retryIndex.set(runId, b.retryOf);
-      if (revisesPr !== undefined) retryIndex.setRevisesPr(runId, revisesPr);
+      retryIndex.applyLaunchEntry(runId, { retryOf: b.retryOf, revisesPr });
       // (DES-PM-001 §3.2, §4) The issues this run addresses, as its tracker set resolved them: delivery links them
       // back, the deliver gate's actions are offered for them, and the projection draws the trail.
       if (linkedAddresses !== undefined && runtime.trackerAddresses !== undefined) {
@@ -4148,14 +4306,18 @@ export function registerRoutes(
       const skillsWarning = skillsAhead === null ? {} : { skillsWarning: { kind: skillsAhead.kind, severity: skillsAhead.severity, message: skillsAhead.message } };
       // wicked-core#850: a full-assurance run on a one-CLI roster will wait at a gate for a seat that
       // can evaluate or judge it; the answer names the explicit opt-in to relaunch with.
-      const notice = launchAssuranceNotice({ runId, reducedAssurance: b.reducedAssurance, engineClisJson: engineRosterJson(input.clisJson) });
+      const notice = launchAssuranceNotice({ runId, reducedAssurance: b.reducedAssurance, coverage: readJudgeCoverage(engineRosterJson(input.clisJson), input.repoRef !== undefined, runtime.judgeCoverage ?? CoreAdapter.judgeCoverage) });
       const assuranceNotice = notice === null ? {} : { assuranceNotice: notice };
       // (program DES-POWER-MODE) Whether the run is in power mode, and why not when it was wanted.
       const power = { ...(input.power === true ? { power: true } : {}), ...(powerNotice !== null ? { powerNotice } : {}), ...(humanConfirmNotice !== null ? { humanConfirmNotice } : {}) };
       return reply.code(201).send({ runId, ...(linkedIssues !== undefined ? { linkedIssues } : {}), ...freeText, ...skillsWarning, ...assuranceNotice, ...power });
     } catch (err) {
+      if (!launched && staged?.published === true) freeStagedDocuments(input.sessionId, false);
       const msg = message(err);
-      if (isReview) runtime.reviewLaunchRefused?.(input.sessionId, msg);
+      // (crew#1375, xreview r1) Only a launch the engine never took is a refused review: a failure after launchRun
+      // resolved leaves the review running, so a retry under its run id can never clear a real review.
+      if (isReview && !launched) runtime.reviewLaunchRefused?.(input.sessionId, msg);
+      if (err instanceof MaintenanceDrainError) return reply.code(503).send(maintenanceDrainBody(err));
       // DES-TEAMING-002 T3: a plan on an engine without the plan approval gate is an "upgrade the
       // engine" 501 — never a free-text run launched in its place.
       if (err instanceof PlanLaunchUnsupportedError) {
@@ -4230,12 +4392,16 @@ export function registerRoutes(
           // existing run; 422: the base-skill intake refusal (`base_skill_refused`, crew#554);
           // 501: campaignId attach on an engine addon without the campaign bindings ("upgrade
           // the engine").
-          statusCodes: [201, 400, 404, 409, 422, 501],
+          statusCodes: [201, 400, 404, 409, 422, 501, 503],
         },
       },
     },
     async (req, reply) => {
-      const out = await launchRun(req.body, { actor: actorOf(req), log: req.log });
+      const launch = () => launchRun(req.body, { actor: actorOf(req), log: req.log });
+      const parsed = LaunchSchema.safeParse(req.body);
+      const out = parsed.success && parsed.data.chatId !== undefined
+        ? await chatProposals.admitChat(parsed.data.chatId, launch)
+        : await launch();
       return reply.code(out.statusCode).send(out.payload);
     },
   );
@@ -4279,16 +4445,6 @@ export function registerRoutes(
   );
 
   /**
-   * (DES-CATALOG-002 §4.6) The `job` launcher: a chat job proposal's Go, one launcher per launch kind, each with the
-   * identity derived from the proposal (`sessionId` = its run id, so a retry finds and adopts it), the chat filing, the
-   * shape, and the plan held: a job launched from a chat stops at its first plan unless the person's Start chose a
-   * power run (`power: true`, api-types 0.196.0), which is refused unless this daemon can run that job as one.
-   */
-  const jobRefusalText = (payload: unknown): string => {
-    const b = payload as { error?: unknown; code?: unknown } | undefined;
-    return `${typeof b?.error === 'string' ? b.error : 'the launch was refused'}${typeof b?.code === 'string' ? ` (${b.code})` : ''}`;
-  };
-  /**
    * (operator ruling 2026-11-06) Why a chat job can't run as a power run on this daemon now, else `null`: only a
    * workflow run on a repository whose workflow is a preset, on an engine with power mode (launchRun's own rule, which
    * would otherwise run it phased and only say so), with Power mode for new jobs on (chat starts follow the setting).
@@ -4318,6 +4474,12 @@ export function registerRoutes(
     if (!(await namesPreset(resolved.workflow, scoped))) return `${p.what.label} can't run as a power run (its workflow is not a preset); ${askPlan}`;
     return null;
   };
+  /**
+   * (DES-CATALOG-002 §4.6) The `job` launcher: a chat job proposal's Go, one launcher per launch kind, each with the
+   * identity derived from the proposal (`sessionId` = its run id, so a retry finds and adopts it), the chat filing, the
+   * shape, and the plan held: a job launched from a chat stops at its first plan unless the person's Start chose a
+   * power run (`power: true`, api-types 0.196.0), which is refused unless this daemon can run that job as one.
+   */
   proposalLaunchers.register('job', {
     find: async (identity) => (await adapter.sessions()).includes(identity.runId),
     live: async (runId) => {
@@ -4362,7 +4524,7 @@ export function registerRoutes(
             ...(projectId !== null && projectId !== DEFAULT_PROJECT_ID ? { projectId } : {}),
             ...common,
             // (CS4) The documents and the source pick, as tokens and names (never flattened into the brief's prose).
-            ...jobInputsOfProposal(p, runtime.runSourcePicks !== undefined ? (runId) => runtime.runSourcePicks!.get(runId) : undefined),
+            ...jobInputsOfProposal(p, runtime.runSourcePicks !== undefined ? (runId) => heldSourcePick(runtime.runSourcePicks!, runId) : undefined),
             // A power run when the person's Start chose one (checked against this daemon just now); otherwise it
             // stops at its first plan, as every chat job did before (operator ruling 2026-11-06).
             // (A power launch overrides the plan hold; launchRun refuses rather than run it phased, `powerRequired`.)
@@ -4376,7 +4538,7 @@ export function registerRoutes(
           },
           { ...ctx, fromProposal: d.pid, ...(d.power === true ? { powerRequired: true } : {}) },
         );
-        if (out.statusCode !== 201) throw new Error(jobRefusalText(out.payload));
+        if (out.statusCode !== 201) throw jobRefusal(out.statusCode, out.payload);
         return;
       }
       if (p.launch === 'compose') {
@@ -4387,7 +4549,7 @@ export function registerRoutes(
           humanConfirm: 'before:1',
           common,
         });
-        if (out.code !== 202) throw new Error(jobRefusalText(out.body));
+        if (out.code !== 202) throw jobRefusal(out.code, out.body);
         return;
       }
       if (p.launch === 'demo') {
@@ -4403,7 +4565,7 @@ export function registerRoutes(
           fromProposal: d.pid,
           common,
         }, demoDeps);
-        if (out.code !== 201) throw new Error(jobRefusalText(out.body));
+        if (out.code !== 201) throw jobRefusal(out.code, out.body);
         return;
       }
       throw new Error(`a ${p.launch} job does not start from a chat`);
@@ -4488,6 +4650,7 @@ export function registerRoutes(
     try {
       const found = await adapter.archiveRun(id, parsed.data.archived, parsed.data.note);
       if (!found) return reply.code(404).send({ error: 'Run not found' });
+      if (parsed.data.archived) freeStagedDocuments(id, true);
       return { runId: id, archived: parsed.data.archived };
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -4540,6 +4703,7 @@ export function registerRoutes(
           }
           const found = await adapter.archiveRun(id, true, note);
           if (!found) return { code: 404, body: { error: 'Run not found' } };
+          freeStagedDocuments(id, true);
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           return { code: /only a terminal run/i.test(msg) ? 409 : 500, body: { error: msg } };
@@ -4568,6 +4732,7 @@ export function registerRoutes(
     for (const id of parsed.data.ids) {
       try {
         const found = await adapter.archiveRun(id, true, parsed.data.note);
+        if (found) freeStagedDocuments(id, true);
         results.push(found ? { id, ok: true } : { id, ok: false, error: 'not found' });
       } catch (e: unknown) {
         results.push({ id, ok: false, error: e instanceof Error ? e.message : String(e) });
@@ -5154,7 +5319,7 @@ export function registerRoutes(
           requestType: 'ChatOpenBody',
           responseType: 'ChatOpenResponse',
           // 200: a seeded retry answers the chat its request already opened (api-types 0.192.0).
-          statusCodes: [200, 201, 400, 403, 404, 409, 500, 501],
+          statusCodes: [200, 201, 400, 403, 404, 409, 410, 500, 501],
         },
       },
     },
@@ -5170,6 +5335,7 @@ export function registerRoutes(
       let seedChatId: string | undefined;
       if (b.seed !== undefined) {
         if (!chatJobProposalsOn) return reply.code(400).send({ error: 'this daemon does not take job proposals from a chat' });
+        if (chatHistory === null) return reply.code(501).send({ error: 'this daemon keeps no chat history for a seeded request' });
         seedActor = actorOf(req);
         if (!isHumanOperator(seedActor)) {
           audit.record('chat.proposal.refused', seedActor, { detail: { reason: 'not_a_person', what: 'seed' } });
@@ -5178,22 +5344,22 @@ export function registerRoutes(
         const bad = seedCardRefusal(b.seed.card);
         if (bad !== null) return reply.code(400).send({ code: 'card_unknown', error: bad });
         seedChatId = proposalRunId(`seed\u0000${seedActor.id}\u0000${b.requestId!}`);
-        // A retry: this request's chat exists (open, or kept in history after a close or a restart). Answer it and its
-        // proposal, completing the proposal while the chat is open; never open the id again (codex r1).
-        const open = askPaths.get(seedChatId) !== undefined || chatScopes.get(seedChatId) !== undefined;
-        if (open || chatHistory?.has(seedChatId) === true) {
-          const stored = chatProposals.viewOfPid(seedChatId, personPid(seedChatId, seedActor.id, b.requestId!));
-          let view = stored === null ? null : await chatProposals.servedView(stored);
-          // The same request id with another seed is not a retry (codex r2).
-          if (view !== null && view.proposal.request?.digest !== requestDigest(seedBody(b.seed, b.requestId!))) {
-            return reply.code(409).send({ code: 'request_reused', error: 'this requestId already started a chat with another job', chatId: seedChatId });
+        const record = seedRequests!.get(seedChatId);
+        if (record !== null) {
+          const id = chatHistory.idOfInstance(seedChatId, record.instance);
+          if (id === null) return reply.code(410).send({ code: 'chat_gone', error: 'the chat this request opened was deleted' });
+          if (record.digest !== requestDigest(seedBody(b.seed, b.requestId!))) {
+            return reply.code(409).send({ code: 'request_reused', error: 'this requestId already started a chat with another job', chatId: id });
           }
+          const stored = chatProposals.viewOfPid(id, personPid(seedChatId, seedActor.id, b.requestId!));
+          let view = stored === null ? null : await chatProposals.servedView(stored);
+          const open = id === seedChatId && (askPaths.get(id) !== undefined || chatScopes.get(id) !== undefined);
           if (view === null && open) {
-            const seeded = await seedProposal(seedChatId, b.seed, b.requestId!, seedActor);
-            if ('refused' in seeded) return reply.code(409).send({ ...seeded.refused, chatId: seedChatId });
+            const seeded = await seedProposal(id, b.seed, b.requestId!, seedActor);
+            if ('refused' in seeded) return reply.code(409).send({ ...seeded.refused, chatId: id });
             view = seeded.view;
           }
-          return reply.code(200).send({ chatId: seedChatId, seats: [], scope: chatScopes.get(seedChatId) ?? null, refused: [], ...(view !== null ? { proposal: view } : {}), adopted: true });
+          return reply.code(200).send({ chatId: id, seats: [], scope: open ? chatScopes.get(id) ?? null : null, refused: [], ...(view !== null ? { proposal: view } : {}), adopted: true });
         }
       }
       const chatId = seedChatId ?? b.chatId ?? randomUUID();
@@ -5536,6 +5702,17 @@ export function registerRoutes(
         } catch (err) {
           req.log.warn({ chatId }, `chat history entry not written: ${message(err)}`);
         }
+        // crew#1422: the instance this request opened, so a retry answers that chat and never another one under the id.
+        // A failure here is logged, never thrown into an open that already published the chat.
+        if (b.seed !== undefined && seedActor !== null) {
+          const state = chatHistory?.stateOf(chatId) ?? null;
+          try {
+            if (state === null) throw new Error('no history entry');
+            seedRequests!.set(chatId, { instance: state.instance, digest: requestDigest(seedBody(b.seed, b.requestId!)), actorId: seedActor.id, at: Date.now() });
+          } catch (err) {
+            req.log.warn({ chatId }, `seed request not recorded (a retry of it cannot find this chat): ${message(err)}`);
+          }
+        }
         // The thread learns of every refused seat the way it learns of everything else — a frame
         // on /ws — AFTER the scope is published, so a reader never sees a refusal for a chat it
         // cannot yet look up.
@@ -5739,6 +5916,11 @@ export function registerRoutes(
       return { ok: true, name: scope.repos[0]!.name };
     },
     rosterEligible: () => proposalRoster(rosterWithStanding()),
+    coverage: (keys, bound, relaunch) => {
+      const p = { seats: { keys: [...keys], lead: keys[0] ?? null, label: '' }, ...(relaunch !== undefined ? { relaunch } : {}) };
+      const { roster } = jobLaunchRoster(launchRosterNaming(rosterWithStanding({ launch: true }), p.seats.lead ?? undefined, keys), p);
+      return readJudgeCoverage(engineRosterJson(JSON.stringify(roster)), bound, runtime.judgeCoverage ?? CoreAdapter.judgeCoverage);
+    },
     // (F1/F2) Agents › "Use <seat> for new work": the pool every new chat job and document is drawn from.
     newWorkSeats: readNewWorkSeats,
     runs: async () => (await adapter.sessionsDetail()).map((v) => decorateRun(v)),
@@ -6315,6 +6497,7 @@ export function registerRoutes(
     // (api-types 0.196.0, operator ruling 2026-11-06) a job's Start chooses how it runs: `true` = a power run (no plan
     // gate), `false` = it stops at its plan. Absent = it stops at its plan, as before.
     power: z.boolean().optional(),
+    reducedAssurance: z.boolean().optional(),
   });
   /** (api-types 0.192.0) `POST /chats/:id/proposals`: a person-made proposal, or a revision of the open one. */
   const PersonProposalSchema = z.union([
@@ -6367,7 +6550,7 @@ export function registerRoutes(
   );
   app.post(
     `${V}/chats/:id/proposals/:pid`,
-    { config: { manifest: { requestType: 'ChatProposalDecisionBody', responseType: 'ChatProposalDecisionResponse', statusCodes: [200, 400, 403, 404, 409, 502] } } },
+    { config: { manifest: { requestType: 'ChatProposalDecisionBody', responseType: 'ChatProposalDecisionResponse', statusCodes: [200, 400, 403, 404, 409, 422, 502] } } },
     async (req, reply) => {
       const { id, pid } = req.params as { id: string; pid: string };
       if (!chatArtifactFlags.proposals) return reply.code(404).send({ error: 'this daemon does not answer chat proposals' });
@@ -6395,6 +6578,7 @@ export function registerRoutes(
         decision: parsed.data.decision,
         ...(edits !== undefined ? { edits } : {}),
         ...(parsed.data.power !== undefined ? { power: parsed.data.power } : {}),
+        ...(parsed.data.reducedAssurance !== undefined ? { reducedAssurance: parsed.data.reducedAssurance } : {}),
       }, actor, instance);
       return reply.code(out.code).send(out.body);
     },
@@ -6629,7 +6813,10 @@ export function registerRoutes(
     /** Runs right after the close fold, with NO await before it: the id cannot have been reopened
      *  yet, so a history operation here can never land on a replacement chat (xreview r1 on #1140). */
     afterFold?: () => void,
-  ): Promise<{ ok: true; cancelError?: { runId: string; error: string } } | { ok: false; error: string }> => {
+  ): Promise<{ ok: true; cancelError?: { runId: string; error: string } } | { ok: false; error: string; code?: 'chat_changed' }> => {
+    // crew#1279 (coord r1 on #1720): the instance the caller checked, read before the wait for a held Go. A chat closed
+    // by another route meanwhile whose id a new chat reused is not this close's to end (fence by generation).
+    const expected = chatHistory?.stateOf(id)?.instance ?? null;
     // DES-SYSTEM-CHAT: the answering CLI the history names is the path's PA, while it is known.
     const pa = askPaths.get(id)?.pa;
     if (pa !== undefined && pa !== null) chatHistory?.setCli(id, pa);
@@ -6637,7 +6824,15 @@ export function registerRoutes(
     // (crew#502). ASK-C1: the daemon owns the close, so the id is HELD — no grace timer — until
     // this close settles below; a reopen meanwhile is refused and a second DELETE joins this one
     // (nothing of the closed chat can land on a reuse — codex on #808 r5).
-    const ticket = chatScopes.holdClose(id);
+    // crew#1279: the close is committed under Go's admission of this chat, so it waits for a launch in flight. Only the
+    // hold is under it: a second DELETE still joins the settling close at once.
+    const ticket = await chatProposals.admitChat(id, async () => {
+      const now = chatHistory?.stateOf(id)?.instance ?? null;
+      return now !== null && now !== expected ? ('changed' as const) : chatScopes.holdClose(id);
+    });
+    if (ticket === 'changed') {
+      return { ok: false as const, code: 'chat_changed' as const, error: `chat ${id} was closed while this request waited, and its id now belongs to a new chat; nothing was changed` };
+    }
     if (ticket === null) return { ok: true as const };
     chatTurns.closed(id);
     // ASK-C1: End cancels the path (`path.ended{status:"cancelled"}`); the engine holds no chat
@@ -6692,7 +6887,7 @@ export function registerRoutes(
       chatAttachments.removeChat(id);
     };
     const ended = await endChat(id, removeHistory);
-    if (!ended.ok) return reply.code(400).send({ error: ended.error });
+    if (!ended.ok) return ended.code !== undefined ? reply.code(409).send({ code: ended.code, error: ended.error }) : reply.code(400).send({ error: ended.error });
     // A chat the daemon no longer held (no fold ran): its kept history goes too.
     if (chatHistory?.entry(id) !== null && chatScopes.get(id) === undefined && askPaths.get(id) === undefined) removeHistory();
     return { ok: true };
@@ -6701,7 +6896,7 @@ export function registerRoutes(
   // DES-SYSTEM-CHAT (api-types 0.137.0): end the chat and KEEP its history and attachments.
   app.post(
     `${V}/chats/:id/close`,
-    { config: { manifest: { responseType: 'ChatCloseResponse', statusCodes: [200, 400, 404, 501, 502] } } },
+    { config: { manifest: { responseType: 'ChatCloseResponse', statusCodes: [200, 400, 404, 409, 501, 502] } } },
     async (req, reply) => {
       const { id } = req.params as { id: string };
       if (chatHistory === null) return reply.code(501).send({ error: 'this daemon keeps no chat history' });
@@ -6713,7 +6908,7 @@ export function registerRoutes(
       // The close fold archives it; closing here too (before the id is free) covers a route set
       // without the fold, and is a no-op after it.
       const ended = await endChat(id, () => chatHistory.closed(id));
-      if (!ended.ok) return reply.code(400).send({ error: ended.error });
+      if (!ended.ok) return ended.code !== undefined ? reply.code(409).send({ code: ended.code, error: ended.error }) : reply.code(400).send({ error: ended.error });
       const chat = chatHistory.entry(id);
       if (chat === null) return reply.code(404).send({ error: `chat ${id} has no history on this daemon` });
       if (ended.cancelError !== undefined) {
@@ -7625,6 +7820,7 @@ export function registerRoutes(
           },
         };
       } catch (err) {
+        if (err instanceof MaintenanceDrainError) return { code: 503, body: maintenanceDrainBody(err) };
         if (err instanceof PlanLaunchUnsupportedError || err instanceof PlanGateNoteUnsupportedError) {
           return { code: 501, body: { error: message(err) } };
         }
@@ -7675,7 +7871,7 @@ export function registerRoutes(
           responseType: 'GateDecisionResult',
           // 409 twice over: a run not awaiting a human gate, and an engine refusal at confirm.
           // 501: an edited plan on an addon without the plan approval gate (DES-TEAMING-002 T3).
-          statusCodes: [200, 400, 404, 409, 501],
+          statusCodes: [200, 400, 404, 409, 501, 503],
         },
       },
     },
@@ -7735,6 +7931,7 @@ export function registerRoutes(
       const base = old !== null && old.shape !== undefined ? factsOf(old) : null;
       const facts: JobFacts = {
         card: parsed.data.card,
+        title: base?.title ?? null,
         option: parsed.data.option ?? undefined,
         depth: parsed.data.depth ?? null,
         words: base?.words ?? envelope.words,
@@ -7807,7 +8004,7 @@ export function registerRoutes(
 
   // Advance semantics (§11.8): a gated run advances via confirmGate; otherwise
   // resumeRun re-enters the cursor. Never resumeRun a gated run (it would re-pause).
-  app.post(`${V}/runs/:id/resume`, { config: { manifest: { requestType: 'ResumeRequest', statusCodes: [200, 400, 404, 409] } } }, async (req, reply) => {
+  app.post(`${V}/runs/:id/resume`, { config: { manifest: { requestType: 'ResumeRequest', statusCodes: [200, 400, 404, 409, 503] } } }, async (req, reply) => {
     const parsed = ResumeSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     const { id } = req.params as { id: string };
@@ -7894,6 +8091,7 @@ export function registerRoutes(
         ...(deliveryCheck !== undefined ? { delivery: deliveryCheck } : {}),
       });
     } catch (err) {
+      if (err instanceof MaintenanceDrainError) return reply.code(503).send(maintenanceDrainBody(err));
       const changed = await gateChangedRefusal(id, err);
       return reply.code(changed?.code ?? 409).send(changed?.body ?? { error: message(err) });
     }
@@ -8090,6 +8288,7 @@ export function registerRoutes(
       }
       return reply.send({ runId: id, ...st });
     } catch (err) {
+      if (err instanceof MaintenanceDrainError) return reply.code(503).send(maintenanceDrainBody(err));
       return powerError(reply, err);
     }
   });
@@ -9751,7 +9950,7 @@ export function registerRoutes(
       return reply.code(404).send({ error: 'Code graph not built for this repo yet' });
     }
     try {
-      // Every page of the answer (estate#279): the dependents are joined, the rest is the last page's.
+      // crew#1556: join every page's dependents and freshness; other fields are the last page's.
       return reply.send(
         await readBlastRadiusPages('wicked-estate', q.name.trim(), dbPath, { timeout: 30_000, cwd: repo.root_path }),
       );
@@ -11892,6 +12091,27 @@ export function registerRoutes(
     actorOf: (req) => actorOf(req).id,
     log: (m) => app.log.warn(m),
   });
+  const proposalPacketDeps: import('../interactive/source-packet.js').PacketDeps = {
+    runs: chatContextDeps.runs,
+    brief: (view) => buildRunBrief(view, { workOutput: chatContextDeps.workOutput, ...(chatContextDeps.acceptanceLine !== undefined ? { acceptanceLine: chatContextDeps.acceptanceLine } : {}) }),
+    docsRoot: chatContextDeps.docsRoot,
+    attachment: (chatId, id) => {
+      const hit = chatAttachments.resolve(chatId, [id])[0];
+      return hit === undefined ? null : { name: hit.name, path: hit.path };
+    },
+    // The exact brief a turn was given, from the live chat's scratch root, beneath it (no link followed), only when
+    // its bytes still hash to what the turn recorded (A1's binding). Gone after the chat ends or the daemon restarts.
+    contextBrief: (chatId, relPath, sha) => {
+      const cwd = chatScopes.get(chatId)?.cwd;
+      if (cwd === undefined) return null;
+      try {
+        const data = readBeneath(realpathSync(cwd), relPath, BRIEF_COPY_MAX).data;
+        return sha256Hex(data) === sha ? data : null;
+      } catch {
+        return null;
+      }
+    },
+  };
   // A3: the real `create` launcher (§4.3 steps 2-3): one document and one run per proposal identity.
   if (realRefine) {
     // A5 (DES §6): the refine launcher — the attempt on the document's binding, then the chat seam's bound refine with the
@@ -11901,6 +12121,8 @@ export function registerRoutes(
       runExists: async (runId) => (await adapter.sessions()).includes(runId),
       docsRoot: (projectId) => projectDocsRoot(adapter, projectSettings, projectId),
       launchBound: runtime.launchBoundRefine!,
+      packetDeps: proposalPacketDeps,
+      chatIdOf: (chatId, instance) => (chatHistory === null ? chatId : chatHistory.idOfInstance(chatId, instance)),
       ...(runtime.fenceBoundDraft !== undefined ? { fence: runtime.fenceBoundDraft } : {}),
       records: (chatId) => chatHistory?.messages(chatId) ?? chatTranscripts?.read(chatId) ?? [],
       instanceOf: (chatId) => chatHistory?.stateOf(chatId)?.instance ?? null,
@@ -11947,27 +12169,7 @@ export function registerRoutes(
         const seed = CATALOG_SEEDS.find((c) => c.id === entry);
         return seed !== undefined && seed.launch.kind === 'document' ? seed.launch.style : 'web';
       },
-      packetDeps: {
-        runs: chatContextDeps.runs,
-        brief: (view) => buildRunBrief(view, { workOutput: chatContextDeps.workOutput, ...(chatContextDeps.acceptanceLine !== undefined ? { acceptanceLine: chatContextDeps.acceptanceLine } : {}) }),
-        docsRoot: chatContextDeps.docsRoot,
-        attachment: (chatId, id) => {
-          const hit = chatAttachments.resolve(chatId, [id])[0];
-          return hit === undefined ? null : { name: hit.name, path: hit.path };
-        },
-        // The exact brief a turn was given, from the live chat's scratch root, beneath it (no link followed), only when
-        // its bytes still hash to what the turn recorded (A1's binding). Gone after the chat ends or the daemon restarts.
-        contextBrief: (chatId, relPath, sha) => {
-          const cwd = chatScopes.get(chatId)?.cwd;
-          if (cwd === undefined) return null;
-          try {
-            const data = readBeneath(realpathSync(cwd), relPath, BRIEF_COPY_MAX).data;
-            return sha256Hex(data) === sha ? data : null;
-          } catch {
-            return null;
-          }
-        },
-      },
+      packetDeps: proposalPacketDeps,
       log: (m) => app.log.warn(m),
     }));
   }
@@ -11978,6 +12180,7 @@ export function registerRoutes(
   // name forever — studio#119's ghost). One static segment more specific than the proxy's
   // wildcard, so the proxy stays pure transport for everything else.
   registerInteractiveDocDelete(app, adapter, {
+    admitDocument: (ref, fn) => chatProposals.admitDocument(ref, fn),
     settings: projectSettings,
     pool: interactiveBridges,
     audit,
@@ -12071,8 +12274,13 @@ export function registerRoutes(
   });
   registerSearchRoutes(app, search);
 
-  const runEvalsPrepare = async (input: LaunchRunInput): Promise<void> => {
-    await prepareRunEvalsLaunch(input, () => runAndRecord(defaultEvalDeps, { project: null, baseline: false, id: randomUUID(), now: new Date() }), runtime.evalRunsDir);
+  const runEvalsPrepare = async (input: LaunchRunInput, scope: RunEvalsScope = { project: null }): Promise<void> => {
+    await prepareRunEvalsLaunch(
+      input,
+      () => runAndRecord(defaultEvalDeps, { project: scope.project, baseline: false, ...(scope.suites !== undefined ? { suites: scope.suites } : {}), id: randomUUID(), now: new Date() }),
+      runtime.evalRunsDir,
+      scope,
+    );
   };
   return { exclusive: decideExclusively, decideGate, decisions, chatRecorder, considerations, search, decorateRun, runEvalsPrepare, chatProposals, proposalLaunchers };
 }

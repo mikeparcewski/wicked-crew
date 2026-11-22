@@ -144,6 +144,7 @@ describe('a public app with an action fails', () => {
         appTool: async () => null,
         callSecret: async () => ({ secret: 'x', missing: false }),
       } as unknown as ManifestInput['registry'],
+      maySee: async () => true,
       grantOf: () => ({ app: 'esc', action: 'assign', kind: 'row-write', source: 'support', actionHash: actionHash(ASSIGN), contractHash: 'c-assign', descriptorHash: pinOf(pg).descriptorHash, fingerprint: 'fp', grantedBy: { id: 'priya', kind: 'human', trust: 'operator' }, grantedAt: 1 }),
       endpoints: null,
     };

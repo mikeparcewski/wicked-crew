@@ -17,11 +17,14 @@ import { DocBindingStore } from '../src/interactive/doc-binding.js';
 import { guardRefine } from '../src/interactive/landing-guard.js';
 import { LandingRecordStore } from '../src/interactive/landing-record.js';
 import { lineageSteps } from '../src/interactive/protected-edits.js';
+import type { DraftFloorIo } from '../src/interactive/draft-skill.js';
+import { buildSourcePacket } from '../src/interactive/source-packet.js';
 import { RefineLauncher } from '../src/interactive/proposal-refine.js';
 import { chatMakeDigest, chatMakeLines, type MakeDigest } from '../src/api/chat-scope.js';
 import { removeScratch } from './setup/scratch.js';
 
 const RUN = '5e5e5e5e-1111-4000-8000-00000000000a';
+const EMPTY_PACKET = { files: [], canonical: [], tokens: {}, struck: [], manifest: { run: RUN, chat: 'c1', proposal: 'c1:t1', files: [], struck: [] } };
 const ENTRY = { id: 'text:h#0a1b2c3d', kind: 'text', label: 'slide 1 · heading “Release 0.17”', wid: 'h', touched: true };
 
 /** Garden's keep_check, as crew spawns it: `map` answers ENTRY; `check` answers `keepAnswer`. Records every argv. */
@@ -115,12 +118,14 @@ describe('A5: a refine of the open document', () => {
     expect(await guardRefine(input, { floor: leaky, garden: gardenIo({ keep: 'kept', argv: [] }) })).toMatchObject({ ok: false, reason: expect.stringContaining('leaks') });
   });
 
-  async function start(state: { keep: 'kept' | 'broken' | 'error'; argv: string[][] }, outcomes: Array<{ runId: string; outcome: unknown }>, landings?: LandingRecordStore, extra: { duringLaunch?: (input: LaunchRunInput, fire: (e: CoreEvent) => void) => void; garden?: Record<string, unknown> } = {}) {
+  async function start(state: { keep: 'kept' | 'broken' | 'error'; argv: string[][] }, outcomes: Array<{ runId: string; outcome: unknown }>, landings?: LandingRecordStore, extra: { duringLaunch?: (input: LaunchRunInput, fire: (e: CoreEvent) => void) => void; garden?: Record<string, unknown>; floor?: DraftFloorIo } = {}) {
     const busDb = join(dir, 'bus.db');
     const listeners = new Set<(e: CoreEvent) => void>();
     const launches: LaunchRunInput[] = [];
     const adapter = {
       launchRun: async (input: LaunchRunInput) => {
+        // The real adapter refuses projectGraph without projectId (core/adapter.ts launchRun, W24).
+        if (input.projectGraph !== undefined && input.projectId === undefined) throw new Error('projectGraph is the PROJECT\'s graph, so the run must be filed into that project');
         launches.push(input);
         extra.duringLaunch?.(input, (e) => { for (const l of listeners) l(e); });
         return input.sessionId;
@@ -155,7 +160,7 @@ describe('A5: a refine of the open document', () => {
       bindings,
       onBoundOutcome: (_ref, runId, outcome) => outcomes.push({ runId, outcome }),
       ...(landings !== undefined ? { landings } : {}),
-      draftFloorIo: floorIo,
+      draftFloorIo: extra.floor ?? floorIo,
       gardenIo: extra.garden ?? gardenIo(state),
       log: () => {},
     });
@@ -165,7 +170,96 @@ describe('A5: a refine of the open document', () => {
 
   const spec = (over: Partial<BoundRefine> = {}): BoundRefine => ({
     documentId: 'deck', runId: RUN, chatId: 'c1', proposalId: 'c1:t1', artifactRef: '_unfiled/deck',
-    ask: 'tighten the speaker notes', base: 3, allow: [], clisJson: '[{"key":"codex"},{"key":"claude"}]', ...over,
+    ask: 'tighten the speaker notes', base: 3, allow: [], packet: EMPTY_PACKET, graphDb: null, clisJson: '[{"key":"codex"},{"key":"claude"}]', ...over,
+  });
+
+  it.each([false, true])('#1406: refine copies the packet, binds the graph, and checks its landing (tampered=%s)', async (tampered) => {
+    const packet = await buildSourcePacket({
+      runId: RUN, chatId: 'c1', pid: 'c1:t1', cutoffTurnId: 't1', records: [],
+      resolution: { what: { title: 'Coverage', label: 'Change' }, brief: 'revise', sources: [{ token: 'run:evidence', status: 'ok' }] } as ArtifactProposal,
+    }, {
+      runs: async () => [{ session: { id: 'evidence' } } as never],
+      brief: async () => ({ runId: 'evidence', title: 'Coverage', status: 'completed', markdown: 'Coverage 80%', sha256: 'x' }),
+      docsRoot: async () => null, attachment: () => null,
+    });
+    const floorCalls: string[][] = [];
+    const outcomes: Array<{ runId: string; outcome: unknown }> = [];
+    const w = await start({ keep: 'kept', argv: [] }, outcomes, undefined, {
+      floor: { ...floorIo, run: async (argv) => { floorCalls.push(argv); return floorIo.run(); } },
+    });
+    bindings.begin({ ref: '_unfiled/deck', mount: '_unfiled', doc: 'deck', projectId: null, owner: 'mike', chatId: 'c1', chatInstance: null, scopeProject: null, proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [], graphDb: '/graphs/chat.db' }, { pid: 'c1:t1', runId: RUN, base: 3, op: 'refine' });
+    bindings.addPacket('_unfiled/deck', packet.canonical, packet.tokens);
+    await w.sub.launchBound({ ...spec(), packet, graphDb: '/graphs/chat.db' });
+    const runDir = join(chatDir, `refine-${RUN}`);
+    expect(readFileSync(join(runDir, 'records', 'run-evidence-x.md'), 'utf8')).toContain('Coverage 80%');
+    expect(w.launches[0]!.problem).toContain('MANIFEST-');
+    expect(w.launches[0]!.problem).not.toContain('--repo');
+    expect(w.launches[0]!.problem).not.toContain("records/ is one of the self-check's");
+    expect(w.launches[0]!.projectGraph).toBeUndefined(); // Unfiled: its chat's repo graph is no project graph (W24)
+    expect(w.launches[0]!.repoRef).toBeUndefined();
+    if (tampered) writeFileSync(join(runDir, 'records', 'run-evidence-x.md'), 'Coverage 99%');
+    writeFileSync(join(runDir, 'revised.html'), '<html><body><h2 data-wid="h">Release 0.17</h2></body></html>');
+    writeFileSync(join(runDir, 'notes.json'), JSON.stringify({ left_out: [], sources: [], assumptions: [] }));
+    w.fire({ type: 'sessionCompleted', session: RUN });
+    if (tampered) {
+      await waitFor(() => outcomes.length === 1);
+      expect(outcomes[0]!.outcome).toMatchObject({ kind: 'failed', reason: expect.stringContaining('source packet changed') });
+      expect(floorCalls).toEqual([]);
+      expect(w.announced.some((e) => e.event_type === DRAFT_COMPLETED)).toBe(false);
+    } else {
+      await waitFor(() => w.announced.some((e) => e.event_type === DRAFT_COMPLETED));
+      expect(floorCalls).toHaveLength(1);
+      expect(floorCalls[0]).not.toContain('--repo');
+      expect(existsSync(join(chatDir, 'landed', RUN, 'records'))).toBe(false);
+    }
+  });
+
+  it('W24: an Unfiled refine never sends projectGraph without its projectId (its binding holds the chat\'s repo graph)', async () => {
+    const outcomes: Array<{ runId: string; outcome: unknown }> = [];
+    const w = await start({ keep: 'kept', argv: [] }, outcomes);
+    bindings.begin({ ref: '_unfiled/deck', mount: '_unfiled', doc: 'deck', projectId: null, owner: 'mike', chatId: 'c1', chatInstance: null, scopeProject: null, proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [], graphDb: '/graphs/chat.db' }, { pid: 'c1:t1', runId: RUN, base: 3, op: 'refine' });
+    await w.sub.launchBound(spec({ graphDb: '/graphs/chat.db' }));
+    expect(w.launches).toHaveLength(1);
+    // core/adapter.ts refuses projectGraph without projectId: the launch would fail and the refine could never start.
+    expect(w.launches[0]!.projectGraph).toBeUndefined();
+    expect('projectId' in w.launches[0]!).toBe(false);
+  });
+
+  it('W24: a filed refine keeps its project graph beside its projectId', async () => {
+    const outcomes: Array<{ runId: string; outcome: unknown }> = [];
+    const w = await start({ keep: 'kept', argv: [] }, outcomes);
+    bindings.begin({ ref: 'proj-a/deck', mount: 'proj-a', doc: 'deck', projectId: 'proj-a', owner: 'mike', chatId: 'c1', chatInstance: null, scopeProject: 'proj-a', proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [], graphDb: '/graphs/proj-a.db' }, { pid: 'c1:t1', runId: RUN, base: 3, op: 'refine' });
+    await w.sub.launchBound(spec({ projectId: 'proj-a', artifactRef: 'proj-a/deck', graphDb: '/graphs/proj-a.db' }));
+    expect(w.launches).toHaveLength(1);
+    expect(w.launches[0]!).toMatchObject({ projectId: 'proj-a', projectGraph: { dbPath: '/graphs/proj-a.db' } });
+  });
+
+  it('lands a refine with existing repository citations without passing --repo to the floor', async () => {
+    const cited = '<html><body><h2 data-wid="h">Release 0.17</h2><p data-source="src/x.ts:12">Coverage reached 80%.</p></body></html>';
+    writeFileSync(join(docsRoot, 'deck', '_v3.html'), cited);
+    const floorCalls: string[][] = [];
+    const outcomes: Array<{ runId: string; outcome: unknown }> = [];
+    const w = await start({ keep: 'kept', argv: [] }, outcomes, undefined, {
+      floor: { ...floorIo, run: async (argv) => {
+        floorCalls.push(argv);
+        expect(readFileSync(argv[3]!, 'utf8')).toBe(cited);
+        if (argv.includes('--repo')) return { stdout: JSON.stringify({ verdict: 'FAIL', failed: ['claims'], checks: { claims: { ok: false, by_kind: { 'dangling-source': 1 } }, contrast: { ok: true }, leaks: { ok: true }, notes: { ok: true } } }), code: 1 };
+        return floorIo.run();
+      } },
+    });
+    bindings.begin({ ref: '_unfiled/deck', mount: '_unfiled', doc: 'deck', projectId: null, owner: 'mike', chatId: 'c1', chatInstance: null, scopeProject: null, proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [], graphDb: null }, { pid: 'c1:t1', runId: RUN, base: 3, op: 'refine' });
+    await w.sub.launchBound(spec());
+    const runDir = join(chatDir, `refine-${RUN}`);
+    expect(readFileSync(join(runDir, 'current.html'), 'utf8')).toBe(cited);
+    writeFileSync(join(runDir, 'revised.html'), cited);
+    writeFileSync(join(runDir, 'notes.json'), JSON.stringify({ left_out: [], sources: [], assumptions: [] }));
+    w.fire({ type: 'sessionCompleted', session: RUN });
+    await waitFor(() => outcomes.length > 0 || w.announced.some((e) => e.event_type === DRAFT_COMPLETED));
+    expect(floorCalls).toHaveLength(1);
+    expect(floorCalls[0]).not.toContain('--repo');
+    expect(outcomes).toEqual([]);
+    expect(w.announced.find((e) => e.event_type === DRAFT_COMPLETED)?.payload).toMatchObject({ document_id: 'deck', expect_head: 3 });
+    expect(readFileSync(join(chatDir, 'landed', RUN, 'revised.html'), 'utf8')).toBe(cited);
   });
 
   it('changes the open document as a new version on its head, keeping the person\'s edits: the derived run, the two helpers, the keep list, and the checked bytes announced with run_id + expect_head', async () => {
@@ -249,7 +343,7 @@ describe('A5 r1 folds', () => {
   const init = { ref: '_unfiled/deck', mount: '_unfiled', doc: 'deck', projectId: null, owner: 'mike', chatId: 'c1', chatInstance: null, scopeProject: null, proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [], graphDb: null };
   const spec = (over: Partial<BoundRefine> = {}): BoundRefine => ({
     documentId: 'deck', runId: RUN, chatId: 'c1', proposalId: 'c1:t1', artifactRef: '_unfiled/deck',
-    ask: 'change the title', base: 1, allow: [], clisJson: '[]', ...over,
+    ask: 'change the title', base: 1, allow: [], packet: EMPTY_PACKET, graphDb: null, clisJson: '[]', ...over,
   });
 
   beforeEach(() => {
@@ -274,6 +368,8 @@ describe('A5 r1 folds', () => {
     const fire = (e: CoreEvent): void => { for (const l of listeners) l(e); };
     const adapter = {
       launchRun: async (input: LaunchRunInput) => {
+        // The real adapter refuses projectGraph without projectId (core/adapter.ts launchRun, W24).
+        if (input.projectGraph !== undefined && input.projectId === undefined) throw new Error('projectGraph is the PROJECT\'s graph, so the run must be filed into that project');
         launches.push(input);
         opts.duringLaunch?.(input, fire);
         return input.sessionId;
@@ -414,7 +510,16 @@ describe('A5: the refine launcher', () => {
       writeFileSync(join(docs, 'versions.json'), JSON.stringify({ head: 4, versions: [{ version: 4, html_file: '_v4.html' }] }));
       const bindings = new DocBindingStore(join(dir, 'b'));
       const launched: BoundRefine[] = [];
-      const resolution = { pid: 'c2:t9', chatId: 'c2', turnId: 't9', kind: 'refine', brief: 'match the headings to my title', what: { title: 'Deck' }, helpers: { seats: ['codex', 'claude'] }, filedIn: { projectId: null }, target: { ref: '_unfiled/deck', title: 'Deck', base: 4 }, protected: [ENTRY] } as unknown as ArtifactProposal;
+      const packetDeps = {
+        runs: async () => [{ session: { id: 'fresh' } }, { session: { id: 'original' } }] as never,
+        brief: async (v: { session: { id: string } }) => ({ runId: v.session.id, title: 'Evidence', status: 'completed', markdown: `Coverage from ${v.session.id}`, sha256: 'x' }),
+        docsRoot: async () => null, attachment: () => null,
+      };
+      const original = await buildSourcePacket({ runId: 'original-draft', chatId: 'c1', pid: 'c1:t1', cutoffTurnId: 't1', records: [],
+        resolution: { what: { title: 'Deck', label: 'Document' }, sources: [{ token: 'run:original', status: 'ok' }] } as ArtifactProposal }, packetDeps);
+      bindings.begin({ ref: '_unfiled/deck', mount: '_unfiled', doc: 'deck', projectId: null, owner: 'mike', chatId: 'c1', chatInstance: 'original-instance', scopeProject: null, proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [], graphDb: '/graphs/original.db' }, { pid: 'c1:t1', runId: 'original-draft', base: 0 });
+      bindings.addPacket('_unfiled/deck', original.canonical, original.tokens);
+      const resolution = { pid: 'c2:t9', chatId: 'c2', turnId: 't9', kind: 'refine', brief: 'match the headings to my title', what: { title: 'Deck', label: 'Change · Deck' }, sources: [{ token: 'run:fresh', label: 'fresh', status: 'ok' }], helpers: { seats: ['codex', 'claude'] }, filedIn: { projectId: null }, target: { ref: '_unfiled/deck', title: 'Deck', base: 4 }, protected: [ENTRY] } as unknown as ArtifactProposal;
       const records: ChatTranscriptRecord[] = [
         { at: 1, turnId: 't9', kind: 'proposal', proposal: resolution },
         { at: 2, turnId: 't9', kind: 'proposal_accepting', pid: 'c2:t9', actor: 'mike', edits: { allow: [ENTRY.id, 'text:smuggled#00000000'] }, resolution, identity: { artifactRef: '_unfiled/deck', runId: RUN } },
@@ -428,11 +533,15 @@ describe('A5: the refine launcher', () => {
         },
         records: () => records,
         instanceOf: () => 'inst-2',
+        chatIdOf: (id) => id,
+        packetDeps,
         clisJsonFor: (seats) => JSON.stringify(seats),
       });
       const d = { kind: 'refine' as const, pid: 'c2:t9', chatId: 'c2', actor: { id: 'mike', kind: 'human' as const, trust: 'operator' as const }, identity: { artifactRef: '_unfiled/deck', runId: RUN }, resolution };
       await launcher.launch(d as never);
       expect(launched[0]).toMatchObject({ runId: RUN, base: 4, allow: [ENTRY.id], ask: 'match the headings to my title', clisJson: '["codex","claude"]' });
+      expect(launched[0]).toMatchObject({ graphDb: '/graphs/original.db', packet: { tokens: { 'run:original': ['run-original-x.md'], 'run:fresh': ['run-fresh-x.md'] } } });
+      expect(bindings.get('_unfiled/deck')?.tokens).toHaveProperty('run:fresh');
       expect(bindings.attemptOf(RUN)?.attempt).toMatchObject({ op: 'refine', allow: [ENTRY.id], chatId: 'c2', chatInstance: 'inst-2', base: 4 });
       expect(bindings.allowOf(RUN)).toEqual([ENTRY.id]);
       writeFileSync(join(docs, 'versions.json'), JSON.stringify({ head: 5, versions: [] }));

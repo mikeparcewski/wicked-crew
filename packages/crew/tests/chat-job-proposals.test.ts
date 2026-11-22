@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import type { Actor, ArtifactProposal, CatalogEntry, ChatTranscriptRecord, Preset, ProposalRevisionEdits, WorkflowDef } from '../src/core/types.js';
+import type { Actor, ArtifactProposal, CatalogEntry, ChatProposalView, ChatTranscriptRecord, Preset, ProposalRevisionEdits, WorkflowDef } from '../src/core/types.js';
 import { CoreAdapter } from '../src/core/adapter.js';
 import { CATALOG_SEEDS } from '../src/workflow-catalog/catalog-data.js';
 import { buildWorkflowCatalogV2, resolveOption, servedState, type ServedState } from '../src/workflow-catalog/build-v2.js';
@@ -17,12 +17,13 @@ import {
   ChatProposals,
   foldProposals,
   LaunchOnceRegistry,
+  LaunchRefusal,
   type ChatProposalDeps,
   type ProposalChat,
   type ProposalDispatch,
   type ProposalDispatcher,
 } from '../src/api/chat-proposals.js';
-import { jobLaunchCommon, jobLaunchRoster, ownWords, personAskedSkip, qeSkipBound } from '../src/api/chat-jobs.js';
+import { jobLaunchCommon, jobLaunchRoster, seatsShortLine, ownWords, personAskedSkip, qeSkipBound } from '../src/api/chat-jobs.js';
 import { launchRosterNaming, primaryRefusal } from '../src/api/routes.js';
 import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
 import { SeatHealthTracker } from '../src/api/seat-health.js';
@@ -53,8 +54,9 @@ afterAll(() => removeScratch(dir));
 
 class FakeLauncher implements ProposalDispatcher {
   launched: ProposalDispatch[] = [];
+  failure: Error | null = null;
   async find(identity: { runId: string }): Promise<boolean> { return this.launched.some((d) => d.identity.runId === identity.runId); }
-  async launch(d: ProposalDispatch): Promise<void> { this.launched.push(d); }
+  async launch(d: ProposalDispatch): Promise<void> { if (this.failure !== null) throw this.failure; this.launched.push(d); }
   async live(): Promise<boolean> { return false; }
 }
 
@@ -80,7 +82,7 @@ interface Rig {
 
 const CHAT = 'c1';
 
-function rig(o: { pickFirstRepo?: ChatProposalDeps['pickFirstRepo']; roster?: Array<{ key: string; name: string }>; repos?: Array<{ id: string; name: string }>; reviewAuthors?: ChatProposalDeps['reviewAuthors']; powerPresets?: ChatProposalDeps['powerPresets'] } = {}): Rig {
+function rig(o: { coverage?: ChatProposalDeps['coverage']; pickFirstRepo?: ChatProposalDeps['pickFirstRepo']; roster?: Array<{ key: string; name: string }>; repos?: Array<{ id: string; name: string }>; reviewAuthors?: ChatProposalDeps['reviewAuthors']; powerPresets?: ChatProposalDeps['powerPresets'] } = {}): Rig {
   const r: Rig = {
     svc: null as unknown as ChatProposals,
     records: [],
@@ -110,6 +112,7 @@ function rig(o: { pickFirstRepo?: ChatProposalDeps['pickFirstRepo']; roster?: Ar
     chat: () => r.chat,
     ...(o.pickFirstRepo !== undefined ? { pickFirstRepo: o.pickFirstRepo } : {}),
     rosterEligible: () => r.roster,
+    ...(o.coverage !== undefined ? { coverage: o.coverage } : {}),
     runs: async () => [],
     chatOfRun: () => undefined,
     isAskPath: () => false,
@@ -367,6 +370,103 @@ describe('(ac) the QE skip is the person\'s own', () => {
   });
 });
 
+describe('document title from the person (#1537)', () => {
+  const make = () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    const deps = (r.svc as unknown as { deps: ChatProposalDeps }).deps;
+    deps.flags = () => ({ context: true, instructions: true, proposals: true, create: true, refine: false, theme: false, demo: false });
+    deps.registry.register('create', r.launcher);
+    deps.docsRoot = async () => dir;
+    deps.acceptsJobs = () => true;
+    return r;
+  };
+
+  it('a document revision records the chosen writer and checker and launches them (#1538)', async () => {
+    const r = make();
+    await pick(r, 'document');
+    const parent = open(r);
+    const out = await swap(r, parent.pid, { lead: 'codex', addSeats: ['pi'], removeSeats: ['claude'] }, 'helpers');
+    expect(out.code, JSON.stringify(out.body)).toBe(201);
+    const p = open(r);
+    expect(p.helpers?.seats).toEqual(['codex', 'pi']);
+    expect(p.sentence?.text).toContain('written by {seats}');
+    expect(p.sentence?.tokens.find((t) => t.kind === 'seats')).toMatchObject({
+      label: 'Codex writes, pi checks',
+      swap: { choices: expect.arrayContaining([expect.objectContaining({ label: 'Claude writes', edit: { lead: 'claude' } })]) },
+    });
+    expect(p.sentence?.notes.join(' ')).toContain('Claude is off');
+    expect((await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    expect(r.launcher.launched[0]!.resolution.helpers?.seats).toEqual(['codex', 'pi']);
+  });
+
+  it('a removal that leaves one document helper keeps both and explains why (#1538)', async () => {
+    const r = make();
+    await pick(r, 'document');
+    const parent = open(r);
+    expect((await swap(r, parent.pid, { removeSeats: ['codex'] }, 'remove-checker')).code).toBe(201);
+    expect(open(r).helpers?.seats).toEqual(parent.helpers?.seats);
+    expect(open(r).sentence?.notes.join(' ')).toMatch(/Codex stays; this job needs 2 seats/u);
+    expect(open(r).sentence?.notes.join(' ')).not.toContain('picked again');
+  });
+
+  it('a document names the extra helper left out, and refuses fewer than two eligible helpers (#1538)', async () => {
+    const r = make();
+    await pick(r, 'document');
+    expect((await swap(r, open(r).pid, { addSeats: ['pi'] }, 'third-helper')).code).toBe(201);
+    expect(open(r).helpers?.seats).toEqual(['claude', 'codex']);
+    expect(open(r).sentence?.notes.join(' ')).toMatch(/pi.*left out/u);
+    r.roster = r.roster.filter((s) => s.key === 'claude');
+    expect((await swap(r, open(r).pid, { detail: { add: ['Keep it short.'] } }, 'one-helper')).code).toBe(201);
+    expect(open(r).helpers).toBeNull();
+    // Said once, by the block (no second note repeating it).
+    expect(open(r).blocked).toMatch(/second helper/u);
+  });
+
+  it('a second-tab revision cannot land during a held Go (#1279)', async () => {
+    const r = make();
+    await pick(r, 'document');
+    const p = open(r);
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const starting = new Promise<void>((resolve) => { entered = resolve; });
+    const launch = r.launcher.launch.bind(r.launcher);
+    r.launcher.launch = async (d) => { entered(); await held; await launch(d); };
+    const go = r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1');
+    await Promise.race([starting, go.then((out) => { throw new Error(`Go refused: ${JSON.stringify(out)}`); })]);
+    let finished = false;
+    const revision = swap(r, p.pid, { lead: 'pi' }, 'second-tab').then((out) => { finished = true; return out; });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(finished).toBe(false);
+    } finally {
+      release();
+    }
+    expect((await go).code).toBe(200);
+    expect(await revision).toMatchObject({ code: 409, body: { code: 'proposal_stale' } });
+    expect(r.launcher.launched).toHaveLength(1);
+  });
+
+  it.each([
+    ["a one-page note titled 'Plugin check note'", 'Plugin check note', 'Plugin check note'],
+    ['a note titled “PLUGIN   CHECK NOTE”', 'Plugin check note', 'Plugin check note'],
+    ['a one-page note about the plugin', 'Invented title', 'Document'],
+  ])('keeps only a title present in the person’s turn: %s', async (words, title, expected) => {
+    const r = make();
+    await say(r, 't-title', words);
+    await reply(r, 't-title', { entry: 'document', option: 'document', confidence: 0.99, title });
+    const p = open(r);
+    expect(p.what.title).toBe(expected);
+    if (expected !== 'Document') {
+      expect(p.what.label).not.toBe('Document · Document');
+      expect((await swap(r, p.pid, { detail: { add: ['Include the plugin version.'] } }, 'detail')).code).toBe(201);
+      expect(open(r).what.title).toBe(expected);
+      expect((await r.svc.decide(CHAT, open(r).pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+      expect(r.launcher.launched[0]!.identity.artifactRef).toMatch(/\/plugin-check-note-[a-f0-9]+$/u);
+    }
+  });
+});
+
 describe('across kinds', () => {
   it('a revision to a document option writes an artifact create in the same lineage (create on), else refuses', async () => {
     const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
@@ -384,8 +484,9 @@ describe('across kinds', () => {
 
 
 describe('codex/pi r1 folds', () => {
-  const withShadow = (preset: Preset): ServedState & { rev: string } => {
-    const presets = [...presetsAll, preset];
+  /** An engine whose built-in `name` changed under an open proposal (its steps replaced). */
+  const withBuiltin = (name: string, steps: (s: Preset['steps']) => Preset['steps']): ServedState & { rev: string } => {
+    const presets = presetsAll.map((p) => (p.name === name && p.created_by === 'builtin' ? { ...p, steps: steps(p.steps) } : p));
     return { ...servedState({ defs: defsAll, presets, entries: entriesAll }), rev: buildWorkflowCatalogV2({ defs: defsAll, presets, entries: entriesAll, runs: [], actorId: '', projectId: null }).rev };
   };
 
@@ -428,8 +529,13 @@ describe('codex/pi r1 folds', () => {
     await pick(r, 'migrate', { option: 'in-place' });
     const p = open(r);
     expect(p.gate).toContain('parity');
-    // A saved migration with the built-in's instruments and no parity rubric.
-    r.served = withShadow({ name: 'migration', steps: [{ catalog: 'build', id: 'execute' }, { catalog: 'test', id: 'verify' }], created_by: 'me', scope: 'global', required_instruments: ['distinct_evaluator', 'judge', 'qe_acceptance'] } as unknown as Preset);
+    // An engine whose migration no longer carries the parity rubric. (A SAVED migration without it no longer resolves the
+    // card at all, crew#1445: the option is off and the shadow runs from Yours only.)
+    r.served = withBuiltin('migration', (steps) => steps.map((s) => {
+      const out = { ...s };
+      delete out.rubric;
+      return out;
+    }));
     const go = await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1');
     expect(go.body).toMatchObject({ code: 'catalog_changed' });
     const fresh = open(r);
@@ -649,7 +755,7 @@ describe('codex/pi r1 folds', () => {
 
 describe('reshape (§2.5)', () => {
   const facts = (card: string): Parameters<ChatProposals['reshape']>[1]['facts'] => ({
-    card, option: undefined, depth: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape',
+    card, option: undefined, depth: null, title: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape',
   });
 
   it('a replacement with fewer checks is refused until the person confirms; then the held plan is rejected and it launches once', async () => {
@@ -675,7 +781,7 @@ describe('reshape (§2.5)', () => {
 
 describe('reshape and a bad newWorkSeats (F1/F2 round 4)', () => {
   const facts = (card: string): Parameters<ChatProposals['reshape']>[1]['facts'] => ({
-    card, option: undefined, depth: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape',
+    card, option: undefined, depth: null, title: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape',
   });
   /** Set what the `newWorkSeats` read answers (the production reader throws `NewWorkSeatsRefusal`). */
   const setting = (r: Rig, read: NonNullable<ChatProposalDeps['newWorkSeats']>): void => {
@@ -812,7 +918,7 @@ describe('Lane D: a reshape offered on a plan version answers only that version'
     await pick(r, 'migrate', { option: 'upgrade' });
     const held = open(r);
     await r.svc.decide(CHAT, held.pid, { decision: 'go' }, ME, 'i1');
-    const facts: Parameters<ChatProposals['reshape']>[1]['facts'] = { card: 'migrate', option: 'move', depth: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape' };
+    const facts: Parameters<ChatProposals['reshape']>[1]['facts'] = { card: 'migrate', option: 'move', depth: null, title: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape' };
     const out = await r.svc.reshape(CHAT, { pid: `${CHAT}:reshape:run1:o`, oldRunId: 'run1', parentPid: held.pid, facts, edits: { option: 'move' }, reducedAssurance: false, relaunch: { deliver: 'pr' as const }, request: { id: 'o', digest: 'do' }, confirmLoss: [], heldPlan: { ord: 1, planRev: 2 } }, ME, 'i1');
     expect(out.code, JSON.stringify(out.body)).toBe(200);
     expect(r.rejectExpect).toEqual({ ord: 1, planRev: 2 });
@@ -823,7 +929,7 @@ describe('Lane D: a reshape offered on a plan version answers only that version'
     await pick(r, 'migrate', { option: 'upgrade' });
     const held = open(r);
     await r.svc.decide(CHAT, held.pid, { decision: 'go' }, ME, 'i1');
-    const facts: Parameters<ChatProposals['reshape']>[1]['facts'] = { card: 'migrate', option: 'move', depth: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape' };
+    const facts: Parameters<ChatProposals['reshape']>[1]['facts'] = { card: 'migrate', option: 'move', depth: null, title: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape' };
     r.rejectAnswer = { code: 409, body: { code: 'gate_changed' } };
     const refused = await r.svc.reshape(CHAT, { pid: `${CHAT}:reshape:run1:p`, oldRunId: 'run1', parentPid: held.pid, facts, edits: { option: 'move' }, reducedAssurance: false, relaunch: { deliver: 'pr' as const }, request: { id: 'p', digest: 'dp' }, confirmLoss: [], heldPlan: { ord: 1, planRev: 3 } }, ME, 'i1');
     expect(refused.body).toMatchObject({ code: 'gate_changed' });
@@ -852,7 +958,7 @@ describe('Lane D: a reshape offered on a plan version answers only that version'
 
 describe('codex r3 folds', () => {
   const facts = (card: string): Parameters<ChatProposals['reshape']>[1]['facts'] => ({
-    card, option: undefined, depth: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape',
+    card, option: undefined, depth: null, title: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape',
   });
 
   it('a reshape to a card that does not exist answers nothing; Go on a reshape answers the held plan first, never around it', async () => {
@@ -920,7 +1026,7 @@ describe('codex r3 folds', () => {
 
 describe('codex r5 folds', () => {
   const facts = (card: string): Parameters<ChatProposals['reshape']>[1]['facts'] => ({
-    card, option: undefined, depth: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape',
+    card, option: undefined, depth: null, title: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape',
   });
 
   it('a launch the preflight says would refuse never answers the held plan', async () => {
@@ -951,7 +1057,7 @@ describe('codex r6 folds', () => {
     await r.svc.decide(CHAT, held.pid, { decision: 'go' }, ME, 'i1');
     const out = await r.svc.reshape(CHAT, {
       pid: `${CHAT}:reshape:run1:n`, oldRunId: 'run1', parentPid: held.pid,
-      facts: { card: 'migrate', option: undefined, depth: null, words: 'w', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape' },
+      facts: { card: 'migrate', option: undefined, depth: null, title: null, words: 'w', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape' },
       edits: { card: 'migrate', option: null }, reducedAssurance: false, relaunch: { deliver: 'pr' }, request: { id: 'n', digest: 'dn' }, confirmLoss: [],
     }, ME, 'i1');
     expect(out.code, JSON.stringify(out.body)).toBe(200);
@@ -1020,7 +1126,7 @@ describe('(api-types 0.196.0) a job Start chooses power', () => {
     await pick(r, 'feature');
     const held = open(r);
     await r.svc.decide(CHAT, held.pid, { decision: 'go' }, ME, 'i1');
-    const facts = { card: 'bug', option: undefined, depth: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape' } as unknown as Parameters<ChatProposals['reshape']>[1]['facts'];
+    const facts = { card: 'bug', option: undefined, depth: null, title: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape' } as unknown as Parameters<ChatProposals['reshape']>[1]['facts'];
     const pid = `${CHAT}:reshape:run1:pw`;
     r.preflightAnswer = "payments-service's folder is missing";
     const made = await r.svc.reshape(CHAT, { pid, oldRunId: 'run1', parentPid: held.pid, facts, edits: { card: 'bug' }, reducedAssurance: false, relaunch: { deliver: 'pr' }, request: { id: 'pw', digest: 'dpw' }, confirmLoss: [] }, ME, 'i1');
@@ -1072,7 +1178,7 @@ describe('opt-in seats through the job lifecycle (crew#1609)', () => {
   const engine = (p: Pick<ArtifactProposal, 'seats' | 'relaunch'>, standing: ReadonlyArray<{ key?: unknown }> = STANDING): string[] =>
     jobLaunchRoster(launchRosterNaming(standing, p.seats?.lead ?? undefined, p.seats?.keys ?? []), p).roster.map((x) => String(x.key)).sort();
   const facts = (card: string): Parameters<ChatProposals['reshape']>[1]['facts'] => ({
-    card, option: undefined, depth: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape',
+    card, option: undefined, depth: null, title: null, words: 'move it', details: [], repoRef: 'r-pay', projectId: null, lead: null, seats: null, inputs: {}, skipQe: null, by: 'person', source: 'reshape',
   });
   const reshapeOf = async (r: Rig) => {
     await pick(r, 'migrate', { option: 'in-place' });
@@ -1273,5 +1379,125 @@ describe('reshape launch with the real roster accessor after readiness (crew#160
     const engine = JSON.parse(engineRosterJson(clisJson)) as Array<Record<string, unknown>>;
     expect(engine.find((s) => s['key'] === 'codex')).toMatchObject({ model: 'held', health: { usable: false } });
     expect(engine.find((s) => s['key'] === 'claude')).toMatchObject({ model: 'held', health: { usable: true } });
+  });
+});
+
+
+describe('launch admission and recovery', () => {
+  it('a refused Go forgets its reduced assurance choice before the next plain Go', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'bug');
+    const p = open(r);
+    expect(p).not.toHaveProperty('reducedAssurance');
+    r.launcher.failure = new LaunchRefusal(409, { code: 'no_independent_reviewer', error: 'No other seat can review.' });
+    const refused = await r.svc.decide(CHAT, p.pid, { decision: 'go', reducedAssurance: true }, ME, 'i1');
+    expect(refused).toMatchObject({ code: 409, body: { view: { state: 'open' } } });
+    expect((refused.body['view'] as ChatProposalView).proposal).not.toHaveProperty('reducedAssurance');
+    r.launcher.failure = null;
+    expect((await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    expect(r.launcher.launched[0]!.resolution).not.toHaveProperty('reducedAssurance');
+  });
+
+  it('a refused Go preserves reduced assurance already chosen on the reshape card', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'bug');
+    const p = open(r);
+    r.records.push({ at: 1_001, turnId: 'person:test', kind: 'proposal', proposal: { ...p, reshapes: 'old-run', heldRejected: true, reducedAssurance: true } });
+    r.launcher.failure = new LaunchRefusal(409, { code: 'no_independent_reviewer', error: 'No other seat can review.' });
+    const refused = await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1');
+    expect(refused).toMatchObject({ code: 409, body: { view: { state: 'open', proposal: { reducedAssurance: true } } } });
+    r.launcher.failure = null;
+    expect((await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    expect(r.launcher.launched[0]!.resolution.reducedAssurance).toBe(true);
+  });
+
+  it('a typed launch refusal preserves its status and retry fields and reopens Start', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'bug');
+    const p = open(r);
+    const excluded = [{ seat: 'claude', reason: 'wrote the change' }];
+    const retryWith = { reducedAssurance: true };
+    const launch = r.launcher.launch.bind(r.launcher);
+    r.launcher.launch = async () => { throw new LaunchRefusal(409, { code: 'no_independent_reviewer', error: 'No other seat can check this change.', excluded, retryWith }); };
+    const refused = await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1');
+    expect(refused.code).toBe(409);
+    expect(refused.body).toMatchObject({ code: 'no_independent_reviewer', excluded, retryWith, view: { state: 'open' } });
+    r.launcher.launch = launch;
+    expect((await r.svc.decide(CHAT, p.pid, { decision: 'go', reducedAssurance: true }, ME, 'i1')).code).toBe(200);
+    expect(r.launcher.launched[0]!.resolution.reducedAssurance).toBe(true);
+    expect(r.records.filter((x) => x.kind === 'proposal_accepting').at(-1)).toMatchObject({ resolution: { reducedAssurance: true } });
+  });
+
+  it.each([false, true])('reduced assurance is only a job Start choice (%s)', async (reducedAssurance) => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'bug');
+    const p = open(r);
+    const notNow = await r.svc.decide(CHAT, p.pid, { decision: 'not_now', reducedAssurance }, ME, 'i1');
+    expect(notNow).toMatchObject({ code: 400, body: { code: 'reduced_assurance_not_applicable' } });
+    r.records.push({ at: 1_001, turnId: 'person:test', kind: 'proposal', proposal: { ...p, kind: 'create' } });
+    const document = await r.svc.decide(CHAT, p.pid, { decision: 'go', reducedAssurance }, ME, 'i1');
+    expect(document).toMatchObject({ code: 400, body: { code: 'reduced_assurance_not_applicable' } });
+    expect(r.launcher.launched).toHaveLength(0);
+  });
+
+  it('an interrupted job with a lost seat reopens and accepts a new seat pick', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }] });
+    await pick(r, 'bug');
+    const p = open(r);
+    r.launcher.failure = new Error('launch interrupted');
+    expect((await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(502);
+    r.roster = r.roster.filter((x) => x.key !== 'pi');
+    const again = await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1');
+    expect(again.code).toBe(409);
+    expect(again.body).toMatchObject({ code: 'helper_unavailable', view: { state: 'open' } });
+    r.launcher.failure = null;
+    const fixed = await r.svc.decide(CHAT, p.pid, { decision: 'go', edits: { seats: ['claude', 'codex'] } }, ME, 'i1');
+    expect(fixed.code, JSON.stringify(fixed.body)).toBe(200);
+    expect(r.launcher.launched[0]!.resolution.seats?.keys).toEqual(['claude', 'codex']);
+  });
+
+  it('uncovered seats add a coverage note instead of claiming a judge exists', async () => {
+    const calls: unknown[] = [];
+    const r = rig({ roster: [{ key: 'claude', name: 'Claude' }, { key: 'codex', name: 'Codex' }], repos: [{ id: 'r-pay', name: 'payments-service' }], coverage: (keys, bound) => {
+      calls.push([keys, bound]);
+      return { covered: false, singleIdentity: false, authors: [{ seat: 'claude', judges: [{ seat: 'codex', seenSharing: 'anthropic' }], notJudges: [] }], benched: [] };
+    } });
+    await pick(r, 'bug');
+    const p = open(r);
+    expect(p.blocked).toBeNull();
+    expect(p.sentence?.notes.join(' ')).toContain('anthropic');
+    expect(p.sentence?.notes.join(' ')).not.toContain('judge is the author of the validator');
+    expect(calls).toContainEqual([p.seats!.keys, true]);
+  });
+
+  it('the card coverage note uses display names and names a benched seat once', async () => {
+    const benched = { seat: 'pi', reason: 'benched', detail: 'cannot use this checkout' };
+    const r = rig({
+      roster: [{ key: 'claude', name: 'Builder' }, { key: 'codex', name: 'Reviewer' }, { key: 'pi', name: 'Helper' }],
+      repos: [{ id: 'r-pay', name: 'payments-service' }],
+      coverage: () => ({
+        covered: false, singleIdentity: false,
+        authors: [
+          { seat: 'claude', judges: [{ seat: 'codex', seenSharing: 'anthropic' }], notJudges: [benched] },
+          { seat: 'codex', judges: [], notJudges: [{ seat: 'claude', reason: 'same_identity' }, benched] },
+        ],
+        benched: [benched],
+      }),
+    });
+    await pick(r, 'bug');
+    const note = open(r).sentence?.notes.find((n) => n.startsWith('These seats'));
+    expect(note).toContain('Reviewer was seen calling anthropic, as was Builder');
+    expect(note).toContain('Builder runs the same CLI as Reviewer');
+    expect(note).toContain('Helper cannot check it: cannot use this checkout');
+    expect(note?.match(/Helper/g)).toHaveLength(1);
+    expect(note).not.toMatch(/claude|codex|\bpi\b/);
+  });
+
+  it('the hold sentence says how many seats can work and how many more to sign in', () => {
+    const r = resolveOption('bug', null, served)!;
+    expect(seatsShortLine(r, 1)).toBe('Needs 2 seats that can work now, one to build it and one to check it, and only 1 can. Sign in another seat to start it.');
+    expect(seatsShortLine(r, 0)).toBe('Needs 2 seats that can work now, one to build it and one to check it, and none can. Sign in 2 more seats to start it.');
+    const one = { ...r, resolved: { ...r.resolved, seats: { ...r.resolved.seats, distinctEvaluator: false } } };
+    expect(seatsShortLine(one, 0)).toBe('Needs a seat that can work now to build it, and none can. Sign in a seat to start it.');
   });
 });

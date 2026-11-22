@@ -429,6 +429,13 @@ class KeyedLock {
   }
 }
 
+/** A launch refused before starting anything; the caller can correct the open card and try again. */
+export class LaunchRefusal extends Error {
+  constructor(readonly status: number, readonly body: Record<string, unknown> & { code: string }) {
+    super(typeof body['error'] === 'string' ? body['error'] : 'The launch was refused.');
+  }
+}
+
 /**
  * DES §4.3 step 3: ONE launcher per run id. `launchOnce` takes the run id's lock, asks the operation's launcher whether
  * that run exists (adopt), and starts it only if not — so a retry, a second tab and a late bus trigger (A3 calls this
@@ -628,6 +635,8 @@ export type HeldPlan =
   | { state: 'running' | 'ended' };
 
 export interface ChatProposalDeps {
+  /** Ask the engine about judges for these seats and binding, retaining a reshape's launch configuration. */
+  coverage?: (keys: readonly string[], bound: boolean, relaunch?: ArtifactProposal['relaunch']) => import('../core/assurance.js').JudgeCoverage | null;
   /** The operations crew advertises (and `proposals`). */
   flags(): ChatArtifactsCapabilities;
   /**
@@ -826,6 +835,13 @@ export function withAskOverlay(p: ArtifactProposal): ArtifactProposal {
 export function isJobCardEntry(block: { entry: string; option?: string | null | undefined; confidence?: number | undefined }): boolean {
   const card = CATALOG_V2_CARDS.find((c) => c.id === block.entry);
   return (card !== undefined && detectable(card)) || block.option !== undefined || block.confidence !== undefined;
+}
+
+/** A document title must occur in the person's own turn. */
+function ownTitle(title: string, words: string): boolean {
+  const plain = (s: string): string => s.replace(/['"‘’“”]/gu, '').replace(/\s+/gu, ' ').trim().toLowerCase();
+  const named = plain(title);
+  return named !== '' && plain(words).includes(named);
 }
 
 /** The person's own words of ONE turn (the message the seat's block answers). */
@@ -1051,7 +1067,7 @@ export class ChatProposals {
    * The block → a card's facts. `null` when the operation is not advertised (the seat was never told about it) or the
    * chat has ended: no card. Everything else resolves, with what cannot be resolved struck or blocking Go.
    */
-  async resolve(input: { chatId: string; turnId: string; seat: string; block: ParsedMake; records: readonly ChatTranscriptRecord[] }): Promise<ArtifactProposal | null> {
+  async resolve(input: { chatId: string; turnId: string; seat: string; block: ParsedMake; records: readonly ChatTranscriptRecord[]; helperSeats?: readonly string[] }): Promise<ArtifactProposal | null> {
     const { chatId, turnId, seat, block, records } = input;
     const flags = this.deps.flags();
     const chat = this.deps.chat(chatId);
@@ -1125,10 +1141,7 @@ export class ChatProposals {
           }
         }
       }
-      // A5: a change works from the document and the person's words; extra sources do not reach its run yet, so the
-      // card says so instead of showing them as used (codex A5 r1).
-      const sources = (await this.resolveSources(block.sources, { chatId, turnId, records, binding, turnHas, chat, words, personNamed: false })).map((src) =>
-        src.status === 'ok' ? { ...src, status: 'struck' as const, reason: 'a change works from the document and your words; make a new document to use this source' } : src);
+      const sources = await this.resolveSources(block.sources, { chatId, turnId, records, binding, turnHas, chat, words, personNamed: false });
       const { helpers, block: helperBlock, seatsUnread } = await this.docHelpers(chat);
       if (helperBlock !== null) blocked.push(helperBlock);
       const title = target?.title ?? (ref !== null ? humanDoc(ref.doc) : block.refine);
@@ -1146,6 +1159,7 @@ export class ChatProposals {
         filedIn: await filedIn(projectId),
         ...(target !== undefined ? { target } : {}),
         ...(block.touches.length > 0 ? { touches: block.touches } : {}),
+        ...(binding?.artifact !== undefined && binding.artifact.ref === ref?.ref ? { anchors: [...binding.artifact.anchors] } : {}),
         ...(protectedList !== undefined ? { protected: protectedList } : {}),
         blocked: blocked[0] ?? null,
       };
@@ -1194,7 +1208,7 @@ export class ChatProposals {
       demo = { url, audience: block.audience ?? null, show: block.show ?? null };
     }
     const sources = kind === 'create' ? await this.resolveSources(block.sources, { chatId, turnId, records, binding, turnHas, chat, words, personNamed: false }) : [];
-    const { helpers, block: helperBlock, seatsUnread } = await this.docHelpers(chat);
+    const { helpers, block: helperBlock, seatsUnread } = await this.docHelpers(chat, input.helperSeats);
     if (helperBlock !== null) blocked.push(helperBlock);
     return {
       pid, chatId, turnId, kind, seat,
@@ -1478,7 +1492,7 @@ export class ChatProposals {
    * instance those checks passed against: nothing is read for, or written to, a chat that reused the id since. One
    * lock per proposal: a second tab or a double click waits for the first and gets its result.
    */
-  decide(chatId: string, pid: string, body: { decision: 'go' | 'not_now'; edits?: ProposalEdits | undefined; power?: boolean | undefined }, actor: Actor, instance: string | null): Promise<DecideResult> {
+  decide(chatId: string, pid: string, body: { decision: 'go' | 'not_now'; edits?: ProposalEdits | undefined; power?: boolean | undefined; reducedAssurance?: boolean | undefined }, actor: Actor, instance: string | null): Promise<DecideResult> {
     // Keyed by the pid alone (it is unique: `<chat>:<turn uuid>`), so the same proposal answered through an ended chat's
     // archived alias still waits for an in-flight answer through its first name.
     return this.lock.run(`pid\u0000${pid}`, () => this.decideLocked(chatId, pid, body, actor, instance)).then((r) => this.served(r));
@@ -1488,7 +1502,7 @@ export class ChatProposals {
     return { code: 409, body: { code: 'chat_gone', error: `chat ${chatId} ended and its id was reused; this proposal can no longer be answered here` } };
   }
 
-  private async decideLocked(chatId: string, pid: string, body: { decision: 'go' | 'not_now'; edits?: ProposalEdits | undefined; power?: boolean | undefined }, actor: Actor, instance: string | null): Promise<DecideResult> {
+  private async decideLocked(chatId: string, pid: string, body: { decision: 'go' | 'not_now'; edits?: ProposalEdits | undefined; power?: boolean | undefined; reducedAssurance?: boolean | undefined }, actor: Actor, instance: string | null): Promise<DecideResult> {
     if (this.deps.instanceOf(chatId) !== instance) return this.gone(chatId);
     const records = this.deps.records(chatId);
     const folded = foldProposals(records).get(pid);
@@ -1497,6 +1511,9 @@ export class ChatProposals {
     // (api-types 0.196.0) How it runs is a job's Start's choice, and nothing else's.
     if (body.power !== undefined && (kind !== 'job' || body.decision !== 'go')) {
       return { code: 400, body: { code: 'power_not_applicable', error: kind !== 'job' ? 'only a job runs as a power run' : 'how a job runs is chosen with Start, not Not now' } };
+    }
+    if (body.reducedAssurance !== undefined && (kind !== 'job' || body.decision !== 'go')) {
+      return { code: 400, body: { code: 'reduced_assurance_not_applicable', error: kind !== 'job' ? 'only a job can start with fewer checks' : 'choose fewer checks with Start' } };
     }
     const reread = (): FoldedProposal => foldProposals(this.deps.records(chatId)).get(pid) ?? folded;
     const ok = (f: FoldedProposal): DecideResult => ({ code: 200, body: { view: viewOf(f) } });
@@ -1527,6 +1544,15 @@ export class ChatProposals {
         const stale = await this.lock.run(`chat\u0000${instance ?? chatId}`, () => this.jobStale(chatId, folded, instance));
         if (stale !== null) return stale;
       }
+      if (kind === 'job') {
+        const can = new Set(this.deps.rosterEligible().map((s) => s.key));
+        const lost = (acc.resolution.seats?.keys ?? []).filter((k) => !can.has(k));
+        if (lost.length > 0) {
+          const reopened = this.reopenLaunch(chatId, folded, acc.resolution, instance);
+          if (reopened === null) return this.gone(chatId);
+          return { code: 409, body: { code: 'helper_unavailable', error: `${lost.join(' and ')} can't work now; change who works on it`, view: viewOf(reopened) } };
+        }
+      }
       // Go again: the frozen choices and identity, re-checked. Only the helpers may change (one may have signed out
       // since); everything else stays as accepted.
       let again = acc.resolution;
@@ -1541,6 +1567,7 @@ export class ChatProposals {
           throw err;
         }
       }
+      if (body.reducedAssurance === true) again = { ...again, reducedAssurance: true };
       return this.go(chatId, folded, again, again === acc.resolution ? acc.edits : { ...(acc.edits ?? {}), ...body.edits }, acc.identity, actor, instance, body.power);
     }
     if (folded.state === 'superseded') {
@@ -1597,6 +1624,7 @@ export class ChatProposals {
     if (effective.blocked !== null) {
       return { code: 409, body: { code: 'proposal_blocked', error: effective.blocked, view: viewOf(folded) } };
     }
+    if (body.reducedAssurance === true) effective = { ...effective, reducedAssurance: true };
     return this.go(chatId, folded, effective, body.edits ?? null, this.identityOf(effective), actor, instance, body.power);
   }
 
@@ -1605,12 +1633,22 @@ export class ChatProposals {
    * proposals of one chat (or two chats changing one document) can never both pass the busy check.
    */
   private go(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, edits: ProposalEdits | null, identity: ProposalIdentity, actor: Actor, instance: string | null, power?: boolean): Promise<DecideResult> {
-    const docKey = (resolution.kind === 'refine' || (resolution.kind === 'create' && resolution.artifactRef !== undefined)) && identity.artifactRef !== null ? identity.artifactRef : null;
+    const docKey = identity.artifactRef;
     // Keyed by the chat's instance (shared by its original id and an ended chat's archived alias), else its id.
     return this.lock.run(`chat\u0000${instance ?? chatId}`, () =>
       docKey === null
         ? this.goLocked(chatId, folded, resolution, edits, identity, actor, instance, power)
-        : this.lock.run(`doc\u0000${docKey}`, () => this.goLocked(chatId, folded, resolution, edits, identity, actor, instance, power)));
+        : this.admitDocument(docKey, () => this.goLocked(chatId, folded, resolution, edits, identity, actor, instance, power)));
+  }
+
+  /** Share Go's admission with other actions on this chat instance. */
+  admitChat<T>(chatId: string, fn: () => Promise<T>): Promise<T> {
+    return this.lock.run(`chat\u0000${this.deps.instanceOf(chatId) ?? chatId}`, fn);
+  }
+
+  /** A create, refine or retirement of the same document waits for the previous admission. */
+  admitDocument<T>(ref: string, fn: () => Promise<T>): Promise<T> {
+    return this.lock.run(`doc\u0000${ref}`, fn);
   }
 
   private async goLocked(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, edits: ProposalEdits | null, identity: ProposalIdentity, actor: Actor, instance: string | null, power?: boolean): Promise<DecideResult> {
@@ -1725,6 +1763,17 @@ export class ChatProposals {
     try {
       result = await this.deps.registry.launchOnce({ kind, pid, chatId, actor, identity, resolution, ...(power !== undefined ? { power } : {}) });
     } catch (err) {
+      if (err instanceof LaunchRefusal) {
+        const reopened = this.reopenLaunch(chatId, folded, resolution, instance);
+        if (reopened === null) return this.gone(chatId);
+        this.deps.audit('chat.proposal.launch_refused', actor, { chatId, pid, code: err.body['code'], error: err.message });
+        return { code: err.status, body: {
+          code: err.body['code'], error: err.message,
+          ...(err.body['excluded'] !== undefined ? { excluded: err.body['excluded'] } : {}),
+          ...(err.body['retryWith'] !== undefined ? { retryWith: err.body['retryWith'] } : {}),
+          view: viewOf(reopened),
+        } };
+      }
       // Accepting stays recorded: the card shows "Interrupted · Go again", which resumes the same identity.
       const msg = err instanceof Error ? err.message : String(err);
       this.deps.audit('chat.proposal.launch_failed', actor, { chatId, pid, error: msg, ...(power !== undefined ? { power } : {}) });
@@ -1734,6 +1783,15 @@ export class ChatProposals {
     if (!this.decided(chatId, folded.turnId, pid, actor, 'go', result, resolution, edits, instance, power)) return this.gone(chatId);
     const after = foldProposals(this.deps.records(chatId)).get(pid) ?? folded;
     return { code: 200, body: { view: viewOf(after) } };
+  }
+
+  private reopenLaunch(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, instance: string | null): FoldedProposal | null {
+    const proposal = { ...resolution };
+    // A Go-only opt-in belongs to that attempt; a reshape card keeps its own prior choice.
+    if (folded.proposal.reducedAssurance === true) proposal.reducedAssurance = true;
+    else delete proposal.reducedAssurance;
+    if (!this.write(chatId, { at: this.now(), turnId: folded.turnId, kind: 'proposal', proposal }, instance)) return null;
+    return foldProposals(this.deps.records(chatId)).get(resolution.pid) ?? null;
   }
 
   /** Record the answer (and audit exactly what was answered); `false` when the chat is no longer this instance. */
@@ -1762,7 +1820,7 @@ export class ChatProposals {
   /** A5: a refine card re-resolved on a newer head: its protected edits are those of the new head (Keep preselected). */
   private async onNewHead(p: ArtifactProposal): Promise<ArtifactProposal> {
     if (p.kind !== 'refine' || p.target === undefined) return p;
-    const kept = await this.protectedOf(p.target.ref, p.target.base, p.touches ?? []);
+    const kept = await this.protectedOf(p.target.ref, p.target.base, [...(p.touches ?? []), ...(p.anchors ?? [])]);
     return 'error' in kept ? { ...p, protected: [], blocked: kept.error } : { ...p, protected: kept.entries, blocked: p.blocked };
   }
 
@@ -2111,6 +2169,7 @@ export class ChatProposals {
       if (block.url !== undefined && block.url !== '' && personUrls(words).has(block.url)) inputs['url'] = { kind: 'url', value: block.url };
       const facts: JobFacts = {
         card: g.card,
+        title: block.title !== undefined && ownTitle(block.title, words) ? block.title : null,
         option: g.option,
         depth: g.depth,
         words,
@@ -2337,7 +2396,7 @@ export class ChatProposals {
     const open = [...foldProposals(this.deps.records(chatId)).values()].find((f) => (f.state === 'open' || f.state === 'revising') && f.proposal.shape !== undefined);
     if (open !== undefined) {
       const p = open.proposal;
-      context.open = { pid: p.pid, label: p.what.label, card: p.shape!.card, option: p.shape!.option, repo: p.repos[0] ?? null, seats: [...(p.seats?.keys ?? [])], checks: checksLabel(p.gate ?? []) };
+      context.open = { pid: p.pid, label: p.what.label, card: p.shape!.card, option: p.shape!.option, repo: p.repos[0] ?? null, seats: [...(p.seats?.keys ?? p.helpers?.seats ?? [])], checks: checksLabel(p.gate ?? []) };
     }
     const job = this.launchedJob(chatId);
     if (job !== null && this.deps.heldPlan !== undefined) {
@@ -2450,9 +2509,11 @@ export class ChatProposals {
   }
 
   /** A document's two default helpers from the pool, and the line that blocks it when there are none. */
-  private async docHelpers(chat: ProposalChat): Promise<{ helpers: ProposalHelpers | null; block: string | null; seatsUnread?: boolean }> {
+  private async docHelpers(chat: ProposalChat, chosen?: readonly string[]): Promise<{ helpers: ProposalHelpers | null; block: string | null; seatsUnread?: boolean }> {
     const { pool, refusal } = await this.seatPool();
-    const helpers = this.helpers(chat, undefined, pool);
+    const eligible = new Set(this.deps.rosterEligible().map((s) => s.key));
+    const seats = chosen === undefined ? undefined : [...new Set(chosen)].filter((k) => eligible.has(k)).slice(0, 2);
+    const helpers = this.helpers(chat, seats, pool);
     return { helpers, block: helpers === null ? NEEDS_HELPER : null, ...(refusal !== undefined ? { seatsUnread: true } : {}) };
   }
 
@@ -2468,7 +2529,7 @@ export class ChatProposals {
     const qeOff = (await this.deps.qeOff?.().catch(() => false)) === true;
     const powerPresets = (await this.deps.powerPresets?.(chat.projectId).catch(() => null)) ?? null;
     const { eligible: roster, pool, refusal } = await this.seatPool();
-    return { chatId, pid, turnId, seat, chat, served, roster, pool, projectLabel, qeOff, powerPresets, ...extra, ...(refusal !== undefined ? { seatsUnread: true } : {}) };
+    return { chatId, pid, turnId, seat, chat, served, roster, pool, projectLabel, qeOff, powerPresets, ...(this.deps.coverage !== undefined ? { coverage: (keys: readonly string[], bound: boolean) => this.deps.coverage!(keys, bound) } : {}), ...extra, ...(refusal !== undefined ? { seatsUnread: true } : {}) };
   }
 
   /** Source availability matters only to a card that shows this input. Keep a failed read a named refusal. */
@@ -2565,9 +2626,20 @@ export class ChatProposals {
     const turnId = ctx.turnId ?? `person:${pid.slice(pid.lastIndexOf(':') + 1)}`;
     // Crew's kind line goes first, as `withBriefLines` puts it on a run: a long request is cut at its end, never the line.
     const words = [r.resolved.brief ?? '', briefOf(facts)].filter((x) => x !== '').join('\n\n');
-    const made = await this.resolve({ chatId, turnId, seat: ctx.seat, block: { op: 'entry', entry: seed.id, brief: words, sources: ['chat'], repos: facts.repoRef !== null ? [facts.repoRef] : [] }, records });
+    const chosen = facts.lead === null && facts.seats === null ? undefined
+      : [...new Set([facts.lead, ...(facts.seats ?? [])].filter((k): k is string => k !== null))];
+    const made = await this.resolve({ chatId, turnId, seat: ctx.seat, ...(chosen !== undefined ? { helperSeats: chosen } : {}), block: { op: 'entry', entry: seed.id, ...(facts.title !== null ? { title: facts.title } : {}), brief: words, sources: ['chat'], repos: facts.repoRef !== null ? [facts.repoRef] : [] }, records });
     if (made === null) throw new JobRefusal('operation_unavailable', 'studio cannot start a document from a chat on this daemon yet', 409);
     const shape: ProposalShape = { card: card.id, option: r.option?.id ?? null, depth: null, by: facts.by, source: facts.source, ...(facts.guess !== undefined ? { guess: facts.guess } : {}) };
+    const nameOf = (key: string): string => ctx.roster.find((s) => s.key === key)?.name ?? key;
+    const extra = (chosen ?? []).filter((k) => ctx.roster.some((s) => s.key === k)).slice(2);
+    const helperNotes = extra.length > 0 ? [`${extra.map(nameOf).join(', ')} left out: a document uses two helpers`] : [];
+    const choices = (ctx.pool ?? ctx.roster).filter((s) => s.key !== made.helpers?.seats[0]).slice(0, 4).map((s) => ({ label: `${s.name} writes`, edit: { lead: s.key } }));
+    const seatsTok: ProposalToken = {
+      id: 'seats', kind: 'seats',
+      label: made.helpers === null ? 'two helpers needed' : `${nameOf(made.helpers.seats[0]!)} writes, ${nameOf(made.helpers.seats[1]!)} checks`,
+      swap: choices.length > 0 ? { choices } : null,
+    };
     const kindTok = { id: 'kind', kind: (card.variant !== undefined ? 'option' : 'card') as 'option' | 'card', label: nounOf(card, shape.option), swap: null };
     const checksTok = { id: 'checks', kind: 'checks' as const, label: checksLabel(r.resolved.gate), swap: null };
     const documentsInput = r.resolved.inputs.find((i) => i.id === 'documents');
@@ -2599,8 +2671,9 @@ export class ChatProposals {
       command: r.option?.command ?? card.command,
       gate: [...r.resolved.gate],
       words: facts.words,
+      ...(facts.title !== null ? { namedTitle: facts.title } : {}),
       details: [...facts.details],
-      sentence: { text: `I'll make {kind} from this conversation${documentsInput !== undefined ? ', reading {documents}' : ''}, filed in ${made.filedIn.label}, checked by {checks}.`, tokens: [kindTok, ...documentsTok, checksTok], notes: [...ctx.notes], ask: offline !== null ? null : question?.text ?? (made.blocked === null ? 'Start?' : null) },
+      sentence: { text: `I'll make {kind} from this conversation${documentsInput !== undefined ? ', reading {documents}' : ''}, filed in ${made.filedIn.label}, written by {seats}, checked by {checks}.`, tokens: [kindTok, ...documentsTok, seatsTok, checksTok], notes: [...ctx.notes, ...helperNotes], ask: offline !== null ? null : question?.text ?? (made.blocked === null ? 'Start?' : null) },
       suggestions: [],
       question,
       revises: ctx.revises,
@@ -2611,10 +2684,13 @@ export class ChatProposals {
   }
 
   /** Resolve facts to their proposal. `previous` marks a rebuild; null is a held job without a stored parent. */
-  private async proposalOf(chatId: string, pid: string, facts: JobFacts, ctx: JobContext, records: readonly ChatTranscriptRecord[], allowHidden = false, previous?: ArtifactProposal | null): Promise<ArtifactProposal> {
+  private async proposalOf(chatId: string, pid: string, facts: JobFacts, ctx: JobContext, records: readonly ChatTranscriptRecord[], allowHidden = false, previous?: ArtifactProposal | null, relaunch = previous?.relaunch): Promise<ArtifactProposal> {
     const card = CATALOG_V2_CARDS.find((c) => c.id === facts.card);
     const r = card === undefined ? null : resolveOption(card.id, optionFor(card, facts.option), ctx.served);
     await this.loadJobSources(facts, ctx);
+    if (relaunch !== undefined && this.deps.coverage !== undefined) {
+      ctx = { ...ctx, coverage: (keys, bound) => this.deps.coverage!(keys, bound, relaunch) };
+    }
     ctx = await this.reviewRoster(facts, ctx);
     if (r?.resolved.inputs.some((i) => i.id === 'documents')) {
       if (facts.inputs['documents'] === undefined) {
@@ -2697,6 +2773,7 @@ export class ChatProposals {
         }
         const facts: JobFacts = {
           card,
+          title: null,
           option,
           depth: body.depth ?? null,
           words: (body.words ?? '').slice(0, 8000),
@@ -2932,7 +3009,7 @@ export class ChatProposals {
     // (F1/F2) What a removal did, from the card as published (never from the merge, which a loss question can hold).
     // A document's workers are its helpers (a revision can make a job a document; codex r2).
     const workers = candidate.seats !== undefined ? candidate.seats.keys : (candidate.helpers?.seats ?? []);
-    const removal = seatRemovalNote(edits.removeSeats, parent.proposal.seats?.keys ?? [], workers, (k) => ctx.roster.find((s) => s.key === k)?.name ?? k, candidate.seats !== undefined);
+    const removal = seatRemovalNote(edits.removeSeats, parent.proposal.seats?.keys ?? parent.proposal.helpers?.seats ?? [], workers, (k) => ctx.roster.find((s) => s.key === k)?.name ?? k);
     const proposal = removal.length === 0 || candidate.sentence === undefined ? candidate : { ...candidate, sentence: { ...candidate.sentence, notes: [...candidate.sentence.notes, ...removal] } };
     if (!this.write(chatId, { at: this.now(), turnId: src.turnId ?? `person:${src.pid.slice(src.pid.lastIndexOf(':') + 1)}`, kind: 'proposal', proposal }, instance)) return this.gone(chatId);
     const view = foldProposals(this.deps.records(chatId)).get(src.pid);
@@ -3074,7 +3151,7 @@ export class ChatProposals {
         });
         if (ctx.seatsUnread) continue;
         const r = resolveOption(p.shape!.card, p.shape!.option, ctx.served);
-        if (r === null || ctx.served.rev !== p.catalogRev || r.resolved.resolution !== p.resolution || p.blocked !== seatsShortLine(r)) continue;
+        if (r === null || ctx.served.rev !== p.catalogRev || r.resolved.resolution !== p.resolution || p.blocked !== seatsShortLine(r, p.seats?.keys.length ?? 0)) continue;
         if ((ctx.pool ?? ctx.roster).length < seatsNeeded(r)) continue;
         const facts = { ...factsOf(p), lead: null, seats: null };
         const fresh = keepReshape(await this.proposalOf(chatId, p.pid, facts, ctx, this.deps.records(chatId), true, p), p);
@@ -3265,7 +3342,7 @@ export class ChatProposals {
             const gone = await this.firstGone(chatId, heldP);
             if (gone !== null) throw new JobRefusal('source_gone', gone, 409);
           }
-          proposal = await this.proposalOf(chatId, x.pid, facts, ctx, this.deps.records(chatId), false, heldP ?? null);
+          proposal = await this.proposalOf(chatId, x.pid, facts, ctx, this.deps.records(chatId), false, heldP ?? null, x.relaunch);
           if (x.edits.inputs?.['documents'] !== undefined) this.refuseStruckDocuments(proposal);
           else if (heldP !== undefined) this.refuseStruckDocuments(proposal, heldP);
         } catch (err) {
@@ -3383,11 +3460,11 @@ export class ChatProposals {
       // Named by the chat's own id (an ended chat's archive alias still holds the same proposals).
       const pid = `${base.chatId}:retry:${runId}`;
       if (folded.has(pid)) return pid;
-      // A5 (codex r1): a refine's retry is drawn on the document as it is now (a conflict moved its head), with the
-      // protected edits of that head, Keep preselected for every one.
+      // A retry keeps the accepted choices only for edit ids still present on the new head.
       const fresh = base.kind === 'refine' && base.target !== undefined ? await this.refreshTarget(base) : base;
       const retry: ArtifactProposal = {
         ...fresh,
+        ...(base.kind === 'refine' ? { allow: (failed.accepting?.edits?.allow ?? []).filter((id) => fresh.protected?.some((e) => e.id === id)) } : {}),
         pid,
         turnId: null,
         sourceRunId: runId,

@@ -13,7 +13,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
@@ -139,11 +139,12 @@ describe('the watch registry on the daemon', () => {
     expect(settings.watch?.entries?.['registry-lagging']).toMatchObject({ enabled: false, enabled_changed: { by: 'root-op' } });
     const h = (await (await call('GET', '/api/v1/watch/health', TOKENS.operator)).json()) as WatchHealth;
     expect(h.entries.off).toEqual([{ id: 'registry-lagging', by: 'root-op', at: expect.any(Number) }]);
-    // The audit trail names the watch change.
-    await new Promise((r) => setTimeout(r, 100));
-    const trail = readFileSync(join(dir, 'audit.log'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
-    const updated = trail.filter((e) => e['action'] === 'settings.updated');
-    expect(updated.at(-1)).toMatchObject({ detail: { changed: ['watch'], watch: patch.watch } });
+    // The audit trail names the watch change. Read through the trail's own route (crew#1303): it awaits every
+    // append issued before it, so the PUT's entry is there however slow the disk is; no fixed sleep.
+    const trail = (await (await call('GET', '/api/v1/audit?action=settings.updated&limit=1', TOKENS.person)).json()) as {
+      entries: Array<Record<string, unknown>>;
+    };
+    expect(trail.entries[0]).toMatchObject({ actor: { id: 'root-op' }, detail: { changed: ['watch'], watch: patch.watch } });
 
     // A caller cannot forge the stamp, and a bad patch names the key.
     const forged = await call('PUT', '/api/v1/settings', TOKENS.person, {

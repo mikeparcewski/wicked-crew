@@ -13,6 +13,11 @@ describe('the system classification agrees across defs, presets and runs', () =>
     expect(withSystemFlag(def('campaign-check')).is_system).toBe(true);
     expect(withPresetSystemFlag({ name: 'campaign-check' }).system).toBe(true);
   });
+  it('the sourced draft is system like interactive-draft: served is_system, no hand launch (wicked-core#1357)', () => {
+    expect(isSystemWorkflow('interactive-draft-sourced')).toBe(true);
+    expect(withSystemFlag(def('interactive-draft-sourced')).is_system).toBe(true);
+    expect(withPresetSystemFlag({ name: 'interactive-draft-sourced' }).system).toBe(true);
+  });
   it('an ordinary def is not, and a stale flag is cleared', () => {
     expect('is_system' in withSystemFlag(def('mine', { is_system: true }))).toBe(false);
     expect(withSystemFlag(def('chat')).is_system).toBe(true);

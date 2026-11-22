@@ -175,6 +175,10 @@ curl -X POST http://127.0.0.1:7701/api/v1/runs \
 wicked-crew start --problem "Fix the flaky retry test" --workflow bug
 ```
 
+Remove an unused repository registration with `DELETE /api/v1/repos/<id>`. Its checkout, graph
+and worktrees stay on disk. Non-terminal runs and project membership block removal (409);
+an older engine without repository removal answers 501.
+
 **With only one CLI signed in**, a governed run cannot be evaluated or judged by a seat other than the
 one that built it. Under the default (full) assurance the engine refuses a review on its builder's
 seat and holds a gate whose judge has no distinct seat, so the run waits for a second CLI; the launch
@@ -207,11 +211,21 @@ wicked-crew serve --uninstall-service      # stop and remove it
 ```
 
 - **macOS:** a LaunchAgent at `~/Library/LaunchAgents/com.wickedagile.wicked-crew.plist` (RunAtLoad,
-  KeepAlive), loaded into your login session. Restart it with
+  restart on failure with a 30-second throttle), loaded into your login session. After an upgrade restart it with
   `launchctl kickstart -k gui/$(id -u)/com.wickedagile.wicked-crew`.
 - **Linux:** a systemd user unit at `~/.config/systemd/user/wicked-crew.service` (Restart=on-failure).
+  After an upgrade restart it with `systemctl --user restart wicked-crew.service`.
   Run `loginctl enable-linger $USER` so it starts at boot without a login session.
 - **Windows:** not automated; `--install-service` prints a Task Scheduler recipe.
+
+These names are for the default port, 7701. Other ports have separate services: port 7702 uses
+`com.wickedagile.wicked-crew.7702.plist` (label `com.wickedagile.wicked-crew.7702`),
+`wicked-crew-7702.service`, or the Windows task `wicked-crew-7702`. Use that label or unit in the
+restart commands, and pass `--port 7702` to install, uninstall, and status (or set `CREW_PORT`).
+
+To hand off a daemon started in a terminal, stop its pid, wait until its port is free, then run
+`wicked-crew serve --install-service` with the same port and options. Run `wicked-crew status`
+with that port to check the service has started.
 
 The service manager starts the daemon with an almost empty environment, so the install captures
 `PATH`, `HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `CREW_PORT`, `GH_ACCOUNT` and every `WICKED_*`
@@ -224,6 +238,12 @@ deliver phase then pushes with `GH_ACCOUNT`'s own gh token (read from gh's keyri
 
 `wicked-crew status` with no daemon answering exits 1 with one line: start it with
 `wicked-crew serve` (or `--install-service`), or, when the service is installed, read its log.
+
+**Drain before an upgrade.** Send `POST /api/v1/maintenance` with `{"drain":true}`, then poll
+`GET /api/v1/maintenance` until `idle` is true. The daemon refuses new launches, resumes and gate
+answers that start work (503 `maintenance_drain`); rejects and power-pause Stop remain available.
+`active` lists runs still planning, distributing or executing. Restart or upgrade once idle; drain
+state is in memory and clears on restart. To cancel maintenance, post `{"drain":false}`.
 
 The CLI surface is `wicked-crew serve|start|resume|gate|status|mcp|governance|version` — `mcp` runs a
 stdio MCP server (crew-as-a-tool for coding agents), `gate` answers a pending human gate from the

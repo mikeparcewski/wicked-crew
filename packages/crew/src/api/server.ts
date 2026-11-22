@@ -12,7 +12,9 @@ import type { ConsiderationService } from '../decisions/consider.js';
 import { requestOrigin, shellCsp } from '../editors/csp.js';
 import { conformanceRuntimeRoot, exportEngineConformanceEnv, exportManagedChrome, managedChromium } from '../editors/conformance-runtime.js';
 import { launchRosterNaming, registerRoutes } from './routes.js';
+import { sweepStagedDocuments } from './run-documents.js';
 import { APPS_ACTIONS_STATE_FILENAME, AppActionStore } from '../apps/actions/store.js';
+import { AppsRedescriber } from '../apps/exec/redescribe.js';
 import { AppsSourceStage } from '../apps/exec/source-stage.js';
 import { APPS_STATE_FILENAME, AppStore, defaultAppsRoot } from '../apps/store.js';
 import { agentMay } from '../knowledge/gate/access.js';
@@ -647,8 +649,11 @@ export async function createServer(
   // `runtime.rosterWithStanding`), the four interactive seams (`roster`), and the adapter's own
   // launches (`setRosterProvider` → `seatsForWorkflow` / `wicked-crew start`). Read at call time,
   // so a seat signed in from the Agents page is eligible on the very next launch.
+  // wicked-crew#1705: hold roster admissions from setup until the background ladder settles.
+  let skillsLanded = options?.skills?.disabled === true || options?.skills?.background !== true;
   const rosterWithStanding = rosterWithStandingFactory({
     seatHealth,
+    skillsLanded: () => skillsLanded,
     ...(options?.seats?.signedIn !== undefined ? { signedIn: options.seats.signedIn } : {}),
     // The broker status cache reads the gateway the ENGINE arms (beside this adapter's store),
     // the same dir the sign-in routes pass (agy crew-r1).
@@ -798,7 +803,7 @@ export async function createServer(
       skillsBoot = skillsRuntime.startBoot((health, ms) => {
         const gen = health.current === null ? '' : ` (generation ${health.current.gen})`;
         app.log.info(`[skills] boot ladder landed in ${ms}ms: ${health.state}${gen} — launches held while it ran proceed now`);
-      });
+      }).finally(() => { skillsLanded = true; });
     } else {
       await skillsRuntime.apply();
       await skillsRuntime.autoRefreshOnBoot();
@@ -930,6 +935,9 @@ export async function createServer(
       }
     }
   } catch (err) {
+    // crew#1442: a run launched before this boot then has an unknown source pick; one whose store entry is gone is
+    // refused its source calls (fail closed) until a restart reads the trail.
+    runTimingIndex.markLaunchHistoryUnreadable();
     app.log.warn(
       `[runs] launch-index hydrate failed (prior runs read as not-a-retry / ungrouped / undated, without their chat_id link, until restart): ${
         err instanceof Error ? err.message : String(err)
@@ -1682,6 +1690,13 @@ export async function createServer(
       (runId, detail) => audit.record('run.cancelled', SCHEDULE_ACTOR, { runId, detail }),
     ),
     onTick: [(status) => reviewService.reconcile(status)],
+    // (crew#1656) An unattended refusal is told on the activity trail too, not only on its schedule row: one entry per
+    // refused attempt, for every scheduled workflow (the review also keeps its failed review record, crew#1608).
+    onScheduledRefusal: (row, reason) => {
+      audit.record('schedule.launch_refused', SCHEDULE_ACTOR, {
+        detail: { id: row.id, workflow: row.workflow, trigger: 'schedule', reason: reason.slice(0, 500) },
+      });
+    },
     log: (m) => app.log.info(m),
   });
   registerScheduleRoutes(app, {
@@ -1803,6 +1818,7 @@ export async function createServer(
       groundingStore: docGrounding,
       // DES-CHAT-ARTIFACTS-001 §5.2 (A3): chat-made documents.
       bindings: docBindings,
+      chatIdOf: (chatId, instance) => chatHistory.idOfInstance(chatId, instance),
       onBoundDocCreated: (ref) => onBoundDocCreated(ref),
       onBoundOutcome,
       landings: docLandings,
@@ -2742,14 +2758,17 @@ export async function createServer(
   });
   // DES-KNOWLEDGE-DATA-001 §4.1: every stored catalog's STRUCTURE (never a row) is projected into estate's knowledge
   // plane, keyed by the registry id; what was described before this release is projected once, off the boot path.
-  const sourceProjector = new SourceProjector({ store: mcpRegistryStore, catalogs: mcpRegistry.catalogs, log: (m) => app.log.warn(m) });
+  // crew#1328: the acknowledgements are kept beside the registry, so a restart does not hide a projected source until
+  // the boot projection lands (estate need not be up at boot for it).
+  const sourceProjector = new SourceProjector({ store: mcpRegistryStore, catalogs: mcpRegistry.catalogs, log: (m) => app.log.warn(m), acksFile: join(mcpRegistryStore.directory, 'knowledge-acks.json') });
   mcpRegistry.catalogs.onWritten = (name) => sourceProjector.written(name);
   // crew#1328: a restored generation changes what estate must hold for a source with no catalog written.
   mcpRegistry.onSourceChanged = (name) => sourceProjector.written(name);
   void sourceProjector.backfill();
   // DES-PM-001 §3.4: every linked tracker (and every retired one) projected into estate, reconciled; a tracker's
   // link state shows on its TrackerLink. The boot backfill sends what estate may not hold yet.
-  const trackerAddresses = new TrackerAddresses();
+  // crew#1352: the store is a bounded cache; each run's `run.launched` entry is the durable record of its addresses.
+  const trackerAddresses = new TrackerAddresses(undefined, { launched: { of: (runId) => runTimingIndex.addressesOf(runId), all: () => runTimingIndex.allAddresses() } });
   const trackerProjector = new TrackerProjector({ store: mcpRegistryStore, addresses: () => trackerAddresses.all(), delivered: (runId) => deliveryIndex.urlFor(runId), log: (m) => app.log.warn(m) });
   // A delivered PR joins the trail (`closes`) at the next reconcile; this one runs every ten minutes as well.
   const trackerTimer = setInterval(() => trackerProjector.changed(), 10 * 60_000);
@@ -2757,6 +2776,13 @@ export async function createServer(
   app.addHook('onClose', async () => clearInterval(trackerTimer));
   mcpRegistry.trackerProjection = trackerProjector.projection;
   mcpRegistry.onRestored = () => trackerProjector.changed();
+  // crew#1328, crew#1354: a removed source's structure and a removed PM entry's trackers are erased from estate, each by
+  // the one writer of its id (the registry keeps the tombstones, so a restart before estate takes them still erases
+  // them: the source backfill and the tracker reconcile above read them at boot).
+  mcpRegistry.onTombstoned = (targets) => {
+    sourceProjector.erase(targets.filter((t) => t.kind === 'source').map((t) => t.id));
+    if (targets.some((t) => t.kind === 'tracker')) trackerProjector.changed();
+  };
   trackerProjector.changed();
   // §4.3: what a unit's knowledge reads may see — the sources its project may see (the gate's predicate) and its repos.
   const projectVisible = async (projectId: string | null, repoId: string | null = null): Promise<string[]> => {
@@ -2780,9 +2806,12 @@ export async function createServer(
   const unitVisible = (scope: EstateUnitScope): Promise<string[]> => projectVisible(scope.projectId, scope.repoId);
   // DES-KNOWLEDGE-DATA-001 §9.1: an app's knowledge query sees what a unit in the APP'S project sees (the same set).
   const appsKnowledgeVisible = (projectId: string): Promise<string[]> => projectVisible(projectId);
+  // One project predicate for the builder, governed check, live reads and action steps.
+  const appsVisibleSources = async (projectId: string | null): Promise<ReadonlySet<string>> => new Set((await dataGate.sources()).filter((s) => agentMay(s.access, s, projectId, 'see')).map((s) => s.name));
   // (DES-CATALOG-002 CS4/CS10) Each run's source pick: recorded at launch (POST /runs), read by the broker, the unit's
   // tool list and the estate relay, so a unit never reaches a registered source its job did not pick.
-  const runSourcePicks = new RunSourcePicks(join(crewStateHome(), 'mcp', 'run-source-picks.json'));
+  // crew#1442: a run the store no longer holds keeps the pick its launch recorded (fail closed, never widened).
+  const runSourcePicks = new RunSourcePicks(join(crewStateHome(), 'mcp', 'run-source-picks.json'), (runId) => runTimingIndex.recordedPickOf(runId));
   /** Every registered source and PM tracker id with its owning source's name: how the relay maps `source:<id>` to a pick. */
   const sourceOwnerNames = async (): Promise<Array<{ id: string; name: string }>> => {
     const out = (await dataGate.sources()).map((s) => ({ id: s.id, name: s.name }));
@@ -2807,6 +2836,7 @@ export async function createServer(
       // so a version holding queries or actions lands when they pass (DES §9.2 step 3).
       sourceStage: new AppsSourceStage({
         registry: mcpRegistry,
+        visibleSources: appsVisibleSources,
         // (DES-KNOWLEDGE-DATA-001 §9.1) A `recall` query is checked against what its app's project may see.
         knowledge: { sources: () => dataGate.sources(), visible: appsKnowledgeVisible },
         projectOf: (slug) => appStore?.projectOf(slug) ?? null,
@@ -2849,6 +2879,10 @@ export async function createServer(
   } catch (err) {
     app.log.error(`[apps] the app store cannot be read, so Apps is off: ${err instanceof Error ? err.message : String(err)}`);
   }
+  // Like the tracker timer, descriptions refresh off the request path and stop with this daemon.
+  const appsRedescriber = new AppsRedescriber({ store: () => appStore, registry: mcpRegistry, log: (m) => app.log.warn(m) });
+  appsRedescriber.start();
+  app.addHook('onClose', async () => appsRedescriber.close());
   const appsVerifyUnitToken = appStore !== null && CoreAdapter.estateScopeResolver() !== null
     ? appsUnitResolver((req) => {
         const resolve = CoreAdapter.estateScopeResolver();
@@ -2858,7 +2892,7 @@ export async function createServer(
     : undefined;
   const mcpBroker = new McpBroker({
     ...(appStore !== null && appsVerifyUnitToken !== undefined ? { apps: new AppsSelfCheck(appStore, appsVerifyUnitToken, {
-      visibleSources: async (projectId) => new Set((await dataGate.sources()).filter((s) => agentMay(s.access, s, projectId, 'see')).map((s) => s.name)),
+      visibleSources: appsVisibleSources,
     }) } : {}),
     picks: runSourcePicks,
     registry: mcpRegistry,
@@ -2979,7 +3013,7 @@ export async function createServer(
       // Route tests drive `registerMcpRoutes` over their own registry (tests/mcp-registry.test.ts).
       mcp: mcpRegistry,
       // DES-APPS-001 (K2a): the app store (`daemon-apps.json` in the state home; repos under the apps root).
-      ...(appStore !== null ? { apps: appStore } : {}),
+      ...(appStore !== null ? { apps: appStore, appsVisibleSources } : {}),
       // (DES-APPS-001 K5) `POST /apps/check`: the engine resolves the unit's token; crew reads which step it is.
       ...(appsVerifyUnitToken !== undefined ? { appsVerifyUnitToken } : {}),
       ...(appStore !== null && appActions !== null ? { appsActions: appActions } : {}),
@@ -3360,6 +3394,12 @@ export async function startServer(
   options?: CreateServerOptions,
 ): Promise<StartedServer> {
   const app = await createServer(adapter, options);
+  // crew#1429: staged document folders whose run the engine never took (a launch that died after staging).
+  try {
+    sweepStagedDocuments(runDocumentsRootDir(), new Set(await adapter.sessions()));
+  } catch (err) {
+    app.log.warn(`[runs] staged documents sweep skipped: ${err instanceof Error ? err.message : String(err)}`);
+  }
   await app.listen({ port, host });
   const clock = app.bootStages ?? new BootStageClock();
   clock.lap('listen');

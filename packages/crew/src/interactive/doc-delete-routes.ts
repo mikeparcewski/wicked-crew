@@ -54,6 +54,7 @@ import { DOC_NAME } from './draft-events.js';
 import type { DocLedgerSweep } from './doc-ledger-sweep.js';
 import { projectDocsRoot } from './project-root.js';
 import { WORKING_DOC_REFUSED_MESSAGE, isWorkingDoc } from './chat-events.js';
+import { UNFILED_MOUNT, chatMount } from '../api/chat-context.js';
 
 const V = API_PREFIX;
 
@@ -74,6 +75,7 @@ export interface DocDeleteDeps {
   /** DES-CHAT-ARTIFACTS-001 (A3): why the document cannot be retired now (a chat proposal's attempt at it has no
    *  outcome yet: it would never get one), or `null`. */
   busyReason?: (projectId: string, documentId: string) => string | null;
+  admitDocument<T>(ref: string, fn: () => Promise<T>): Promise<T>;
   env?: NodeJS.ProcessEnv;
   /** The daemon state home the DEFAULT docs root hangs off (crew ≥ 0.7.35, D-L7-1; tests point it at a scratch dir). */
   stateHome?: string;
@@ -144,6 +146,7 @@ export function registerInteractiveDocDelete(
           .send({ error: 'unknown doc', name: doc, ledger: { ok: true, removed_keys: [] } });
       }
 
+      return deps.admitDocument(`${chatMount(projectId) ?? UNFILED_MOUNT}/${doc}`, async () => {
       const root = await rootFor(projectId);
       if (root === null) {
         return reply.code(404).send({ error: `Project ${projectId} not found` });
@@ -290,6 +293,7 @@ export function registerInteractiveDocDelete(
       // Both halves done: the bridge's own 200 body (first retire carries `event_id`; a repeat
       // carries `already_retired: true` and the original `retired_at`) plus crew's ledger report.
       return reply.code(200).send({ ...upstream.body, ledger: sweep });
+      });
     },
   );
 }

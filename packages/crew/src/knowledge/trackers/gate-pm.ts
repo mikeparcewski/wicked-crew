@@ -135,8 +135,10 @@ export async function projectOptsVia(pm: object, e: PmEntry, credential: string 
 
 /** Why a vendor call failed, as a class (and an HTTP status when the transport saw one): never the vendor's words. */
 export function upstreamFailure(err: unknown): string {
-  const cls = classifyUpstreamError(err).errorClass;
-  const code = (err as { code?: unknown } | null)?.code;
+  const classified = classifyUpstreamError(err);
+  const cls = classified.errorClass;
+  // crew#1367: the invoker hands back a classified error, which keeps the status; a raw transport error keeps `code`.
+  const code = classified.status ?? (err as { code?: unknown } | null)?.code;
   const status = cls === 'http' && typeof code === 'number' && Number.isInteger(code) && code >= 100 && code <= 599 ? ` ${code}` : '';
   const words: Record<string, string> = { transport: 'the connection failed', timeout: 'it did not answer in time', http: 'the server answered HTTP', protocol: 'the MCP exchange failed', boundary: 'crew stopped the call at its boundary' };
   return `${words[cls] ?? cls}${status}`;
