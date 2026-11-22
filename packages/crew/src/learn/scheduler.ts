@@ -225,6 +225,14 @@ export class LearnScheduler {
         now,
       );
       this.deps.log(`[learn-schedule] ${due.id} launch refused (${failures}): ${message}`);
+      // (crew#1656) Told on the activity trail too, in the generic scheduler's words, not only on the learn row.
+      try {
+        this.deps.audit.record('schedule.launch_refused', LEARN_SCHEDULE_ACTOR, {
+          detail: { id: due.id, workflow: LEARN_WORKFLOW, trigger: 'schedule', reason: message.slice(0, 500) },
+        });
+      } catch (auditErr) {
+        this.deps.log(`[learn-schedule] ${due.id}: telling its refusal failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`);
+      }
       return;
     }
     // The launch happened: record it FIRST, so a failure in the bookkeeping below can never

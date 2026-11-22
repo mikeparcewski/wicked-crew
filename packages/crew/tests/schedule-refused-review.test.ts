@@ -127,5 +127,14 @@ describe('a refused scheduled review (server)', () => {
     expect(manual?.runId).not.toBe(review.runId);
     expect(after.running).toBe(false);
     expect(launchRun).not.toHaveBeenCalled();
+
+    // (crew#1656) The scheduled refusal is on the activity trail, once; the person's Run it now answered its own.
+    const trail = await app.inject({ method: 'GET', url: '/api/v1/audit?action=schedule.launch_refused' });
+    expect(trail.statusCode, trail.body).toBe(200);
+    const entries = (trail.json() as { entries: Array<{ actor: { id: string }; detail?: Record<string, unknown> }> }).entries;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.actor.id).toBe('workflow-schedule');
+    expect(entries[0]!.detail).toMatchObject({ id: REVIEW_WORKFLOW, workflow: REVIEW_WORKFLOW, trigger: 'schedule' });
+    expect(String(entries[0]!.detail?.['reason'])).toMatch(/no signed-in, eligible agent seat/);
   }, 20_000);
 });
