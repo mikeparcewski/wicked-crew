@@ -3,7 +3,7 @@
  *
  * - **Exact scoring** (§9.2): a clear case is right only when the card AND the option both match (every option, not
  *   only plan-changing ones) and the band is not `ask`. An ambiguous case accepts only its listed shapes (a bare card in
- *   the list accepts any option of it). A coming case is right when the coming card (and option) is named. Depth is
+ *   the list accepts any option of it), decided or among an ask's choices (crew#1446). A coming case is right when the coming card (and option) is named. Depth is
  *   reported apart: it is a brief line, never a plan change.
  * - **The release checks and targets** of §9.2 are computed from one pass ({@link scoreShapeCorpus}); CI asserts them on
  *   the shipped words layer plus the recorded seat fixture. The live numbers are the integrator's (`run-evals` with
@@ -68,6 +68,15 @@ export function acceptable(card: string, option: string | null, allowed: readonl
   return allowed.includes(key(card, option)) || allowed.includes(card);
 }
 
+/**
+ * Whether an ask offers at least one acceptable shape among its choices (crew#1446): a question whose choices are all
+ * unsuitable (or that offers none) is not a right answer to an ambiguous case. Extra choices beside an acceptable one
+ * are fine, because the person picks.
+ */
+export function askOffersAcceptable(question: ShapeGuess['question'], allowed: readonly string[]): boolean {
+  return (question?.choices ?? []).some((c) => acceptable(c.card, c.option, allowed));
+}
+
 /** The option a case expects: the one it names, else the card's default (a card with options always has one). */
 export function expectedOption(card: string | undefined, option: string | undefined): string | null {
   if (option !== undefined) return option;
@@ -101,7 +110,7 @@ export interface ShapeMetrics {
   /** Release check: ≥ 0.95. */
   right: number;
   wrongAtSure: string[];
-  /** Release check: 0. */
+  /** Release check: 0. Ambiguous cases decided onto an unacceptable shape, or asked with no acceptable choice (crew#1446). */
   ambiguousUnacceptable: string[];
   /** Target: ≤ 10 %. */
   heldLikely: number;
@@ -149,7 +158,14 @@ export function scoreShapeCorpus(corpus: ShapeCorpus, answers: Record<string, Ra
       m.ambiguous += 1;
       if (guess.band === 'ask') {
         m.ambiguousAsked += 1;
-        right = true;
+        // An ask is right only when it offers an acceptable shape (crew#1446).
+        if (askOffersAcceptable(guess.question, c.expect.ask ?? [])) {
+          right = true;
+        } else {
+          m.ambiguousUnacceptable.push(c.id);
+          const offered = (guess.question?.choices ?? []).map((x) => key(x.card, x.option));
+          note = `asked with no acceptable choice (${offered.length > 0 ? offered.join(', ') : 'none offered'})`;
+        }
       } else if (!acceptable(guess.card, guess.option, c.expect.ask ?? [])) {
         m.ambiguousUnacceptable.push(c.id);
         note = `decided ${guess.band} onto ${key(guess.card, guess.option)}`;
@@ -202,7 +218,7 @@ export function shapeReport(m: ShapeMetrics): Record<string, number | string> {
   return {
     'card and option right, clear cases': `${m.right}/${m.clear} (${rate(m.right, m.clear).toFixed(3)})`,
     'wrong at sure': m.wrongAtSure.length,
-    'ambiguous decided onto an unacceptable shape': m.ambiguousUnacceptable.length,
+    'ambiguous decided onto an unacceptable shape, or asked with no acceptable choice': m.ambiguousUnacceptable.length,
     'clear cases held as likely': `${m.heldLikely}/${m.clear} (${rate(m.heldLikely, m.clear).toFixed(3)})`,
     'asked on a clear case': `${m.askedOnClear}/${m.clear}`,
     'ambiguous asked': `${m.ambiguousAsked}/${m.ambiguous} (${rate(m.ambiguousAsked, m.ambiguous).toFixed(3)})`,
@@ -362,7 +378,8 @@ export function shapeKey(card: string, option: string | null | undefined): strin
 
 /** What a clear, coming or ambiguous corpus case expects, as one label. */
 function expectedLabel(c: ShapeCase): string {
-  // An ambiguous case is right when it asks or lands on one of its listed shapes (§9.2).
+  // An ambiguous case is right when it lands on one of its listed shapes, or asks with one of them among its choices
+  // (§9.2, crew#1446).
   if (c.kind === 'ambiguous') return 'acceptable';
   if (c.kind === 'coming') return c.expect.coming ?? '';
   return key(c.expect.card ?? '', expectedOption(c.expect.card, c.expect.option));
@@ -388,7 +405,10 @@ export function shapeCorpusCases(corpus: ShapeCorpus = loadShapeCorpus(), answer
 export function observedOf(text: string, seat: RawGuess | null, acceptableShapes?: readonly string[]): Observed {
   const { guess } = classifyPathSync({ text, catalogRev: 'replay' }, seat);
   const label = guess.band === 'ask' ? 'ask' : key(guess.card, guess.option);
-  if (acceptableShapes !== undefined && (guess.band === 'ask' || acceptable(guess.card, guess.option, acceptableShapes))) return { label: 'acceptable', by: 'replay' };
+  if (acceptableShapes !== undefined) {
+    const ok = guess.band === 'ask' ? askOffersAcceptable(guess.question, acceptableShapes) : acceptable(guess.card, guess.option, acceptableShapes);
+    if (ok) return { label: 'acceptable', by: 'replay' };
+  }
   return { label, confidence: guess.confidence, by: 'replay' };
 }
 
