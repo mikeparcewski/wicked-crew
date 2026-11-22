@@ -141,7 +141,7 @@ describe('the publish manifest', () => {
     const { input, registry } = fixture({ actions: [] });
     const asked: Array<string | null> = [];
     const service = (visible: string[]) => new PublishService({
-      engine: { launchRun: async () => 'never', sessionsDetail: async () => [] },
+      engine: { launchRun: async () => 'never', runView: async () => undefined },
       roster: async () => '[]',
       registry,
       grantOf: () => null,
