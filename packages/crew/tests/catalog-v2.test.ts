@@ -127,44 +127,60 @@ describe('the v2 wire', () => {
     const builtinSteps = (name: string): PresetStep[] => presets.find((p) => p.name === name && p.created_by === 'builtin')!.steps;
     const shadow = (name: string, steps: PresetStep[], instruments: string[] = []): Preset =>
       ({ name, steps, created_by: 'me', scope: 'global', required_instruments: instruments }) as unknown as Preset;
+    const QE = ['distinct_evaluator', 'judge', 'qe_acceptance'];
+    const whats = (steps: PresetStep[]): string[] => promisesOf(steps, entries).map((p) => p.what);
+    const resolve = (preset: Preset, card: string, option: string | null) => resolveOption(card, option, servedState({ defs, presets: [...presets, preset], entries }))!;
     const offWith = (preset: Preset, card: string, option: string | null, lacks: RegExp): void => {
-      const r = resolveOption(card, option, servedState({ defs, presets: [...presets, preset], entries }))!;
+      const r = resolve(preset, card, option);
       expect(r.resolved, `${card}:${option}`).toMatchObject({ status: 'unavailable', statusNote: expect.stringMatching(/fewer checks/u) });
       expect(r.resolved.statusNote, `${card}:${option}`).toMatch(lacks);
       // The weaker shadow still runs from Yours.
-      const v = build({ presets: [...presets, preset] });
       if (preset.name !== 'interactive-draft-sourced') {
-        expect(v.cards.find((c) => c.category === 'yours' && c.launch.kind === 'run' && c.launch.workflow === preset.name)).toMatchObject({ source: 'saved', status: 'available' });
+        expect(build({ presets: [...presets, preset] }).cards.find((c) => c.category === 'yours' && c.launch.kind === 'run' && c.launch.workflow === preset.name)).toMatchObject({ source: 'saved', status: 'available' });
       }
+    };
+    const keeps = (preset: Preset, card: string, option: string | null, source: 'saved' | 'studio'): void => {
+      expect(resolve(preset, card, option).resolved, `${card}:${option}`).toMatchObject({ status: 'available', source });
     };
     // A sourced report without its fidelity check (the step keeps its place; only the rubric is gone).
     const report = builtinSteps('sourced-report');
-    expect(promisesOf(report, entries)).toContain('the fidelity-to-source check');
-    offWith(shadow('sourced-report', report.map((s) => { const out = { ...s }; delete out.rubric; return out; })), 'competitive', null, /fidelity-to-source check/u);
+    expect(whats(report)).toContain('the fidelity-to-source check');
+    offWith(shadow('sourced-report', report.map((s) => { const out = { ...s }; delete out.rubric; return out; })), 'competitive', null, /fidelity-to-source check on its `\w[\w-]*` step/u);
     // An editor plugin without its consent before install (the steps that carry it dropped), even with every instrument.
     const plugin = builtinSteps('editor-plugin');
-    expect(promisesOf(plugin, entries)).toContain('consent before install');
-    const noConsent = plugin.filter((s) => !promisesOf([s], entries).includes('consent before install'));
-    offWith(shadow('editor-plugin', noConsent, ['distinct_evaluator', 'judge', 'qe_acceptance']), 'studio-plugin', 'editor', /consent before install/u);
-    // A migration without its unconditional cutover hold, parity kept.
+    expect(whats(plugin)).toContain('consent before install');
+    const noConsent = plugin.filter((s) => !whats([s]).includes('consent before install'));
+    offWith(shadow('editor-plugin', noConsent, QE), 'studio-plugin', 'editor', /consent before install/u);
+    // A migration without its unconditional cutover hold, parity kept; and one whose hold moved to another step.
     const migration = builtinSteps('migration');
-    expect(promisesOf(migration, entries)).toContain('a hold for a person');
-    const noHold = migration.map((s) => (promisesOf([s], entries).includes('a hold for a person') ? { ...s, gate: null } : s));
-    expect(promisesOf(noHold, entries)).not.toContain('a hold for a person');
-    offWith(shadow('migration', noHold, ['distinct_evaluator', 'judge', 'qe_acceptance']), 'migrate', 'move', /a hold for a person/u);
+    const held = promisesOf(migration, entries).find((p) => p.what === 'a hold for a person')!;
+    expect(held).toBeDefined();
+    const noHold = migration.map((s) => (s.id === held.step ? { ...s, gate: null } : s));
+    expect(whats(noHold)).not.toContain('a hold for a person');
+    offWith(shadow('migration', noHold, QE), 'migrate', 'move', /a hold for a person on its `[\w-]+` step/u);
+    const moved = noHold.map((s, i) => (i === 0 ? { ...s, gate: { human_confirm: { unconditional: true } } } : s));
+    expect(migration[0]!.id).not.toBe(held.step);
+    expect(whats(moved)).toContain('a hold for a person');
+    offWith(shadow('migration', moved, QE), 'migrate', 'move', /a hold for a person/u);
     // A sourced draft without its check: Respond is off.
     const draft = builtinSteps('interactive-draft-sourced');
-    expect(promisesOf(draft, entries)).toContain('the fidelity-to-source check');
+    expect(whats(draft)).toContain('the fidelity-to-source check');
     offWith(shadow('interactive-draft-sourced', draft.filter((s) => s.rubric === undefined)), 'respond', 'rfp', /fidelity-to-source check/u);
-    // Shadows that keep every promise resolve to them ("Your version"), the draft included.
-    const keeps = (preset: Preset, card: string, option: string | null): void => {
-      const r = resolveOption(card, option, servedState({ defs, presets: [...presets, preset], entries }))!;
-      expect(r.resolved.status, `${card}:${option}`).toBe('available');
-    };
-    keeps(shadow('sourced-report', report), 'competitive', null);
-    keeps(shadow('editor-plugin', plugin, ['distinct_evaluator', 'judge', 'qe_acceptance']), 'studio-plugin', 'editor');
-    keeps(shadow('interactive-draft-sourced', draft), 'respond', 'rfp');
-    expect(resolveOption('competitive', null, servedState({ defs, presets: [...presets, shadow('sourced-report', report)], entries }))!.resolved.source).toBe('saved');
+    // Shadows that keep every promise resolve to them ("Your version"); consent before the held step keeps its hold.
+    keeps(shadow('sourced-report', report), 'competitive', null, 'saved');
+    keeps(shadow('editor-plugin', plugin, QE), 'studio-plugin', 'editor', 'saved');
+    keeps(shadow('migration', migration.map((s) => (s.id === held.step ? { ...s, gate: 'consent_before' } : s)), QE), 'migrate', 'move', 'saved');
+    keeps(shadow('interactive-draft-sourced', draft), 'respond', 'rfp', 'studio');
+    // A project's listing carries its shadow INSTEAD of the built-in row: the built-in def is the baseline.
+    const projectListing = (preset: Preset): Preset[] => [...presets.filter((p) => p.name !== preset.name), { ...preset, scope: 'project:p1' } as Preset];
+    const inProject = (preset: Preset, card: string, option: string | null) => resolveOption(card, option, servedState({ defs, presets: projectListing(preset), entries }))!.resolved;
+    expect(inProject(shadow('interactive-draft-sourced', draft), 'respond', 'rfp').status).toBe('available');
+    expect(inProject(shadow('interactive-draft-sourced', draft.filter((s) => s.rubric === undefined)), 'respond', 'rfp')).toMatchObject({ status: 'unavailable', statusNote: expect.stringMatching(/fewer checks/u) });
+    expect(inProject(shadow('sourced-report', report), 'competitive', null)).toMatchObject({ status: 'available', source: 'saved' });
+    // A saved row with no built-in row or def behind it is not a shadow: the card's workflow is not served.
+    const bare = servedState({ defs: defs.filter((d) => d.id !== 'interactive-draft-sourced' && d.id !== 'sourced-report'), presets: projectListing(shadow('interactive-draft-sourced', draft)).filter((p) => p.name !== 'sourced-report').concat([{ ...shadow('sourced-report', report), scope: 'project:p1' } as Preset]), entries });
+    expect(resolveOption('respond', 'rfp', bare)!.resolved).toMatchObject({ status: 'unavailable', statusNote: expect.stringMatching(/does not serve/u) });
+    expect(resolveOption('competitive', null, bare)!.resolved).toMatchObject({ status: 'unavailable', statusNote: expect.stringMatching(/does not serve/u) });
   });
 
   it('a card whose preset the engine does not serve is unavailable, never dropped; an unseeded served def joins Yours', () => {
