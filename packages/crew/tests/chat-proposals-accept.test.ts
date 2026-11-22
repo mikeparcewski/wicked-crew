@@ -9,8 +9,10 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Actor, ArtifactProposal, ChatTranscriptRecord, CoreEvent, SessionView } from '../src/core/types.js';
 import { CATALOG_SEEDS } from '../src/workflow-catalog/catalog-data.js';
 import {
+  CHAT_ENDED,
   ChatProposals,
   foldProposals,
+  LaunchRefusal,
   LaunchOnceRegistry,
   proposalRunId,
   type ChatProposalDeps,
@@ -156,6 +158,16 @@ beforeEach(() => {
 });
 
 describe('the resolver', () => {
+  it.each([
+    ['make a deck called Domain coverage for new engineers', 'Domain coverage', 'Domain coverage'],
+    ['make a deck for new engineers', 'Invented by the seat', 'Presentation'],
+  ])('an entry block keeps its title only when the person said it (crew#1728): %s', async (words, title, expected) => {
+    const r = rig();
+    const t = chatWith(r, 'c1', { words });
+    const p = (await propose(r, 'c1', t, { entry: 'presentation', title }))!;
+    expect(p.what.title).toBe(expected);
+  });
+
   it('a refine of an unnamed or out-of-scope document is blocked before anything of it is read, and carries no target', async () => {
     const r = rig();
     const t = chatWith(r, 'c1', { projectId: 'mikes' });
@@ -295,7 +307,7 @@ describe('the resolver', () => {
     const r = rig();
     const t = chatWith(r, 'a1', { analysis: true });
     expect(await propose(r, 'a1', t, { entry: 'presentation' })).toBeNull();
-    const t2 = chatWith(r, 'c1');
+    const t2 = chatWith(r, 'c1', { words: 'a deck called First, please' });
     await propose(r, 'c1', t2, { entry: 'presentation', title: 'First' });
     r.svc.onReply({ chat: 'c1', cliKey: 'codex', turnId: t2, ok: true, blocks: [JSON.stringify({ entry: 'presentation', title: 'Second' })] });
     await r.svc.settled();
@@ -462,7 +474,7 @@ describe('the accept flow', () => {
 
   it('an interrupted Go whose helper signed out resumes with two working helpers chosen now (and nothing else changed)', async () => {
     const r = rig();
-    const t = chatWith(r, 'c1');
+    const t = chatWith(r, 'c1', { words: 'a deck titled Keep' });
     const p = (await propose(r, 'c1', t, { entry: 'presentation', title: 'Keep' }))!;
     r.records.get('c1')!.push({ at: 3, turnId: t, kind: 'proposal_accepting', pid: p.pid, actor: 'maria', edits: null, resolution: p, identity: { artifactRef: '_unfiled/keep', runId: proposalRunId(p.pid) } });
     r.roster = [{ key: 'claude', name: 'Claude Code' }, { key: 'pi', name: 'Pi' }];
@@ -505,6 +517,39 @@ describe('the accept flow', () => {
     const stub: ProposalDispatcher = { stub: true, find: async () => true, launch: async () => undefined };
     stubReg.register('create', stub);
     expect(await stubReg.find('create', { artifactRef: null, runId: 'x' })).toStrictEqual({ stub: true });
+  });
+
+  it('every refusal after the accepting write names that record (crew#1695)', async () => {
+    const r = rig();
+    const t = chatWith(r, 'c1');
+    const p = (await propose(r, 'c1', t, { entry: 'presentation' }))!;
+    r.launcher.fail = 'engine down';
+    const failed = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    const accepting = r.records.get('c1')!.filter((x) => x.kind === 'proposal_accepting');
+    expect(accepting).toHaveLength(1);
+    expect(failed).toMatchObject({ code: 502, body: { code: 'launch_failed', acceptingAt: accepting[0]!.at } });
+    // A typed launch refusal (it reopens the card) names it too.
+    r.launcher.fail = null;
+    const refusing: ProposalDispatcher = { find: async () => false, launch: async () => { throw new LaunchRefusal(409, { code: 'power_unavailable', error: 'no power here' }); } };
+    const reg = (r.svc as unknown as { deps: ChatProposalDeps }).deps.registry;
+    reg.register('create', refusing);
+    const refused = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    const second = r.records.get('c1')!.filter((x) => x.kind === 'proposal_accepting');
+    expect(second).toHaveLength(2);
+    expect(refused).toMatchObject({ code: 409, body: { code: 'power_unavailable', acceptingAt: second[1]!.at } });
+    // The rig's clock never moves: each Go's record is still told apart (xreview r2).
+    expect(second[1]!.at).toBeGreaterThan(second[0]!.at);
+  });
+
+  it('a chat that ended is refused without its id (crew#1745)', async () => {
+    const r = rig();
+    const t = chatWith(r, 'c1');
+    const p = (await propose(r, 'c1', t, { entry: 'presentation' }))!;
+    r.instances.set('c1', 'i2');
+    const out = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    expect(out).toMatchObject({ code: 409, body: { code: 'chat_gone', error: CHAT_ENDED } });
+    expect(JSON.stringify(out.body)).not.toContain('c1');
+    expect(CHAT_ENDED).toMatch(/new chat/u);
   });
 
   it('a chat closed and its id reused mid-accept: nothing is recorded on the new chat and nothing starts', async () => {

@@ -21,7 +21,7 @@
  * it is and name the fix.
  */
 
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -548,17 +548,49 @@ export function latestDraftRender(units: readonly unknown[] | undefined): Record
   return best?.rec ?? null;
 }
 
+/** The counter's path below a garden root (wicked-core `draft_render::COUNTER_SCRIPT`). */
+export const DRAFT_PAGE_COUNTER_SCRIPT = 'scripts/draft/page_count.py';
+
+/**
+ * (crew#1750) Who would print the count here: the sha256 of the `page_count.py` this floor runs (its own garden root)
+ * and its browser's own `--version` line. `null` for what this floor cannot name; a count is then never reused.
+ */
+export interface DraftRenderIdentity {
+  counterSha256: string | null;
+  rendererVersion: string | null;
+}
+
 /**
  * (PLAN G12) The engine's measured page count when it is this floor's own measurement of these exact bytes: `outcome`
  * `measured`, an integer count of at least one, the same sha256 (lowercase hex of the raw bytes, the landing record's
- * key) and the same print profile. Anything else is `null`, and the floor prints (or estimates) as before.
+ * key) and the same print profile. (crew#1750, core#1337) And printed the way this floor would print it: the record's
+ * `counter_sha256` and `renderer_version` equal the floor's own ({@link DraftRenderIdentity}); a record without them
+ * (an older engine) is not reused. Anything else is `null`, and the floor prints (or estimates) as before.
  */
-export function reusablePageCount(record: Record<string, unknown> | null, sha256: string | null): number | null {
+export function reusablePageCount(record: Record<string, unknown> | null, sha256: string | null, identity: DraftRenderIdentity): number | null {
   if (record === null || sha256 === null) return null;
   const pages = record['pages'];
   if (record['outcome'] !== 'measured' || typeof pages !== 'number' || !Number.isInteger(pages) || pages < 1) return null;
   if (record['sha256'] !== sha256 || record['profile'] !== DRAFT_RENDER_PROFILE) return null;
+  if (identity.counterSha256 === null || record['counter_sha256'] !== identity.counterSha256) return null;
+  if (identity.rendererVersion === null || record['renderer_version'] !== identity.rendererVersion) return null;
   return pages;
+}
+
+/** (crew#1750) The first non-empty line of a `--version` answer, trimmed, at most 200 characters (core's
+ *  `draft_render::read_version`), or `null`. */
+export function versionLine(text: string): string | null {
+  const line = text.split(/\r?\n/u).map((l) => l.trim()).find((l) => l !== '');
+  return line === undefined ? null : [...line].slice(0, 200).join('');
+}
+
+/** (crew#1750) The browser's own `--version` line, or `null` when it does not answer one in time. */
+export function rendererVersionOf(chrome: string, timeoutMs = 5_000): Promise<string | null> {
+  return new Promise((resolvePromise) => {
+    execFile(chrome, ['--version'], { timeout: timeoutMs, env: childEnvWithBootEstateDb() }, (err, stdout) => {
+      resolvePromise(err !== null ? null : versionLine(String(stdout)));
+    });
+  });
 }
 
 /**
@@ -620,8 +652,11 @@ export interface DraftFloorIo {
   /** (PLAN G12) The run's own `draft_render` record (the engine's {@link latestDraftRender} of its units), read when the
    *  floor runs. A measurement of the same bytes with the same profile is reused ({@link reusablePageCount}). */
   engineRender?: (runId: string) => Promise<Record<string, unknown> | null>;
-  /** The draft's bytes, for the sha256 a reuse is matched on. Default: `readFileSync`. */
+  /** The draft's bytes, for the sha256 a reuse is matched on (and the counter's, for its identity). Default:
+   *  `readFileSync`. */
   readBytes?: (path: string) => Buffer;
+  /** (crew#1750) The browser's own `--version` line ({@link rendererVersionOf}). */
+  rendererVersion?: (chrome: string) => Promise<string | null>;
   /** How long {@link engineRender} may take before the floor prints instead. Default {@link DRAFT_RENDER_READ_TIMEOUT_MS}. */
   engineRenderTimeoutMs?: number;
   timeoutMs?: number;
@@ -674,7 +709,13 @@ export async function runDraftFloor(
   // the self-check runs without its own render. Any doubt (no record, another hash, another profile, not measured, a
   // read that fails) and the floor prints or estimates as before.
   let reused: number | null = null;
-  if (budget.pages !== null && opts.runId !== undefined && io.engineRender !== undefined) {
+  let chrome: string | null;
+  try {
+    chrome = io.chrome?.() ?? null;
+  } catch {
+    chrome = null;
+  }
+  if (budget.pages !== null && opts.runId !== undefined && io.engineRender !== undefined && chrome !== null) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       // Bounded: the record is an optimisation, and a read that stalls must not hold the floor (and the document's
@@ -682,23 +723,19 @@ export async function runDraftFloor(
       const expiry = new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error('the run read took too long')), io.engineRenderTimeoutMs ?? DRAFT_RENDER_READ_TIMEOUT_MS);
       });
-      const record = await Promise.race([io.engineRender(opts.runId), expiry]);
-      const sha = createHash('sha256').update((io.readBytes ?? readFileSync)(outPath)).digest('hex');
-      reused = reusablePageCount(record, sha);
+      const [record, rendererVersion] = await Promise.race([Promise.all([io.engineRender(opts.runId), (io.rendererVersion ?? rendererVersionOf)(chrome)]), expiry]);
+      const read = io.readBytes ?? readFileSync;
+      const sha = createHash('sha256').update(read(outPath)).digest('hex');
+      const counterSha256 = createHash('sha256').update(read(join(root, DRAFT_PAGE_COUNTER_SCRIPT))).digest('hex');
+      reused = reusablePageCount(record, sha, { counterSha256, rendererVersion });
     } catch {
       reused = null;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
   }
-  let chrome: string | null = null;
-  if (reused === null) {
-    try {
-      chrome = io.chrome?.() ?? null;
-    } catch {
-      chrome = null;
-    }
-  }
+  // A reused count needs no browser: the self-check runs without its own render.
+  if (reused !== null) chrome = null;
   const argv = draftFloorArgv(root, outPath, budget, snapshotDirs, { ...opts, render: chrome !== null });
   let answer: { stdout: string; code: number | null };
   try {

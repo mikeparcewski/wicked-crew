@@ -33,6 +33,12 @@ export const STATE_HOME_ENTRY_NAMES: ReadonlyArray<string> = [
   // The k8s seats' replica .git builders, a disposable engine cache — wicked-core `src/k8s/seat.rs`
   // GitBuild::build (core#1678; registered by core#1699).
   'k8s-replica-git',
+  // The k8s seat images' inspected facts, an engine cache — wicked-core `src/container_floor.rs` seat_facts_path
+  // (core#1102, core#1440; registered by core#1692).
+  'seat-image-facts',
+  // Transient image exports loaded into a kind or k3s node — wicked-core `src/k8s/images.rs` archive_dir (core#1398;
+  // registered by core#1692).
+  'image-archives',
   'project-settings.json',
   // DES-learn-workflow §5: the learn schedules — `src/learn/schedule-store.ts`.
   'learn-schedules.json',

@@ -690,6 +690,7 @@ export function registerSourceRoutes(app: FastifyInstance, deps: SourceRouteDeps
             table: up.table,
             header: up.header,
             sample: actor.kind === 'human' ? up.sample : [],
+            dropped: up.dropped,
             catalog: up.catalog,
           };
           return reply.code(201).send(body);

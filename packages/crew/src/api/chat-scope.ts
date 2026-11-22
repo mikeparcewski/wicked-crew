@@ -816,6 +816,8 @@ export function chatJobLines(mode: 'cards' | 'prose'): string[] {
     'ONE question naming them and send no block. One block per reply at most. A question about the code is answered,',
     'with no block.',
     'A document\'s `title` is included only when the person named one, in their words.',
+    '`lead` (who builds or writes) and `seats` (who else works on it, such as who checks) only when the person named',
+    'them in this message, as seat keys in their order: "Codex writes it and Pi checks it" is `"lead":"codex","seats":["pi"]`.',
     '',
     '**A change to the open proposal** ("make it a move", "use billing-api", "add pi too", "go deep"): answer in at most',
     'two sentences, then end with ONE revision block naming the open proposal (its id is in the message\'s job lines):',
@@ -1195,9 +1197,9 @@ export function daemonGroundingLines(g: DaemonGrounding): string[] {
       '```',
       '',
       'Give the address exactly as they wrote it. `project`: the listed project they named (its id); null when they named',
-      'none (the repository joins this chat\'s project, if it has one). When their words match no listed project, or more',
-      'than one, ask ONE question naming the listed projects and send no block (a new project is made on Projects → New',
-      'project). A repository already in the list is not added again: say where it is; only to put it into another project',
+      'none (the repository joins this chat\'s project, if it has one). A project they named that is not listed: its name',
+      'as they said it, and the card offers to create it. When their words match more than one listed project, ask ONE',
+      'question naming them and send no block. A repository already in the list is not added again: say where it is; only to put it into another project',
       'send the block with its address. Never say you added, cloned or started it.',
     );
   } else {

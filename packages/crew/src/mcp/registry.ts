@@ -1501,11 +1501,17 @@ export function addEstateTombstones(file: McpRegistryFile, targets: readonly Est
   if (list.length > 0) file.estateTombstones = list;
 }
 
-/** Drop the tombstones of `kind` whose id `settled` names (their writer erased them, or the id is live again). */
-export function dropEstateTombstones(file: McpRegistryFile, kind: EstateTombstone['kind'], settled: ReadonlySet<string>): void {
-  if (file.estateTombstones === undefined) return;
+/**
+ * Drop the tombstones of `kind` whose id `settled` names (their writer erased them, or the id is live again). Answers
+ * whether any was dropped (crew#1740: a writer that drops none writes nothing).
+ */
+export function dropEstateTombstones(file: McpRegistryFile, kind: EstateTombstone['kind'], settled: ReadonlySet<string>): boolean {
+  if (file.estateTombstones === undefined) return false;
+  const before = file.estateTombstones.length;
   file.estateTombstones = file.estateTombstones.filter((t) => t.kind !== kind || !settled.has(t.id));
+  const changed = file.estateTombstones.length !== before;
   if (file.estateTombstones.length === 0) delete file.estateTombstones;
+  return changed;
 }
 
 /** A data source of any form: K1 `sql`/`graphql`, or a Toolbox-form database source. */

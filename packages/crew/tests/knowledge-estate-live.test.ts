@@ -137,6 +137,46 @@ describe.skipIf(EXE === '' || process.platform === 'win32')('the knowledge packa
     for (const s of sources) expect(projector.projectedDescriptor(s.id), s.name).not.toBeNull();
   }, 120_000);
 
+  it("crew#1741: an acknowledgement kept across a restart is confirmed by estate's own generation, never by a swapped store", async () => {
+    const store = new McpRegistryStore(join(base, 'acks', 'mcp'));
+    const catalogs = new SourceCatalogStore(join(base, 'acks', 'catalogs'));
+    const stamp = '2026-11-04T05:00:00Z';
+    const record: McpServerRecord & { id: string } = {
+      id: 'acks-source-1', name: 'acks-pg', kind: 'sql',
+      command: null, args: [], url: null, auth: null, enabled: true, tools: [],
+      health: { state: 'ok', consecutiveFailures: 0, checkedAt: stamp, lastError: null },
+      registeredAt: stamp, updatedAt: stamp,
+      sql: { driver: 'postgres', host: 'db.test', port: 5432, database: 'd', user: 'u', tls: 'disable' },
+    };
+    await store.mutate((file) => { file.servers = [record]; });
+    await catalogs.write(record.name, { descriptorHash: sourceDescriptorHash(configOf(record)), catalog: catalogOf(['tickets'], stamp) });
+    const acksFile = join(base, 'acks', 'mcp', 'knowledge-acks.json');
+    const first = new SourceProjector({ store, catalogs, call: write, acksFile });
+    expect(await first.project(record.name)).toBe(true);
+    const key = first.projectedDescriptor(record.id);
+    expect(key).not.toBeNull();
+    // A restarted daemon's boot backfill, against `estate`: what it admits at the moment its projection is sent.
+    const restartAgainst = async (estate: typeof write): Promise<string | null> => {
+      let atSend: string | null | undefined;
+      const projector: SourceProjector = new SourceProjector({
+        store, catalogs, acksFile,
+        call: async (tool, args) => {
+          if (tool === 'knowledge.replace_source' && atSend === undefined) atSend = projector.projectedDescriptor(record.id);
+          return estate(tool, args);
+        },
+      });
+      expect(projector.projectedDescriptor(record.id)).toBeNull();
+      await projector.backfill();
+      expect(projector.projectedDescriptor(record.id)).toBe(key);
+      return atSend ?? null;
+    };
+    // Estate still holds the acknowledged generation: admitted before the projection is sent.
+    expect(await restartAgainst(write)).toBe(key);
+    // Estate's knowledge store was swapped while crew was down: nothing is admitted until the projection lands.
+    const swapped = (tool: string, args: Record<string, unknown>) => callEstateTool(tool, args, { spawn: () => spawn(EXE, [], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...env(), WICKED_KNOWLEDGE_DB: join(base, 'swapped-knowledge.db') } }), timeoutMs: 60_000 });
+    expect(await restartAgainst(swapped)).toBeNull();
+  }, 120_000);
+
   it('estate takes the generation, and a later one without a relation tombstones it', async () => {
     const first = (await write('knowledge.replace_source', sourceGeneration(source(['tickets', 'customers'], '2026-11-04T03:00:00Z'), 1000)! as never)) as Record<string, unknown>;
     expect(first).toMatchObject({ sourceId: SOURCE_ID, docs: 2 });
