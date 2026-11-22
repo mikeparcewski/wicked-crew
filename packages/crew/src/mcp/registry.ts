@@ -57,7 +57,7 @@ import { checkSourceDocument, DeploymentPolicyError, policyVersionOf } from '../
 import { canonicalJson, deriveToolClass, effectiveToolClass, APPS_SERVER, ESTATE_SERVER, type HashedRestTarget, type HashedToolShape, MCP_SERVER_NAME_RE, mcpSubject, parseMcpSubject, sha256Hex, toolSchemaHash } from './classify.js';
 import { envFingerprint } from './env.js';
 import type { McpUpstreamConfig, ProbedTool, ProbeResult, Prober } from './probe.js';
-import { GENERATIONS_KEPT, type McpRegistryFile, type McpRegistryStore, type McpServerRecord, type McpToolRecord } from './registry-store.js';
+import { type EstateTombstone, GENERATIONS_KEPT, type McpRegistryFile, type McpRegistryStore, type McpServerRecord, type McpToolRecord } from './registry-store.js';
 import { restTarget } from './rest.js';
 import { type AddressPolicy, classifyAddress, exactRangesFor, NO_CONFIRMATION } from '../sources/dialer.js';
 import { CREW_SOURCE, type SourceDescription, sourceDescriptorHash, sqlFromToolboxEntry, toolboxEntryFromSql } from '../sources/kinds.js';
@@ -194,6 +194,11 @@ export class McpRegistry {
   trackerProjection: TrackerProjectionLookup = PROJECTION_UNKNOWN;
   /** (DES-PM-001 §3.4) Called once a restore has landed (the daemon points it at the tracker projector). */
   onRestored: (() => void) | undefined;
+  /**
+   * (crew#1328, crew#1354) Called once a removal or a restore that dropped records has landed, with the estate source
+   * ids it tombstoned ({@link estateSourceIds}); the daemon has their writers erase them. Never throws in.
+   */
+  onTombstoned: ((targets: EstateTarget[]) => void) | undefined;
 
   constructor(private readonly deps: McpRegistryDeps) {
     this.now = deps.now ?? Date.now;
@@ -386,6 +391,9 @@ export class McpRegistry {
     }
     const prior = held.secret === null ? null : await this.deps.secrets.get(held.config.name);
     if (held.secret !== null) await this.deps.secrets.set(held.config.name, held.secret);
+    // (crew#1328 item 3) A save that changes a source's allowed views with no new description changes its projection key
+    // with no catalog written: it is named once the write lands, so its structure is projected again now.
+    let viewsChanged = false;
     const saved = await this.restoreSecretOnFailure(held.config.name, held.secret !== null, prior, () => this.mutate(async (file) => {
       const prior = file.servers.find((s) => s.name === held.config.name);
       // (DES-PM-001 §3) A PM entry stays the PM system it was registered as: a re-save that drops the marker, or
@@ -474,9 +482,21 @@ export class McpRegistry {
       // The description lands INSIDE the record's own write (the store serializes mutations), so a
       // record and its description can never be paired with another save's.
       if (held.source !== null) await this.catalogs.write(record.name, { ...held.source, descriptorHash: sourceDescriptorHash(configOf(record)) });
+      const viewsOf = (r: McpServerRecord | undefined): string => JSON.stringify([...new Set(r?.viewsAllowed ?? [])].sort());
+      viewsChanged = held.source === null && prior !== undefined && isSourceRecord(record) && viewsOf(prior) !== viewsOf(record);
       return record;
     }));
+    if (viewsChanged) this.sourceChanged(saved.name);
     return this.view(saved);
+  }
+
+  private tombstoned(targets: EstateTarget[]): void {
+    if (targets.length === 0) return;
+    try {
+      this.onTombstoned?.(targets);
+    } catch {
+      // the listener's own failure; the tombstones are in the registry and the next reconcile sends them
+    }
   }
 
   private sourceChanged(name: string): void {
@@ -631,14 +651,18 @@ export class McpRegistry {
 
   /** Remove a server, and the keychain secret it owns (`keychain:wicked-mcp/<name>`). */
   async remove(name: string): Promise<void> {
-    const removed = await this.mutate(async (file) => {
+    const { removed, tombstoned } = await this.mutate(async (file) => {
       const s = this.find(file.servers, name);
       file.servers = file.servers.filter((x) => x.name !== name);
       // Inside the mutation, serialized with every save and upload: a source saved under this name
       // next writes its catalog after this deletion, never before it.
       if (isSourceRecord(s)) await this.catalogs.remove(name);
-      return s;
+      // (crew#1328, crew#1354) What estate holds of it is erased, in this same write, so a restart never forgets it.
+      const ids = estateSourceIds(s);
+      addEstateTombstones(file, ids, new Date(this.now()).toISOString());
+      return { removed: s, tombstoned: ids };
     });
+    this.tombstoned(tombstoned);
     if (removed.auth?.ref === keychainRef(name) && this.deps.secrets.available) {
       try {
         await this.deps.secrets.delete(name);
@@ -1066,14 +1090,21 @@ export class McpRegistry {
       s.health = { ...s.health, checkedAt: stamp, lastError: `secret_missing: ${s.auth.ref} resolves to no secret; set it, then switch ${s.name} on` };
       s.updatedAt = stamp;
     }
-    const current = await this.mutate((file) => {
+    const { current, tombstoned } = await this.mutate((file) => {
       if (expected !== undefined) {
         const late = file.servers.map((s) => s.name).filter((n) => !expected.includes(n));
         if (late.length > 0) throw new McpRegistryError(409, 'registry_busy', `${late.join(', ')} was registered while the restore ran; nothing was restored: try again`);
       }
+      // (crew#1328, crew#1354) A source or tracker the restored generation does not hold is erased from estate too; one
+      // it brings back is not (its own projection replaces what estate holds).
+      const kept = servers.flatMap(estateSourceIds);
+      const dropped = file.servers.flatMap(estateSourceIds).filter((t) => !kept.some((k) => k.id === t.id && k.kind === t.kind));
+      for (const kind of ['source', 'tracker'] as const) dropEstateTombstones(file, kind, new Set(kept.filter((k) => k.kind === kind).map((k) => k.id)));
+      addEstateTombstones(file, dropped, stamp);
       file.servers = servers;
-      return file.generation ?? 0;
+      return { current: file.generation ?? 0, tombstoned: dropped };
     });
+    this.tombstoned(tombstoned);
     for (const s of servers) if (isSourceRecord(s)) this.sourceChanged(s.name);
     // (DES-PM-001 §3.4) A restored generation brings its tracker links back: the projection reconciles to them.
     this.onRestored?.();
@@ -1442,6 +1473,40 @@ export function diffTools(registered: ReadonlyArray<Pick<McpToolRecord, 'name' |
 }
 
 // ── The one registry's entry (DES-KNOWLEDGE-DATA-001 §5) ─────────────────────────────────────────
+
+/** An estate source id a record's structure lives under, and which projector writes it. */
+export type EstateTarget = Pick<EstateTombstone, 'id' | 'kind'>;
+
+/**
+ * (crew#1328, crew#1354) The estate source ids a record's structure lives under: a data source's entry id (its
+ * projected catalog), and a PM entry's trackers, retired ones included.
+ */
+export function estateSourceIds(s: McpServerRecord): EstateTarget[] {
+  const out: EstateTarget[] = [];
+  if (isSourceRecord(s)) out.push({ id: entryId(s), kind: 'source' });
+  if (pmOf(s) !== null) {
+    for (const t of trackersOf(s)) out.push({ id: t.id, kind: 'tracker' });
+    for (const r of s.retired ?? []) out.push({ id: r.id, kind: 'tracker' });
+  }
+  return out;
+}
+
+/**
+ * Add `targets` to the registry's tombstones. An id already waiting keeps its tombstone (its writer erases by id, after
+ * reading the registry, so one is enough); nothing is ever evicted (codex on #1735: a dropped one is never erased).
+ */
+export function addEstateTombstones(file: McpRegistryFile, targets: readonly EstateTarget[], at: string): void {
+  const list = file.estateTombstones ?? [];
+  for (const t of targets) if (!list.some((x) => x.id === t.id && x.kind === t.kind)) list.push({ id: t.id, kind: t.kind, at });
+  if (list.length > 0) file.estateTombstones = list;
+}
+
+/** Drop the tombstones of `kind` whose id `settled` names (their writer erased them, or the id is live again). */
+export function dropEstateTombstones(file: McpRegistryFile, kind: EstateTombstone['kind'], settled: ReadonlySet<string>): void {
+  if (file.estateTombstones === undefined) return;
+  file.estateTombstones = file.estateTombstones.filter((t) => t.kind !== kind || !settled.has(t.id));
+  if (file.estateTombstones.length === 0) delete file.estateTombstones;
+}
 
 /** A data source of any form: K1 `sql`/`graphql`, or a Toolbox-form database source. */
 export function isSourceRecord(s: Pick<McpServerRecord, 'kind'>): boolean {
