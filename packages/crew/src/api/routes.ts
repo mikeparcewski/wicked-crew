@@ -326,7 +326,7 @@ import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, 
 import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, removeStagedDocuments, stagedDocumentsRemoved, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
 import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks, webScopeReason } from './run-sources.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
-import { CHAT_ENDED, LaunchRefusal, ChatProposals, LaunchOnceRegistry, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
+import { CHAT_ENDED, LaunchRefusal, ChatProposals, LaunchOnceRegistry, liveInRuns, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
 import { CATALOG_SEEDS } from '../workflow-catalog/catalog-data.js';
 import { registerInteractiveDocList } from '../interactive/doc-list-routes.js';
 import { REVIEWS_DIRNAME } from '../interactive/review-ledger.js';
@@ -2592,20 +2592,37 @@ export function registerRoutes(
       ...[adapter.vaultBin != null ? vaultBinWarning(adapter.vaultBin) : null].filter((w) => w !== null),
     ];
   // crew#1157: the engine's built-in presets are compiled in, so the chat workflows it carries are
-  // read once (on the first probe that can read them) and held until restart.
+  // read once and held until restart. crew#1767: the read is an actor round trip, so it starts here,
+  // at registration (the first probe usually finds it held), at most one is in flight, and `/health`
+  // waits for it only inside the ping's own bound: a probe while the actor is busy answers `[]` (the
+  // engine's answer is not known yet) and a later probe answers the held list. A failed read is
+  // dropped, so the next probe reads again.
   let chatWorkflowsHeld: string[] | null = null;
-  const chatWorkflowsNow = async (): Promise<string[]> => {
-    if (chatWorkflowsHeld !== null) return chatWorkflowsHeld;
-    if (typeof adapter.listPresets !== 'function') return [];
-    try {
-      chatWorkflowsHeld = servedChatWorkflows(await adapter.listPresets());
-      return chatWorkflowsHeld;
-    } catch {
-      return [];
-    }
+  let chatWorkflowsRead: Promise<string[]> | null = null;
+  const chatWorkflowsLoad = (): Promise<string[]> => {
+    if (chatWorkflowsHeld !== null) return Promise.resolve(chatWorkflowsHeld);
+    if (typeof adapter.listPresets !== 'function') return Promise.resolve([]);
+    chatWorkflowsRead ??= Promise.resolve()
+      .then(() => adapter.listPresets())
+      .then((presets) => (chatWorkflowsHeld = servedChatWorkflows(presets)))
+      .catch(() => [] as string[])
+      .finally(() => {
+        chatWorkflowsRead = null;
+      });
+    return chatWorkflowsRead;
   };
+  void chatWorkflowsLoad();
   app.get(`${V}/health`, { config: { manifest: { statusCodes: [200] } } }, async () => {
+    const deadline = performance.now() + HEALTH_PING_WAIT_MS;
+    const workflowsRead = chatWorkflowsLoad();
     const ping = await enginePing();
+    let chatWorkflowsTimer: NodeJS.Timeout | undefined;
+    const chatWorkflows = await Promise.race([
+      workflowsRead,
+      new Promise<string[]>((resolve) => {
+        chatWorkflowsTimer = setTimeout(() => resolve([]), Math.max(0, deadline - performance.now()));
+      }),
+    ]).finally(() => clearTimeout(chatWorkflowsTimer));
     // F-E2E-030: what this deployment can keep. A composer reads `capabilities.deliverGate`
     // before it promises "pauses at the deliver gate"; a stub-driven route set without the
     // probe honestly reports no gate.
@@ -2646,7 +2663,7 @@ export function registerRoutes(
       chatAttachments: true,
       // api-types 0.141.0 (crew#1157): the read-only workflows `POST /chats {workflow}` runs on THIS
       // engine (`analyze` on a core-ts that carries it); `[]` = plain chats only.
-      chatWorkflows: await chatWorkflowsNow(),
+      chatWorkflows,
       // api-types 0.145.0: the evals, insights and schedules surfaces, read off the route table this
       // daemon serves, so a route set booted without one says false rather than an invented true.
       defaultEvals: app.hasRoute({ method: 'GET', url: `${V}/testing/default-evals/suites` }),
@@ -4506,10 +4523,8 @@ export function registerRoutes(
    */
   proposalLaunchers.register('job', {
     find: async (identity) => (await adapter.sessions()).includes(identity.runId),
-    live: async (runId) => {
-      const v = await adapter.runView(runId);
-      return v !== undefined && !['completed', 'cancelled', 'failed'].includes(String(v.session.status));
-    },
+    // crew#1779: read off the check's one run list, never one engine read per job.
+    live: liveInRuns,
     launch: async (d) => {
       const p = d.resolution;
       if (p.shape === undefined || p.catalogRev === undefined) throw new Error('this proposal has no shape to launch');

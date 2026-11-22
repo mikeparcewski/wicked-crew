@@ -81,7 +81,8 @@ interface RunView {
 
 export interface InspectServiceDeps {
   adapter: {
-    sessionsDetail(): Promise<unknown[]>;
+    /** One run's view (crew#1779: that run alone, never a fold of the store). */
+    runView(runId: string): Promise<unknown>;
     runEvents(runId: string): Promise<unknown[] | null>;
     seatsForWorkflow(workflowId: string): Promise<unknown[]>;
     launchRun(input: LaunchRunInput): Promise<string>;
@@ -322,7 +323,7 @@ export class InspectService {
     this.settle(runId);
     const already = this.list(runId).find((r) => r.ord === ord && r.state === 'checking');
     if (already !== undefined) return already;
-    const view = ((await this.deps.adapter.sessionsDetail()) as RunView[]).find((v) => v.session.id === runId);
+    const view = (await this.deps.adapter.runView(runId)) as RunView | undefined;
     if (view === undefined) throw new InspectError(404, 'not_found', 'Run not found');
     const unit = view.units.find((u) => u.ord === ord);
     if (unit === undefined) throw new InspectError(404, 'not_found', `Step ${ord} not found in run ${runId}`);

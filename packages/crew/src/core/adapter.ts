@@ -13,6 +13,7 @@ import { crewStateHome, isDefaultStateHome, wickedWorkRoot } from '../projects/s
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { RunReadLane } from './run-read-lane.js';
 import type { Core as CoreHandle, LaunchOptions, Subscription } from 'wicked-core-ts';
 import type { GateAction, MaintenanceState, PowerPauseRequest, PowerState, Rigor } from 'wicked-crew-api-types';
 import { AskError, AskUnsupportedError, type AskRequest, type AskTicket, type AskUnit } from './types.js';
@@ -1418,6 +1419,8 @@ export class CoreAdapter {
   private readonly listeners = new Set<CoreEventListener>();
   /** F35: the views version, moved by every engine frame (bar the live streams) and every engine call that may write. */
   private viewsEpoch = 0;
+  /** crew#1779: one-run reads a frame's listeners start wait in this lane, behind every request's read. */
+  private readonly runReads = new RunReadLane<string>((runId) => this.core.sessionDetail(runId));
   private readonly launchListeners = new Set<LaunchListener>();
   /** crew#1145: what each engine launch awaits first (`setLaunchGate`); `null` = nothing. */
   private launchGate: (() => Promise<void>) | null = null;
@@ -1645,13 +1648,16 @@ export class CoreAdapter {
     // F35: a frame may follow a change to a run, so the views snapshot is stale from here (before
     // any listener runs, so a read a listener starts sees the change).
     if (!VIEW_NEUTRAL_EVENTS.has(event.type)) this.viewsEpoch++;
-    for (const listener of this.listeners) {
-      try {
-        listener(event);
-      } catch {
-        /* isolate a faulty listener */
+    // crew#1779: a one-run read any listener starts from here takes the frame lane (`runView`).
+    this.runReads.inFrame(() => {
+      for (const listener of this.listeners) {
+        try {
+          listener(event);
+        } catch {
+          /* isolate a faulty listener */
+        }
       }
-    }
+    });
   }
 
   /**
@@ -2934,9 +2940,11 @@ export class CoreAdapter {
    * engine frame, so while runs were active each gate read paid for a fresh fold of every run (and its
    * parse on the event loop), and studio's per-page gate reads queued behind those folds. The read
    * starts now, so it is never older than a change this adapter made or a frame it delivered.
+   * crew#1779: a read a frame listener starts takes the frame lane ({@link RunReadLane}): it waits
+   * behind no request's read, and the listeners of one frame share one read of the run.
    */
   async runView(runId: string): Promise<SessionView | undefined> {
-    const view = JSON.parse(await this.core.sessionDetail(runId)) as SessionView | null;
+    const view = JSON.parse(await this.runReads.get(runId)) as SessionView | null;
     if (view === null) return undefined;
     await this.resolveIdentities([view]);
     return view;

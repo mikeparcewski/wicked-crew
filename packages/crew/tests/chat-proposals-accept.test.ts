@@ -14,6 +14,7 @@ import {
   foldProposals,
   LaunchRefusal,
   LaunchOnceRegistry,
+  liveInRuns,
   proposalRunId,
   type ChatProposalDeps,
   type ProposalChat,
@@ -718,5 +719,67 @@ describe('the fold (r2)', () => {
     ]);
     expect(f.get('c1:t1')?.state).toBe('superseded');
     expect(f.get('c1:t2')?.state).toBe('open');
+  });
+});
+
+// crew#1779: a check over the chat's started jobs reads the run list once, never one engine read per job.
+describe('job liveness reads one run list', () => {
+  function startedJobs(r: Rig, chatId: string, statuses: string[]): string[] {
+    const ids: string[] = [];
+    statuses.forEach((status, i) => {
+      const id = `job-run-${i}`;
+      const pid = `${chatId}:job${i}`;
+      const t = chatWith(r, chatId);
+      const proposal = { pid, chatId, turnId: t, kind: 'create', what: { entry: 'presentation', title: `job ${i}`, label: `Job ${i}`, outcome: null } } as unknown as ArtifactProposal;
+      r.records.get(chatId)!.push(
+        { at: 2, turnId: t, kind: 'proposal', proposal } as unknown as ChatTranscriptRecord,
+        { at: 3, turnId: t, kind: 'proposal_decided', pid, actor: 'maria', decision: 'go', result: { runId: id, artifactRef: null, adopted: false, stub: false } } as unknown as ChatTranscriptRecord,
+      );
+      ids.push(id);
+      r.runs.push(run(id, { status }));
+    });
+    return ids;
+  }
+  function countedRuns(r: Rig): { reads: number } {
+    const n = { reads: 0 };
+    const deps = (r.svc as unknown as { deps: ChatProposalDeps }).deps;
+    const read = deps.runs;
+    deps.runs = async () => {
+      n.reads += 1;
+      return read();
+    };
+    deps.registry.register('create', { find: async () => false, launch: async () => undefined, live: liveInRuns });
+    return n;
+  }
+
+  it('liveJobOf names the live job after one run-list read, however many jobs the chat started', async () => {
+    const r = rig();
+    const n = countedRuns(r);
+    startedJobs(r, 'c1', ['completed', 'cancelled', 'failed', 'completed', 'executing']);
+    expect(await r.svc.liveJobOf('c1')).toBe('Job 4');
+    expect(n.reads).toBe(1);
+  });
+
+  it('liveJobOf reads nothing for a chat that started no job, and null when every job ended', async () => {
+    const r = rig();
+    const n = countedRuns(r);
+    chatWith(r, 'quiet');
+    expect(await r.svc.liveJobOf('quiet')).toBeNull();
+    expect(n.reads).toBe(0);
+    startedJobs(r, 'c2', ['completed', 'failed']);
+    expect(await r.svc.liveJobOf('c2')).toBeNull();
+    expect(n.reads).toBe(1);
+  });
+
+  it("Go's busy check reads the run list once for every started job of the chat", async () => {
+    const r = rig();
+    const n = countedRuns(r);
+    startedJobs(r, 'c1', ['completed', 'cancelled', 'executing']);
+    const t = chatWith(r, 'c1');
+    const p = (await propose(r, 'c1', t, { entry: 'presentation', title: 'x' }))!;
+    n.reads = 0;
+    const go = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    expect(go).toMatchObject({ code: 409, body: { code: 'chat_busy' } });
+    expect(n.reads).toBe(1);
   });
 });

@@ -93,7 +93,8 @@ function fakeEngine() {
       views.set(input.sessionId, { session: { id: input.sessionId, status: 'executing' }, units: [unit(input.sessionId, 'build', 1), unit(input.sessionId, 'check', 2), unit(input.sessionId, 'review', 3)] } as unknown as SessionView);
       return input.sessionId;
     },
-    sessionsDetail: async () => [...views.values()],
+    // crew#1779: a turn reads its one run, never a fold of the store.
+    runView: async (runId) => views.get(runId),
     cancelRun: async (runId) => {
       if (ctl.cancelFails) throw new Error('the engine is busy');
       cancelled.push(runId);
@@ -485,16 +486,16 @@ describe('apps turns: check, land, refuse', () => {
     const units = view.units;
     // A malformed record for a parked run: isActive sees the refusal first, the settlement trips on the record.
     let reads = 0;
-    const orig = s.engine.sessionsDetail;
-    s.engine.sessionsDetail = async () => {
+    const orig = s.engine.runView;
+    s.engine.runView = async (id) => {
       reads += 1;
-      return reads % 2 === 0 ? [{ ...view, units: undefined as never }] : orig();
+      return reads % 2 === 0 ? { ...view, units: undefined as never } : orig(id);
     };
     expect((await s.call('GET', '/apps/escalations')).body.app.turn).toMatchObject({ runId });
     expect(s.cancelled).toEqual([]);
     expect((await s.call('POST', '/apps/escalations/turns', { base: 2, message: 'another' })).status).toBe(409);
     // Ended (completed) with the same malformed record: released, failed, nothing landed.
-    s.engine.sessionsDetail = async () => [{ ...view, session: { ...view.session, status: 'completed' }, units: undefined as never }];
+    s.engine.runView = async () => ({ ...view, session: { ...view.session, status: 'completed' }, units: undefined as never });
     const d = (await s.call('GET', '/apps/escalations')).body.app;
     expect(d.turn).toBeNull();
     expect(d.turns![0]).toMatchObject({ state: 'failed', code: 'unknown' });

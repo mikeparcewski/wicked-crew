@@ -157,7 +157,9 @@ function rig(opts: { roster?: unknown[]; events?: Ev[]; launchFails?: boolean; u
   }];
   let ids = 0;
   const adapter = {
-    sessionsDetail: async () => views(),
+    // crew#1779: the check reads its one run, never a fold of the store.
+    sessionsDetail: async () => { throw new Error('a one-run check folded the store'); },
+    runView: async (id: string) => views().find((v) => (v as { session: { id: string } }).session.id === id),
     runEvents: async () => opts.events ?? loopFixture(),
     seatsForWorkflow: async () => opts.roster ?? [
       { key: 'claude', cli: 'claude', health: { status: 'active' } },
@@ -408,7 +410,7 @@ describe('xreview on #1233', () => {
     // A new daemon over the same directory.
     const cancels: string[] = [];
     const fresh = new InspectService({
-      adapter: { sessionsDetail: async () => [], runEvents: async () => [], seatsForWorkflow: async () => [], launchRun: async () => 'x', cancelRun: async (id: string) => { cancels.push(id); } },
+      adapter: { runView: async () => undefined, runEvents: async () => [], seatsForWorkflow: async () => [], launchRun: async () => 'x', cancelRun: async (id: string) => { cancels.push(id); } },
       replyOf: async () => null, dir: join(r.dir, 'inspections'), broadcast: () => undefined, log: () => undefined, newId: () => 'n',
     });
     await fresh.recover();

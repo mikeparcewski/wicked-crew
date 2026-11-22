@@ -1595,7 +1595,7 @@ export async function createServer(
   const INSPECT_ACTOR: Actor = { id: 'unit-inspect', kind: 'system', trust: 'operator' };
   const unitInspect = new InspectService({
     adapter: {
-      sessionsDetail: () => adapter.sessionsDetail(),
+      runView: (id) => adapter.runView(id),
       runEvents: (id) => adapter.runEvents(id),
       seatsForWorkflow: (id) => adapter.seatsForWorkflow(id),
       launchRun: (input) => adapter.launchRun(input),

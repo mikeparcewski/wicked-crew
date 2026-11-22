@@ -397,6 +397,15 @@ export interface ProposalDispatch {
   power?: boolean;
 }
 
+/** The run list, read at most once per check (crew#1779). */
+export type RunsOnce = () => Promise<readonly SessionView[]>;
+
+/** A job's run is live while the check's run list has it and it has not ended (crew#1779: no engine read per job). */
+export async function liveInRuns(runId: string, runs: RunsOnce): Promise<boolean> {
+  const v = (await runs()).find((r) => r.session.id === runId);
+  return v !== undefined && !['completed', 'cancelled', 'failed'].includes(String(v.session.status));
+}
+
 /** One operation's launcher (A3 create, A5 refine, A7 theme, A8 demo register theirs). */
 export interface ProposalDispatcher {
   /** The create path's actual readers, so proposal authorization never guesses from attachment metadata. */
@@ -406,8 +415,9 @@ export interface ProposalDispatcher {
   /** Start it, with `identity.runId` as the launch's `sessionId`. Called only when {@link find} said no, under the
    *  run id's lock. */
   launch(dispatch: ProposalDispatch): Promise<void>;
-  /** Whether a run it started is still live (the one-live-job-per-chat rule). */
-  live?(runId: string): Promise<boolean>;
+  /** Whether a run it started is still live (the one-live-job-per-chat rule). `runs` is the run list the check reads
+   *  (crew#1779: one list for every job a check looks at, never one engine read per job), read only when called. */
+  live?(runId: string, runs: RunsOnce): Promise<boolean>;
   /** Whether a document has an attempt of this launcher still without an outcome (A3: one live job per document). */
   docBusy?(artifactRef: string): Promise<boolean>;
   /** The test configuration's recording stub: nothing is started. */
@@ -472,15 +482,15 @@ export class LaunchOnceRegistry {
     return { stub: d.stub === true };
   }
 
-  async live(kind: ArtifactProposalKind, runId: string): Promise<boolean> {
+  async live(kind: ArtifactProposalKind, runId: string, runs: RunsOnce): Promise<boolean> {
     const d = this.dispatchers.get(kind);
-    return d?.live === undefined ? false : d.live(runId);
+    return d?.live === undefined ? false : d.live(runId, runs);
   }
 
   /** Whether a run this daemon started for the artifact is still live, or a launcher's durable record says an attempt at
    *  it has no outcome yet (A3: across a restart too). */
-  async liveForArtifact(artifactRef: string): Promise<boolean> {
-    for (const r of this.byArtifact.get(artifactRef) ?? []) if (await this.live(r.kind, r.runId)) return true;
+  async liveForArtifact(artifactRef: string, runs: RunsOnce): Promise<boolean> {
+    for (const r of this.byArtifact.get(artifactRef) ?? []) if (await this.live(r.kind, r.runId, runs)) return true;
     for (const d of new Set(this.dispatchers.values())) if (d.docBusy !== undefined && (await d.docBusy(artifactRef))) return true;
     return false;
   }
@@ -1950,6 +1960,7 @@ export class ChatProposals {
    */
   private async busy(chatId: string, artifactRef: string | null, p: ArtifactProposal): Promise<{ code: 'chat_busy' | 'document_busy'; reason: string } | null> {
     const runs = await this.deps.runs();
+    const runsOnce: RunsOnce = async () => runs;
     // A reshape's held run is the one it replaces: answered Reject inside this Go, so it does not make the chat busy.
     const held = p.reshapes !== undefined && p.heldRejected !== true ? p.reshapes : null;
     for (const f of foldProposals(this.deps.records(chatId)).values()) {
@@ -1957,7 +1968,7 @@ export class ChatProposals {
       // Another proposal of this chat started a job (decided go, or accepting with its run launched) still live.
       const runId = f.state === 'decided' && f.decision === 'go' ? f.result?.runId ?? null
         : f.state === 'accepting' ? f.accepting?.identity.runId ?? null : null;
-      if (runId !== null && runId !== held && (await this.deps.registry.live(f.proposal.kind, runId))) {
+      if (runId !== null && runId !== held && (await this.deps.registry.live(f.proposal.kind, runId, runsOnce))) {
         return { code: 'chat_busy', reason: `This chat already has a job running (${f.proposal.what.label}). Wait, or stop that run.` };
       }
     }
@@ -1966,7 +1977,7 @@ export class ChatProposals {
       return { code: 'chat_busy', reason: `This chat already has a job running (run ${v.session.id.slice(0, 8)}). Wait, or stop that run.` };
     }
     if (artifactRef !== null && (p.kind === 'refine' || (p.kind === 'create' && p.artifactRef !== undefined))) {
-      if (await this.deps.registry.liveForArtifact(artifactRef)) {
+      if (await this.deps.registry.liveForArtifact(artifactRef, runsOnce)) {
         return { code: 'document_busy', reason: `“${p.target?.title ?? p.what.title}” is being ${p.kind === 'create' ? 'drafted' : 'revised'}. Wait, or stop that run.` };
       }
       const ref = parseArtifactRef(artifactRef);
@@ -3563,9 +3574,12 @@ export class ChatProposals {
    * job per chat, work and artifact runs together (DES §4.3).
    */
   async liveJobOf(chatId: string): Promise<string | null> {
+    // crew#1779: the run list is read once, and only when a job's check needs it.
+    let read: Promise<readonly SessionView[]> | null = null;
+    const runsOnce: RunsOnce = () => (read ??= this.deps.runs());
     for (const f of foldProposals(this.deps.records(chatId)).values()) {
       const runId = f.state === 'decided' && f.decision === 'go' ? f.result?.runId ?? null : f.state === 'accepting' ? f.accepting?.identity.runId ?? null : null;
-      if (runId !== null && (await this.deps.registry.live(f.proposal.kind, runId))) return f.proposal.what.label;
+      if (runId !== null && (await this.deps.registry.live(f.proposal.kind, runId, runsOnce))) return f.proposal.what.label;
     }
     return null;
   }
