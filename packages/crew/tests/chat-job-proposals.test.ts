@@ -484,8 +484,9 @@ describe('across kinds', () => {
 
 
 describe('codex/pi r1 folds', () => {
-  const withShadow = (preset: Preset): ServedState & { rev: string } => {
-    const presets = [...presetsAll, preset];
+  /** An engine whose built-in `name` changed under an open proposal (its steps replaced). */
+  const withBuiltin = (name: string, steps: (s: Preset['steps']) => Preset['steps']): ServedState & { rev: string } => {
+    const presets = presetsAll.map((p) => (p.name === name && p.created_by === 'builtin' ? { ...p, steps: steps(p.steps) } : p));
     return { ...servedState({ defs: defsAll, presets, entries: entriesAll }), rev: buildWorkflowCatalogV2({ defs: defsAll, presets, entries: entriesAll, runs: [], actorId: '', projectId: null }).rev };
   };
 
@@ -528,8 +529,13 @@ describe('codex/pi r1 folds', () => {
     await pick(r, 'migrate', { option: 'in-place' });
     const p = open(r);
     expect(p.gate).toContain('parity');
-    // A saved migration with the built-in's instruments and no parity rubric.
-    r.served = withShadow({ name: 'migration', steps: [{ catalog: 'build', id: 'execute' }, { catalog: 'test', id: 'verify' }], created_by: 'me', scope: 'global', required_instruments: ['distinct_evaluator', 'judge', 'qe_acceptance'] } as unknown as Preset);
+    // An engine whose migration no longer carries the parity rubric. (A SAVED migration without it no longer resolves the
+    // card at all, crew#1445: the option is off and the shadow runs from Yours only.)
+    r.served = withBuiltin('migration', (steps) => steps.map((s) => {
+      const out = { ...s };
+      delete out.rubric;
+      return out;
+    }));
     const go = await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1');
     expect(go.body).toMatchObject({ code: 'catalog_changed' });
     const fresh = open(r);

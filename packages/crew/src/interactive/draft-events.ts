@@ -70,7 +70,7 @@ import {
   type GroundingRepo,
 } from './doc-grounding.js';
 import type { CoreAdapter } from '../core/adapter.js';
-import { draftPresetFor } from '../workflow-catalog/build-v2.js';
+import { draftPresetFor, sourcedDraftRefusal } from '../workflow-catalog/build-v2.js';
 import type { CoreEvent, ProposalShape } from '../core/types.js';
 import { awaitingHumanLine, describeStep, resyncRunUnits, ResyncGate, RunUnits } from './run-units.js';
 import {
@@ -1434,12 +1434,10 @@ export async function startInteractiveDraftSubscriber(
     const workflow = draftPresetFor(bound?.shape?.card, bound?.shape?.option);
     // Older engines can default an unknown workflow to plain drafting: refuse before any work or files start.
     if (workflow === 'interactive-draft-sourced') {
-      try {
-        const presets = await adapter.listPresets(doc.projectId);
-        if (!presets.some((p) => p.name === workflow)) throw new Error('preset missing');
-      } catch {
+      // (crew#1445) The scope's effective preset must be the built-in, or a saved shadow that keeps its checks.
+      const reason = await sourcedDraftRefusal(adapter, doc.projectId, workflow);
+      if (reason !== null) {
         endFlight(runId);
-        const reason = "this engine has no sourced draft yet; update wicked-crew's engine";
         emitStatus({ ...docScope(doc.documentId, doc.projectId), state: 'error', message: reason });
         throw new Error(reason);
       }

@@ -71,7 +71,9 @@ describe('a chat job Start chooses power (server, real job launcher)', () => {
     workflowCatalog: async () => ({ workflows: BUILTIN_WORKFLOWS, unavailable: [] }),
     getWorkflow: (id: string) => BUILTIN_WORKFLOWS.find((w) => w.id === id),
     catalog: async () => [],
-    listPresets: async () => presets.map((name) => ({ name, scope: 'global', steps: [{ id: 'fix' }], created_by: systemPreset ? 'operator' : 'builtin', ...(systemPreset ? { system: true } : {}), updated_at: 1 })),
+    // A saved system-stamped row shadows the card's built-in like any other (crew#1445 coord F1): it keeps the built-in's
+    // instruments, so the card stays on and this tests only that the launch accepts it.
+    listPresets: async () => presets.map((name) => ({ name, scope: 'global', steps: [{ id: 'fix' }], created_by: systemPreset ? 'operator' : 'builtin', ...(systemPreset ? { system: true, required_instruments: ['distinct_evaluator', 'judge', 'qe_acceptance'] } : {}), updated_at: 1 })),
     supportsPowerMode: () => {
       powerReads += 1;
       if (powerReadsLeft === null) return powerMode;

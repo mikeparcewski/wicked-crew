@@ -50,7 +50,11 @@ async function waitFor(check: () => boolean): Promise<void> {
 }
 
 /** Existing draft-events harness: real temporary bus and subscriber, fake engine, real Go dispatcher. */
-async function world(presets: 'sourced' | 'missing' | 'unreadable' = 'sourced') {
+/** The built-in sourced draft's promise (core: `interactive-draft` plus a trailing fidelity-to-source `check`). */
+const SOURCED_STEPS = [{ catalog: 'produce', id: 'draft' }, { catalog: 'critique', id: 'check', rubric: 'fidelity-to-source' }];
+const SOURCED_BUILTIN = { name: 'interactive-draft-sourced', created_by: 'builtin', scope: 'global', steps: SOURCED_STEPS };
+
+async function world(presets: 'sourced' | 'missing' | 'unreadable' | 'saved-only' = 'sourced') {
   const dir = mkdtempSync(join(tmpdir(), 'crew-cs5-'));
   scratch.push(dir);
   const docs = join(dir, 'docs');
@@ -64,10 +68,13 @@ async function world(presets: 'sourced' | 'missing' | 'unreadable' = 'sourced') 
   const launches: LaunchRunInput[] = [];
   const listPresets = vi.fn(async () => {
     if (presets === 'unreadable') throw new Error('old engine');
-    return (presets === 'sourced' ? [{ name: 'interactive-draft-sourced' }] : [{ name: 'interactive-draft' }]) as Preset[];
+    // An Unfiled draft reads the global listing: a saved global row under the built-in's name (kept from before it was a
+    // built-in) replaces it there, so there is no built-in to compare it to (crew#1445).
+    if (presets === 'saved-only') return [{ ...SOURCED_BUILTIN, created_by: 'me' }] as unknown as Preset[];
+    return (presets === 'sourced' ? [SOURCED_BUILTIN] : [{ name: 'interactive-draft', created_by: 'builtin', steps: [] }]) as unknown as Preset[];
   });
   const adapter = {
-    listPresets, listRepos: async () => [],
+    listPresets, listRepos: async () => [], catalog: async () => [],
     launchRun: async (input: LaunchRunInput) => { launches.push(input); return input.sessionId; },
     onEvent: (listener: (event: CoreEvent) => void) => { listeners.add(listener); return () => listeners.delete(listener); },
   } as unknown as CoreAdapter;
@@ -124,7 +131,7 @@ describe('CS5 proposal Go through the draft seam', () => {
     expect(w.launches[0]!.projectId).toBeUndefined();
     expect(w.listPresets).toHaveBeenCalledTimes(expected === 'interactive-draft-sourced' ? 1 : 0);
   });
-  it.each(['missing', 'unreadable'] as const)('refuses a sourced Go when the preset is %s', async (presets) => {
+  it.each(['missing', 'unreadable', 'saved-only'] as const)('refuses a sourced Go when the preset is %s', async (presets) => {
     const w = await world(presets);
     await expect(w.go('respond', 'rfp')).rejects.toThrow("this engine has no sourced draft yet; update wicked-crew's engine");
     expect(w.launches).toEqual([]);
