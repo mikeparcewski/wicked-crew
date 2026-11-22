@@ -341,8 +341,9 @@ function readManifest(rootReal: string, doc: string): Manifest {
   for (const v of Array.isArray(m.versions) ? (m.versions as unknown[]) : []) {
     if (typeof v !== 'object' || v === null) continue;
     const e = v as { version?: unknown; html_file?: unknown; kind?: unknown };
-    if (e.kind === 'demo') cutVersion = true;
     if (typeof e.version !== 'number' || !Number.isInteger(e.version) || e.version < 0) continue;
+    // Only a real version entry classifies the document (a malformed one is skipped like the rest of it).
+    if (e.kind === 'demo') cutVersion = true;
     if (e.html_file === undefined || e.html_file === null || e.html_file === '') {
       files.set(e.version, `_v${e.version}.html`);
       continue;

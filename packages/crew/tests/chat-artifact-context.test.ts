@@ -456,6 +456,11 @@ describe('buildTurnContext', () => {
     // A page whose versions carry other kinds is no cut.
     writeDoc('mikes', 'themed-page', { 0: '<h1>P</h1>', 1: '<h1>P</h1>' }, { head: 1, versions: [{ version: 0 }, { version: 1, parent: 0, kind: 'theme' }] });
     expect((await built({ context: { artifact: { ref: 'mikes/themed-page', version: 1 } } })).block).not.toContain("Crew's note");
+    // A malformed entry (no, a string or a negative version) marked demo never makes a page a cut.
+    writeDoc('mikes', 'odd-page', { 1: '<h1>P</h1>' }, { head: 1, kind: 'doc', versions: [{ version: 1, kind: 'theme' }, { kind: 'demo' }, { version: '2', kind: 'demo' }, { version: -1, kind: 'demo' }] });
+    const odd = await built({ context: { artifact: { ref: 'mikes/odd-page', version: 1 } } });
+    expect(odd.binding?.artifact?.kind).toBe('document');
+    expect(odd.block).not.toContain("Crew's note");
   });
 
   it.skipIf(process.platform === 'win32')('never blocks on a FIFO where a manifest or a version should be', async () => {
