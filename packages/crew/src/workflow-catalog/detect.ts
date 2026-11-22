@@ -333,10 +333,11 @@ const PRICE_OF_WORK = /\bcosts?\s+(?:us\s+)?to\s+(?:build|create|develop|impleme
 export const COST_CARDS: readonly string[] = ['run-cost', 'estimate-price'];
 
 /**
- * The opening sentence: the words up to the first sentence end, a `.`, `?`, `!` or `;` followed by a space or the end
- * (a decimal point, `.NET` or `Node.js` is not one; xreview r1).
+ * The opening sentence: the words up to the first sentence end. A `?`, `!` or `;` ends one when a space or the end
+ * follows; a `.` only when a capital starts the next sentence (or nothing follows), so a decimal point, `.NET`,
+ * `Node.js` or an abbreviation (`Acme Inc. last month`, `e.g.`) is not one (xreview r1, r2).
  */
-const OPENING_SENTENCE = /^(?:[^.?!;]|[.?!;](?!\s|$))*/u;
+const OPENING_SENTENCE = /^(?:[^.?!;]|[?!;](?!\s|$)|\.(?!\s+\p{Lu}|\s*$))*/u;
 const openingOf = (text: string): string => OPENING_SENTENCE.exec(text)?.[0] ?? text;
 
 /**

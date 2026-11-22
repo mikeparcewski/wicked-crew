@@ -371,9 +371,11 @@ describe('cost routing consults the seat (crew#1452)', () => {
     // words lead with the run cost model and, with the signal mixed, ask the seat rather than decide alone.
     const budget = "Model our monthly cost budget for runs. Use last month's unit price.";
     expect(costCardOf(budget)).toBe('run-cost');
-    expect(shape(chat(budget, null))[0]).toBe('run-cost');
-    expect(classifyPathSync({ text: budget, catalogRev: 'r' }, null).guess.card).toBe('run-cost');
-    expect(classifyPathSync({ text: budget, catalogRev: 'r' }, { card: 'run-cost', confidence: 0.9 }).guess.card).toBe('run-cost');
+    expect(wordsLayer(budget).card).toBe('run-cost');
+    expect(wordsLayer(budget).sure).toBe(false);
+    expect(shape(chat(budget, null))).toEqual(['run-cost', 'likely']);
+    expect(shape(classifyPathSync({ text: budget, catalogRev: 'r' }, null).guess)).toEqual(['run-cost', 'likely']);
+    expect(classifyPathSync({ text: budget, catalogRev: 'r' }, { card: 'run-cost', confidence: 0.9 })).toMatchObject({ asked: true, guess: { card: 'run-cost' } });
     const later = 'How much would it cost per month? We need a quote for the partner portal.';
     expect(wordsLayer(later).sure).toBe(false);
     expect(classifyPathSync({ text: later, catalogRev: 'r' }, { card: 'estimate-price', confidence: 0.9 })).toMatchObject({ asked: true, guess: { card: 'estimate-price' } });
@@ -392,7 +394,7 @@ describe('cost routing consults the seat (crew#1452)', () => {
     // The question itself about past spend is still Review recent work's (and a decimal or a dotted name is not a
     // sentence end; xreview r1).
     expect(costAsked('estimate our spend on bug fixes last month')).toBe(false);
-    for (const dotted of ['Estimate our spend on .NET bug fixes last month', 'Estimate our spend on Node.js upgrades last month']) {
+    for (const dotted of ['Estimate our spend on .NET bug fixes last month', 'Estimate our spend on Node.js upgrades last month', 'Estimate our spend on bug fixes for Acme Inc. last month.', 'Estimate our spend on U.S. bug fixes, e.g. last month']) {
       expect(costAsked(dotted), dotted).toBe(false);
       expect(chat(dotted, { card: 'review-recent-work', confidence: 0.9 }).card, dotted).toBe('review-recent-work');
       expect(classifyPathSync({ text: dotted, catalogRev: 'r' }, { card: 'review-recent-work', confidence: 0.9 }).guess.card, dotted).toBe('review-recent-work');
