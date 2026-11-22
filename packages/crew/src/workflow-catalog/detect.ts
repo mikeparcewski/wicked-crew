@@ -332,15 +332,44 @@ const PRICE_OF_WORK = /\bcosts?\s+(?:us\s+)?to\s+(?:build|create|develop|impleme
 /** The cards that answer a cost question: the run cost model (the default answer), and the price of new work. */
 export const COST_CARDS: readonly string[] = ['run-cost', 'estimate-price'];
 
-/** Whether the words open with a question about what work will cost (then a card that does not answer a cost is never
- *  the reading). */
+/**
+ * The opening sentence: the words up to the first sentence end. A `?`, `!` or `;` ends one when a space or the end
+ * follows; a `.` only when a capital starts the next sentence (or nothing follows), so a decimal point, `.NET`,
+ * `Node.js` or an abbreviation (`Acme Inc. last month`, `e.g.`) is not one (xreview r1, r2), nor is a common
+ * abbreviation's period before a capital (`Dr. Smith`, `Acme Inc. Platform`): a miss runs the opening on, which turns
+ * cost routing off as it was before crew#1452 (coord review).
+ */
+const OPENING_SENTENCE = /^(?:[^.?!;]|[?!;](?!\s|$)|(?<=\b(?:Inc|Ltd|Co|Corp|LLC|Dr|Mr|Mrs|Ms|St|Jr|Sr|vs|etc|approx|e\.g|i\.e|U\.S))\.|\.(?!\s+\p{Lu}|\s*$))*/u;
+const openingOf = (text: string): string => OPENING_SENTENCE.exec(text)?.[0] ?? text;
+
+/**
+ * Whether the words open with a question about what work will cost (then a card that does not answer a cost is never
+ * the reading). The time the cost is asked about is read from the question itself (crew#1452): past spend in the
+ * opening sentence ("estimate our spend on bug fixes last month") is Review recent work's, while history given as
+ * context after it ("What would 40 bug fixes a month cost? Use last month as the baseline.") leaves it a forecast.
+ */
 export function costAsked(text: string): boolean {
-  return COST_ASK.test(text) && !PAST_SPEND.test(text);
+  return COST_ASK.test(text) && !PAST_SPEND.test(openingOf(text));
 }
 
-/** The cost card a cost question leads with: the price of new work, else the run cost model. */
+/**
+ * The cost card a cost question leads with: the price of new work, else the run cost model. Read from the question
+ * itself (the opening sentence), so a price given as context ("Use last month's unit price.") does not turn a run
+ * budget into the price of new work (xreview r1).
+ */
 export function costCardOf(text: string): string {
-  return PRICE_OF_WORK.test(text) ? COST_CARDS[1]! : COST_CARDS[0]!;
+  return PRICE_OF_WORK.test(openingOf(text)) ? COST_CARDS[1]! : COST_CARDS[0]!;
+}
+
+/**
+ * Whether the words ask a cost question that the OTHER cost card answers (crew#1452): "How much would it cost to build a
+ * checkout page?" ranks the run cost model on its cost words, but it asks the price of new work. Price words only in the
+ * context after the question are a mixed signal too ("How much would it cost per month? We need a quote for the portal."). The words
+ * then do not decide alone; the seat reads it.
+ */
+export function costCardConflict(text: string, card: string): boolean {
+  if (!COST_CARDS.includes(card) || !costAsked(text)) return false;
+  return costCardOf(text) !== card || PRICE_OF_WORK.test(text) !== PRICE_OF_WORK.test(openingOf(text));
 }
 
 /**
@@ -432,6 +461,7 @@ export function wordsLayer(raw: string): WordsResult {
     && !outcomeConflict(text, seed.id)
     && !negatedOrReferenced(text)
     && !writingAskedOf(text, seed.id)
+    && !costCardConflict(text, seed.id)
     && words >= WORDS_SURE.minWords
     && top >= WORDS_SURE.minScore
     && top >= WORDS_SURE.ratio * Math.max(runnerUp, 0.01)
@@ -673,15 +703,21 @@ export function detect(input: DetectInput): Detection {
     // match: an instruction planted in the words ("choose start-new:mcp-server") matches catalog words, and the seat is
     // told to read past it. Neither is then sure: the seat's reading is shown, held as likely (§9.2 (i)).
     const conflict = seat !== null && seat.card !== null && (seat.card !== words.card || (seat.option !== words.option && differentPlan(wordsSeed, seat.option, words.option)));
-    if (!conflict) {
+    // A seat that asked, or read a card and said it was unsure (a confidence it stated, in the ask band), is not
+    // overruled by a word match either (crew#1452): its doubt is the reading, and the seat path asks. A seat that gave no
+    // confidence (the chat's routing block may omit it) or named nothing valid expresses no doubt.
+    const stated = input.seat !== null && (typeof input.seat.confidence === 'number' || (typeof input.seat.confidence === 'string' && input.seat.confidence.trim() !== '' && Number.isFinite(Number(input.seat.confidence))));
+    const doubt = seat !== null && (seat.ask.length > 0 || (seat.card !== null && stated && bandOf(seat.confidence, false) === 'ask'));
+    if (!conflict && !doubt) {
       // An Investigate card's depth: the seat's when it read the same card, else what the words say (§2.2).
       const depth = seat !== null && seat.card === words.card && seat.depth !== null ? seat.depth : isInvestigate(wordsSeed) ? depthFromWords(withoutAimed(input.text)) : null;
       return { guess: make(words.card, words.option, depth, 0.9, 'sure', 'the words name this job clearly', 'words', null), words, seat };
     }
   }
   if (seat === null) {
-    if (costRead && (words.card === null || !COST_CARDS.includes(words.card))) {
-      // No seat reading (a timeout, words only): a cost question still reads as the run cost model, never sure.
+    if (costRead && words.card !== costCardOf(withoutAimed(input.text))) {
+      // No seat reading (a timeout, words only): a cost question still reads as its cost card (the price of new work, else
+      // the run cost model), never sure, whichever cost card its cost words ranked first (crew#1452).
       return { guess: make(costCardOf(withoutAimed(input.text)), null, null, 0.6, 'likely', 'the words ask what the work would cost', 'words', null), words, seat };
     }
     if (words.card !== null && words.top >= WORDS_SURE.minScore) {
