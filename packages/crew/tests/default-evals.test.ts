@@ -690,6 +690,12 @@ describe('a card launch of run-evals scores what its card asks for (crew#1375)',
     const runs = await launch('analyze-runs', 'p1');
     expect(runs.project).toBe('p1');
     expect(runs.suites.length).toBe(9);
+    // No shape (a schedule, /workflow-run-evals), even filed in a project: every suite, every project, as before.
+    const bare = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'Run the default evals', workflow: 'run-evals', projectId: 'p1' } });
+    expect(bare.statusCode, bare.body).toBe(201);
+    const all = JSON.parse(readFileSync(join(dir, launched[launched.length - 1]!.sessionId, 'report.json'), 'utf8')) as DefaultEvalReport;
+    expect(all.project).toBeNull();
+    expect(all.suites.length).toBe(9);
     await app.close();
   });
 });

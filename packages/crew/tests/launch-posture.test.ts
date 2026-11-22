@@ -3,7 +3,7 @@
 // is what the launch does — and both are what the launch route did before the decision was lifted out of it
 // (`mainSays`, the rules restated here independently of the code under test).
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -297,6 +297,34 @@ describe('POST /runs/preview == POST /runs (studio#1150)', () => {
     expect(retried.statusCode, retried.body).toBe(201);
     expect(adapter.launchRun!).toHaveBeenCalledTimes(1);
     expect(store.get('rev-retry')).toMatchObject({ status: 'running', error: null });
+  });
+
+  it('(crew#1375) a failure after the engine took the review leaves it running: a retry under its id is refused', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'posture-review-taken-'));
+    const store = new InsightsStore(join(root, 'insights.json'));
+    const service = new ReviewService({
+      store,
+      adapter: { sessionsDetail: async () => [], runEvents: async () => [], seatsForWorkflow: async () => [{ key: 'claude' }] },
+      reviewsDir: join(root, 'reviews'),
+      estateTool: async () => ({}),
+      log: () => undefined,
+    });
+    const { app, adapter } = await daemon({ supports: false, setting: undefined, deliverDefault: 'none' }, {
+      reviewLaunch: async (input: LaunchRunInput) => { await service.prepareLaunch(input, { trigger: 'manual' }); },
+      reviewLaunchRefused: (runId: string, reason: string) => service.launchRefused(runId, reason),
+      // A skills seam that admits the launch and then fails the answer's garden read (after the engine took the run).
+      skills: { health: () => ({ findings: [] }), baseSkill: () => null, installedAheadFinding: async () => { throw new Error('the garden could not be read'); } } as never,
+    });
+    const body = { problem: 'x', clisJson: '[]', workflow: 'review-recent-work', sessionId: 'rev-taken' };
+    const first = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: body });
+    expect(first.statusCode).not.toBe(201);
+    expect(adapter.launchRun!).toHaveBeenCalledTimes(1);
+    expect(store.get('rev-taken')).toMatchObject({ status: 'running', error: null });
+    expect(existsSync(join(root, 'reviews', 'rev-taken'))).toBe(true);
+    const retried = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: body });
+    expect(retried.statusCode).toBe(409);
+    expect(retried.json().error).toMatch(/already recorded/u);
+    expect(adapter.launchRun!).toHaveBeenCalledTimes(1);
   });
 
   it('a run review on a daemon that does not prepare it is an ordinary launch: delivery as resolved', async () => {

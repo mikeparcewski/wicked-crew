@@ -4037,7 +4037,8 @@ export function registerRoutes(
     if (b.workflow === RUN_EVALS_WORKFLOW) {
       try {
         // (crew#1375) A card launch scores what its card asks for: Evaluate rules the steering suite, and a card that takes
-        // a project input the launch's project. A launch with no shape (a schedule, `/workflow-run-evals`) scores all.
+        // a project input (Evaluate rules, Analyze runs) the project the launch is filed in. A launch with no shape (a
+        // schedule, `/workflow-run-evals`) scores every suite and project.
         await runEvalsPrepare(input, runEvalsScopeOf(shapeChecked?.shape.card ?? null, b.projectId ?? null));
       } catch (err) {
         return reply.code(409).send({ error: `the default evals could not be prepared: ${message(err)}` });
@@ -4313,7 +4314,9 @@ export function registerRoutes(
     } catch (err) {
       if (!launched && staged?.published === true) freeStagedDocuments(input.sessionId, false);
       const msg = message(err);
-      if (isReview) runtime.reviewLaunchRefused?.(input.sessionId, msg);
+      // (crew#1375, xreview r1) Only a launch the engine never took is a refused review: a failure after launchRun
+      // resolved leaves the review running, so a retry under its run id can never clear a real review.
+      if (isReview && !launched) runtime.reviewLaunchRefused?.(input.sessionId, msg);
       if (err instanceof MaintenanceDrainError) return reply.code(503).send(maintenanceDrainBody(err));
       // DES-TEAMING-002 T3: a plan on an engine without the plan approval gate is an "upgrade the
       // engine" 501 — never a free-text run launched in its place.

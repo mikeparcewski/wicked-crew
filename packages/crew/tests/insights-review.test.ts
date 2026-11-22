@@ -377,6 +377,18 @@ describe('ingest, Accept and Dismiss', () => {
     expect(s.store.get('rev-1')?.status).toBe('running');
   });
 
+  it('crew#1375: two retries of a refused id at once: one prepares, the other is refused and clears nothing', async () => {
+    const r = rig();
+    await r.service.prepareLaunch(launchInput(), { trigger: 'manual' });
+    r.service.launchRefused('rev-1', 'no eligible seat');
+    const both = await Promise.allSettled([r.service.prepareLaunch(launchInput(), { trigger: 'manual' }), r.service.prepareLaunch(launchInput(), { trigger: 'manual' })]);
+    expect(both.filter((x) => x.status === 'fulfilled')).toHaveLength(1);
+    const lost = both.find((x) => x.status === 'rejected') as PromiseRejectedResult;
+    expect(String(lost.reason)).toMatch(/already recorded/u);
+    expect(r.store.get('rev-1')?.status).toBe('running');
+    expect(existsSync(join(r.root, 'reviews', 'rev-1', OUT_DIR))).toBe(true);
+  });
+
   it('crew#1375: a review that reached the engine is never prepared again, whatever its outcome', async () => {
     for (const end of ['completed', 'failed', 'running'] as const) {
       const r = rig();

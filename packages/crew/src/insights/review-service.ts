@@ -168,9 +168,13 @@ export class ReviewService {
     }
     const projectIds = [...(opts.projectIds ?? [])];
     const snap = await this.snapshot(projectIds, now.getTime());
+    // (xreview r1) Read again after the awaits, with none from here to the record below: a concurrent retry of the same
+    // refused id that prepared (and launched) meanwhile owns it now, and its files are never cleared.
+    const current = this.deps.store.get(runId);
+    if (current !== undefined && (held === undefined || !neverReachedEngine(current))) throw new Error(`a review is already recorded for run ${runId}`);
     const dir = this.runDir(runId);
     mkdirSync(this.deps.reviewsDir, { recursive: true });
-    if (held !== undefined) rmSync(dir, { recursive: true, force: true });
+    if (current !== undefined) rmSync(dir, { recursive: true, force: true });
     try {
       mkdirSync(dir); // exclusive: the filesystem decides who owns this id
     } catch (err) {
