@@ -404,18 +404,60 @@ export type PullRequestResolution =
 /** The exec seam `resolvePullRequest` reads `gh` through — injectable so tests answer without gh. */
 export type GhExec = (
   args: string[],
-  opts: { cwd: string; timeoutMs: number },
+  /** `env`: variables set for this one gh call on top of the daemon's (the pinned token, {@link pinnedGhExec}). */
+  opts: { cwd: string; timeoutMs: number; env?: Readonly<Record<string, string>> },
 ) => Promise<{ stdout: string; stderr: string; code: number | null }>;
 
 export const defaultGhExec: GhExec = (args, opts) =>
   new Promise((resolve) => {
     // The daemon's governance-store variables never ride into a child (crew#495): the boot value is
     // restored and the exported store URL is stripped, the same helper every other spawn site uses.
-    execFile('gh', args, { cwd: opts.cwd, timeout: opts.timeoutMs, encoding: 'utf8', env: childEnvWithBootEstateDb(process.env) }, (err, stdout, stderr) => {
+    execFile('gh', args, { cwd: opts.cwd, timeout: opts.timeoutMs, encoding: 'utf8', env: { ...childEnvWithBootEstateDb(process.env), ...opts.env } }, (err, stdout, stderr) => {
       const code = err === null ? 0 : typeof (err as { code?: unknown }).code === 'number' ? ((err as { code: number }).code) : null;
       resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), code });
     });
   });
+
+/**
+ * (crew#1792) A gh exec whose reads run as the deliver identity, in the deliver script's own credential order
+ * ({@link GITHUB_CREDENTIAL_LINES}, {@link GH_CALL_LINE}), so a PR the deliver identity can see is readable whatever
+ * account gh has active on the host:
+ *  - an exported `GH_TOKEN` wins, as in the script; with no identity configured, gh's own login reads;
+ *  - on a github.com origin the call is pinned to it (`GH_HOST`/`GH_REPO`, so an inherited `GH_REPO` cannot point
+ *    the read at another repository), and a configured identity (the repository's pin, the setting, else
+ *    `GH_ACCOUNT`, {@link pushIdentityOf}) reads with that account's own token from gh's keyring
+ *    (`gh auth token --user`), passed to this one call only;
+ *  - an origin read as absent or not github.com: the identity does not apply, gh runs as it is;
+ *  - with a pin to apply (an exported token or an identity), an origin that cannot be read, or gh holding no token for
+ *    the account, is a failed read that says so, never a silent unpinned read.
+ * `identity` is read per call (settings change at run time); so is the registered checkout's origin.
+ */
+export function pinnedGhExec(
+  identity: () => Promise<string | null>,
+  exec: GhExec = defaultGhExec,
+  env: NodeJS.ProcessEnv = process.env,
+): GhExec {
+  return async (args, opts) => {
+    const exported = (env['GH_TOKEN'] ?? '').trim() !== '';
+    const login = exported ? null : (await identity().catch(() => null)) || null;
+    if (!exported && login === null) return exec(args, opts);
+    if (login !== null && !isGitHubLogin(login)) return { stdout: '', stderr: `the deliver identity ${JSON.stringify(login.slice(0, 60))} is not a GitHub login`, code: 1 };
+    const origin = await readDeliverOriginUrl(opts.cwd).catch(() => null);
+    if (origin === null) {
+      return { stdout: '', stderr: `could not read the repository's origin, so the read cannot be pinned to it${login === null ? '' : ` as the deliver identity ${login}`}`, code: 1 };
+    }
+    const repo = githubRepoOf(origin);
+    if (repo === null) return exec(args, opts);
+    const pin = { GH_HOST: 'github.com', GH_REPO: `github.com/${repo}` };
+    if (login === null) return exec(args, { ...opts, env: { ...opts.env, ...pin } });
+    const read = await exec(['auth', 'token', '--hostname', 'github.com', '--user', login], { cwd: opts.cwd, timeoutMs: opts.timeoutMs });
+    const token = read.code === 0 ? read.stdout.trim() : '';
+    if (token === '') {
+      return { stdout: '', stderr: `gh holds no token for ${login} on this machine and no GH_TOKEN is exported, so it cannot read as the deliver identity`, code: 1 };
+    }
+    return exec(args, { ...opts, env: { ...opts.env, ...pin, GH_TOKEN: token } });
+  };
+}
 
 /**
  * `git remote get-url --push origin` in `rootPath` — the deliver gate's origin preflight (F2).

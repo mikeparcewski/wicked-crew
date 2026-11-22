@@ -49,6 +49,18 @@ describe('parseReviewTarget', () => {
     ['#123456789012345678', null],
     ['branch feature/a and abcdef1 and PR 12', { kind: 'pr', number: 12 }],
     ['abcdef1 then branch feature/a', { kind: 'branch', name: 'feature/a' }],
+    // crew#1793: a sentence's punctuation after the name is not part of it.
+    ['Run a review job (review-change) on branch min-helper: it adds min(xs) with tests', { kind: 'branch', name: 'min-helper' }],
+    ['please review branch feature/a.', { kind: 'branch', name: 'feature/a' }],
+    ['is branch feature/a, ready?', { kind: 'branch', name: 'feature/a' }],
+    ['review branch feature/a?!', { kind: 'branch', name: 'feature/a' }],
+    ['review branch `feature/a`', { kind: 'branch', name: 'feature/a' }],
+    ['(see branch feature/a)', { kind: 'branch', name: 'feature/a' }],
+    ['review wicked/123e4567-e89b-12d3-a456-426614174000.', { kind: 'branch', name: 'wicked/123e4567-e89b-12d3-a456-426614174000' }],
+    // A quoted name is exact: one the safe-ref rule refuses names no branch, never a shorter one.
+    ['review branch `release,`', null],
+    ['review branch "feature/a."', { kind: 'branch', name: 'feature/a.' }],
+    ["review branch 'feature/a'.", { kind: 'branch', name: 'feature/a' }],
   ])('parses %s', (words, target) => expect(parseReviewTarget(words)).toEqual(target));
 
   it.each(['-bad', 'a..b', 'a/', 'a.lock', 'a;bad', 'a$(bad)'])('rejects unsafe branch %s', (name) => {
@@ -216,6 +228,37 @@ describe('reviewChangeExclusion', () => {
     expect(d.git).toHaveBeenCalledWith(['fetch', 'origin'], d.repoRoot);
     expect(d.git).toHaveBeenCalledWith(['cat-file', '-e', `${COMMIT}^{commit}`], d.repoRoot);
     expect(d.git).toHaveBeenCalledWith(['for-each-ref', '--contains', COMMIT, '--format=%(refname)', 'refs/heads/wicked/', 'refs/remotes/origin/wicked/'], d.repoRoot);
+  });
+
+  it('ignores containing run branches of runs this daemon does not know for this repository (crew#1794)', async () => {
+    const d = deps([view('A')]);
+    d.git = vi.fn(async (args) => ({ code: 0, stdout: args[0] === 'for-each-ref' ? 'refs/remotes/origin/wicked/0adbfc95-elsewhere\nrefs/heads/wicked/A\n' : '', stderr: '' }));
+    const result = success(await reviewChangeExclusion(`review commit ${COMMIT}`, d));
+    expect(result).toMatchObject({ provenance: 'built_here', runs: ['A'], excludeSeats: ['claude'] });
+  });
+
+  it('finds a known run on its sanitized branch name (a campaign id\'s `:` as `-`) and its recorded run_branch (crew#1794)', async () => {
+    const d = deps([view('recon-7:alpha:a0'), view('B', [{ ...build, assigned_cli: 'codex' }], { run_branch: 'wicked/renamed-b' })]);
+    d.git = vi.fn(async (args) => ({ code: 0, stdout: args[0] === 'for-each-ref' ? 'refs/remotes/origin/wicked/recon-7-alpha-a0\nrefs/heads/wicked/renamed-b\n' : '', stderr: '' }));
+    expect(success(await reviewChangeExclusion(`commit ${COMMIT}`, d))).toMatchObject({ provenance: 'built_here', runs: ['B', 'recon-7:alpha:a0'], excludeSeats: ['claude', 'codex'] });
+  });
+
+  it('drops a containing run whose recorded base already holds the commit, only on git\'s proof (crew#1794)', async () => {
+    const BASE = 'c'.repeat(40);
+    for (const [code, runs] of [[0, []], [1, ['A']], [128, ['A']], [null, ['A']]] as const) {
+      const d = deps([view('A', [build], { base_commit: BASE })]);
+      d.git = vi.fn(async (args) => ({
+        code: args[0] === 'merge-base' ? code : 0,
+        stdout: args[0] === 'for-each-ref' ? 'refs/remotes/origin/wicked/A\n' : '', stderr: '',
+      }));
+      expect(success(await reviewChangeExclusion(`commit ${COMMIT}`, d)).runs).toEqual(runs);
+      expect(d.git).toHaveBeenCalledWith(['merge-base', '--is-ancestor', COMMIT, BASE], d.repoRoot);
+    }
+    // The engine writes `base_commit: null` for a run with no recorded base: it stays an author.
+    const d = deps([view('A', [build], { base_commit: null })]);
+    d.git = vi.fn(async (args) => ({ code: 0, stdout: args[0] === 'for-each-ref' ? 'refs/heads/wicked/A\n' : '', stderr: '' }));
+    expect(success(await reviewChangeExclusion(`commit ${COMMIT}`, d)).runs).toEqual(['A']);
+    expect(d.git).not.toHaveBeenCalledWith(expect.arrayContaining(['merge-base']), d.repoRoot);
   });
 
   it.each([

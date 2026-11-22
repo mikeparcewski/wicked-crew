@@ -1,5 +1,10 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
+import type { GhExec } from '../src/core/deliver.js';
 import { registerRoutes, type RuntimeDeps } from '../src/api/routes.js';
 import { AuditLog } from '../src/api/audit.js';
 import { DeliveryIndex } from '../src/api/delivery-index.js';
@@ -18,13 +23,19 @@ const BODY = { workflow: 'review-change', repoRef: 'repo', problem: 'review #12'
 const AUTHOR = { key: 'claude', work_eligible: true, council_eligible: true };
 const REVIEWER = { key: 'codex', work_eligible: true, council_eligible: true };
 const apps: FastifyInstance[] = [];
+// The PR read is pinned per the daemon's environment (crew#1792): these cases run as a daemon with none exported.
+beforeEach(() => {
+  vi.stubEnv('GH_TOKEN', '');
+  vi.stubEnv('GH_ACCOUNT', '');
+});
 afterEach(async () => {
   for (const app of apps.splice(0)) await app.close();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 /** Reuse the revision route's fake adapter seam: inspect exactly what the engine would receive. */
-function buildApp(opts: { roster?: unknown[]; views?: SessionView[]; ghFails?: boolean; deliverOutput?: string } = {}) {
+function buildApp(opts: { roster?: unknown[]; views?: SessionView[]; ghFails?: boolean; deliverOutput?: string; root?: string; settings?: Record<string, unknown>; gh?: Mock<GhExec> } = {}) {
   const launched: LaunchRunInput[] = [];
   const roster = opts.roster ?? [AUTHOR, REVIEWER];
   const views = opts.views ?? [{
@@ -37,13 +48,13 @@ function buildApp(opts: { roster?: unknown[]; views?: SessionView[]; ghFails?: b
     sessions: vi.fn(async () => views.map((v) => v.session.id)),
     runEvents: vi.fn(async () => null),
     runView: vi.fn(async (id: string) => views.find((v) => v.session.id === id) ?? null),
-    listRepos: vi.fn(async () => [{ id: 'repo', name: 'repo', root_path: process.cwd(), registered_at: 1 }]),
+    listRepos: vi.fn(async () => [{ id: 'repo', name: 'repo', root_path: opts.root ?? process.cwd(), registered_at: 1 }]),
     // A code-work default deliberately exercises the review's forced no-delivery decision.
     getWorkflow: vi.fn(() => bug),
-    getSettings: vi.fn(async () => ({ deliverDefault: 'pr' })),
+    getSettings: vi.fn(async () => ({ deliverDefault: 'pr', ...opts.settings })),
     launchRun: vi.fn(async (input: LaunchRunInput) => { launched.push(input); return input.sessionId; }),
   } as unknown as CoreAdapter;
-  const gh = vi.fn(async () => ({
+  const gh = opts.gh ?? vi.fn<GhExec>(async () => ({
     code: opts.ghFails ? 1 : 0, stderr: opts.ghFails ? 'lookup failed' : '',
     stdout: JSON.stringify({ headRefName: 'wicked/A', headRefOid: HEAD, url: 'https://github.com/org/repo/pull/12', state: 'OPEN', isCrossRepository: false }),
   }));
@@ -184,6 +195,30 @@ describe('review-change launch', () => {
     expect(launched[0]!.excludeSeats).toEqual(['claude']);
     expect(launched[0]!.problem).toContain('provenance unknown:');
     expect(record).toHaveBeenCalledWith('run.launched', expect.anything(), expect.objectContaining({ detail: expect.objectContaining({ reviewChange: expect.objectContaining({ provenance: 'unknown' }) }) }));
+  });
+
+  it('reads a private PR as the repository\'s push identity, not gh\'s active account (crew#1792)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'crew-1792-route-'));
+    try {
+      execFileSync('git', ['init', '-q', root]);
+      execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/org/repo.git'], { cwd: root });
+      // gh's active account cannot see the repository; only the pinned identity's own token can.
+      const gh = vi.fn<GhExec>(async (args, o) => {
+        if (args[0] === 'auth') return { code: args.includes('deliverbot') ? 0 : 1, stdout: args.includes('deliverbot') ? 'gho_deliverbot\n' : '', stderr: '' };
+        return o.env?.['GH_TOKEN'] === 'gho_deliverbot'
+          ? { code: 0, stderr: '', stdout: JSON.stringify({ headRefName: 'wicked/A', headRefOid: HEAD, url: 'https://github.com/org/repo/pull/12', state: 'OPEN', isCrossRepository: false }) }
+          : { code: 1, stdout: '', stderr: "GraphQL: Could not resolve to a Repository with the name 'org/repo'. (repository)" };
+      });
+      const { post, launched, record } = buildApp({ root, gh, settings: { deliverIdentityByRepo: { repo: 'deliverbot' } } });
+      const res = await post();
+      expect(res.statusCode, res.body).toBe(201);
+      expect(launched[0]!.problem).toContain('built by runs A (authors excluded: claude)');
+      expect(record).toHaveBeenCalledWith('run.launched', expect.anything(), expect.objectContaining({ detail: expect.objectContaining({ reviewChange: expect.objectContaining({ provenance: 'built_here' }) }) }));
+      expect(gh).toHaveBeenCalledWith(['pr', 'view', '12', '--json', 'headRefName,headRefOid,url,state,isCrossRepository'],
+        { cwd: root, timeoutMs: 5000, env: { GH_TOKEN: 'gho_deliverbot', GH_HOST: 'github.com', GH_REPO: 'github.com/org/repo' } });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('leaves an ordinary workflow launch unchanged', async () => {
