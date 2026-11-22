@@ -1387,12 +1387,13 @@ describe('materialize — git archive of each pinned tag', () => {
         });
       const runs = [spawnMaterialize(), spawnMaterialize()] as const;
       const refused = await Promise.race(runs);
-      // The lock is published whole (a hard link of a written file), so the loser always names the holder.
-      expect(refused.status, refused.stderr).toBe(1);
-      expect(refused.stderr).toMatch(/another `materialize` publication holds .*\.materialize\.lock \(pid \d+ generation \d{8}-\d{6}-[0-9a-f]{8}\) — refusing to interleave/);
+      // Released and both collected before any assertion: a failing one never leaves the holder running.
       writeFileSync(release, '');
       const [x, y] = await Promise.all(runs);
       rmSync(release);
+      // The lock is published whole (a hard link of a written file), so the loser always names the holder.
+      expect(refused.status, refused.stderr).toBe(1);
+      expect(refused.stderr).toMatch(/another `materialize` publication holds .*\.materialize\.lock \(pid \d+ generation \d{8}-\d{6}-[0-9a-f]{8}\) — refusing to interleave/);
       expect([x.status, y.status].sort()).toEqual([0, 1]); // one published, one refused
       const trees = ['alpha@v0.3.0', 'beta@v0.2.0', 'gamma@v0.3.0'];
       expect(readdirSync(outDir).sort()).toEqual([...trees, 'materialized.json']);
@@ -2320,11 +2321,11 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
         });
       const runs = [spawnRun(), spawnRun()] as const;
       const refused = await Promise.race(runs);
-      expect(refused.status, refused.stderr).toBe(1);
-      expect(refused.stderr).toMatch(/another `run` publication holds .*\.report\.lock \(pid \d+ generation \d{8}-\d{6}-[0-9a-f]{8}\) — refusing to interleave/);
-      writeFileSync(release, '');
+      writeFileSync(release, ''); // released and both collected before any assertion, as in S15n
       const [x, y] = await Promise.all(runs);
       rmSync(release);
+      expect(refused.status, refused.stderr).toBe(1);
+      expect(refused.stderr).toMatch(/another `run` publication holds .*\.report\.lock \(pid \d+ generation \d{8}-\d{6}-[0-9a-f]{8}\) — refusing to interleave/);
       expect([x.status, y.status].sort()).toEqual([0, 1]);
       expect([x.status, y.status]).toContain(0); // at least one published
       const m = await mod();
@@ -2387,6 +2388,20 @@ describe('publication — atomic (tmp+rename), locked, one generation per public
     expect(s.status, s.stderr).toBe(0);
     expect(s.stderr).not.toMatch(/publication holds/);
     expect(readdirSync(outDir).sort()).toEqual(['samples.json', 'samples.meta.json']); // published; no tmp, no lock left
+  });
+
+  it('a lock released and taken again between every refused link and its read still ends in a refusal naming a holder (crew#1764)', async () => {
+    const m = await mod();
+    const lock = join(outDir, m.SAMPLES_LOCK);
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(lock, 'pid 4242 generation 20260909-000000-deadbeef\n', 'utf8');
+    // Three times over, the holder releases right after the refused link and another publisher takes the lock right
+    // after the read: no count of such retries ends in a refusal without a holder.
+    const s = runEnv({ [m.FAULT_ENV]: 'lock-churn:3' }, 'samples', outDir);
+    expect(s.status).toBe(1);
+    expect(s.stderr).toMatch(/another `samples` publication holds .*\.samples\.lock \(pid \d+ generation churn-3\) — refusing to interleave/);
+    expect(existsSync(join(outDir, 'samples.json'))).toBe(false);
+    rmSync(lock);
   });
 
   it('a failure removing the lock\'s temp name after the lock was taken still releases the lock (crew#1764)', async () => {
