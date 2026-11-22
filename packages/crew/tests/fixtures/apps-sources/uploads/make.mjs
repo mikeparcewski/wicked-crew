@@ -145,5 +145,10 @@ export function makeSqlite(path, { trigger = false, view = false, hiddenVirtual 
     db.exec('CREATE TABLE pragma_table_list (schema TEXT, name TEXT, type TEXT, ncol INTEGER, wr INTEGER, strict INTEGER)');
     db.exec("INSERT INTO pragma_table_list SELECT 'main', name, 'table', 0, 0, 0 FROM sqlite_schema WHERE type = 'table'");
   }
+  if (estateFts) {
+    // codex r2: text the file freed before it was uploaded (secure_delete off), left in its free pages (last, so no later
+    // write reuses them).
+    db.exec("PRAGMA secure_delete = OFF; CREATE TABLE scratch (t TEXT); INSERT INTO scratch VALUES ('zqxj-freed-before-upload'); DROP TABLE scratch;");
+  }
   db.close();
 }

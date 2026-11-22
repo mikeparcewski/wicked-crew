@@ -16,7 +16,7 @@ import type { McpUpstreamConfig } from '../src/mcp/probe.js';
 import { specWith } from './support/apps-harness.js';
 import { observeSqliteRunnerForTests, runnerEnv, sqliteIngest, sqliteRead } from '../src/sources/drivers/sqlite.js';
 import { checkSqlQuery, readSqlQuery, SourcePolicyError } from '../src/sources/sql.js';
-import { ingestUpload, snapshotPath, STALE_TMP_MS, sweepStale, UploadError, UPLOAD_LIMITS } from '../src/sources/uploads.js';
+import { ingestUpload, snapshotPath, STALE_TMP_MS, sweepSettled, sweepStale, UploadError, UPLOAD_LIMITS } from '../src/sources/uploads.js';
 import { detectHeader, looksLikeHeader } from '../runners/upload-parse.mjs';
 import { makeSqlite, makeXlsx, makeZipBomb, zip } from './fixtures/apps-sources/uploads/make.mjs';
 
@@ -316,11 +316,15 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
       snap.close();
       expect(kinds.sort(), f).toEqual(tables.map((t) => `${t}:table`));
     }
-    // The index's own text is gone from the snapshot's bytes (the freed pages are zeroed), the person's file is untouched,
-    // and a kept table's rowids are as uploaded (no VACUUM renumbers them: codex r1).
+    // The index's own text, and what the file had freed before, are gone from the snapshot's bytes (the copy is rewritten
+    // with VACUUM INTO: codex r2), the person's file is untouched, and a kept table's rowids are as uploaded (a plain
+    // VACUUM renumbers them: codex r1).
     const estate = await ingestUpload('estate.sqlite', readFileSync(join(work, 'estate.sqlite')), { dir });
-    expect(readFileSync(snapshotPath(estate.digest, dir)).includes('zqxj-only-in-the-index')).toBe(false);
-    expect(readFileSync(join(work, 'estate.sqlite')).includes('zqxj-only-in-the-index')).toBe(true);
+    for (const marker of ['zqxj-only-in-the-index', 'zqxj-freed-before-upload']) {
+      expect(readFileSync(snapshotPath(estate.digest, dir)).includes(marker), marker).toBe(false);
+      expect(readFileSync(join(work, 'estate.sqlite')).includes(marker), marker).toBe(true);
+    }
+    expect(readdirSync(dir).filter((n) => n.startsWith('.tmp-'))).toEqual([]);
     const snap = new DatabaseSync(snapshotPath(estate.digest, dir), { readOnly: true });
     expect(snap.prepare('SELECT r.body FROM refs JOIN records r ON r.rowid = refs.record_rowid').all().map((x) => x['body'])).toEqual(['kept']);
     snap.close();
@@ -360,6 +364,7 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
       writeFileSync(join(store, '.tmp-notes.txt'), 'not ours');
       utimesSync(join(store, '.tmp-notes.txt'), old, old);
       await ingestUpload('ok.csv', Buffer.from('a,b\n1,2\n'), { dir: store });
+      await sweepSettled();
       const left = readdirSync(store).filter((n) => n.startsWith('.tmp-')).sort();
       expect(left).toEqual([`.tmp-${fresh}.upload`, '.tmp-notes.txt']);
       // A live upload's files are never swept, however old they look (codex r1): a sweep while one runs keeps them.

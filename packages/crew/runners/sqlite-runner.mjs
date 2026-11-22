@@ -5,6 +5,7 @@
 // It lives outside src/ on purpose: it is not daemon code, and the daemon's SQLite guards scan src/.
 import { DatabaseSync, constants } from 'node:sqlite';
 import { readFile } from 'node:fs/promises';
+import { renameSync } from 'node:fs';
 import { parseCsv, parseXlsx, detectHeader, columnNames, inferType, tableNameFor } from './upload-parse.mjs';
 // One UTF-8 decoder for the whole request: a character split across two pipe chunks stays one.
 process.stdin.setEncoding('utf8');
@@ -60,15 +61,16 @@ try {
   if (req.op === 'strip') {
     // (crew#1731) An uploaded .sqlite's virtual tables (a full-text index, an R-tree) are dropped from crew's COPY of
     // the file, never the person's: DROP TABLE runs the module's own destroy, which drops its shadow tables too. A
-    // module this SQLite does not have cannot be dropped, and the upload is refused naming it. secure_delete zeroes the
-    // pages the drop frees, so nothing of what was dropped stays in the copy's bytes; no VACUUM, which would renumber
-    // the rowids of a table without an INTEGER PRIMARY KEY that another table may refer to (codex r1).
+    // module this SQLite does not have cannot be dropped, and the upload is refused naming it. The copy is then
+    // rewritten with VACUUM INTO (live pages only, so nothing dropped, now or before the upload, stays in its free
+    // pages) and put in its place. Not a plain VACUUM: that renumbers the rowids of a table without an INTEGER PRIMARY
+    // KEY, which another table may refer to; VACUUM INTO keeps them (codex r1, r2).
     const quote = (n) => '"' + String(n).replace(/"/g, '""') + '"';
     const w = new DatabaseSync(req.path, { enableForeignKeyConstraints: false, enableDoubleQuotedStringLiterals: false, allowExtension: false });
     let answer;
     try {
       w.enableDefensive(true);
-      w.exec('PRAGMA trusted_schema = 0; PRAGMA journal_mode = DELETE; PRAGMA secure_delete = ON;');
+      w.exec('PRAGMA trusted_schema = 0; PRAGMA journal_mode = DELETE;');
       const failed = [];
       for (const name of req.tables) {
         try {
@@ -77,10 +79,12 @@ try {
           failed.push({ name, error: String(e && e.message || e) });
         }
       }
+      if (failed.length === 0) w.exec("VACUUM INTO '" + String(req.into).replace(/'/g, "''") + "'");
       answer = { ok: true, failed };
     } finally {
       w.close();
     }
+    if (answer.failed.length === 0) renameSync(req.into, req.path);
     await new Promise((done) => process.stdout.write(JSON.stringify(answer), done));
     process.exit(0);
   }

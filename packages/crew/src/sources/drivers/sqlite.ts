@@ -150,11 +150,12 @@ export async function sqliteIngest(
 }
 
 /**
- * (crew#1731) Drop `tables` (virtual tables) from the upload's copy at `path`, in the writer child, with the freed pages
- * zeroed. Answers the ones that could not be dropped (a module this SQLite lacks).
+ * (crew#1731) Drop `tables` (virtual tables) from the upload's copy at `path`, in the writer child, then rewrite the copy
+ * through `into` (VACUUM INTO, rowids kept) and put it back at `path`. Answers the ones that could not be dropped (a
+ * module this SQLite lacks); the copy is not rewritten then.
  */
-export async function sqliteStrip(path: string, tables: string[], deadlineMs: number): Promise<{ failed: Array<{ name: string; error: string }> }> {
-  const a = await runChild({ op: 'strip', path, tables }, deadlineMs);
+export async function sqliteStrip(path: string, into: string, tables: string[], deadlineMs: number): Promise<{ failed: Array<{ name: string; error: string }> }> {
+  const a = await runChild({ op: 'strip', path, into, tables }, deadlineMs);
   if (!a.ok) throw new SourceQueryError(null, 'source', a.error ?? 'the virtual tables could not be dropped');
   return { failed: (a['failed'] as Array<{ name: string; error: string }>) ?? [] };
 }

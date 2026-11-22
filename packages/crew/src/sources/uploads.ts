@@ -13,8 +13,8 @@
  *   process, never in the daemon. A virtual table (a full-text index, an R-tree) is dropped from crew's copy
  *   with its shadow tables, in the same child, and the result names it (crew#1731); one whose module this
  *   SQLite lacks cannot be dropped, and the file is refused naming it.
- * - A crash mid-upload leaves its `.tmp-*` files behind: each upload first removes the ones older than
- *   {@link STALE_TMP_MS} (crew#1724).
+ * - A crash mid-upload leaves its `.tmp-*` files behind: each upload starts a sweep (one at a time, never awaited) that
+ *   removes the ones older than {@link STALE_TMP_MS} and not a live upload's (crew#1724).
  * - Limits: 50 MB file, 200 MB after decompression, 1,000,000 rows, 200 columns, 30 s to parse.
  */
 
@@ -88,13 +88,31 @@ export interface UploadResult {
  */
 export const STALE_TMP_MS = 2 * UPLOAD_LIMITS.parseMs;
 /** The temporary files an upload writes in the store: its bytes, the snapshot being built and its journals. */
-const TMP_FILE_RE = /^\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:upload|sqlite(?:-journal|-wal|-shm)?)$/;
+const TMP_FILE_RE = /^\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:upload|sqlite(?:-vacuum)?(?:-journal|-wal|-shm)?)$/;
+/** A `.sqlite` temp's sidecars: its journals, and the rewrite of a stripped copy (`-vacuum`) with its journal. */
+const TMP_SIDECARS = ['-journal', '-wal', '-shm', '-vacuum', '-vacuum-journal'];
 
 /**
  * The temporary files of the uploads this process is running (codex r1): never swept, however long one has stalled. Only
  * one daemon writes a state home's snapshot store, so these are all the live ones.
  */
 const liveTmp = new Set<string>();
+
+/** The sweep running now, if one is: uploads that start while it runs start none of their own (codex r2). */
+let sweeping: Promise<void> | null = null;
+
+/** Start a sweep of `dir` unless one runs; never awaited by an upload, so it never spends an upload's deadline. */
+function startSweep(dir: string): void {
+  if (sweeping !== null) return;
+  sweeping = sweepStale(dir).finally(() => {
+    sweeping = null;
+  });
+}
+
+/** TESTS ONLY: resolves once the sweep running now (if any) has finished. */
+export async function sweepSettled(): Promise<void> {
+  await sweeping;
+}
 
 /**
  * Remove the store's stale `.tmp-*` files (crew#1724), never a live upload's. Housekeeping: a failure is never the
@@ -110,7 +128,7 @@ export async function sweepStale(dir: string, now: number = Date.now()): Promise
   for (const n of names) {
     if (!TMP_FILE_RE.test(n)) continue;
     const p = join(dir, n);
-    if (liveTmp.has(p.replace(/-(?:journal|wal|shm)$/, ''))) continue;
+    if (liveTmp.has(p.replace(/(?:-vacuum)?(?:-journal|-wal|-shm)?$/, ''))) continue;
     try {
       if (now - (await stat(p)).mtimeMs > STALE_TMP_MS) await rm(p, { force: true });
     } catch {
@@ -223,12 +241,12 @@ export async function ingestUpload(filename: string, data: Buffer, opts: { dir?:
   await writeFile(join(dir, '.gitignore'), '*\n', { flag: 'wx', mode: 0o600 }).catch((err: NodeJS.ErrnoException) => {
     if (err.code !== 'EEXIST') throw err;
   });
-  await sweepStale(dir);
   const tmp = join(dir, `.tmp-${randomUUID()}.sqlite`);
   const input = join(dir, `.tmp-${randomUUID()}.upload`);
   const kind = kindOf(filename, data);
   liveTmp.add(tmp);
   liveTmp.add(input);
+  startSweep(dir);
   try {
     if (kind === 'sqlite') {
       if (data.subarray(0, 16).toString('latin1') !== 'SQLite format 3\0') throw new UploadError('bad_sqlite', 'the file is not a SQLite database');
@@ -248,7 +266,7 @@ export async function ingestUpload(filename: string, data: Buffer, opts: { dir?:
         within(deadline);
         let failed: Array<{ name: string; error: string }>;
         try {
-          failed = (await sqliteStrip(tmp, dropped, Math.max(1, deadline - Date.now()))).failed;
+          failed = (await sqliteStrip(tmp, `${tmp}-vacuum`, dropped, Math.max(1, deadline - Date.now()))).failed;
         } catch (err) {
           if (err instanceof SourceQueryError && err.errorClass === 'timeout') throw tooSlow();
           throw unavailable(err) ?? err;
@@ -296,8 +314,12 @@ export async function ingestUpload(filename: string, data: Buffer, opts: { dir?:
     };
   } finally {
     // The file and any journal a runner ended mid-transaction left beside it.
-    await Promise.all([rm(input, { force: true }), ...['', '-journal', '-wal', '-shm'].map((s) => rm(`${tmp}${s}`, { force: true }))]);
-    liveTmp.delete(tmp);
-    liveTmp.delete(input);
+    try {
+      await Promise.all([rm(input, { force: true }), ...['', ...TMP_SIDECARS].map((s) => rm(`${tmp}${s}`, { force: true }))]);
+    } finally {
+      // Not live any more even if a removal failed: the next sweep takes what is left (codex r2).
+      liveTmp.delete(tmp);
+      liveTmp.delete(input);
+    }
   }
 }
