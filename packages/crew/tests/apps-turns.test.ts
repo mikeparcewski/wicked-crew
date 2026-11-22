@@ -20,7 +20,7 @@ import { McpBroker, type McpBrokerDeps } from '../src/mcp/broker.js';
 import type { McpCallResponse } from '../src/core/types.js';
 import { registerAppRoutes } from '../src/apps/routes.js';
 import { AppStore, type AppRepoRegistry } from '../src/apps/store.js';
-import { APPS_SELF_CHECK_COMMAND, AppTurnService, PackageKnowledge, SPEC_SHAPE_GUIDE, appsUnitResolver, builderLines, changeLine, packageJson, turnProblem, type KnowledgePackage, type TurnEngine } from '../src/apps/turns.js';
+import { APPS_SELF_CHECK_COMMAND, AppTurnService, PackageKnowledge, SPEC_SHAPE_GUIDE, appsUnitResolver, builderLines, changeLine, packageJson, refusalWords, turnProblem, type KnowledgePackage, type TurnEngine } from '../src/apps/turns.js';
 import { readRules } from '../src/sources/policy/rules.js';
 import { builderCatalog } from './fixtures/apps-sources/builder-catalog.js';
 import { chatKnowledgeFor } from '../src/api/chat-mcp.js';
@@ -515,6 +515,63 @@ describe('apps turns: check, land, refuse', () => {
     await s.call('POST', '/apps/escalations/turns', { base: 2, message: 'next' });
     expect(s.launched[1]!.problem).toContain('"code":"no_change","why":"the builder made no change (it may have declined)"');
     expect(s.launched[1]!.problem).not.toContain('pg_sleep is refused');
+  });
+
+  // crew#1347: the evaluator's verdict text, as the engine records it (its head, then the evaluator's own tail).
+  const EVALUATOR_FAIL = [
+    "the evaluator's verdict is FAIL",
+    'Reviewed as evaluator; changed no files.',
+    'ITEM 1: PASS — The KPI tile reads the escalated count.',
+    'ITEM 2: FAIL — New query `escalated_west_count` embeds filter values as literals; declare parameters.',
+    '',
+    "Local HEAD is v6 with the reviewed changes uncommitted, so its tree differs from crew's recorded tree.",
+    '',
+    'Counts: derived 3 / submitted 3 / failed 1.',
+    'Memories proposed 0; no resolved environment issue warranted capture.',
+    'TREE: e2e47a84c0ffee00',
+    'VERDICT: FAIL',
+  ].join('\n');
+
+  it('a refused review\'s reason is its failing items in plain words, never the evaluator\'s bookkeeping (crew#1347)', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    s.set(runId, 'awaiting_human', { build: { status: 'done' }, check: { status: 'done' }, review: { status: 'rejected', denial_reason: EVALUATOR_FAIL } });
+    const d = (await s.call('GET', '/apps/escalations')).body.app;
+    expect(d.turn).toBeNull();
+    const reason = d.turns![0]!.reason!;
+    expect(d.turns![0]).toMatchObject({ state: 'refused', code: 'review_refused' });
+    expect(reason).toBe('The reviewer refused the change: New query escalated_west_count embeds filter values as literals; declare parameters. Nothing landed.');
+    for (const bookkeeping of ['Counts', 'Memories proposed', 'TREE', 'VERDICT', "evaluator's verdict", 'Reviewed as evaluator', 'ITEM 1', 'Local HEAD', '`']) expect(reason).not.toContain(bookkeeping);
+  });
+
+  it('refusalWords: a run-together verdict keeps only the failing items; plain findings lose only their bookkeeping', () => {
+    const oneLined = EVALUATOR_FAIL.replace(/\s+/g, ' ');
+    expect(refusalWords(oneLined)).toBe("New query escalated_west_count embeds filter values as literals; declare parameters. Local HEAD is v6 with the reviewed changes uncommitted, so its tree differs from crew's recorded tree.");
+    expect(refusalWords("the evaluator's verdict is FAIL\nThe chart reads a column the message did not ask for.\n**VERDICT: FAIL**")).toBe('The chart reads a column the message did not ask for.');
+    expect(refusalWords("the evaluator's verdict is FAIL\nCounts: derived 1\nVERDICT: FAIL")).toBe('');
+    // A check's own words carry no bookkeeping and are kept as they are.
+    expect(refusalWords('apps_check: refused: check_failed - read_policy queries/x.sql: pg_sleep is not allowed')).toBe('apps_check: refused: check_failed - read_policy queries/x.sql: pg_sleep is not allowed');
+    expect(refusalWords(null)).toBe('');
+  });
+
+  it('a build that made no change never quotes the STACK-CHECK footer or raw markdown (crew#1540)', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    s.outputs.set(`${runId}:build`, 'I could not read the app\'s files: **access to the worktree was refused**, so I changed nothing.\n\n**STACK-CHECK:** looked at nothing (no file access) :: offers nothing this change needs.\n\nMemories proposed 0');
+    s.set(runId, 'failed', { build: { status: 'rejected', denial_reason: 'executes-code phase reported done but left no change in the worktree' } });
+    s.emit({ type: 'sessionFailed', session: runId });
+    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull());
+    const t = (await s.call('GET', '/apps/escalations')).body.app.turns![0]!;
+    expect(t).toMatchObject({ state: 'failed', code: 'no_change' });
+    expect(t.reason).toBe('The builder made no change it could hand on. It said: “I could not read the app\'s files: access to the worktree was refused, so I changed nothing.” Nothing landed.');
+
+    // A builder that said nothing but the footer: crew's words only, no quote.
+    const run2 = (await s.call('POST', '/apps/escalations/turns', { base: 2, message: 'again' })).body['runId'] as string;
+    s.outputs.set(`${run2}:build`, '**STACK-CHECK:** looked at nothing (no file access) :: offers nothing this change needs.');
+    s.set(run2, 'failed', { build: { status: 'rejected', denial_reason: 'executes-code phase reported done but left no change in the worktree' } });
+    s.emit({ type: 'sessionFailed', session: run2 });
+    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull());
+    expect((await s.call('GET', '/apps/escalations')).body.app.turns![1]!.reason).toBe('The builder made no change it could hand on. Nothing landed.');
   });
 
   it('a build refused for another reason keeps that reason (only "left no change" is no_change)', async () => {

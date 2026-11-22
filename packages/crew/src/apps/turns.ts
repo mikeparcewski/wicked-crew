@@ -180,16 +180,69 @@ export function changeLine(before: { spec: AppSpec; queryText: Record<string, st
   return `${line[0]!.toUpperCase()}${line.slice(1)}`;
 }
 
-/** The last paragraph of a seat's answer (code fences and verdict lines left out), or ''. */
+// ── A seat's words for the person: its findings, never the protocol's bookkeeping (crew#1347, crew#1540) ──
+
+/** A line without the decoration a seat wraps it in: leading `#`, `*`, `-`, `>`, ticks, and `**` / `__` / ticks inside. */
+const undecorate = (l: string): string => l.trim().replace(/^[#*>`\-\s]+/, '').replace(/\*\*|__|`/g, '').trim();
+
+/**
+ * The worker and evaluator skills' bookkeeping lines (counts, memories, tree, verdict, the stack-check footer) and the
+ * engine's own head over an evaluator's words: lines for the run record, never what the seat said to the person.
+ */
+const BOOKKEEPING_LINE = /^(?:VERDICT\b|TREE\s*:|Counts\s*:|Memories proposed\b|STACK-CHECK\b)|^the evaluator's (?:verdict|`?VERDICT:?`? line)\b|^Reviewed as (?:the )?evaluator\b/i;
+/** The same bookkeeping as the tail of a line that was already run together into one. */
+const BOOKKEEPING_TAIL = /\s+(?:Counts: derived\b|Memories proposed\b|TREE: [0-9a-f]{7,}|VERDICT: [A-Z]{3,}\b|STACK-CHECK:).*$/;
+/** One acceptance item's verdict line, as the evaluator skill writes it: `ITEM 2: FAIL — what is wrong`. */
+const ITEM_LINE = /^ITEM\s+\d+\s*:\s*([A-Z][A-Z -]*?)\s*(?:—|–|-|:)\s*(.*)$/;
+
+/** The lines of a seat's text that are words for the person: undecorated, bookkeeping dropped and cut off. */
+function personLines(text: string): string[] {
+  const out: string[] = [];
+  for (const raw of text.replace(/\r/g, '').split('\n')) {
+    // A code fence ends a paragraph, as a blank line does (its ticks are decoration, so it is read before them).
+    let l = raw.trim().startsWith('```') ? '' : undecorate(raw);
+    if (l === '') {
+      out.push('');
+      continue;
+    }
+    // A run-together text carries the engine's head and the evaluator's note at its start.
+    l = l.replace(/^the evaluator's verdict is [A-Z]+\b[.:]?\s*/i, '').replace(/^Reviewed as (?:the )?evaluator\b[^.]*\.\s*/i, '');
+    if (l === '' || BOOKKEEPING_LINE.test(l)) continue;
+    l = l.replace(BOOKKEEPING_TAIL, '').trim();
+    if (l !== '') out.push(l);
+  }
+  return out;
+}
+
+/**
+ * A refused step's reason, in the reviewer's (or crew's check's) own words for the person: the failing acceptance
+ * items when the evaluator listed items (`ITEM n: FAIL — …`), else its words with the bookkeeping left out; `''`
+ * when nothing is left (the caller then says it in crew's words only).
+ */
+export function refusalWords(text: string | null | undefined): string {
+  if (text == null) return '';
+  const lines = personLines(text).filter((l) => l !== '');
+  // An item run together with the next one (a one-lined text) is split at each `ITEM n:`.
+  const parts = lines.flatMap((l) => l.split(/\s+(?=ITEM\s+\d+\s*:)/));
+  const items = parts.map((l) => ITEM_LINE.exec(l)).filter((m): m is RegExpExecArray => m !== null);
+  if (items.length > 0) {
+    const failing = items.filter((m) => m[1]!.trim().toUpperCase() !== 'PASS').map((m) => m[2]!.trim()).filter((t) => t !== '');
+    if (failing.length > 0) return failing.join('; ');
+  }
+  return lines.join(' ');
+}
+
+/** The last paragraph of a seat's answer (code fences and bookkeeping lines left out, markdown stripped), or ''. */
 function lastParagraph(output: string | null): string {
   if (output === null) return '';
-  // The skill's own bookkeeping lines (counts, memories, verdict, tree) are not what it said about the change.
-  const lines = output.replace(/\r/g, '').split('\n').map((l) => l.trim()).filter((l) => !/^(VERDICT|TREE|Counts|Memories proposed)\b/i.test(l));
-  while (lines.length > 0 && (lines[lines.length - 1] === '' || lines[lines.length - 1]!.startsWith('```'))) lines.pop();
+  // The skill's own bookkeeping lines (counts, memories, verdict, tree, the stack-check footer) are not what it
+  // said about the change (crew#1540: a `**STACK-CHECK:**` footer was quoted as the reason).
+  const lines = personLines(output);
+  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
   const tail: string[] = [];
   for (let i = lines.length - 1; i >= 0 && tail.length < 6; i--) {
     const l = lines[i]!;
-    if (l === '' || l.startsWith('```')) break;
+    if (l === '') break;
     tail.unshift(l);
   }
   return tail.join(' ');
@@ -424,7 +477,8 @@ export function parkedRefusal(v: SessionView, events: ReadonlyArray<Record<strin
   const refusal = (phase: string, detailText: string): { phase: string; code: string; reason: string } => {
     const code = phase === 'review' ? 'review_refused' : phase === 'check' ? 'check_failed' : 'step_failed';
     const what = phase === 'review' ? 'The reviewer refused the change' : phase === 'check' ? 'crew\'s check refused the change' : `${phase === 'build' ? 'The build' : 'A step'} did not pass`;
-    const detail = oneLine(detailText, 1500);
+    // Its own closing stop is dropped: crew's sentence ends it.
+    const detail = oneLine(refusalWords(detailText), 1500).replace(/[\s.]+$/, '');
     return { phase, code, reason: `${what}${detail !== '' ? `: ${detail}` : ''}. Nothing landed.` };
   };
   for (const phase of ['check', 'review', 'build']) {
@@ -629,11 +683,11 @@ export class AppTurnService implements AppTurnLauncher {
     if (status === 'failed') {
       const check = unit('check');
       if (check !== null && check.status === 'rejected') {
-        return { kind: 'end', state: 'refused', code: 'check_failed', reason: oneLine(check.denial_reason ?? 'crew\'s check refused the turn', 2000) };
+        return { kind: 'end', state: 'refused', code: 'check_failed', reason: oneLine(refusalWords(check.denial_reason) || 'crew\'s check refused the turn', 2000) };
       }
       const failed = v.units.find((u) => u.status === 'rejected') ?? null;
       const phase = failed === null ? 'a step' : failed.id.slice(input.runId.length + 1) || 'a step';
-      return { kind: 'end', state: 'failed', code: 'step_failed', reason: oneLine(`${phase} could not finish: ${failed?.denial_reason ?? 'the run failed'}`, 2000) };
+      return { kind: 'end', state: 'failed', code: 'step_failed', reason: oneLine(`${phase} could not finish: ${refusalWords(failed?.denial_reason) || 'the run failed'}`, 2000) };
     }
     if (status === 'cancelled') return { kind: 'end', state: 'cancelled', code: 'cancelled', reason: 'The turn was stopped before it landed.' };
     // Still running, or parked for a person on a gate that is not a refusal: not ended (xreview r3).
