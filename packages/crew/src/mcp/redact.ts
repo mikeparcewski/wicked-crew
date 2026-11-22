@@ -63,13 +63,67 @@ export const VALUE_PATTERNS: ReadonlyArray<ValuePattern> = [
   { id: 'private-key-block', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
 ];
 
-export function redactString(value: string): string {
+export function redactString(value: string, patterns: ReadonlyArray<ValuePattern> = VALUE_PATTERNS): string {
   let out = value;
-  for (const { id, re, replace } of VALUE_PATTERNS) {
+  for (const { id, re, replace } of patterns) {
     re.lastIndex = 0;
     out = replace !== undefined ? out.replace(re, replace) : out.replace(re, REDACTED(id));
   }
   return out;
+}
+
+/**
+ * In JSON text a line break is the two characters `\n` (a tab `\t`, and so on), so a secret that starts a line follows
+ * the letter `n` and a leading `\b` never matches there (coord on #1733, C-1). Over JSON text a pattern's leading `\b`
+ * also matches right after such an escape. (After an escaped backslash followed by that letter it matches too: that
+ * only redacts more.)
+ */
+const ESCAPE_BOUNDARY = String.raw`(?:\b|(?<=\\[nrtbf]))`;
+function overJsonText(re: RegExp): RegExp {
+  return re.source.startsWith(String.raw`\b`) ? new RegExp(ESCAPE_BOUNDARY + re.source.slice(2), re.flags) : re;
+}
+
+/**
+ * (crew#1520) The value shapes for a text block that is a JSON document. Two differences: a leading boundary also
+ * holds after an escape letter ({@link ESCAPE_BOUNDARY}), and a `kv-secret` value never takes a backslash that
+ * escapes a quote. Over JSON text the plain pattern takes the backslash of an escaped quote (`password=admin` written
+ * inside quotes in a record) and leaves the quote bare, so the block stops parsing. Here every other escape (a tab, a
+ * backslash, a `u0041` escape) still counts as part of the value, so what the plain pass redacted is redacted here
+ * too, less that one backslash.
+ */
+const JSON_TEXT_PATTERNS: ReadonlyArray<ValuePattern> = VALUE_PATTERNS.map((p) => ({
+  ...p,
+  re: overJsonText(p.id === 'kv-secret' ? /\b(token|secret|password|passwd|pwd|api[-_]?key|apikey|access[-_]?key|auth)=((?:[^&\s"'\\]|\\[^"\s]){4,})/gi : p.re),
+}));
+
+/** Whether `text` is a JSON object or array (never throws: a text too deep to parse is not one). */
+function isJsonDocument(text: string): boolean {
+  const head = text.trimStart()[0];
+  if (head !== '{' && head !== '[') return false;
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * (crew#1520) An MCP text block. Text that is a JSON document (estate's records, most servers' answers) is redacted
+ * over its text with {@link JSON_TEXT_PATTERNS}, so it still parses afterwards; numbers, duplicate members and a key
+ * split across members are seen exactly as the plain pass sees them, since nothing is parsed and re-serialized. In
+ * the unlikely case the redaction still leaves invalid JSON, the plain pass's text is returned, as before this fix.
+ * Other text keeps the plain pass.
+ */
+function redactTextBlock(text: string): string {
+  if (!isJsonDocument(text)) return redactString(text);
+  const safe = redactString(text, JSON_TEXT_PATTERNS);
+  return isJsonDocument(safe) ? safe : redactString(text);
+}
+
+/** Whether `v` is an MCP content block of type `text`. */
+function isTextBlock(v: Record<string, unknown>): boolean {
+  return v['type'] === 'text' && typeof v['text'] === 'string';
 }
 
 /** Layers 2 and 3 over any JSON value. Pure: returns a new value. */
@@ -78,9 +132,12 @@ export function redactDeep<T>(value: T): T {
     if (typeof v === 'string') return redactString(v);
     if (Array.isArray(v)) return v.map(walk);
     if (v !== null && typeof v === 'object') {
+      const rec = v as Record<string, unknown>;
+      const textBlock = isTextBlock(rec);
       const out: Record<string, unknown> = {};
-      for (const [k, inner] of Object.entries(v as Record<string, unknown>)) {
-        out[k] = isDeniedFieldName(k) ? REDACTED(`field:${k}`) : walk(inner);
+      for (const [k, inner] of Object.entries(rec)) {
+        if (textBlock && k === 'text') out[k] = redactTextBlock(inner as string);
+        else out[k] = isDeniedFieldName(k) ? REDACTED(`field:${k}`) : walk(inner);
       }
       return out;
     }

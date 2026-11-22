@@ -62,7 +62,7 @@ import {
 import { scrubResult } from './redact.js';
 import { UpstreamCallError } from './upstream-error.js';
 import { McpRegistryError, type McpRegistry } from './registry.js';
-import { FENCE_REASON, FENCE_REMEDY, FENCE_RULE, pickAllows, PICK_RULE, type RunFence, type SourcePicks } from './run-fence.js';
+import { FENCE_REASON, FENCE_REMEDY, FENCE_RULE, pickAllows, PICK_RULE, runHasPick, type RunFence, type SourcePicks } from './run-fence.js';
 import { scrubSecrets } from './secrets.js';
 import {
   ESTATE_PROPOSAL_TOOL,
@@ -175,6 +175,11 @@ interface Span {
   kind: McpUpstreamKind | null;
   retries: number;
   bytesOut: number;
+  /**
+   * (crew#1442) Estate knowledge reads: how many records the release re-check withheld, and whether the run's source
+   * pick is in force. Set once the re-check ran, so every record of the call (an answer, or a later refusal) says it.
+   */
+  withheld?: { records: number; picked: boolean };
 }
 
 export function budgetFromEnv(env: NodeJS.ProcessEnv = process.env): number {
@@ -479,12 +484,22 @@ export class McpBroker {
       }
       if (!released.ok) return this.refuse(span, 'withheld', 'deny', 'broker:estate-visible', ['estate:visible'], released.reason, 'work from what this step may see; a person decides which sources a project sees on the source sheet', null, null);
       result = released.result;
+      // (crew#1442) Recorded, so "withheld" never reads as "nothing found"; a run with a pick names the pick rule (CS10).
+      if (released.withheld > 0) span.withheld = { records: released.withheld, picked: runHasPick(this.deps.picks, scope.unit.runId) };
     }
     // `rules.recall` is crew's own answer (the operator's rule text the judge reads), not an upstream's output: it is
     // released verbatim, so a seat reads the words it is judged on. The redactor works on the serialized text and
     // would change a statement (`Bearer …`) or break its JSON (`"password=…"`), leaving the rule unreadable.
-    const scrubbed = tool === RULES_RECALL_TOOL ? result : scrubResult(result, []);
-    const raw = JSON.stringify(scrubbed);
+    let scrubbed: Record<string, unknown>;
+    let raw: string;
+    try {
+      scrubbed = tool === RULES_RECALL_TOOL ? result : scrubResult(result, []);
+      raw = JSON.stringify(scrubbed);
+    } catch (err) {
+      // A result the scrub cannot walk (nested past the stack) is refused and recorded, never handed back unscrubbed.
+      this.deps.log?.(`[mcp] ${body.subject}: the result could not be scrubbed: ${message(err)}`);
+      return this.refuse(span, 'guard_error', 'guard_error', 'broker:estate', [], `mcp:estate/${tool} answered a result the relay could not check, so it is withheld`, 'narrow the call, or continue without it', null, null);
+    }
     span.bytesOut = Buffer.byteLength(raw, 'utf8');
     if (span.bytesOut > relay.maxResultBytes) {
       return this.refuse(span, 'withheld', 'deny', 'broker:estate-bound', ['estate:result-bound'], `mcp:estate/${tool} answered ${span.bytesOut} bytes, over the relay's ${relay.maxResultBytes}-byte bound`, tool === RULES_RECALL_TOOL ? 'pull fewer rules at once: name them in "ids", or page with "limit" and "offset"' : 'narrow the call (a lower limit or depth, a narrower query), or page it with cursor', null, null);
@@ -672,6 +687,7 @@ export class McpBroker {
   ): McpCallRecord {
     const end = this.now();
     const v = span.verdict;
+    const w = span.withheld;
     return {
       traceId: v?.unit.runId ?? null,
       spanId: span.spanId,
@@ -681,7 +697,7 @@ export class McpBroker {
       end: new Date(end).toISOString(),
       ms: end - span.start,
       status: { code: errorClass === null && outcome === 'ok' ? 'ok' : 'error', errorClass: errorClass ?? (outcome === 'ok' ? null : outcome) },
-      decision: { decision, by, ruleIds, claimId },
+      decision: { decision, by, ruleIds: w?.picked === true && !ruleIds.includes(PICK_RULE) ? [...ruleIds, PICK_RULE] : ruleIds, claimId },
       outcome,
       attrs: {
         'mcp.subject': span.subject,
@@ -692,6 +708,7 @@ export class McpBroker {
         'wicked.carrier': 'shim',
         'bytes.out': span.bytesOut,
         retries: span.retries,
+        ...(w !== undefined && w.records > 0 ? { 'estate.withheld': w.records } : {}),
       },
     };
   }
