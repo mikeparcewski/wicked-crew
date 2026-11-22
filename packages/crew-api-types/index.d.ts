@@ -13330,6 +13330,22 @@ export interface TeamPlanStep {
    *  no `run` step, may be scoped `SCOPE {"touch":[]}`, which scores 0. Set on a code phase it is
    *  refused (`writes_nothing_on_code`). Omitted when unset. */
   writes_nothing?: boolean;
+  // (wicked-core#1259) The step's controls as the plan set them, carried on `plan.proposed`,
+  // `plan.accepted` and `plan.revised` steps so a plan card shows what shapes the step's gates.
+  // Display only (the engine composes from the plan itself); each is omitted when unset.
+  /** The step runs code (a step may raise its entry's). */
+  executes_code?: boolean;
+  /** The validator the step pins. */
+  validator_pin?: string;
+  /** The step's output is an acceptance requirement of its run. */
+  verified_evidence?: boolean;
+  /** The step's output must end with a capture-report marker. */
+  requires_capture_report?: boolean;
+  /** (crew#1311) The step's output is an answer its caller reads: the substance floor asks only
+   *  that an answer exists. */
+  answer_only?: boolean;
+  /** The deliverables the step must produce. */
+  required_deliverables?: string[];
 }
 
 /**
