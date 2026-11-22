@@ -1,0 +1,218 @@
+{
+ "confidence": {
+  "avg": 0.6499999761581421,
+  "edge_count": 3,
+  "min": 0.6499999761581421
+ },
+ "crossings": [
+  {
+   "depth": 2,
+   "evidence": {
+    "confidence": 0.6000000238418579,
+    "consumer_version": "1.0.0",
+    "ecosystem": "npm",
+    "identity": "registry-source(version-only)",
+    "package": "@fx/api",
+    "provider_version": "1.0.0",
+    "ranks": [
+     "package-manifest"
+    ],
+    "skew": false
+   },
+   "from": {
+    "repo": "web",
+    "symbol": "file . web/src/page.ts:"
+   },
+   "hops": [
+    {
+     "kind": "imports",
+     "resolved_by": "wicked-link"
+    }
+   ],
+   "id": "xd844539cff04463e",
+   "to": {
+    "repo": "api",
+    "symbol": "file . api/src/index.ts:"
+   }
+  }
+ ],
+ "crossings_total": 1,
+ "crossings_truncated": false,
+ "dependents": [
+  {
+   "depth": 1,
+   "file": "api/src/index.ts",
+   "id": "file . api/src/index.ts:",
+   "kind": "file",
+   "line": 1,
+   "name": "api/src/index.ts",
+   "stale": "modified",
+   "via": [
+    {
+     "id": "ts-typescript . . . api/src/index/charge().",
+     "kind": "contains"
+    }
+   ],
+   "via_crossing": null,
+   "via_crossing_omitted": false,
+   "via_omitted": 0
+  },
+  {
+   "depth": 1,
+   "file": "gone/src/index.ts",
+   "id": "file . gone/src/index.ts:",
+   "kind": "file",
+   "line": 1,
+   "name": "gone/src/index.ts",
+   "stale": "modified",
+   "via": [
+    {
+     "id": "ts-typescript . . . gone/src/index/charge().",
+     "kind": "contains"
+    }
+   ],
+   "via_crossing": null,
+   "via_crossing_omitted": false,
+   "via_omitted": 0
+  },
+  {
+   "depth": 1,
+   "file": "api/src/index.ts",
+   "id": "ts-typescript . . . api/src/index/bill().",
+   "kind": "function",
+   "line": 2,
+   "name": "bill",
+   "stale": "modified",
+   "via": [
+    {
+     "id": "ts-typescript . . . api/src/index/charge().",
+     "kind": "calls"
+    }
+   ],
+   "via_crossing": null,
+   "via_crossing_omitted": false,
+   "via_omitted": 0
+  },
+  {
+   "depth": 1,
+   "file": "gone/src/index.ts",
+   "id": "ts-typescript . . . gone/src/index/bill().",
+   "kind": "function",
+   "line": 2,
+   "name": "bill",
+   "stale": "modified",
+   "via": [
+    {
+     "id": "ts-typescript . . . gone/src/index/charge().",
+     "kind": "calls"
+    }
+   ],
+   "via_crossing": null,
+   "via_crossing_omitted": false,
+   "via_omitted": 0
+  },
+  {
+   "depth": 2,
+   "file": "gone/src/index.ts",
+   "id": "ts-typescript . . . gone/src/index/checkout().",
+   "kind": "function",
+   "line": 3,
+   "name": "checkout",
+   "stale": "modified",
+   "via": [
+    {
+     "id": "ts-typescript . . . gone/src/index/bill().",
+     "kind": "calls"
+    }
+   ],
+   "via_crossing": null,
+   "via_crossing_omitted": false,
+   "via_omitted": 0
+  }
+ ],
+ "depth_horizon_reached": false,
+ "freshness": {
+  "checked_files": 2,
+  "commits_behind": 0,
+  "indexing": [],
+  "not_file_backed": 0,
+  "roots": [
+   {
+    "commits_behind": 0,
+    "head": "eb355425421ad9b0239c1230017ffbe7cc01bfbd",
+    "indexed": "eb355425421ad9b0239c1230017ffbe7cc01bfbd",
+    "label": "api",
+    "root": "~/fx/api"
+   },
+   {
+    "commits_behind": 0,
+    "head": "3bbac62861020c94f755fe88e5465ee00a2f80a2",
+    "indexed": "3bbac62861020c94f755fe88e5465ee00a2f80a2",
+    "label": "gone",
+    "root": "~/fx/gone"
+   },
+   {
+    "commits_behind": 0,
+    "head": "7c2c9a0f4b858e3d3d3dfb2e5b2c88870d575d63",
+    "indexed": "7c2c9a0f4b858e3d3d3dfb2e5b2c88870d575d63",
+    "label": "web",
+    "root": "~/fx/web"
+   }
+  ],
+  "stale_files": [
+   {
+    "file": "api/src/index.ts",
+    "status": "modified"
+   },
+   {
+    "file": "gone/src/index.ts",
+    "status": "modified"
+   }
+  ],
+  "stale_files_total": 2,
+  "unindexed_files": 0
+ },
+ "link": [
+  {
+   "coverage": [
+    {
+     "boundaries": {},
+     "incomplete": false,
+     "label": "api",
+     "links_in": 1,
+     "links_out": 0,
+     "manifests": 1,
+     "package_imports": 0
+    },
+    {
+     "boundaries": {},
+     "incomplete": false,
+     "label": "web",
+     "links_in": 0,
+     "links_out": 1,
+     "manifests": 2,
+     "package_imports": 1
+    }
+   ],
+   "generation": 5,
+   "last_error": null,
+   "project": "p1",
+   "stale": true,
+   "stale_labels": [
+    "web"
+   ]
+  }
+ ],
+ "next_cursor": null,
+ "node_cap_reached": false,
+ "page": {
+  "count": 5,
+  "from": 0,
+  "total": 5
+ },
+ "resolved": true,
+ "searched_depth": 12,
+ "target": "charge",
+ "truncated_dependents": 0,
+ "unresolved": 0
+}

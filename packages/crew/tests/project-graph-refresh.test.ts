@@ -208,7 +208,7 @@ if (cmd === 'resolve' || cmd === 'blast-radius') {
     cmd === 'resolve'
       ? JSON.stringify(hits)
       : JSON.stringify({ target: want, dependents: hits, unresolved: 0, crossings, crossings_total: crossings.length,
-          link: [{ project: 'p', generation: 3, stale, stale_labels: stale ? ['beta'] : [], coverage: [] }] }),
+          link: [{ project: 'proj_refresh', generation: 3, stale, stale_labels: stale ? ['beta'] : [], coverage: [] }] }),
   );
   process.exit(0);
 }
