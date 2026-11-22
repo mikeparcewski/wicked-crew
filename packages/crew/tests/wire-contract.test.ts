@@ -887,6 +887,29 @@ accepts<
     rule_coverage: { exercised: number; unexercised: { rule_id: string; steering_type: Wire.SteeringType }[] };
   }
 >();
+// (crew#1128, core#397) The memory axis: the engine's report with a memory store (evals.rs `MemoryAxis`,
+// `MemoryResult`) validates, a result's `memory` may be null (the sample declares none), and the declared key sets are
+// exactly the producer's (both directions).
+const ENGINE_MEMORY_RESULT = { surfaced: ['m1'], missing: [] as string[], unexpected_surfaced: [] as string[], verdict: 'caught' as const };
+const ENGINE_MEMORY_AXIS = {
+  summary: { total: 1, caught: 1, gaps: 0, false_positives: 0 },
+  coverage: { memories: 2, surfaced: 1, unsurfaced: [{ memory_id: 'm2', scope: 'project:p' }] },
+};
+accepts<
+  Wire.GovernanceEvalReport,
+  {
+    results: Array<Wire.GovernanceEvalResult & { memory: typeof ENGINE_MEMORY_RESULT | null }>;
+    summary: Wire.GovernanceEvalSummary;
+    degraded: null;
+    memory: typeof ENGINE_MEMORY_AXIS | null;
+  }
+>();
+accepts<keyof Wire.GovernanceEvalMemoryResult, keyof typeof ENGINE_MEMORY_RESULT>();
+accepts<keyof typeof ENGINE_MEMORY_RESULT, keyof Wire.GovernanceEvalMemoryResult>();
+accepts<keyof Wire.GovernanceEvalMemoryAxis['coverage'], keyof typeof ENGINE_MEMORY_AXIS.coverage>();
+accepts<keyof typeof ENGINE_MEMORY_AXIS.coverage, keyof Wire.GovernanceEvalMemoryAxis['coverage']>();
+// A sample that declares memories is a legal import body (the schema takes the engine's two matcher lists).
+accepts<z.input<typeof ImportEvalCorpusSchema>, { name: string; samples: Array<Wire.GovernanceEvalSample & { expected_memories: string[]; unexpected_memories: string[] }> }>();
 // Steering `effect` (api-types 0.27.0): the operator-authorable `warn` band is a legal effect on
 // the wire alongside the policy-era three; a rule WITHOUT one stays recall-only (still legal).
 accepts<Wire.ConformanceRule['effect'], 'deny' | 'warn' | 'allow_with_conditions' | 'allow' | undefined>();

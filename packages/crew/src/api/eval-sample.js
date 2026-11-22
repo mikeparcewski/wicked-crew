@@ -31,12 +31,21 @@ export const EvalSignalsSchema = z.strictObject({
   content: z.string().optional(),
 });
 
+/**
+ * (crew#1128, core#397) A memory the worker's recall for this action should (`expected_memories`) or must not
+ * (`unexpected_memories`) surface: `id:<memory id>` names one memory, any other entry is a case-insensitive content
+ * substring. The engine validates the entries; a run over a sample that declares memories needs the memory store.
+ */
+const MemoryMatchersSchema = z.array(z.string().min(1)).optional();
+
 export const EvalSampleSchema = z.strictObject({
   id: z.string().min(1),
   description: z.string().min(1),
   kind: z.enum(['good', 'bad']),
   steering_type: z.string().min(1),
   signals: EvalSignalsSchema,
+  expected_memories: MemoryMatchersSchema,
+  unexpected_memories: MemoryMatchersSchema,
 });
 
 export const ImportEvalCorpusSchema = z.strictObject({
@@ -70,11 +79,15 @@ export function canonicalJson(value) {
  * The payload identity of ONE sample: `sha256:` over the canonical JSON of exactly the five
  * payload fields (id, description, kind, steering_type, signals) — never a subset, never an
  * extra (a `payload_hash` already stamped on the sample is NOT part of its own identity).
+ * (crew#1128) A sample's memory matchers are part of the question it asks, so a NON-EMPTY
+ * `expected_memories` / `unexpected_memories` joins the payload; an absent or empty one does not,
+ * so every sample without memories keeps the hash it always had.
  *
  * @param {import('zod').input<typeof EvalSampleSchema>} sample
  * @returns {string}
  */
 export function samplePayloadHash(sample) {
+  /** @type {Record<string, unknown>} */
   const payload = {
     id: sample.id,
     description: sample.description,
@@ -82,5 +95,7 @@ export function samplePayloadHash(sample) {
     steering_type: sample.steering_type,
     signals: sample.signals,
   };
+  if (Array.isArray(sample.expected_memories) && sample.expected_memories.length > 0) payload['expected_memories'] = sample.expected_memories;
+  if (Array.isArray(sample.unexpected_memories) && sample.unexpected_memories.length > 0) payload['unexpected_memories'] = sample.unexpected_memories;
   return `sha256:${createHash('sha256').update(canonicalJson(payload)).digest('hex')}`;
 }

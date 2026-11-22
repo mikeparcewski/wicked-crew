@@ -34,6 +34,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EvalRunStore, type RecordEvalRunInput } from '../src/api/eval-store.js';
 import { classifyFlip, compareEvalRuns, DIFFERING_TYPE_FILTER, MALFORMED_RESULT_ROWS, MALFORMED_RULE_COVERAGE, UNVERIFIED_NO_SAMPLE_IDENTITY, type EvalRuleCoverageDelta } from '../src/api/eval-compare.js';
+import { createHash } from 'node:crypto';
 import { PAYLOAD_HASH_RE, samplePayloadHash } from '../src/api/eval-sample.js';
 import { removeScratch } from './setup/scratch.js';
 import type { EvalRunDetail, GovernanceEvalResult, GovernanceEvalRuleCoverage, GovernanceEvalSignals, GovernanceEvalSummary, GovernanceEvalTypeCoverage, SteeringType } from '../src/core/types.js';
@@ -868,5 +869,19 @@ describe('samplePayloadHash — the identity the comparison keys on', () => {
     ]) {
       expect(samplePayloadHash(variant)).not.toBe(h);
     }
+  });
+
+  it('a sample\'s memory matchers join its identity only when non-empty, so a sample without them keeps its hash (crew#1128)', () => {
+    const base = { id: 'm@000000000000', description: 'd', kind: 'good' as const, steering_type: 'development', signals: { tool: 'Edit' } };
+    const h = samplePayloadHash(base);
+    // The hash every existing sample already carries (pinned: no memory field ever reaches the payload of such a sample).
+    expect(h).toBe('sha256:' + createHash('sha256').update(JSON.stringify({ description: 'd', id: base.id, kind: 'good', signals: { tool: 'Edit' }, steering_type: 'development' })).digest('hex'));
+    expect(samplePayloadHash({ ...base, expected_memories: [], unexpected_memories: [] })).toBe(h);
+    const expectedOnly = samplePayloadHash({ ...base, expected_memories: ['id:m1'] });
+    const unexpectedOnly = samplePayloadHash({ ...base, unexpected_memories: ['id:m1'] });
+    expect(expectedOnly).not.toBe(h);
+    expect(unexpectedOnly).not.toBe(h);
+    expect(expectedOnly).not.toBe(unexpectedOnly);
+    expect(samplePayloadHash({ ...base, expected_memories: ['id:m2'] })).not.toBe(expectedOnly);
   });
 });

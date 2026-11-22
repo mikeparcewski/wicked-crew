@@ -16,7 +16,7 @@
  * type filter AND the same sample ids AND, per id, the same `kind` AND the same sample PAYLOAD
  * identity — the `sample.payload_hash` a producer stamped on each result row (`eval-sample.js`
  * `samplePayloadHash`: sha256 over the canonical JSON of id, description, kind, steering_type,
- * signals). The engine echoes only id/description/kind/steering_type per row, never the input
+ * signals, and any non-empty memory matchers, crew#1128). The engine echoes only id/description/kind/steering_type per row, never the input
  * `signals`, so a row WITHOUT a payload hash cannot be proven to be the same action as its
  * namesake in the other run: such a pair is `comparable: false` with `comparable_reason` starting
  * `unverified: no sample identity` — unverified, which is not the same as "different". A sample

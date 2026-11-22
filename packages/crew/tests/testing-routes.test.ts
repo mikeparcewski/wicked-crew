@@ -519,6 +519,21 @@ describe('POST /api/v1/testing/corpora/import', () => {
     expect(importCaptured).toEqual({ name: 'dev-behaviors', samples: SAMPLES });
   });
 
+  it('200: a sample that declares memories (the memory axis, crew#1128) reaches the adapter with its matchers', async () => {
+    evalsSupported = true;
+    const withMemories = [{ ...SAMPLES[0], expected_memories: ['id:m1', 'use the staging db'], unexpected_memories: ['id:m9'] }];
+    const res = await post('/api/v1/testing/corpora/import', { name: 'memory-axis', samples: withMemories });
+    expect(res.status).toBe(200);
+    expect(importCaptured).toEqual({ name: 'memory-axis', samples: withMemories });
+  });
+
+  it('400 on a blank memory matcher', async () => {
+    evalsSupported = true;
+    const res = await post('/api/v1/testing/corpora/import', { name: 'memory-axis', samples: [{ ...SAMPLES[0], expected_memories: [''] }] });
+    expect(res.status).toBe(400);
+    expect(importCaptured).toBeNull();
+  });
+
   it('400 on a missing name', async () => {
     evalsSupported = true;
     const res = await post('/api/v1/testing/corpora/import', { samples: SAMPLES });

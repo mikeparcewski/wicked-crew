@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -13,7 +13,7 @@ let home: string;
 let isolated: string;
 let armed: string;
 let saved: NodeJS.ProcessEnv;
-const KEYS = ['HOME', 'USERPROFILE', 'WICKED_CREW_KNOWLEDGE_DB'] as const;
+const KEYS = ['HOME', 'USERPROFILE', 'WICKED_CREW_KNOWLEDGE_DB', 'WICKED_MEMORY_DB'] as const;
 beforeEach(() => {
   armed = crewStateHome();
   saved = Object.fromEntries(KEYS.map((key) => [key, process.env[key]]));
@@ -24,6 +24,7 @@ beforeEach(() => {
   process.env['HOME'] = home;
   process.env['USERPROFILE'] = home;
   delete process.env['WICKED_CREW_KNOWLEDGE_DB'];
+  delete process.env['WICKED_MEMORY_DB'];
   setCrewStateHome(isolated);
 });
 afterEach(() => {
@@ -81,5 +82,28 @@ describe('state-home path ladders', () => {
       expect(payload['knowledgeDb']).toBe(expected);
       expect(Object.hasOwn(payload, 'knowledgeDb')).toBe(expected !== undefined);
     }
+  });
+
+  it.each(['state-home', 'explicit'] as const)('governance evals pass the %s memory store only once it exists (crew#1128)', async (mode) => {
+    const store = mode === 'explicit' ? join(root, 'operator-memory.db') : join(isolated, 'mcp', 'memory.db');
+    if (mode === 'explicit') process.env['WICKED_MEMORY_DB'] = store;
+    const payloads: Record<string, unknown>[] = [];
+    const capture = async (raw: string) => { payloads.push(JSON.parse(raw) as Record<string, unknown>); return '{}'; };
+    const adapter = Object.create(CoreAdapter.prototype) as CoreAdapter;
+    Object.assign(adapter, { core: { governanceEvals: capture }, dbPath: join(isolated, 'core.db') });
+    // No store yet: the engine would refuse a missing memoryDb, so it is not sent (the rules-only report).
+    await adapter.runGovernanceEvals({});
+    expect(Object.hasOwn(payloads[0]!, 'memoryDb')).toBe(false);
+    // The store the workers recall from exists: the memory axis reads it.
+    mkdirSync(join(store, '..'), { recursive: true });
+    writeFileSync(store, '');
+    await adapter.runGovernanceEvals({ corpus: 'evals:memory' });
+    expect(payloads[1]!['memoryDb']).toBe(store);
+    // A directory at that path is not a store.
+    const dirStore = join(root, 'not-a-file.db');
+    mkdirSync(dirStore);
+    process.env['WICKED_MEMORY_DB'] = dirStore;
+    await adapter.runGovernanceEvals({});
+    expect(Object.hasOwn(payloads[2]!, 'memoryDb')).toBe(false);
   });
 });
