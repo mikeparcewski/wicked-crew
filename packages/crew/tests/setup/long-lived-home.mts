@@ -74,6 +74,12 @@ async function seed(base: string): Promise<void> {
 async function clone(base: string, want: number): Promise<void> {
   const { DatabaseSync } = await import('node:sqlite');
   const db = new DatabaseSync(join(base, 'home', 'core.db'));
+  // Open the store as the engine does: its SQLite (rusqlite, via estate) runs with defensive mode
+  // off. node:sqlite turns defensive mode on by default, and under it SQLite refuses estate's schema
+  // (estate 0.35.x keeps a trigger, `nodes_fts_rowid_guard`, on the FTS5 shadow table
+  // `nodes_fts_content`): every statement fails with "malformed database schema ... cannot create
+  // triggers on shadow tables". Must run before the first statement, which is what parses the schema.
+  db.enableDefensive(false);
   const SESSION = '{"other":"agent_session"}';
   const UNIT = '{"other":"work_unit"}';
   const templates = (db.prepare('SELECT name FROM nodes WHERE kind = ?').all(SESSION) as Array<{ name: string }>).map((r) => r.name);
