@@ -315,6 +315,12 @@ function publishWrites(scratchRoot: string, writes: readonly PendingWrite[]): vo
 interface Manifest {
   head: number;
   kind: string;
+  /**
+   * studio#1140: a demo video's cut. Interactive's "New demo" writes a top-level `kind: "demo"`; the cut a run's
+   * "Edit the cut" makes (crew's `POST /runs/:id/demo/document`, then interactive's import) has no top-level kind, and
+   * each rendered version is recorded with `kind: "demo"`. Either makes it a cut.
+   */
+  cut: boolean;
   files: Map<number, string>;
 }
 
@@ -331,9 +337,11 @@ function readManifest(rootReal: string, doc: string): Manifest {
   const m = parsed as { head?: unknown; kind?: unknown; versions?: unknown };
   if (typeof m.head !== 'number' || !Number.isInteger(m.head) || m.head < 0) throw new ContextRefusal('its versions.json names no version');
   const files = new Map<number, string>();
+  let cutVersion = false;
   for (const v of Array.isArray(m.versions) ? (m.versions as unknown[]) : []) {
     if (typeof v !== 'object' || v === null) continue;
-    const e = v as { version?: unknown; html_file?: unknown };
+    const e = v as { version?: unknown; html_file?: unknown; kind?: unknown };
+    if (e.kind === 'demo') cutVersion = true;
     if (typeof e.version !== 'number' || !Number.isInteger(e.version) || e.version < 0) continue;
     if (e.html_file === undefined || e.html_file === null || e.html_file === '') {
       files.set(e.version, `_v${e.version}.html`);
@@ -345,7 +353,7 @@ function readManifest(rootReal: string, doc: string): Manifest {
   }
   if (!files.has(m.head)) files.set(m.head, `_v${m.head}.html`);
   const kind = typeof m.kind === 'string' && Object.hasOwn(KIND_WORDS, m.kind) ? m.kind : 'doc';
-  return { head: m.head, kind, files };
+  return { head: m.head, kind, cut: kind === 'demo' || cutVersion, files };
 }
 
 /** The docs root as its real path, after proving the document is a real directory beneath it (no link in its path).
@@ -393,7 +401,7 @@ async function readArtifact(
   const docsReal = realDocsRoot(root, ref.doc);
   const manifest = readManifest(docsReal, ref.doc);
   // Known before any copy: a cut whose storyboard can't be copied is still a video this chat can't change.
-  seen.cut = manifest.kind === 'demo';
+  seen.cut = manifest.cut;
   const scratchReal = realScratchRoot(input.scratchRoot);
   const seatOpenDir = join(seatPathOf(input.scratchRoot), 'open');
   const unusable = dirUnusable(scratchReal, 'open');
@@ -876,13 +884,13 @@ export function artifactHead(docsRoot: string, doc: string): number | null {
 }
 
 /**
- * studio#1140: whether `<docsRoot>/<doc>` is a demo video's cut (its manifest's kind is `demo`), read the way
+ * studio#1140: whether `<docsRoot>/<doc>` is a demo video's cut (its manifest's kind, or any version's, is `demo`), read the way
  * {@link artifactHead} reads it. A chat never changes a cut: a refine of one is blocked.
  */
 export function artifactIsCut(docsRoot: string, doc: string): boolean {
   if (!artifactExists(docsRoot, doc)) return false;
   try {
-    return readManifest(realDocsRoot(docsRoot, doc), doc).kind === 'demo';
+    return readManifest(realDocsRoot(docsRoot, doc), doc).cut;
   } catch {
     return false;
   }

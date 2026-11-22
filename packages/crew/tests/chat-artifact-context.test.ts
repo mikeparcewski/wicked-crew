@@ -437,6 +437,27 @@ describe('buildTurnContext', () => {
     expect(plain.block).not.toContain("Crew's note");
   });
 
+  it('studio#1140: the cut a run\'s "Edit the cut" makes (no top-level kind; its renders are kind demo) is a video too', async () => {
+    // The real shape: crew's POST /runs/:id/demo/document creates the document with no kind (interactive's initManifest
+    // omits it), and interactive's import records each render as { kind: "demo" }.
+    const real = { head: 1, versions: [{ version: 0, parent: null, feedback_file: null, html_file: '_v0.html' }, { version: 1, parent: 0, kind: 'demo' }] };
+    writeDoc('mikes', 'demo-8e0ffbece431', { 0: '<p>Importing the demo cut…</p>', 1: '<!doctype html><html><head><title>Sign-in demo</title></head><body><h1>Sign-in demo</h1></body></html>' }, real);
+    const ctx = await built({ text: 'change only the chapter caption to read exactly: Welcome', context: { artifact: { ref: 'mikes/demo-8e0ffbece431', version: 1 } } });
+    expect(ctx.binding?.artifact).toMatchObject({ ref: 'mikes/demo-8e0ffbece431', kind: 'demo video', viewed: 1, head: 1 });
+    const note = ctx.block.indexOf("## Crew's note on the video they have open");
+    expect(note).toBeGreaterThan(-1);
+    expect(note).toBeLessThan(ctx.block.indexOf('## What studio and crew give you for this turn'));
+    expect(ctx.block).toContain("`mikes/demo-8e0ffbece431` is a demo video's cut. This chat can't change this video");
+    // Its storyboard unreadable: refused as data, and the note still holds.
+    rmSync(join(docs.mikes!, 'demo-8e0ffbece431', '_v1.html'));
+    const unread = await built({ context: { artifact: { ref: 'mikes/demo-8e0ffbece431', version: 1 } } });
+    expect(unread.binding?.artifact).toBeUndefined();
+    expect(unread.block).toContain("This chat can't change this video");
+    // A page whose versions carry other kinds is no cut.
+    writeDoc('mikes', 'themed-page', { 0: '<h1>P</h1>', 1: '<h1>P</h1>' }, { head: 1, versions: [{ version: 0 }, { version: 1, parent: 0, kind: 'theme' }] });
+    expect((await built({ context: { artifact: { ref: 'mikes/themed-page', version: 1 } } })).block).not.toContain("Crew's note");
+  });
+
   it.skipIf(process.platform === 'win32')('never blocks on a FIFO where a manifest or a version should be', async () => {
     const dir = join(docs.mikes!, 'fifo-doc');
     mkdirSync(dir);
