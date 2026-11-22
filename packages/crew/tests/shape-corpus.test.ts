@@ -108,6 +108,17 @@ describe('coverage (§9.1)', () => {
     }
   });
 
+  it('carries the crew#1452 cost cases, scored on both doors', () => {
+    const rc = { cases: corpus.cases.filter((c) => ['rc9', 'rc10', 'rc11'].includes(c.id)) };
+    expect(rc.cases.map((c) => c.id)).toEqual(['rc9', 'rc10', 'rc11']);
+    const band = (mm: ReturnType<typeof scoreShapeCorpus>): Record<string, string> =>
+      Object.fromEntries(mm.results.map((r) => [r.id, `${r.guess.card}/${r.guess.band}`]));
+    // The detect-shape door: the price of new work asks the seat; history as context keeps the forecast; sure words decide.
+    expect(band(scoreShapeCorpus(rc, fixture))).toEqual({ rc9: 'estimate-price/sure', rc10: 'run-cost/sure', rc11: 'run-cost/sure' });
+    // The chat door: capped at likely where the words do not agree, and the unsure seat (rc11) asks.
+    expect(band(scoreShapeCorpus(rc, fixture, 'chat'))).toEqual({ rc9: 'estimate-price/likely', rc10: 'run-cost/likely', rc11: 'run-cost/ask' });
+  });
+
   it('carries the new adversarial cases: an option substituted within a card, and an instruction inside quoted chat or a document', () => {
     for (const id of ['z5', 'z6', 'z7', 'z8']) expect(corpus.cases.find((c) => c.id === id)?.kind, id).toBe('adversarial');
   });

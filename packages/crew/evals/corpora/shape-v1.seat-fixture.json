@@ -1,5 +1,5 @@
 {
- "$comment": "DES-CATALOG-002 §9.2: the recorded seat-answer fixture for the shape corpus. Spike 2 (§9.3): pi, no tools, high thinking, blind to the labels, the classify digest and anchors with the words as <request> data (design lanes/catalog-v2-design/spike/prompt2.txt); each value is that seat's one-line answer, verbatim. CI runs the corpus through crew's shipped words layer, validator, cross-check and bands with these answers: deterministic and model-free. The live numbers are the integrator's (run-evals with the real chat seat on the rig). Lane D's w1-w15 and z5-z8 were answered the same way (the spike-2 prompt's header with only those requests; pi, no tools, high thinking, blind), recorded verbatim. w16-w19 likewise (review round 1). w20 likewise (review round 2). CS8 (the catalog flip): the relabelled cases (i8, i9, i10, a10, j15, c17, c18, c19, e1, e2, sp3, x10) and the new y1-y31 were answered the same way against the flipped catalog (prompt2's header, the live cards with their options, those requests only; pi, no tools, high thinking, blind), recorded verbatim; the earlier answers for those twelve ids are replaced. rc1-rc8 (fix-catalog) are NOT blind recordings: rc1-rc4 hold the noun reading (the work named, not the cost) that a New chat seat gave on the rig in e2e-1105 CJ7, as the worst case; rc5-rc8 hold a seat that read the request right.",
+ "$comment": "DES-CATALOG-002 §9.2: the recorded seat-answer fixture for the shape corpus. Spike 2 (§9.3): pi, no tools, high thinking, blind to the labels, the classify digest and anchors with the words as <request> data (design lanes/catalog-v2-design/spike/prompt2.txt); each value is that seat's one-line answer, verbatim. CI runs the corpus through crew's shipped words layer, validator, cross-check and bands with these answers: deterministic and model-free. The live numbers are the integrator's (run-evals with the real chat seat on the rig). Lane D's w1-w15 and z5-z8 were answered the same way (the spike-2 prompt's header with only those requests; pi, no tools, high thinking, blind), recorded verbatim. w16-w19 likewise (review round 1). w20 likewise (review round 2). CS8 (the catalog flip): the relabelled cases (i8, i9, i10, a10, j15, c17, c18, c19, e1, e2, sp3, x10) and the new y1-y31 were answered the same way against the flipped catalog (prompt2's header, the live cards with their options, those requests only; pi, no tools, high thinking, blind), recorded verbatim; the earlier answers for those twelve ids are replaced. rc1-rc8 (fix-catalog) are NOT blind recordings: rc1-rc4 hold the noun reading (the work named, not the cost) that a New chat seat gave on the rig in e2e-1105 CJ7, as the worst case; rc5-rc8 hold a seat that read the request right. rc9-rc11 (crew#1452) are NOT blind recordings either: rc9 and rc10 hold a seat that read the cost right (on main the words alone decided rc9 as the run cost model and never asked it); rc11 holds the unsure seat (0.1) the issue names, which the words decide on the detect-shape door and the chat door asks about.",
  "answers": {
   "p1": {
    "card": "plan-it",
@@ -1795,6 +1795,30 @@
    "confidence": 0.85,
    "ask": null,
    "reason": "past spend on bug fix runs"
+  },
+  "rc9": {
+   "card": "estimate-price",
+   "option": null,
+   "depth": null,
+   "confidence": 0.9,
+   "ask": null,
+   "reason": "price of building a checkout page"
+  },
+  "rc10": {
+   "card": "run-cost",
+   "option": null,
+   "depth": null,
+   "confidence": 0.88,
+   "ask": null,
+   "reason": "forecast monthly bug fix cost"
+  },
+  "rc11": {
+   "card": "run-cost",
+   "option": null,
+   "depth": null,
+   "confidence": 0.1,
+   "ask": null,
+   "reason": "unsure: a budget model or a price"
   }
  }
 }

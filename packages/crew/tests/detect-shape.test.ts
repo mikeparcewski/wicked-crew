@@ -335,3 +335,53 @@ describe('a cost question routes to the run cost model, not the work it names (e
     expect(g.band).not.toBe('sure');
   });
 });
+
+describe('cost routing consults the seat (crew#1452)', () => {
+  const chat = (text: string, seat: RawGuess | null): ShapeGuess => detect({ text, seat, source: 'chat', catalogRev: 'r' }).guess;
+  const shape = (g: ShapeGuess): [string, string] => [g.card, g.band];
+
+  it('1. words that are sure do not overrule a seat that asked or said it was unsure', () => {
+    const t = 'Model our monthly run cost budget';
+    // The words alone decide it (no seat, or a seat that agrees, or one that gave no confidence).
+    expect(wordsLayer(t)).toMatchObject({ card: 'run-cost', sure: true });
+    expect(shape(chat(t, null))).toEqual(['run-cost', 'sure']);
+    expect(shape(chat(t, { card: 'run-cost', confidence: 0.9 }))).toEqual(['run-cost', 'sure']);
+    expect(shape(chat(t, { card: 'run-cost' }))).toEqual(['run-cost', 'sure']);
+    // A seat's doubt is the reading: one question, never sure.
+    const unsure = chat(t, { card: 'run-cost', confidence: 0.1 });
+    expect(shape(unsure)).toEqual(['run-cost', 'ask']);
+    expect(unsure.question).not.toBeNull();
+    const asked = chat(t, { card: 'run-cost', confidence: 0.9, ask: ['run-cost', 'estimate-price'] });
+    expect(shape(asked)).toEqual(['run-cost', 'ask']);
+    expect(asked.question?.choices.map((c) => c.card)).toEqual(['run-cost', 'estimate-price']);
+    // A seat whose answer named nothing valid expresses no doubt: the words still decide.
+    expect(shape(chat(t, { card: 'no-such-card', confidence: 0.1 }))).toEqual(['run-cost', 'sure']);
+  });
+
+  it('2. the price of new work is not decided as the run cost model by the words alone: the seat is asked', () => {
+    const t = 'How much would it cost to build a checkout page?';
+    expect(wordsLayer(t).sure).toBe(false);
+    const priced = classifyPathSync({ text: t, catalogRev: 'r' }, { card: 'estimate-price', confidence: 0.9 });
+    expect(priced.asked).toBe(true);
+    expect(shape(priced.guess)).toEqual(['estimate-price', 'sure']);
+    // With no seat reading, the words lead with the price of new work, never sure.
+    expect(shape(detect({ text: t, seat: null, source: 'classify', catalogRev: 'r' }).guess)).toEqual(['estimate-price', 'likely']);
+    expect(shape(chat(t, null))).toEqual(['estimate-price', 'likely']);
+    // A forecast of run volume is still the run cost model's, decided by the words where they were sure before.
+    expect(classifyPathSync({ text: 'What would 40 bug fixes a month cost?', catalogRev: 'r' }, { card: 'bug', confidence: 0.95 }).guess.card).toBe('run-cost');
+  });
+
+  it('3. history given as context after a forecast question leaves cost routing on; past spend asked about turns it off', () => {
+    const t = 'What would 40 bug fixes a month cost? Use last month as the baseline.';
+    expect(costAsked(t)).toBe(true);
+    expect(costAsked('What would the refactor cost per month? We spent 300 dollars so far.')).toBe(true);
+    for (const door of ['chat', 'classify'] as const) {
+      const g = door === 'chat' ? chat(t, { card: 'bug', confidence: 0.95 }) : classifyPathSync({ text: t, catalogRev: 'r' }, { card: 'bug', confidence: 0.95 }).guess;
+      expect(shape(g), door).toEqual(['run-cost', 'likely']);
+    }
+    // The question itself about past spend is still Review recent work's (and a decimal is not a sentence end).
+    expect(costAsked('estimate our spend on bug fixes last month')).toBe(false);
+    expect(costAsked('What would 1.5 bug fixes a month have cost last month?')).toBe(false);
+    expect(costAsked('What would 1.5 bug fixes a month cost?')).toBe(true);
+  });
+});
