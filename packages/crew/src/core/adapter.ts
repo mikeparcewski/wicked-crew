@@ -1420,7 +1420,10 @@ export class CoreAdapter {
   /** F35: the views version, moved by every engine frame (bar the live streams) and every engine call that may write. */
   private viewsEpoch = 0;
   /** crew#1779: one-run reads a frame's listeners start wait in this lane, behind every request's read. */
-  private readonly runReads = new RunReadLane<string>((runId) => this.core.sessionDetail(runId));
+  private readonly runReads = new RunReadLane<SessionView | undefined>(
+    (runId) => this.runViewRead(runId),
+    (view) => (view === undefined ? undefined : structuredClone(view)),
+  );
   private readonly launchListeners = new Set<LaunchListener>();
   /** crew#1145: what each engine launch awaits first (`setLaunchGate`); `null` = nothing. */
   private launchGate: (() => Promise<void>) | null = null;
@@ -2944,7 +2947,12 @@ export class CoreAdapter {
    * behind no request's read, and the listeners of one frame share one read of the run.
    */
   async runView(runId: string): Promise<SessionView | undefined> {
-    const view = JSON.parse(await this.runReads.get(runId)) as SessionView | null;
+    return this.runReads.get(runId);
+  }
+
+  /** One run's read and its identity, as one operation: the frame lane shares and bounds all of it (crew#1779). */
+  private async runViewRead(runId: string): Promise<SessionView | undefined> {
+    const view = JSON.parse(await this.core.sessionDetail(runId)) as SessionView | null;
     if (view === null) return undefined;
     await this.resolveIdentities([view]);
     return view;

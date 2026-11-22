@@ -31,8 +31,13 @@ export class RunReadLane<T> {
   private readonly queued = new Map<string, Array<Waiter<T>>>();
   private readonly running = new Set<string>();
 
+  /**
+   * `read`: the whole one-run read (the engine read and whatever it resolves), so a shared read shares all of it.
+   * `copy`: each caller that shares a read past the first gets its own copy of the answer (callers may change it).
+   */
   constructor(
     private readonly read: (runId: string) => Promise<T>,
+    private readonly copy: (value: T) => T,
     private readonly width: number = FRAME_READ_WIDTH,
   ) {}
 
@@ -80,7 +85,13 @@ export class RunReadLane<T> {
           .then(() => this.read(runId))
           .then(
             (value) => {
-              for (const w of waiters) w.resolve(value);
+              waiters.forEach((w, i) => {
+                try {
+                  w.resolve(i === 0 ? value : this.copy(value));
+                } catch (err) {
+                  w.reject(err);
+                }
+              });
             },
             (err: unknown) => {
               for (const w of waiters) w.reject(err);

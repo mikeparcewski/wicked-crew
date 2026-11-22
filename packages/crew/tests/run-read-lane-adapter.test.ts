@@ -67,4 +67,36 @@ describe('CoreAdapter.runView: the frame lane on the real adapter', () => {
     expect(conn.reads.filter((id) => id === 'run-ended')).toHaveLength(1);
     expect(conn.reads.filter((id) => id === 'run-gate')).toHaveLength(1);
   });
+
+  it('the shared read resolves the run identity once (one event-log read), and each listener gets its own copy', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'run-read-lane-'));
+    dirs.push(dir);
+    const adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
+    adapters.push(adapter);
+    const core = (adapter as unknown as { core: { sessionDetail: (id: string) => Promise<string>; runEvents: (id: string) => Promise<string> } }).core;
+    // A run the engine names only by its synthetic id: its identity is read from its launch record.
+    core.sessionDetail = oneConnection(5, (id) => JSON.stringify({ session: { id, status: 'completed', workflow_id: `wf-${id}` }, units: [] })).read;
+    let logReads = 0;
+    core.runEvents = async () => {
+      logReads += 1;
+      await new Promise((r) => setTimeout(r, 10));
+      return JSON.stringify([{ type: 'sessionStarted', workflowId: 'bug' }]);
+    };
+    const seen: Array<Promise<Awaited<ReturnType<CoreAdapter['runView']>>>> = [];
+    for (let i = 0; i < 8; i++) {
+      adapter.onEvent((event) => {
+        if (event.type === 'sessionCompleted') seen.push(adapter.runView('run-x'));
+      });
+    }
+    (adapter as unknown as { onEngineFrame(err: Error | null, json: string): void }).onEngineFrame(
+      null,
+      JSON.stringify({ type: 'sessionCompleted', session_id: 'run-x' }),
+    );
+    const views = await Promise.all(seen);
+    expect(logReads).toBe(1);
+    expect(views.map((v) => v?.session.workflow_id)).toEqual(Array(8).fill('bug'));
+    expect(new Set(views).size).toBe(8);
+    views[0]!.session.status = 'failed';
+    expect(views[1]!.session.status).toBe('completed');
+  });
 });
