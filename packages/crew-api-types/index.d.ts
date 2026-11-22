@@ -7849,6 +7849,10 @@ export interface BlastRadius {
     depth?: number;
     stale?: 'modified' | 'deleted';
     via_crossing?: string | null;
+    /** (crew#1714, wicked-estate >= 0.35.10) The edges from this row to the target or to rows exactly one
+     *  ring in (`depth - 1`), at most 3; `via_omitted` counts the rest. ABSENT from an older estate. */
+    via?: ProjectGraphVia[];
+    via_omitted?: number;
   }>;
   /** crew#1555: false means no symbol by that name. */
   resolved?: boolean;
@@ -10913,6 +10917,20 @@ export interface ProjectGraphHit {
    */
   via_crossing?: string;
   via_crossing_omitted?: boolean;
+  /**
+   * (crew#1714, wicked-estate >= 0.35.10) The edges from this row to the target or to rows exactly one ring
+   * in (`depth - 1`): a ring view draws a true edge from them. At most 3, `via_omitted` counts the rest. An
+   * edge to a row this answer left out (a removed member's) is dropped. ABSENT from an older estate.
+   */
+  via?: ProjectGraphVia[];
+  via_omitted?: number;
+}
+
+/** crew#1714: one `via` edge. `id` is a row's `id` or the target's SymbolId; `kind` is estate's edge-kind
+ *  wire form (`'calls'`, `'contains'`, … or `{ other: '<tag>' }`). */
+export interface ProjectGraphVia {
+  id: string;
+  kind: string | { other: string };
 }
 
 /** Per-repo hit counts, so "which repo does this touch" is answerable without scanning hits. */
@@ -10968,7 +10986,9 @@ export interface ProjectBlastRadius {
   /**
    * (api-types 0.202.0) The project's link generation predates the current indexes (a member was
    * re-indexed, removed, is mid-index, or the last link failed): the crossings are the previous
-   * generation's. `link_stale_labels` names the members that moved. A refresh relinks.
+   * generation's. `link_stale_labels` names the members that moved. A refresh relinks. (crew#1714) THIS
+   * project's state only, and stated on a co-located answer too: the crossing it lacks may be one the
+   * stale links miss.
    */
   link_stale?: boolean;
   link_stale_labels?: string[];
@@ -11028,6 +11048,12 @@ export interface ProjectGraphPath {
   note: string;
   /** The route crossed a detached repository; refresh to rebuild without it. */
   excluded?: string;
+  /** (crew#1714, wicked-estate >= 0.35.10) Current members' link coverage, when estate names this project. */
+  coverage?: ProjectGraphMemberCoverage[];
+  /** (crew#1714) As on {@link ProjectBlastRadius}: this project's links predate the current indexes, so a
+   *  route through a member that moved may be missing. `link_stale_labels` names those members. A refresh relinks. */
+  link_stale?: boolean;
+  link_stale_labels?: string[];
 }
 
 /** crew#1477: an import estate could not prove is a member link; never an edge. */

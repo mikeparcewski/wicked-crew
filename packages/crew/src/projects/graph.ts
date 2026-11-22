@@ -61,6 +61,7 @@ import type {
   ProjectGraphCrossing,
   ProjectGraphLinkRun,
   ProjectGraphHit,
+  ProjectGraphVia,
   ProjectGraphRefreshFailure,
   ProjectGraphRefreshResult,
   ProjectGraphRefreshState,
@@ -87,7 +88,7 @@ export const LINKED_NOTE =
   'through one names it in `via_crossing`). Other hits are per-repo results, and a dependency the ' +
   'linker could not prove is not followed.';
 
-/** Added to {@link LINKED_NOTE} when the project's link generation predates the current indexes. */
+/** Added to the answer's note when the project's link generation predates the current indexes. */
 export const LINK_STALE_NOTE =
   'The links are from an earlier refresh and some repos changed since (`link_stale_labels`): ' +
   'refresh the code graph to relink.';
@@ -1470,9 +1471,18 @@ export function attributeHits(
   raw: unknown,
   labels: Map<string, string>,
 ): { hits: ProjectGraphHit[]; byRepo: ProjectGraphRepoCount[] } {
-  const hits = (Array.isArray(raw) ? (raw as RawHit[]) : [])
-    .map((r) => toHit(r, labels))
-    .filter((h): h is ProjectGraphHit => h !== null);
+  const hits: ProjectGraphHit[] = [];
+  // crew#1714: the rows left out (a removed member's) are not in the answer, so a `via` edge to one
+  // points at nothing a client can place: it goes with them.
+  const dropped = new Set<string>();
+  for (const r of Array.isArray(raw) ? (raw as RawHit[]) : []) {
+    const h = toHit(r, labels);
+    if (h !== null) hits.push(h);
+    else if (typeof r?.id === 'string') dropped.add(r.id);
+  }
+  if (dropped.size > 0) {
+    for (const h of hits) if (h.via !== undefined) h.via = h.via.filter((v) => !dropped.has(v.id));
+  }
   return { hits, byRepo: countByRepo(hits) };
 }
 
@@ -1497,6 +1507,21 @@ interface RawHit {
   stale?: unknown;
   via_crossing?: unknown;
   via_crossing_omitted?: unknown;
+  via?: unknown;
+  via_omitted?: unknown;
+}
+
+/** crew#1714: estate's `via` (wicked-estate#557): `{id, kind}` edges to the inner ring; `kind` is the
+ *  edge-kind wire form, a string or `{other: <tag>}`. A malformed entry is left out, never guessed. */
+function viaOf(raw: unknown): ProjectGraphVia[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  return raw.flatMap((v: unknown): ProjectGraphVia[] => {
+    const { id, kind } = (v ?? {}) as { id?: unknown; kind?: unknown };
+    if (typeof id !== 'string') return [];
+    if (typeof kind === 'string') return [{ id, kind }];
+    const other = (kind as { other?: unknown } | null)?.other;
+    return typeof other === 'string' ? [{ id, kind: { other } }] : [];
+  });
 }
 
 function toHit(raw: RawHit, labels: Map<string, string>): ProjectGraphHit | null {
@@ -1504,6 +1529,7 @@ function toHit(raw: RawHit, labels: Map<string, string>): ProjectGraphHit | null
   const where = attribute(file, labels);
   if (where === null) return null;
   const id = typeof raw.id === 'string' ? raw.id : typeof raw.symbol_id === 'string' ? raw.symbol_id : '';
+  const via = viaOf(raw.via);
   return {
     repoId: where.repoId,
     repo: where.repo,
@@ -1516,6 +1542,8 @@ function toHit(raw: RawHit, labels: Map<string, string>): ProjectGraphHit | null
     ...(raw.stale === 'modified' || raw.stale === 'deleted' ? { stale: raw.stale } : {}),
     ...(typeof raw.via_crossing === 'string' ? { via_crossing: raw.via_crossing } : {}),
     ...(raw.via_crossing_omitted === true ? { via_crossing_omitted: true } : {}),
+    ...(via === undefined ? {} : { via }),
+    ...(typeof raw.via_omitted === 'number' ? { via_omitted: raw.via_omitted } : {}),
   };
 }
 
@@ -1559,16 +1587,36 @@ function mergeFreshness(pages: BlastRadiusFreshness[]): BlastRadiusFreshness {
   };
 }
 
-/** crew#1555: keep counts intact while attributing the sample and removing host paths. */
-function attributeFreshness(raw: BlastRadiusFreshness, labels: Map<string, string>): ProjectBlastRadiusFreshness {
-  const { stale_files, ...rest } = raw;
+/**
+ * crew#1555: attribute the sample and remove host paths. crew#1713: a removed member's rows stay in the
+ * database until the next refresh, and estate counts their files too, so its stale files leave the
+ * total (the sample's and every stale-marked row's, which covers files past the sample's cap) and its
+ * label leaves `indexing`.
+ */
+function attributeFreshness(
+  raw: BlastRadiusFreshness,
+  labels: Map<string, string>,
+  dependents: unknown,
+): ProjectBlastRadiusFreshness {
+  const { stale_files, indexing, ...rest } = raw;
   delete rest.roots;
+  const removed = new Set<string>();
+  const kept = stale_files?.flatMap((row) => {
+    const where = attribute(row.file, labels);
+    if (where === null) removed.add(row.file);
+    return where === null ? [] : [{ ...where, status: row.status }];
+  });
+  for (const row of Array.isArray(dependents) ? (dependents as RawHit[]) : []) {
+    const marked = row?.stale === 'modified' || row?.stale === 'deleted';
+    if (marked && typeof row.file === 'string' && attribute(row.file, labels) === null) removed.add(row.file);
+  }
   return {
     ...rest,
-    ...(stale_files === undefined ? {} : { stale_files: stale_files.flatMap((row) => {
-      const where = attribute(row.file, labels);
-      return where === null ? [] : [{ ...where, status: row.status }];
-    }) }),
+    ...(typeof rest.stale_files_total === 'number'
+      ? { stale_files_total: Math.max(kept?.length ?? 0, rest.stale_files_total - removed.size) }
+      : {}),
+    ...(Array.isArray(indexing) ? { indexing: indexing.filter((label) => labels.has(label)) } : {}),
+    ...(kept === undefined ? {} : { stale_files: kept }),
   };
 }
 
@@ -1652,12 +1700,7 @@ export async function projectBlastRadius(
     return kept;
   });
   const linked = crossings.length > 0;
-  // estate's per-project link state: stale when a member moved since the link was validated.
-  const state = (Array.isArray(raw.link) ? raw.link : []) as Array<{ stale?: unknown; stale_labels?: unknown }>;
-  const stale = state.some((s) => s.stale === true);
-  const staleLabels = state
-    .flatMap((s) => (Array.isArray(s.stale_labels) ? s.stale_labels : []))
-    .filter((l): l is string => typeof l === 'string');
+  const link = linkState(raw.link, q.status.projectId, q.labels);
   // crew#751: estate's completeness causes (wicked-estate#222), carried through verbatim when the
   // installed estate reports them, and ABSENT when it does not — never a fabricated `false`, which
   // would read as "the walk was complete" on an estate that cannot say.
@@ -1670,8 +1713,8 @@ export async function projectBlastRadius(
   return {
     ...causes,
     ...(typeof raw.resolved === 'boolean' ? { resolved: raw.resolved } : {}),
-    ...(raw.freshness === undefined ? {} : { freshness: attributeFreshness(raw.freshness, q.labels) }),
-    ...blastCoverage(raw.link, q.status.projectId, q.labels),
+    ...(raw.freshness === undefined ? {} : { freshness: attributeFreshness(raw.freshness, q.labels, raw.dependents) }),
+    ...link.coverage,
     projectId: q.status.projectId,
     target: typeof raw.target === 'string' ? raw.target : name,
     dependents: hits,
@@ -1683,13 +1726,13 @@ export async function projectBlastRadius(
     reposSearched: [...q.labels.keys()].sort(),
     missingRepos: q.status.missingRepos,
     linkage: linked ? 'linked' : 'co-located',
-    note: linked ? (stale ? `${LINKED_NOTE} ${LINK_STALE_NOTE}` : LINKED_NOTE) : CO_LOCATION_NOTE,
+    note: `${linked ? LINKED_NOTE : CO_LOCATION_NOTE}${link.note}`,
     ...(Array.isArray(raw.crossings) ? { crossings } : {}),
     ...(typeof raw.crossings_total === 'number'
       ? { crossings_total: Math.max(crossings.length, raw.crossings_total - dropped.size) }
       : {}),
     ...(raw.crossings_truncated === true ? { crossings_truncated: true } : {}),
-    ...(linked && stale ? { link_stale: true, link_stale_labels: [...new Set(staleLabels)].sort() } : {}),
+    ...link.stale,
   };
 }
 
@@ -1728,9 +1771,24 @@ function memberCoverage(state: LinkStatus, labels: Map<string, string>): Project
   });
 }
 
-function blastCoverage(raw: unknown, projectId: string, labels: Map<string, string>): { coverage?: ProjectGraphMemberCoverage[] } {
-  const state = (Array.isArray(raw) ? raw as LinkStatus[] : []).find((s) => s.project === projectId);
-  return state === undefined ? {} : { coverage: memberCoverage(state, labels) };
+/**
+ * THIS project's link state from estate's `link` array (blast-radius and, wicked-estate#557, path: one
+ * entry per project in the store): its members' coverage, and (crew#1714) whether its links predate the
+ * current indexes. Another project's stale link says nothing about this one. Stale is stated on a
+ * co-located answer too: a crossing the stale links miss is why it found none (estate's LINK-STALE:
+ * "cross-repo dependents may be missing").
+ */
+function linkState(raw: unknown, projectId: string, labels: Map<string, string>): {
+  coverage: { coverage?: ProjectGraphMemberCoverage[] };
+  stale: { link_stale?: true; link_stale_labels?: string[] };
+  note: string;
+} {
+  const state = (Array.isArray(raw) ? raw as LinkStatus[] : []).find((s) => s?.project === projectId);
+  if (state === undefined) return { coverage: {}, stale: {}, note: '' };
+  const coverage = { coverage: memberCoverage(state, labels) };
+  if (state.stale !== true) return { coverage, stale: {}, note: '' };
+  const staleLabels = (Array.isArray(state.stale_labels) ? state.stale_labels : []).filter((l): l is string => typeof l === 'string');
+  return { coverage, stale: { link_stale: true, link_stale_labels: [...new Set(staleLabels)].sort() }, note: ` ${LINK_STALE_NOTE}` };
 }
 
 interface RawPathEnd {
@@ -1761,7 +1819,7 @@ export async function projectGraphPath(
   ], { timeout: QUERY_TIMEOUT_MS }), env);
   const raw = JSON.parse(stdout) as {
     from: string; to: string; found: boolean; resolved?: boolean; unresolved: 'from' | 'to' | null;
-    depth_bounded: boolean; node_bounded: boolean; crossings?: unknown;
+    depth_bounded: boolean; node_bounded: boolean; crossings?: unknown; link?: unknown;
     hops: Array<{ source: RawPathEnd; target: RawPathEnd; kind: string; confidence?: number }>;
   };
   const hops: ProjectGraphPathHop[] = [];
@@ -1774,6 +1832,8 @@ export async function projectGraphPath(
   }
   const { crossings } = memberCrossings(raw.crossings, q.labels);
   const linked = crossings.length > 0;
+  // crew#1714: `path --json` carries the project link state too (wicked-estate#557), read as blast-radius reads it.
+  const link = linkState(raw.link, q.status.projectId, q.labels);
   return {
     projectId: q.status.projectId, from: raw.from, to: raw.to, found: excluded ? false : raw.found,
     ...(typeof raw.resolved === 'boolean' ? { resolved: raw.resolved } : {}),
@@ -1782,8 +1842,10 @@ export async function projectGraphPath(
     ...(Array.isArray(raw.crossings) ? { crossings } : {}),
     ...(excluded ? { excluded: 'the route found runs through a repository that is no longer in this project; refresh the project graph' } : {}),
     reposSearched: [...q.labels.keys()].sort(), missingRepos: q.status.missingRepos,
+    ...link.coverage,
+    ...link.stale,
     linkage: linked ? 'linked' : 'co-located',
-    note: `${linked ? LINKED_NOTE : CO_LOCATION_NOTE}${raw.depth_bounded || raw.node_bounded ? ' The search stopped at its depth or node bound, so a route it did not find may still exist.' : ''}`,
+    note: `${linked ? LINKED_NOTE : CO_LOCATION_NOTE}${link.note}${raw.depth_bounded || raw.node_bounded ? ' The search stopped at its depth or node bound, so a route it did not find may still exist.' : ''}`,
   };
 }
 

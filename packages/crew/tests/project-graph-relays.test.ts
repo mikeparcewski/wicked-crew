@@ -1,0 +1,131 @@
+// crew#1713, crew#1714: the project graph routes relay estate's freshness, `via` rows and link state for
+// CURRENT members only. Every fixture is real `wicked-estate 0.35.10` output (tests/fixtures/estate-0.35.10,
+// README there): `gone` was indexed into the project store and is not a member any more, as after a detach
+// that has not been refreshed since.
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
+
+import { projectBlastRadius, projectGraphPath, type Queryable } from '../src/projects/graph.js';
+import { removeScratch } from './setup/scratch.js';
+
+const dir = mkdtempSync(join(tmpdir(), 'project-graph-relays-'));
+afterAll(() => removeScratch(dir));
+
+type Doc = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+const fixture = (name: string): Doc =>
+  JSON.parse(readFileSync(new URL(`./fixtures/estate-0.35.10/${name}`, import.meta.url), 'utf8')) as Doc;
+
+/** A fake estate that prints `reply` for any query. */
+function estate(reply: unknown): NodeJS.ProcessEnv {
+  const exe = join(dir, `estate-${Math.random().toString(36).slice(2)}.mjs`);
+  writeFileSync(exe, `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(JSON.stringify(reply))});\n`);
+  chmodSync(exe, 0o755);
+  return { ...process.env, WICKED_ESTATE_EXE: exe };
+}
+
+const q = {
+  ok: true,
+  dbPath: join(dir, 'graph.db'),
+  labels: new Map([['api', 'repo-api'], ['web', 'repo-web']]),
+  status: { projectId: 'p1', missingRepos: [] },
+} as unknown as Extract<Queryable, { ok: true }>;
+
+describe.skipIf(process.platform === 'win32')('blast-radius freshness names current members only (crew#1713)', () => {
+  it('a removed member\'s stale file leaves the sample and the total, and its label leaves `indexing`', async () => {
+    const raw = fixture('blast-radius-removed-member.json');
+    // Real: estate counts `gone/src/index.ts` (stale_files_total 2). `indexing` lists labels with a
+    // run marker (estate freshness.rs indexing_roots); none was mid-index at capture, so set one.
+    expect(raw['freshness']['stale_files_total']).toBe(2);
+    raw['freshness']['indexing'] = ['gone', 'api'];
+    const out = await projectBlastRadius(q, 'charge', estate(raw));
+    expect(out.freshness).toMatchObject({
+      stale_files: [{ repoId: 'repo-api', repo: 'api', file: 'src/index.ts', status: 'modified' }],
+      stale_files_total: 1,
+      indexing: ['api'],
+    });
+    expect(JSON.stringify(out)).not.toContain('gone');
+  });
+
+  it('a removed member\'s stale file past the sample still leaves the total (read off its stale-marked rows)', async () => {
+    const raw = fixture('blast-radius-removed-member.json');
+    // As when estate's 20-file sample is full: the total counts a file the sample does not list.
+    raw['freshness']['stale_files'] = raw['freshness']['stale_files'].filter((r: Doc) => !String(r['file']).startsWith('gone/'));
+    const out = await projectBlastRadius(q, 'charge', estate(raw));
+    expect(out.freshness?.stale_files_total).toBe(1);
+  });
+});
+
+describe.skipIf(process.platform === 'win32')('blast-radius rows carry estate\'s via edges (crew#1714)', () => {
+  it('each current member\'s row keeps `via` and `via_omitted` as estate wrote them', async () => {
+    const out = await projectBlastRadius(q, 'charge', estate(fixture('blast-radius-removed-member.json')));
+    const bill = out.dependents.find((d) => d.id === 'ts-typescript . . . api/src/index/bill().');
+    expect(bill).toMatchObject({ via: [{ id: 'ts-typescript . . . api/src/index/charge().', kind: 'calls' }], via_omitted: 0 });
+    const file = out.dependents.find((d) => d.kind === 'file');
+    expect(file).toMatchObject({ via: [{ id: 'ts-typescript . . . api/src/index/charge().', kind: 'contains' }], via_omitted: 0 });
+  });
+
+  it('an edge to a row the answer left out is dropped; an `other` kind is kept; a malformed one is never guessed', async () => {
+    const raw = fixture('blast-radius-removed-member.json');
+    const bill = raw['dependents'].find((d: Doc) => d['id'] === 'ts-typescript . . . api/src/index/bill().');
+    bill['via'].push(
+      { id: 'ts-typescript . . . gone/src/index/bill().', kind: 'calls' },
+      { id: 'ts-typescript . . . api/src/index/charge().', kind: { other: 'reads' } },
+      { id: 7, kind: 'calls' },
+      { id: 'x', kind: { other: 3 } },
+    );
+    const out = await projectBlastRadius(q, 'charge', estate(raw));
+    expect(out.dependents.find((d) => d.id === bill['id'])?.via).toEqual([
+      { id: 'ts-typescript . . . api/src/index/charge().', kind: 'calls' },
+      { id: 'ts-typescript . . . api/src/index/charge().', kind: { other: 'reads' } },
+    ]);
+  });
+
+  it('an older estate (no via) adds none', async () => {
+    const raw = fixture('blast-radius-removed-member.json');
+    for (const d of raw['dependents']) { delete d['via']; delete d['via_omitted']; }
+    const out = await projectBlastRadius(q, 'charge', estate(raw));
+    for (const d of out.dependents) {
+      expect(d).not.toHaveProperty('via');
+      expect(d).not.toHaveProperty('via_omitted');
+    }
+  });
+});
+
+describe.skipIf(process.platform === 'win32')('project path carries this project\'s link state (crew#1714)', () => {
+  it('a linked route over a stale link says so, with the moved members and current coverage', async () => {
+    const out = await projectGraphPath(q, 'web/src/page.ts', 'api/src/index.ts', undefined, estate(fixture('path-linked-stale.json')));
+    expect(out).toMatchObject({
+      found: true, linkage: 'linked', link_stale: true, link_stale_labels: ['web'],
+      coverage: [
+        { repoId: 'repo-api', repo: 'api', links_in: 1, links_out: 0, incomplete: false, package_imports: 0, manifests: 1 },
+        { repoId: 'repo-web', repo: 'web', links_in: 0, links_out: 1, incomplete: false, package_imports: 1, manifests: 2 },
+      ],
+    });
+    expect(out.note).toMatch(/^Linked:.*earlier refresh/);
+  });
+
+  it('a route not found over a stale link says the link is stale (a crossing it misses may be why)', async () => {
+    const out = await projectGraphPath(q, 'page', 'charge', undefined, estate(fixture('path-unlinked-stale.json')));
+    expect(out).toMatchObject({ found: false, linkage: 'co-located', link_stale: true, link_stale_labels: ['web'] });
+    expect(out.note).toMatch(/^Co-located.*earlier refresh/);
+  });
+
+  it('another project\'s link state is not this one\'s', async () => {
+    const raw = fixture('path-linked-stale.json');
+    raw['link'][0]['project'] = 'other';
+    const out = await projectGraphPath(q, 'web/src/page.ts', 'api/src/index.ts', undefined, estate(raw));
+    expect(out).not.toHaveProperty('link_stale');
+    expect(out).not.toHaveProperty('coverage');
+    expect(out.note).not.toMatch(/earlier refresh/);
+  });
+
+  it('blast-radius reads only this project\'s link state too', async () => {
+    const raw = fixture('blast-radius-removed-member.json');
+    raw['link'] = [{ ...raw['link'][0], project: 'other' }, { ...raw['link'][0], stale: false, stale_labels: [] }];
+    const out = await projectBlastRadius(q, 'charge', estate(raw));
+    expect(out).not.toHaveProperty('link_stale');
+    expect(out.coverage).toHaveLength(2);
+  });
+});
