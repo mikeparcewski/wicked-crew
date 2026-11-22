@@ -20,7 +20,7 @@ import { McpBroker, type McpBrokerDeps } from '../src/mcp/broker.js';
 import type { McpCallResponse } from '../src/core/types.js';
 import { registerAppRoutes } from '../src/apps/routes.js';
 import { AppStore, type AppRepoRegistry } from '../src/apps/store.js';
-import { APPS_SELF_CHECK_COMMAND, AppTurnService, PackageKnowledge, SPEC_SHAPE_GUIDE, appsUnitResolver, builderLines, changeLine, packageJson, refusalWords, turnProblem, type KnowledgePackage, type TurnEngine } from '../src/apps/turns.js';
+import { APPS_SELF_CHECK_COMMAND, AppTurnService, PackageKnowledge, SPEC_SHAPE_GUIDE, appsUnitResolver, builderLines, changeLine, lastParagraph, packageJson, refusalWords, turnProblem, type KnowledgePackage, type TurnEngine } from '../src/apps/turns.js';
 import { readRules } from '../src/sources/policy/rules.js';
 import { builderCatalog } from './fixtures/apps-sources/builder-catalog.js';
 import { chatKnowledgeFor } from '../src/api/chat-mcp.js';
@@ -544,14 +544,43 @@ describe('apps turns: check, land, refuse', () => {
     for (const bookkeeping of ['Counts', 'Memories proposed', 'TREE', 'VERDICT', "evaluator's verdict", 'Reviewed as evaluator', 'ITEM 1', 'Local HEAD', '`']) expect(reason).not.toContain(bookkeeping);
   });
 
-  it('refusalWords: a run-together verdict keeps only the failing items; plain findings lose only their bookkeeping', () => {
-    const oneLined = EVALUATOR_FAIL.replace(/\s+/g, ' ');
-    expect(refusalWords(oneLined)).toBe("New query escalated_west_count embeds filter values as literals; declare parameters. Local HEAD is v6 with the reviewed changes uncommitted, so its tree differs from crew's recorded tree.");
-    expect(refusalWords("the evaluator's verdict is FAIL\nThe chart reads a column the message did not ask for.\n**VERDICT: FAIL**")).toBe('The chart reads a column the message did not ask for.');
-    expect(refusalWords("the evaluator's verdict is FAIL\nCounts: derived 1\nVERDICT: FAIL")).toBe('');
-    // A check's own words carry no bookkeeping and are kept as they are.
-    expect(refusalWords('apps_check: refused: check_failed - read_policy queries/x.sql: pg_sleep is not allowed')).toBe('apps_check: refused: check_failed - read_policy queries/x.sql: pg_sleep is not allowed');
+  it('refusalWords: the bookkeeping and the settled items go; every finding stays (xreview r1 cases)', () => {
+    expect(refusalWords(EVALUATOR_FAIL.replace(/\s+/g, ' '))).toBe('New query escalated_west_count embeds filter values as literals; declare parameters.');
+    const cases: Array<[string, string]> = [
+      // A plain finding loses only its head and verdict line.
+      ["the evaluator's verdict is FAIL\nThe chart reads a column the message did not ask for.\n**VERDICT: FAIL**", 'The chart reads a column the message did not ask for.'],
+      ["the evaluator's verdict is FAIL\nCounts: derived 1\nVERDICT: FAIL", ''],
+      // Counts before the findings, all run together: the item survives.
+      ["the evaluator's verdict is FAIL Counts: derived 1 / submitted 1 / failed 1 ITEM 1: FAIL — The query reads the wrong table. TREE: deadbeef VERDICT: FAIL", 'The query reads the wrong table.'],
+      // A failing item's continuation lines are its evidence and its fix.
+      ["ITEM 1: FAIL — The regional total is incorrect.\n  queries/count.sql:8 omits the viewer's region predicate.\n  Add that predicate before aggregating.\nVERDICT: FAIL", "The regional total is incorrect. queries/count.sql:8 omits the viewer's region predicate. Add that predicate before aggregating."],
+      // A passing item's continuation goes with it; prose after it stays.
+      ['ITEM 1: PASS — ok\n  evidence: a.sql:1\nThe change also deletes the totals page.', 'The change also deletes the totals page.'],
+      // A finding that names a protocol word is a finding; words after a Counts or VERDICT record stay.
+      ["STACK-CHECK is missing from the builder's report; the custom implementation duplicates the framework.", "STACK-CHECK is missing from the builder's report; the custom implementation duplicates the framework."],
+      ['Counts: derived 1 / submitted 0 / failed 1 — QE registration remains blocked.\nITEM 1: PASS — ok', 'QE registration remains blocked.'],
+      ['VERDICT: FAIL — The chart reads a column the message did not ask for', 'The chart reads a column the message did not ask for'],
+      // A broken rule beside a failing item is kept, with its id; a deferred item is no reason.
+      ['ITEM 1: FAIL — The chart uses the wrong aggregation.\nRULE viewer-isolation: BROKEN — queries/count.sql omits the viewer predicate.\nVERDICT: FAIL', 'The chart uses the wrong aggregation. RULE viewer-isolation: BROKEN — queries/count.sql omits the viewer predicate.'],
+      ['ITEM 1: DEFERRED — CI on the pull request\nRULE r1: BROKEN — x.sql:3 hardcodes a region\nVERDICT: FAIL', 'RULE r1: BROKEN — x.sql:3 hardcodes a region'],
+      // Any case and stop after the status; N/A forms are settled; a reference to another item is not split.
+      ['ITEM 1: Fail. New query embeds literals.\nITEM 2: FAIL — Missing label\nITEM 3: NOT-APPLICABLE — out of scope\nITEM 4: FAIL — Contradicts ITEM 1: filter is hardcoded', 'New query embeds literals. Missing label. Contradicts ITEM 1: filter is hardcoded'],
+      ['Reviewed as evaluator ITEM 1: FAIL — New query embeds literals; declare parameters.', 'New query embeds literals; declare parameters.'],
+      // Identifiers, globs and operators keep their characters; only wrapping markdown goes.
+      ['read_policy queries/sales__west.sql: pg_sleep is not allowed; `__typename` and `queries/**/*.sql`', 'read_policy queries/sales__west.sql: pg_sleep is not allowed; __typename and queries/**/*.sql'],
+      ['`*` is not allowed in SELECT; -1 is not a valid limit; `>= 0` is required', '* is not allowed in SELECT; -1 is not a valid limit; >= 0 is required'],
+      ['_STACK-CHECK:_ looked at x\n*Counts*: derived 3 / submitted 3 / failed 0\n*TREE*: e2e47a84c0', ''],
+      // A check's and a rule check's own words are kept as they are.
+      ['apps_check: refused: check_failed - read_policy queries/x.sql: pg_sleep is not allowed', 'apps_check: refused: check_failed - read_policy queries/x.sql: pg_sleep is not allowed'],
+      ['1 steering rule(s) broken: learn-tests-with-fixes - no test file is added or changed', '1 steering rule(s) broken: learn-tests-with-fixes - no test file is added or changed'],
+    ];
+    for (const [text, want] of cases) expect(refusalWords(text), text).toBe(want);
     expect(refusalWords(null)).toBe('');
+  });
+
+  it('lastParagraph: the builder\'s last words, past fences, Counts in any form and a memories list', () => {
+    expect(lastParagraph("I could not read the app's files, so I changed nothing.\n\n```sql\nselect 1\n```\n\n**STACK-CHECK:** looked at nothing :: offers nothing.\n\nMemories proposed: 1\n- [gotcha] worktree path was unreadable")).toBe("I could not read the app's files, so I changed nothing.");
+    expect(lastParagraph('I declined: no such table.\n\nCounts — derived 0 / submitted 0 / failed 0')).toBe('I declined: no such table.');
   });
 
   it('a build that made no change never quotes the STACK-CHECK footer or raw markdown (crew#1540)', async () => {
