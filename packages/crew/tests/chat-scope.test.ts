@@ -1135,8 +1135,9 @@ describe('crew#1569: the statement on the container seat floor', () => {
   it('crew#1795: tells a seat outside its repositories to stay put and name the path, never cd into one', async () => {
     const scope = await scopeOf({ chatId: 'k6', repoRefs: ['r-alpha'] });
     const text = chatScopeStatement('k6', scope);
-    expect(text).toContain('Do NOT `cd` into a repository: run every command from where you start.');
+    expect(text).toContain('Do NOT `cd` into a repository: run every command from where you start, and name the repository\'s path in it instead,');
     expect(text).toContain('e.g. `git -C /srv/repos/alpha log -5` or `ls /srv/repos/alpha`.');
+    expect(text).toContain('in a command that\ncan also write');
     // The container floor's own checkout is the working directory: nothing to cd into, no line.
     const floor = chatScopeStatement('k6', scope, undefined, { containerFloor: true, runRepoId: 'r-alpha' });
     expect(floor).not.toContain('Do NOT `cd`');

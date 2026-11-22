@@ -705,18 +705,21 @@ export function chatSearchLines(paths: readonly string[]): string[] {
 }
 
 /**
- * (crew#1795) A seat that starts outside the repositories tends to `cd` into one; the engine's input governance reads a
- * `cd` out of the seat's working directory as leaving the job's folder and blocks the call, so the answer stops at a
- * rules card. Say where to stay and hand the form that works: the repository's path named in the command. `.` (the
- * working directory itself, a container-floor checkout) needs no such line.
+ * (crew#1795) A seat that starts outside the repositories tends to `cd` into one. The engine's input governance judges
+ * a `cd` out of the working directory in a command that can also write (a redirect, an interpreter or shell, a git verb
+ * that is not a read: wicked-core gate_hook.rs `bash_cd_escape_targets`) as a write outside the job's folder and blocks
+ * it, so the answer stops at a rules card. Say where to stay and hand the form that works: the repository's path named
+ * in the command. `.` (the working directory itself, a container-floor checkout) needs no such line.
  */
 export function chatStayLines(paths: readonly string[]): string[] {
   const outside = paths.filter((p) => p !== '.');
   if (outside.length === 0) return [];
   const one = shellWord(outside[0]!);
   return [
-    "Do NOT `cd` into a repository: run every command from where you start. The job's rules refuse a `cd` out of it and",
-    `your answer stops there. Name the repository's path in each command instead, e.g. \`git -C ${one} log -5\` or \`ls ${one}\`.`,
+    "Do NOT `cd` into a repository: run every command from where you start, and name the repository's path in it instead,",
+    `e.g. \`git -C ${one} log -5\` or \`ls ${one}\`. The job's rules refuse a \`cd\` out of where you start in a command that`,
+    'can also write (a redirect, a script interpreter such as python or node, a git command that changes something), and',
+    'your answer stops at that refusal.',
   ];
 }
 

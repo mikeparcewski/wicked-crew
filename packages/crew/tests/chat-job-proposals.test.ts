@@ -212,6 +212,15 @@ describe('a person-made job proposal', () => {
     expect(p.sentence!.ask).toBe('Which repository?');
     expect(p.question!.choices.map((c) => c.edit.repoRef)).toEqual(['r-ops', 'r-tiny', 'r-pay', 'r-bill', 'r-web', 'r-docs']);
     expect(p.needs!.find((n) => n.id === 'repo')!.choices!.map((c) => c.value)).toEqual(['r-ops', 'r-tiny', 'r-pay', 'r-bill', 'r-web', 'r-docs']);
+    // A link names its repository, so a linked one and a named one are two: the person picks (studio's rule).
+    const linked = rig({ repos: MANY });
+    expect((await pick(linked, 'migrate', { option: 'upgrade', words: 'Port https://github.com/acme/tiny-math-rd/pull/7 to node 22; billing-api has a similar fix' })).code).toBe(201);
+    expect(open(linked).repoRefs ?? []).toEqual([]);
+    expect(open(linked).question!.choices.slice(0, 2).map((c) => c.edit.repoRef)).toEqual(['r-bill', 'r-tiny']);
+    // A link alone names it clearly.
+    const only = rig({ repos: MANY });
+    expect((await pick(only, 'migrate', { option: 'upgrade', words: 'Port https://github.com/acme/tiny-math-rd/pull/7 to node 22.' })).code).toBe(201);
+    expect(open(only).repoRefs).toEqual(['r-tiny']);
     // A plain word that is also a repository's name (`docs`) never picks it; a longer token never names a shorter one.
     for (const words of ['update the docs for node 22', 'bump tiny-math-rd2 to node 22']) {
       const q = rig({ repos: MANY });

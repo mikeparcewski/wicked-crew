@@ -322,18 +322,59 @@ function distinctName(name: string): boolean {
   return name.length >= 3 && /[^\p{L}]/u.test(name);
 }
 
-/** The chat's repositories the words name, by name or id, in the chat's order. */
-export function reposNamedIn<R extends { id: string; name: string }>(words: string, repos: readonly R[]): R[] {
-  return repos.filter((r) => namesTerm(words, r.name) || (r.id !== r.name && namesTerm(words, r.id)));
+const REPO_OPS = new Set(['pull', 'pulls', 'pull-requests', 'merge_requests', 'tree', 'blob', 'commit', 'commits', 'compare']);
+
+/** The repository one link names, or null: studio's `linkedRepo` (repoProjects.ts). GitHub and Bitbucket:
+ *  `<owner>/<repo>`, whatever follows. Elsewhere the segment before the first repository operation after it (or
+ *  GitLab's `-` before one; on gitlab.com any `-`); with no operation, a GitLab project home names its last segment and
+ *  a clone link (`…/<repo>.git`) its repository. Other links name nothing. */
+function linkedRepo(link: string): string | null {
+  let url: URL;
+  try { url = new URL(link); } catch { return null; }
+  const segs = url.pathname.split('/').filter((x) => x !== '').map((x) => { try { return decodeURIComponent(x); } catch { return x; } });
+  const host = url.hostname.toLowerCase().replace(/^www\./u, '');
+  let repo: string | undefined;
+  if (host === 'github.com' || host === 'bitbucket.org') repo = segs.length >= 2 ? segs[1] : undefined;
+  else {
+    const gitlab = host === 'gitlab.com';
+    const at = segs.findIndex((x, i) => i >= 2 && (REPO_OPS.has(x) || (x === '-' && (gitlab || REPO_OPS.has(segs[i + 1] ?? '')))));
+    if (at >= 2) repo = segs[at - 1];
+    else if (gitlab) repo = segs.length >= 2 ? segs[segs.length - 1] : undefined;
+    else if (segs.length >= 2 && /\.git$/iu.test(segs[segs.length - 1]!)) repo = segs[segs.length - 1];
+  }
+  const name = repo?.replace(/\.git$/iu, '').toLowerCase();
+  return name === undefined || name === '' || name === '-' ? null : name;
 }
 
-/** (crew#1791) The one repository the words clearly name ("In tiny-math-rd, fix …"): named by a distinct name or id,
- *  and no other named. `null` = none or several: the proposal asks. */
+/** The repositories the links in the words name (lower-cased): studio's `linkedRepos`. A link ends at a space, a
+ *  bracket or a quote, and a sentence's punctuation after it is not part of it. */
+function linkedRepos(words: string): string[] {
+  const out: string[] = [];
+  for (const m of words.matchAll(/https?:\/\/[^\s<>()[\]"'`]+/giu)) {
+    const name = linkedRepo(m[0].replace(/[.,;:!?]+$/u, ''));
+    if (name !== null) out.push(name);
+  }
+  return out;
+}
+
+const linkedTo = (linked: readonly string[], r: { id: string; name: string }): boolean =>
+  linked.includes(r.name.toLowerCase()) || linked.includes(r.id.toLowerCase());
+
+/** The chat's repositories the words name, by name, id or link, in the chat's order (studio's `reposNamedIn`). */
+export function reposNamedIn<R extends { id: string; name: string }>(words: string, repos: readonly R[]): R[] {
+  const linked = linkedRepos(words);
+  return repos.filter((r) => namesTerm(words, r.name) || (r.id !== r.name && namesTerm(words, r.id)) || linkedTo(linked, r));
+}
+
+/** (crew#1791) The one repository the words clearly name ("In tiny-math-rd, fix …", or a link into it): named by a
+ *  link, a distinct name or id, and no other named. `null` = none or several: the proposal asks. Studio's
+ *  `repoNamedInWords`, so the repository crew picks is the one studio would. */
 export function repoNamedIn<R extends { id: string; name: string }>(words: string, repos: readonly R[]): R | null {
   const named = reposNamedIn(words, repos);
   if (named.length !== 1) return null;
   const r = named[0]!;
-  return (distinctName(r.name) && namesTerm(words, r.name)) || (r.id !== r.name && distinctName(r.id) && namesTerm(words, r.id)) ? r : null;
+  const linked = linkedRepos(words);
+  return linkedTo(linked, r) || (distinctName(r.name) && namesTerm(words, r.name)) || (r.id !== r.name && distinctName(r.id) && namesTerm(words, r.id)) ? r : null;
 }
 
 /** (crew#1791) Every repository the person can pick, those the words name first: no cap, so the named one and every
