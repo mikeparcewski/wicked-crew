@@ -101,6 +101,17 @@ export class RefineLauncher implements ProposalDispatcher {
       { pid: d.pid, runId: d.identity.runId, base: target.base, allow, op: 'refine', chatId: d.chatId, chatInstance: instance },
     );
     this.deps.fence?.(ref.doc, (this.deps.bindings.get(ref.ref)?.attempts ?? []).map((a) => a.runId).filter((id) => id !== d.identity.runId), ref.mount);
+    // crew#1726: a refine that names `chat`, accepted on the chat instance the document was made in (its own id or the
+    // archive alias a reuse moved it to), reads the conversation up to its own cutoff: turns and files added since the
+    // create reach it. The records the held snapshot brought ride along; every other held token keeps its copy (its
+    // bytes may not be readable again). A Go again of this refine finds its own snapshot held and reuses it.
+    const cutoff = packetCutoff(records, d.pid, d.resolution.turnId);
+    const sameChat = chatNow !== null && instance === binding.chatInstance && (instance !== null || d.chatId === binding.chatId);
+    const ownSnapshot = `conversation-${d.chatId}-to-${cutoff ?? 'empty'}.md`;
+    const refreshChat = sameChat
+      && d.resolution.sources.some((s) => s.token === 'chat' && s.status === 'ok')
+      && binding.tokens['chat'] !== undefined
+      && !binding.tokens['chat'].includes(ownSnapshot);
     const resolution = {
       ...d.resolution,
       sources: [
@@ -109,10 +120,14 @@ export class RefineLauncher implements ProposalDispatcher {
       ],
     };
     const packet = await buildSourcePacket({
-      runId: d.identity.runId, chatId: d.chatId, pid: d.pid, cutoffTurnId: packetCutoff(records, d.pid, d.resolution.turnId),
+      runId: d.identity.runId, chatId: d.chatId, pid: d.pid, cutoffTurnId: cutoff,
       resolution, records,
       ...(chatNow !== null ? { storageChatId: chatNow } : {}),
       held: { tokens: binding.tokens, bytes: (name) => this.deps.bindings.packetBytes(ref.ref, name) },
+      ...(refreshChat ? { refreshChat: true } : {}),
+      chatSnapshot: ownSnapshot,
+      // As the create read it: a document moved out of its chat's scope keeps only what is in its project.
+      ...(binding.scopeProject !== binding.projectId ? { recheckProject: binding.projectId } : {}),
     }, this.deps.packetDeps);
     refuseLostSources(resolution, packet);
     this.deps.bindings.addPacket(ref.ref, packet.canonical, packet.tokens);
