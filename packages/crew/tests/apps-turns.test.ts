@@ -20,7 +20,7 @@ import { McpBroker, type McpBrokerDeps } from '../src/mcp/broker.js';
 import type { McpCallResponse } from '../src/core/types.js';
 import { registerAppRoutes } from '../src/apps/routes.js';
 import { AppStore, type AppRepoRegistry } from '../src/apps/store.js';
-import { APPS_SELF_CHECK_COMMAND, AppTurnService, PackageKnowledge, SPEC_SHAPE_GUIDE, appsUnitResolver, builderLines, changeLine, packageJson, turnProblem, type KnowledgePackage, type TurnEngine } from '../src/apps/turns.js';
+import { APPS_SELF_CHECK_COMMAND, AppTurnService, PackageKnowledge, SPEC_SHAPE_GUIDE, appsUnitResolver, brokenRulesOf, builderLines, changeLine, packageJson, turnProblem, type KnowledgePackage, type TurnEngine } from '../src/apps/turns.js';
 import { readRules } from '../src/sources/policy/rules.js';
 import { builderCatalog } from './fixtures/apps-sources/builder-catalog.js';
 import { chatKnowledgeFor } from '../src/api/chat-mcp.js';
@@ -701,6 +701,60 @@ describe('apps turns: a review held on steering rules waits for the person (F22)
     await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull());
     expect(s.cancelled).toEqual([runId]);
     expect((await s.call('GET', '/apps/escalations')).body.app.turns![0]).toMatchObject({ state: 'refused', code: 'review_refused', reason: expect.stringContaining('learn-tests-with-fixes') });
+  });
+
+  it('a review refused by the evaluator with a BROKEN rule behind it names the rule on the turn, with its cite (crew#1379)', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    const fail = "the evaluator's verdict is FAIL\nThe chart has no text alternative.";
+    s.set(runId, 'awaiting_human', { build: { status: 'done' }, check: { status: 'done' }, review: {
+      status: 'rejected', denial_reason: fail,
+      denial: { source: 'evaluator', reason: fail },
+      denials_behind: [{ source: 'rule_check', reason: '1 steering rule(s) broken: learn-accessible — charts/kpi.json:4 has no alt text', rule_ids: ['learn-accessible'] }],
+      rule_check: { rows: [
+        { ruleId: 'learn-accessible', status: 'broken', how: 'judge', reason: 'a chart has no text alternative', cite: 'charts/kpi.json:4 has no alt text', ruleKey: 'k1' },
+        { ruleId: 'learn-tests-with-fixes', status: 'kept', how: 'judge', reason: 'tests changed', ruleKey: 'k2' },
+      ] },
+    } });
+    const d = (await s.call('GET', '/apps/escalations')).body.app;
+    expect(d.turn).toBeNull();
+    expect(s.cancelled).toEqual([runId]);
+    expect(d.turns![0]).toMatchObject({ state: 'refused', code: 'review_refused', rules: [{ id: 'learn-accessible', reason: 'charts/kpi.json:4 has no alt text' }] });
+    expect(d.turns![0]!.reason).toMatch(/It breaks steering rule learn-accessible\. Nothing landed\.$/);
+  });
+
+  it('a refusal the rule check won names its rules once; a plain refusal records no rules (crew#1379)', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    const broken = '1 steering rule(s) broken: learn-tests-with-fixes — no test file is added or changed';
+    s.set(runId, 'awaiting_human', { build: { status: 'done' }, check: { status: 'done' }, review: {
+      status: 'rejected', denial_reason: broken, denial: { source: 'rule_check', reason: broken, rule_ids: ['learn-tests-with-fixes'] },
+      rule_check: { rows: [{ ruleId: 'learn-tests-with-fixes', status: 'broken', how: 'judge', reason: 'no test file is added or changed', ruleKey: 'k' }] },
+    } });
+    const d = (await s.call('GET', '/apps/escalations')).body.app;
+    expect(d.turns![0]).toMatchObject({ state: 'refused', code: 'review_refused', rules: [{ id: 'learn-tests-with-fixes', reason: 'no test file is added or changed' }] });
+    expect(d.turns![0]!.reason).not.toContain('It breaks');
+
+    const run2 = (await s.call('POST', '/apps/escalations/turns', { base: 2, message: 'again' })).body['runId'] as string;
+    s.set(run2, 'awaiting_human', { review: { status: 'rejected', denial_reason: 'reads a column nobody asked for' } });
+    const t = (await s.call('GET', '/apps/escalations')).body.app.turns![1]!;
+    expect(t).toMatchObject({ state: 'refused', code: 'review_refused' });
+    expect(t.rules).toBeUndefined();
+  });
+
+  it('brokenRulesOf reads the rule check as core does: rows only when the layers behind are unrecorded, never a process rule', () => {
+    const rows = [
+      { ruleId: 'learn-a', status: 'broken', reason: 'a broke', ruleKey: 'k' },
+      { ruleId: 'proc-x', status: 'broken', reason: 'process', blocking: false, ruleKey: 'k' },
+      { ruleId: 'kept-k', status: 'kept', reason: 'fine', ruleKey: 'k' },
+    ];
+    // An older record: no layers behind recorded, the evaluator's denial won.
+    expect(brokenRulesOf({ denial: { source: 'evaluator', reason: 'FAIL' }, rule_check: { rows } })).toEqual([{ id: 'learn-a', reason: 'a broke' }]);
+    // The layers behind ARE recorded and none is the rule check: a row left from an earlier attempt names nothing.
+    expect(brokenRulesOf({ denial: { source: 'evaluator', reason: 'FAIL' }, denials_behind: [], rule_check: { rows } })).toEqual([]);
+    // A rule the denial names with no row of its own is still named.
+    expect(brokenRulesOf({ denial: { source: 'rule_check', reason: 'x', rule_ids: ['gone', 'gone'] } })).toEqual([{ id: 'gone', reason: '' }]);
+    expect(brokenRulesOf(undefined)).toEqual([]);
   });
 
   it('a hold on the review does not hide a step that DID refuse at an open gate elsewhere (the open gate decides)', async () => {

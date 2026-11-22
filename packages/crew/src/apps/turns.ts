@@ -21,7 +21,7 @@
  *    read-only, and the person answers the gate (re-check, or confirm or skip with a reason) or stops it (F22).
  */
 
-import type { AppSpec, AppTurnRecord, CoreEvent, KnowledgeSummaryResponse, LaunchRunInput, SessionView } from '../core/types.js';
+import type { AppSpec, AppTurnRecord, AppTurnRule, CoreEvent, KnowledgeSummaryResponse, LaunchRunInput, SessionView } from '../core/types.js';
 import { readRules } from '../sources/policy/rules.js';
 import type { GateSource } from '../knowledge/gate/sources.js';
 import { type KnowledgePackage, knowledgePackageFor, packageJson } from '../knowledge/package.js';
@@ -416,6 +416,31 @@ export function rulesHeldOrd(v: SessionView, events: ReadonlyArray<Record<string
   return at !== undefined && held(at) ? at.ord : null;
 }
 
+/**
+ * (crew#1379) The steering rules a refused step BROKE, from the engine's record of it, as core reads them
+ * (`actor.rs` `open_rule_ids`, BROKEN only): the ids its `rule_check` denials name, winning or behind the reviewer's
+ * (`denial`, `denials_behind`); when none does and the layers behind are not recorded, its last rule check's
+ * broken rows (a process rule's, `blocking: false`, never denies). Each carries the judge's cite (else its reason)
+ * from that check, as one line of text. These fields ride the runs wire; they are not in the api-types `WorkUnit`.
+ */
+export function brokenRulesOf(unit: unknown): AppTurnRule[] {
+  const isRecord = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null;
+  if (!isRecord(unit)) return [];
+  const behind = Array.isArray(unit['denials_behind']) ? unit['denials_behind'] : null;
+  const denials = [unit['denial'], ...(behind ?? [])].filter(isRecord).filter((d) => d['source'] === 'rule_check');
+  const check = unit['rule_check'];
+  const rows = (isRecord(check) && Array.isArray(check['rows']) ? check['rows'] : []).filter(isRecord).filter((r) => typeof r['ruleId'] === 'string' && r['ruleId'] !== '');
+  const brokenRows = rows.filter((r) => r['status'] === 'broken' && r['blocking'] !== false);
+  let ids = denials.flatMap((d) => (Array.isArray(d['rule_ids']) ? d['rule_ids'] : []).filter((x): x is string => typeof x === 'string' && x !== ''));
+  if (ids.length === 0 && (denials.length > 0 || unit['denials_behind'] == null)) ids = brokenRows.map((r) => r['ruleId'] as string);
+  const text = (x: unknown): string => (typeof x === 'string' ? x : '');
+  return [...new Set(ids)].slice(0, 20).map((id) => {
+    const row = brokenRows.find((r) => r['ruleId'] === id) ?? rows.find((r) => r['ruleId'] === id);
+    const why = row === undefined ? '' : text(row['cite']) !== '' ? text(row['cite']) : text(row['reason']);
+    return { id: oneLine(id, 200), reason: oneLine(why, 300) };
+  });
+}
+
 export function parkedRefusal(v: SessionView, events: ReadonlyArray<Record<string, unknown>> | null = null): { phase: string; code: string; reason: string } | null {
   const runId = v.session.id;
   // (F22) A step held on steering rules is waiting for the person (re-check, or confirm or skip with a reason), not
@@ -624,7 +649,11 @@ export class AppTurnService implements AppTurnLauncher {
         reason = said !== '' ? `The builder made no change it could hand on. It said: “${said}” Nothing landed.` : 'The builder made no change it could hand on. Nothing landed.';
         code = 'no_change';
       }
-      return { kind: 'end', state: code === 'step_failed' || code === 'no_change' ? 'failed' : 'refused', code, reason };
+      // (crew#1379) A rule the step broke is named, so the person can find it in Steering (rescope or retire it).
+      const rules = code === 'no_change' ? [] : brokenRulesOf(v.units.find((x) => x.id === `${input.runId}:${refused.phase}`));
+      const unnamed = rules.filter((r) => !reason.includes(r.id)).map((r) => r.id);
+      if (unnamed.length > 0) reason = `${reason.replace(/\s*Nothing landed\.$/, '')} It breaks steering rule${unnamed.length === 1 ? '' : 's'} ${unnamed.join(', ')}. Nothing landed.`;
+      return { kind: 'end', state: code === 'step_failed' || code === 'no_change' ? 'failed' : 'refused', code, reason, ...(rules.length > 0 ? { rules } : {}) };
     }
     if (status === 'failed') {
       const check = unit('check');
