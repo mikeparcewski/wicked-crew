@@ -578,6 +578,19 @@ export class LaunchReply {
 }
 
 /** Keep correctable launch refusals typed, and preserve error codes in other launch failures. */
+/**
+ * (crew#1442, coord on #1734) A held run's source pick, for a reshape that keeps it. A pick that can't be read (its
+ * store entry gone and the launch trail not read at boot) refuses the launch, 409 `sources_unavailable`, rather than
+ * launch it as if the held run had no pick.
+ */
+export function heldSourcePick(picks: Pick<RunSourcePicks, 'get'>, runId: string): string[] | null {
+  try {
+    return picks.get(runId);
+  } catch (err) {
+    throw jobRefusal(409, { code: 'sources_unavailable', error: `the held run's source pick could not be read: ${message(err)}` });
+  }
+}
+
 export function jobRefusal(status: number, payload: unknown): Error {
   const b = payload as { error?: unknown; code?: unknown } | undefined;
   if (status >= 400 && status < 500 && typeof b?.code === 'string') {
@@ -3894,7 +3907,14 @@ export function registerRoutes(
     // retry or reshape that sends none keeps the earlier run's pick; a run without a pick reads what the switches allow.
     let sourcePick: string[] | null = null;
     // An inherited pick is checked like a sent one (the switches may have changed since the earlier run).
-    const wantedPick = b.sources ?? (b.retryOf !== undefined ? (runtime.runSourcePicks?.get(b.retryOf) ?? undefined) : undefined);
+    let wantedPick: string[] | undefined;
+    try {
+      wantedPick = b.sources ?? (b.retryOf !== undefined ? (runtime.runSourcePicks?.get(b.retryOf) ?? undefined) : undefined);
+    } catch (err) {
+      // (crew#1442, coord on #1734) The earlier run's pick can't be read (its store entry is gone and the launch trail
+      // was not read at boot): refused, never launched as if it had no pick.
+      return reply.code(409).send({ code: 'sources_unavailable', error: `the earlier run's source pick could not be read: ${message(err)}` });
+    }
     if (wantedPick !== undefined) {
       if (runtime.runSourcePicks === undefined || runtime.dataGate === undefined) {
         return reply.code(400).send({ code: 'sources_refused', error: 'this daemon cannot limit a run to picked sources' });
@@ -3984,7 +4004,11 @@ export function registerRoutes(
         if (linked.block !== null) input.problem = `${intent.trimEnd()}\n\n${linked.block}`;
         // crew#825: an all-excluded intent appends nothing but still answers what it left out.
         if (linked.issues.length > 0) linkedIssues = linked.issues;
-        if (linked.addresses !== undefined && linked.addresses.length > 0) linkedAddresses = linked.addresses;
+        if (linked.addresses !== undefined && linked.addresses.length > 0) {
+          linkedAddresses = linked.addresses;
+          // crew#1352: known before the engine is called, so the deliver script's embedded fallback links them back.
+          input.trackerRefs = linked.addresses.map((a) => ({ system: a.system, ref: a.ref, ...(a.asked !== undefined ? { asked: a.asked } : {}) }));
+        }
       } catch (err) {
         req.log.warn(`linked-issue resolution failed; launching on the intent alone: ${message(err)}`);
       }
@@ -4191,6 +4215,12 @@ export function registerRoutes(
         ...(b.actor !== undefined ? { actor: b.actor } : {}),
         // crew#627: which linked issues the daemon read into the problem, and which it could not.
         ...(linkedIssues !== undefined ? { linkedIssues } : {}),
+        // crew#1352: the issues the run addresses, as its tracker set resolved them. The trail is the durable record for
+        // the run's lifetime (the tracker-addresses store is a bounded cache, and its write may fail); the run-timing
+        // index reads them back, live and after a restart.
+        ...(linkedAddresses !== undefined ? { trackerAddresses: linkedAddresses } : {}),
+        // crew#1442: the run's source pick, so a pick store that loses the run still narrows it (fail closed).
+        ...(sourcePick !== null ? { sourcePick } : {}),
         // DES-CATALOG-002 §4.4: the shape it was launched as, what it was launched with, and the proposal behind it.
         ...(b.shape !== undefined ? { shape: launchShapeOf(b.shape) } : {}),
         ...(ctx.fromProposal !== undefined ? { fromProposal: ctx.fromProposal } : {}),
@@ -4483,7 +4513,7 @@ export function registerRoutes(
             ...(projectId !== null && projectId !== DEFAULT_PROJECT_ID ? { projectId } : {}),
             ...common,
             // (CS4) The documents and the source pick, as tokens and names (never flattened into the brief's prose).
-            ...jobInputsOfProposal(p, runtime.runSourcePicks !== undefined ? (runId) => runtime.runSourcePicks!.get(runId) : undefined),
+            ...jobInputsOfProposal(p, runtime.runSourcePicks !== undefined ? (runId) => heldSourcePick(runtime.runSourcePicks!, runId) : undefined),
             // A power run when the person's Start chose one (checked against this daemon just now); otherwise it
             // stops at its first plan, as every chat job did before (operator ruling 2026-11-06).
             // (A power launch overrides the plan hold; launchRun refuses rather than run it phased, `powerRequired`.)

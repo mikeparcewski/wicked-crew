@@ -1557,6 +1557,8 @@ export function factsFromWorkflow(input: {
   phases: PhaseDef[];
   runUrl: string | null;
   revisesPr?: { number: number; url: string } | null;
+  /** (crew#1352) The issues the launch resolved through the tracker set: the embedded fallback links them back too. */
+  trackerRefs?: DeliverTextFacts['trackerRefs'];
 }): DeliverTextFacts {
   return {
     runId: input.runId,
@@ -1578,6 +1580,7 @@ export function factsFromWorkflow(input: {
     verdicts: [],
     revisesPr: input.revisesPr ?? null,
     trailers: configuredTrailers(),
+    ...(input.trackerRefs !== undefined && input.trackerRefs.length > 0 ? { trackerRefs: input.trackerRefs.map((t) => ({ ...t })) } : {}),
   };
 }
 

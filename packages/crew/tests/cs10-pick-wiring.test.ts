@@ -44,6 +44,8 @@ describe('CS10 wiring: one pick store reaches every enforcement point', () => {
 
   it('the unit tool-list route and the reshape launcher read the launch store', () => {
     expect(callAt(routes, 'registerMcpRoutes(app, {')).toMatch(/\{ picks: runtime\.runSourcePicks \}/);
-    expect(routes).toMatch(/jobInputsOfProposal\(p, runtime\.runSourcePicks !== undefined \? \(runId\) => runtime\.runSourcePicks!\.get\(runId\)/);
+    // (coord on #1734) Through heldSourcePick, which reads the same store and refuses 409 when it can't.
+    expect(routes).toMatch(/jobInputsOfProposal\(p, runtime\.runSourcePicks !== undefined \? \(runId\) => heldSourcePick\(runtime\.runSourcePicks!, runId\)/);
+    expect(routes).toMatch(/export function heldSourcePick\([^)]*\)[^{]*\{\s*try \{\s*return picks\.get\(runId\);/);
   });
 });

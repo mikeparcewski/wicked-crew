@@ -17,6 +17,8 @@
 
 import type { AuditLog } from './audit.js';
 import type { Actor, AuditEntry, LaunchEnvelope, LaunchShape, RecordedEvent, SessionView } from '../core/types.js';
+import type { RunAddress } from '../knowledge/trackers/addresses.js';
+import { MCP_SERVER_NAME_RE } from '../mcp/classify.js';
 
 /** The run statuses that are terminal (`SessionStatus`): the only runs `ended_at` may date. */
 const TERMINAL_STATUSES: ReadonlySet<string> = new Set(['completed', 'cancelled', 'failed']);
@@ -81,6 +83,14 @@ export class RunTimingIndex {
   /** (DES-CATALOG-002 §4.4) The launch's shape, its envelope and the chat proposal whose Go launched it (`detail.shape`,
    *  `detail.envelope`, `detail.fromProposal`): usage by shape, the reshape's relaunch, and the plan-gate binding. */
   private readonly runToLaunchFacts = new Map<string, { shape?: LaunchShape; envelope?: LaunchEnvelope; fromProposal?: string }>();
+  /** crew#1352: the issues a run addresses, as its launch recorded them (`detail.trackerAddresses`), with its scope. */
+  private readonly runToAddresses = new Map<string, LaunchedAddresses>();
+  /** crew#1442: the source pick a run was launched with (`detail.sourcePick`). */
+  private readonly runToSourcePick = new Map<string, string[]>();
+  /** crew#1442: every run whose `run.launched` entry this index read (live or hydrated). */
+  private readonly launchedRuns = new Set<string>();
+  /** crew#1442: the boot read of the trail failed, so a run not launched since is of unknown pick. */
+  private launchHistoryUnreadable = false;
 
   /**
    * Consume pre-read `run.launched` entries — the seam that lets `createServer` feed this index
@@ -116,6 +126,9 @@ export class RunTimingIndex {
     this.runToLaunchDeliver.delete(runId);
     this.runToProposal.delete(runId);
     this.runToLaunchFacts.delete(runId);
+    this.runToAddresses.delete(runId);
+    this.runToSourcePick.delete(runId);
+    this.launchedRuns.add(runId);
     if (typeof entry.ts === 'number' && entry.ts > 0) this.set(runId, entry.ts);
     const launcher = entry.actor;
     if (typeof launcher?.id === 'string' && launcher.kind !== 'system') this.setPrincipal(runId, launcher.id);
@@ -140,6 +153,53 @@ export class RunTimingIndex {
     this.noteProposal(runId, detail);
     this.noteChain(runId, detail);
     this.noteLaunchFacts(runId, detail);
+    this.noteTrackerFacts(runId, typeof entry.ts === 'number' ? entry.ts : 0, detail);
+  }
+
+  /** crew#1352, crew#1442: a launch entry's tracker addresses and source pick, each kept only when it is well formed. */
+  noteTrackerFacts(runId: string, ts: number, detail: Record<string, unknown> | undefined): void {
+    const addresses = launchedAddressList(detail?.['trackerAddresses']);
+    if (addresses !== null && addresses.length > 0) {
+      const projectId = detail?.['projectId'];
+      const repoId = detail?.['repoRef'];
+      this.runToAddresses.set(runId, { runId, at: ts, projectId: typeof projectId === 'string' ? projectId : null, repoId: typeof repoId === 'string' ? repoId : null, addresses });
+    }
+    const pick = detail?.['sourcePick'];
+    if (Array.isArray(pick) && pick.length <= SOURCE_PICK_MAX && pick.every((id) => typeof id === 'string' && MCP_SERVER_NAME_RE.test(id))) {
+      this.runToSourcePick.set(runId, [...new Set(pick as string[])]);
+    }
+  }
+
+  /** crew#1352: what a run addresses as its launch recorded it, or `undefined` (none recorded). A copy. */
+  addressesOf(runId: string): LaunchedAddresses | undefined {
+    const a = this.runToAddresses.get(runId);
+    return a === undefined ? undefined : { ...a, addresses: a.addresses.map((x) => ({ ...x })) };
+  }
+
+  /** crew#1352: every run whose launch recorded tracker addresses, oldest launch first. Copies. */
+  allAddresses(): LaunchedAddresses[] {
+    return [...this.runToAddresses.keys()].map((id) => this.addressesOf(id)!).sort((a, b) => a.at - b.at);
+  }
+
+  /** crew#1442: the source pick a run's launch recorded, or `null` (none recorded). A copy: a caller cannot widen it. */
+  sourcePickOf(runId: string): string[] | null {
+    const p = this.runToSourcePick.get(runId);
+    return p === undefined ? null : [...p];
+  }
+
+  /** crew#1442: the boot read of `run.launched` failed (the daemon logged it). */
+  markLaunchHistoryUnreadable(): void {
+    this.launchHistoryUnreadable = true;
+  }
+
+  /**
+   * crew#1442: the pick store's fallback. A run whose launch this index read answers its recorded pick (`null` = it had
+   * none). A run it never read, after a boot read that failed, THROWS: its pick is unknown, and a pick store that
+   * throws refuses the run's source calls (fail closed) rather than read the run as unpicked.
+   */
+  recordedPickOf(runId: string): string[] | null {
+    if (!this.launchedRuns.has(runId) && this.launchHistoryUnreadable) throw new Error(`run ${runId}'s source pick is unknown: the launch history could not be read at boot`);
+    return this.sourcePickOf(runId);
   }
 
   /** (DES-CATALOG-002 §4.4) A launch entry's shape, envelope and proposal, as recorded. */
@@ -454,4 +514,46 @@ export function recordRunLaunched(
   const ts = audit.record('run.launched', actor, { runId, detail });
   runTimingIndex?.applyLaunchEntry({ runId, ts, actor, detail });
   return ts;
+}
+
+/** crew#1352: a run's tracker addresses as its `run.launched` entry recorded them. */
+export interface LaunchedAddresses {
+  runId: string;
+  /** The launch entry's `ts` (ms). */
+  at: number;
+  projectId: string | null;
+  repoId: string | null;
+  addresses: RunAddress[];
+}
+
+/** The most names a recorded pick may hold (RUN_SOURCES_MAX). */
+const SOURCE_PICK_MAX = 20;
+const PM_SYSTEMS_KNOWN = new Set(['github', 'jira', 'gitlab', 'ado']);
+
+/** A recorded `trackerAddresses` list, or `null` when any element is not an address crew wrote. */
+function launchedAddressList(v: unknown): RunAddress[] | null {
+  if (!Array.isArray(v)) return null;
+  const out: RunAddress[] = [];
+  for (const a of v as unknown[]) {
+    if (typeof a !== 'object' || a === null || Array.isArray(a)) return null;
+    const r = a as Record<string, unknown>;
+    const trackerId = r['trackerId'];
+    const source = r['source'];
+    const ref = r['ref'];
+    const system = r['system'];
+    const asked = r['asked'];
+    const closing = r['closing'];
+    if (typeof trackerId !== 'string' || typeof source !== 'string' || typeof ref !== 'string' || typeof system !== 'string' || !PM_SYSTEMS_KNOWN.has(system)) return null;
+    if (asked !== undefined && typeof asked !== 'string') return null;
+    if (closing !== undefined && typeof closing !== 'boolean') return null;
+    out.push({
+      trackerId,
+      source,
+      system: system as RunAddress['system'],
+      ref,
+      ...(typeof asked === 'string' ? { asked } : {}),
+      ...(typeof closing === 'boolean' ? { closing } : {}),
+    });
+  }
+  return out;
 }

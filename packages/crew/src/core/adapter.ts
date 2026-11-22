@@ -2101,6 +2101,7 @@ export class CoreAdapter {
   ): ReturnType<typeof deliverPresetStep> {
     return deliverPresetStep(name, phases, input.sessionId, input.problem, {
       repoRef: input.repoRef ?? null,
+      ...(input.trackerRefs !== undefined ? { trackerRefs: input.trackerRefs } : {}),
       apiOrigin: this.deliverApiOrigin?.() ?? null,
       revisesPr: input.revisesPr ?? null,
       ghAccount: process.env['GH_ACCOUNT'] ?? null,
@@ -2400,6 +2401,8 @@ export class CoreAdapter {
           // def and one registration below, never two armed ids.
           composed = composeDeliverWorkflow(composed, input.sessionId, input.problem, {
             repoRef: input.repoRef ?? null,
+            // crew#1352: the tracker issues the launch resolved, so the embedded fallback links them back.
+            ...(input.trackerRefs !== undefined ? { trackerRefs: input.trackerRefs } : {}),
             apiOrigin: this.deliverApiOrigin?.() ?? null,
             // DES-L9: the revised PR (push target) and the push identity for the gate card —
             // GH_ACCOUNT's value and whether GH_TOKEN is exported (presence only, never the value).

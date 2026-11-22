@@ -12,13 +12,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
-import { registerRoutes } from '../src/api/routes.js';
+import { heldSourcePick, registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { AuditLog } from '../src/api/audit.js';
 import { ChatAttachmentStore } from '../src/api/chat-attachments.js';
-import { ChatProposals, LaunchOnceRegistry, type ProposalDispatch } from '../src/api/chat-proposals.js';
+import { ChatProposals, LaunchOnceRegistry, LaunchRefusal, type ProposalDispatch } from '../src/api/chat-proposals.js';
 import { RunSourcePicks } from '../src/api/run-sources.js';
 import { factsOf, jobInputsOfProposal } from '../src/api/chat-jobs.js';
 import { CATALOG_SEEDS } from '../src/workflow-catalog/catalog-data.js';
@@ -343,6 +343,47 @@ describe('POST /runs: a job’s documents and source pick (CS4)', () => {
     expect((await launch({ retryOf: first })).statusCode).toBe(201);
     const second = (launchRun.mock.calls[1]![0] as LaunchRunInput).sessionId;
     expect(new RunSourcePicks(join(scratch, 'mcp', 'run-source-picks.json')).get(second)).toEqual(['web']);
+  });
+
+  it('(crew#1442) the run.launched trail entry carries the pick, so a store that loses the run still narrows it', async () => {
+    const record = vi.spyOn(AuditLog.prototype, 'record');
+    try {
+      expect((await launch({ sources: ['web'] })).statusCode).toBe(201);
+      const runId = (launchRun.mock.calls[0]![0] as LaunchRunInput).sessionId;
+      const launched = record.mock.calls.find((c) => c[0] === 'run.launched' && c[2]?.runId === runId);
+      expect(launched?.[2]?.detail?.['sourcePick']).toEqual(['web']);
+      // A run launched with no pick records none (it reads what the switches allow).
+      expect((await launch({})).statusCode).toBe(201);
+      const open = (launchRun.mock.calls[1]![0] as LaunchRunInput).sessionId;
+      expect(record.mock.calls.find((c) => c[0] === 'run.launched' && c[2]?.runId === open)?.[2]?.detail).not.toHaveProperty('sourcePick');
+    } finally {
+      record.mockRestore();
+    }
+  });
+
+  it('(coord on #1734) a retry or reshape whose earlier pick cannot be read is refused 409 sources_unavailable, and launches nothing', async () => {
+    expect((await launch({ sources: ['web'] })).statusCode).toBe(201);
+    const first = (launchRun.mock.calls[0]![0] as LaunchRunInput).sessionId;
+    const get = vi.spyOn(picks, 'get').mockImplementation(() => {
+      throw new Error(`run ${first}'s source pick is unknown`);
+    });
+    try {
+      const res = await launch({ retryOf: first });
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ code: 'sources_unavailable' });
+      expect(launchRun).toHaveBeenCalledTimes(1);
+      // A reshape that keeps the held run's pick is refused the same way (a LaunchRefusal the Go answers with).
+      let refused: unknown;
+      try {
+        heldSourcePick(picks, first);
+      } catch (err) {
+        refused = err;
+      }
+      expect(refused).toBeInstanceOf(LaunchRefusal);
+      expect(refused).toMatchObject({ status: 409, body: { code: 'sources_unavailable' } });
+    } finally {
+      get.mockRestore();
+    }
   });
 
   it('an empty pick is a pick (none), not "no pick"', async () => {

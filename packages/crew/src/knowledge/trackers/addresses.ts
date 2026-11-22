@@ -3,6 +3,10 @@
  * with the run so delivery, the governed actions and the projection read the same answer. Written once at launch,
  * from the resolved references only. `<state home>/mcp/tracker-addresses.json` (the fenced `mcp` directory: no
  * worker reads it); written atomically, serialized, bounded to the newest {@link ADDRESSES_RUNS_KEPT} runs.
+ *
+ * (crew#1352) That file is a bounded cache. The durable record is the run's `run.launched` trail entry, which carries
+ * the same addresses (`detail.trackerAddresses`) for the run's lifetime: {@link TrackerAddressesDeps.launched} reads
+ * it back, so a run the cache evicted (or whose write failed) still delivers, acts and projects with its addresses.
  */
 
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
@@ -35,10 +39,28 @@ interface AddressesFile {
   runs: Array<{ runId: string; at: string; projectId: string | null; repoId: string | null; addresses: RunAddress[] }>;
 }
 
+/** A run's addresses as its launch recorded them (the run-timing index's read of `run.launched`). */
+export interface LaunchedRunAddresses {
+  runId: string;
+  /** The launch instant (ms). */
+  at: number;
+  projectId: string | null;
+  repoId: string | null;
+  addresses: RunAddress[];
+}
+
+export interface TrackerAddressesDeps {
+  /** The launch record's read: one run, and every run that recorded addresses. Absent = the cache alone. */
+  launched?: { of(runId: string): LaunchedRunAddresses | undefined; all(): LaunchedRunAddresses[] };
+}
+
 export class TrackerAddresses {
   private chain: Promise<unknown> = Promise.resolve();
 
-  constructor(private readonly dir: string = mcpStateDir()) {}
+  constructor(
+    private readonly dir: string = mcpStateDir(),
+    private readonly deps: TrackerAddressesDeps = {},
+  ) {}
 
   private get file(): string {
     return join(this.dir, 'tracker-addresses.json');
@@ -70,15 +92,34 @@ export class TrackerAddresses {
     return next;
   }
 
-  /** What `runId` addresses; `[]` when nothing was recorded. */
+  /** What `runId` addresses: the cache's record, else the launch record's; `[]` when neither has one. */
   async of(runId: string): Promise<RunAddress[]> {
     await this.chain;
-    return (await this.load()).runs.find((r) => r.runId === runId)?.addresses ?? [];
+    let cached: RunAddress[] | undefined;
+    try {
+      cached = (await this.load()).runs.find((r) => r.runId === runId)?.addresses;
+    } catch (err) {
+      // An unreadable cache is not "no issues": the launch record answers for a run it holds; otherwise it throws.
+      const launched = this.deps.launched?.of(runId);
+      if (launched !== undefined) return launched.addresses;
+      throw err;
+    }
+    return cached ?? this.deps.launched?.of(runId)?.addresses ?? [];
   }
 
-  /** Every recorded run (the projection's `addresses` edges). */
+  /**
+   * Every recorded run (the projection's `addresses` edges), oldest first: the cache's runs, and every run the launch
+   * record holds that the cache does not (evicted, or never written).
+   */
   async all(): Promise<Array<{ runId: string; projectId: string | null; repoId: string | null; addresses: RunAddress[] }>> {
     await this.chain;
-    return (await this.load()).runs.map((r) => ({ runId: r.runId, projectId: r.projectId, repoId: r.repoId, addresses: r.addresses }));
+    const cached = (await this.load()).runs.map((r) => ({ at: Date.parse(r.at), runId: r.runId, projectId: r.projectId, repoId: r.repoId, addresses: r.addresses }));
+    const held = new Set(cached.map((r) => r.runId));
+    const launched = (this.deps.launched?.all() ?? []).filter((r) => !held.has(r.runId));
+    if (launched.length === 0) return cached.map((r) => ({ runId: r.runId, projectId: r.projectId, repoId: r.repoId, addresses: r.addresses }));
+    return [...cached.map((r) => ({ ...r, at: Number.isFinite(r.at) ? r.at : 0 })), ...launched]
+      .map((r, i) => ({ r, i }))
+      .sort((a, b) => a.r.at - b.r.at || a.i - b.i)
+      .map(({ r }) => ({ runId: r.runId, projectId: r.projectId, repoId: r.repoId, addresses: r.addresses }));
   }
 }

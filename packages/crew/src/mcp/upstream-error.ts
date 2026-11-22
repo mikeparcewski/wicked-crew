@@ -11,6 +11,8 @@ export class UpstreamCallError extends Error {
     readonly errorClass: UpstreamErrorClass,
     readonly retryable: boolean,
     message: string,
+    /** (crew#1367) The HTTP status the server answered, for an `http` failure whose status is known. */
+    readonly status?: number,
   ) {
     super(message);
   }
