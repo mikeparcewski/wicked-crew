@@ -272,7 +272,7 @@ export async function approveEdited(
   edit: z.infer<typeof ApproveEditSchema>,
   projectOf: (runId: string) => string | undefined,
   /** (crew#1261) Told of each rejection this accept makes: the original replaced by its copy, or the copy withdrawn. */
-  decided?: (proposalId: string, reason: 'replaced-by-edit' | 'withdrawn-copy', copyId?: string) => void,
+  decided?: (proposalId: string, reason: 'replaced-by-edit' | 'withdrawn-copy' | 'stale', copyId?: string) => void,
 ): Promise<EditedApproval> {
   // estate has no compare-and-swap: two accepts of one proposal racing (a double click, two tabs)
   // would each promote a copy. One daemon, so one accept per proposal at a time is enough.
@@ -301,7 +301,7 @@ async function acceptEdited(
   id: string,
   edit: z.infer<typeof ApproveEditSchema>,
   projectOf: (runId: string) => string | undefined,
-  decided?: (proposalId: string, reason: 'replaced-by-edit' | 'withdrawn-copy', copyId?: string) => void,
+  decided?: (proposalId: string, reason: 'replaced-by-edit' | 'withdrawn-copy' | 'stale', copyId?: string) => void,
 ): Promise<EditedApproval> {
   const listed = (await estateTool('proposal.list', { state: 'pending' })) as {
     proposals?: {
@@ -321,7 +321,7 @@ async function acceptEdited(
     };
   }
   // crew#1546: a stale replacement of an edited learning is refused and rejected here too (see the plain approve).
-  const stale = await refuseStaleReplacement(estateTool, id, row.payload);
+  const stale = await refuseStaleReplacement(estateTool, id, row.payload, (pid) => decided?.(pid, 'stale'));
   if (stale !== null) return { status: 409, body: { error: stale, code: 'stale_replacement' } };
   const payload = { ...(typeof row.payload === 'object' && row.payload !== null ? row.payload : {}) } as Record<string, unknown>;
   const capture = payload['capture'];

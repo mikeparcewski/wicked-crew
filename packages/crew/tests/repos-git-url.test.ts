@@ -152,3 +152,14 @@ describe('GET /api/v1/repos — git_url from the checkout origin', () => {
     expect((await listed(app)).repos[0]!['git_url']).toBe('https://github.com/acme/second.git');
   });
 });
+
+describe('crew#1744: the repo search reads the same git_url', () => {
+  it('a repo is found by a word only its origin carries', async () => {
+    const root = checkout('searched', 'https://github.com/acme/kestrelremote.git');
+    const app = routes([entry('searched', root)]);
+    const res = await app.inject({ method: 'GET', url: '/api/v1/search?q=kestrelremote&types=repo' });
+    expect(res.statusCode, res.body).toBe(200);
+    const groups = (res.json() as { groups: Array<{ type: string; hits: Array<{ id: string }> }> }).groups;
+    expect(groups.find((g) => g.type === 'repo')?.hits.map((h) => h.id)).toEqual(['searched']);
+  });
+});

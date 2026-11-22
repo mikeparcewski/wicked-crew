@@ -4,7 +4,7 @@
  * delivers nothing. Ingest keeps crew's ranked recommendations (the seat only words them), files the proposals, and
  * Accept / Dismiss update state.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -296,7 +296,9 @@ describe('ingest, Accept and Dismiss', () => {
     const app = Fastify();
     let actor: Actor | undefined;
     app.addHook('preHandler', async (req) => { if (actor !== undefined) (req as { actor?: Actor }).actor = actor; });
-    registerInsightsRoutes(app, { store: r.store, service: r.service, audit: AuditLog.noop() });
+    const audit = AuditLog.noop();
+    const recorded = vi.spyOn(audit, 'record');
+    registerInsightsRoutes(app, { store: r.store, service: r.service, audit });
     const recs = r.review?.recommendations ?? [];
     const stale = recs.find((x) => x.kind === 'resolve-stale');
     const rule = recs.find((x) => x.kind === 'steering-rule');
@@ -318,6 +320,10 @@ describe('ingest, Accept and Dismiss', () => {
     expect(after?.state).toBe('dismissed');
     expect(after?.reason).toBe('scope drift is expected on core');
     expect(r.calls.some((c) => c.tool === 'proposal.reject' && c.args['id'] === rule?.proposalId)).toBe(true);
+    // crew#1261: the person's dismissal is on record as their rejection of its proposal.
+    expect(recorded).toHaveBeenCalledWith('proposal.decided', expect.objectContaining({ kind: 'human' }), {
+      detail: { proposalId: rule?.proposalId, by: 'operator', reason: 'rejected' },
+    });
     expect((await app.inject({ method: 'POST', url: `/api/v1/insights/recommendations/${rule?.id}/accept` })).statusCode).toBe(409);
     expect((await app.inject({ method: 'POST', url: '/api/v1/insights/recommendations/nope/accept' })).statusCode).toBe(404);
     const body = (await app.inject({ method: 'GET', url: '/api/v1/insights' })).json();
