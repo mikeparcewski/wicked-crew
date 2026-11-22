@@ -561,7 +561,7 @@ describe('crew#1726: a refine that names chat reads the conversation up to its o
 
   /** A document made at t1 (its packet's `chat` holds the conversation to t1 and a file attached at t1), then a figure
    *  and a file at t2 and the refine at t3, all in chat `c1` (instance `i1`). */
-  async function made(o: { instanceNow?: string } = {}) {
+  async function made(o: { instanceNow?: string; doc?: boolean } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'crew-refine-chat-'));
     const docs = join(dir, 'docs', 'deck');
     mkdirSync(docs, { recursive: true });
@@ -573,17 +573,29 @@ describe('crew#1726: a refine that names chat reads the conversation up to its o
     const gone = new Set<string>();
     const packetDeps = {
       runs: async () => [] as never,
-      brief: async () => null,
-      docsRoot: async () => null,
-      attachment: (_chat: string, id: string) => (files[id] !== undefined && !gone.has(id) ? { name: id === 'att-0' ? 'plan.csv' : 'figures.csv', path: files[id]! } : null),
+      brief: async () => null as never,
+      docsRoot: async () => (o.doc === true ? join(dir, 'docs') : null),
+      // As the daemon's lookup does (routes.ts proposalPacketDeps → ChatAttachmentStore.resolve): an attachment whose
+      // metadata is gone throws (404 attachment_unknown); it never answers null.
+      attachment: (chat: string, id: string) => {
+        if (files[id] === undefined || gone.has(id)) throw new Error(`chat ${chat} has no attachment ${id}`);
+        return { name: id === 'att-0' ? 'plan.csv' : 'figures.csv', path: files[id]! };
+      },
     };
     const records: ChatTranscriptRecord[] = [user(1, 't1', 'Write a note on revenue against the plan.', [{ id: 'att-0', name: 'plan.csv' }])];
+    if (o.doc === true) {
+      // The t1 answer had the document open (its v1): the snapshot carries that version as a record.
+      records.push({ at: 1.2, turnId: 't1', kind: 'context', runs: [], refused: [], artifact: { ref: '_unfiled/deck', viewed: 1, head: 1, copies: [], anchors: [] }, page: true } as unknown as ChatTranscriptRecord);
+      records.push({ at: 1.5, turnId: 't1', kind: 'seat', cliKey: 'claude', text: 'Revenue is on track.', ok: true, usage: null } as unknown as ChatTranscriptRecord);
+    }
     // The create's packet, as the create launcher builds it (the conversation up to the create's turn).
     const created = await buildSourcePacket({ runId: 'original-draft', chatId: 'c1', pid: 'c1:t1', cutoffTurnId: 't1', records: [...records],
       resolution: { what: { title: 'Deck', label: 'Document' }, sources: CHAT } as unknown as ArtifactProposal }, packetDeps);
     const bindings = new DocBindingStore(join(dir, 'b'));
     bindings.begin({ ref: '_unfiled/deck', mount: '_unfiled', doc: 'deck', projectId: null, owner: 'mike', chatId: 'c1', chatInstance: 'i1', scopeProject: null, proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [], graphDb: null }, { pid: 'c1:t1', runId: 'original-draft', base: 0 });
     bindings.addPacket('_unfiled/deck', created.canonical, created.tokens);
+    // Its v1 is replaced in place after the create (removed and made again under the same version).
+    if (o.doc === true) writeFileSync(join(docs, '_v1.html'), '<h2>y</h2>');
     records.push(user(2, 't2', 'North was 42 this quarter.', [{ id: 'att-1', name: 'figures.csv' }]));
     records.push(user(3, 't3', 'Use the new figure in the note.'));
     const launched: BoundRefine[] = [];
@@ -611,12 +623,22 @@ describe('crew#1726: a refine that names chat reads the conversation up to its o
       expect(text(named, 'attachment-')).toContain('north,42');
       // The file the create held rides along even when it can no longer be read again.
       expect(text(named, 'attachment-')).toContain('q3,40');
+      // ... and the conversation lists it as here, never as left out.
+      expect(text(named)).toContain('Files attached to this turn: `attachment-att-0-plan.csv`');
+      expect(text(named)).not.toContain('is not in the packet');
       // A Go again of the same refine (its launch failed after the packet was kept) reuses that snapshot, and
       // rebuilding nothing it cannot read again: never two contents under one name.
       m.gone.add('att-1');
       const again = await m.go('c1', CHAT, 'refine-run-2');
       expect(text(again)).toContain('North was 42 this quarter.');
       expect(text(again, 'attachment-')).toContain('north,42');
+      // The binding now holds both snapshots; a Go again carries only its own (never both: the packet would grow).
+      expect(m.bindings.get('_unfiled/deck')!.tokens['chat']!.filter((n) => n.startsWith('conversation-'))).toHaveLength(2);
+      expect(again.packet.files.filter((f) => f.name.startsWith('conversation-')).map((f) => f.name)).toEqual(['conversation-c1-to-t3.md']);
+      // A later refine that does not name chat carries the newest snapshot only, with every record.
+      const later = await m.go('c1', [], 'refine-run-3');
+      expect(later.packet.files.filter((f) => f.name.startsWith('conversation-')).map((f) => f.name)).toEqual(['conversation-c1-to-t3.md']);
+      expect(text(later, 'attachment-')).toContain('q3,40');
     } finally {
       removeScratch(m.dir);
     }
@@ -645,6 +667,18 @@ describe('crew#1726: a refine that names chat reads the conversation up to its o
       const spec = await m.go('c1', [], 'refine-run-1');
       expect(text(spec)).not.toContain('North was 42 this quarter.');
       expect(text(spec)).toContain('Write a note on revenue against the plan.');
+    } finally {
+      removeScratch(m.dir);
+    }
+  });
+
+  it('a record the document holds keeps its held bytes when the refresh reads a changed copy under the same name', async () => {
+    const m = await made({ doc: true });
+    try {
+      const named = await go1(m);
+      expect(text(named)).toContain('North was 42 this quarter.');
+      expect(text(named, 'doc-')).toContain('<h2>x</h2>');
+      expect(text(named, 'doc-')).not.toContain('<h2>y</h2>');
     } finally {
       removeScratch(m.dir);
     }
