@@ -234,46 +234,6 @@ describe('A5: a refine of the open document', () => {
     expect(w.launches[0]!).toMatchObject({ projectId: 'proj-a', projectGraph: { dbPath: '/graphs/proj-a.db' } });
   });
 
-  it('crew#1727: a chat-made document with no repository checks its records/ citations, so a wrong line is refused', async () => {
-    const packet = await buildSourcePacket({
-      runId: RUN, chatId: 'c1', pid: 'c1:t1', cutoffTurnId: 't1', records: [],
-      resolution: { what: { title: 'Coverage', label: 'Change' }, brief: 'revise', sources: [{ token: 'run:evidence', status: 'ok' }] } as ArtifactProposal,
-    }, {
-      runs: async () => [{ session: { id: 'evidence' } } as never],
-      brief: async () => ({ runId: 'evidence', title: 'Coverage', status: 'completed', markdown: 'Coverage 80%', sha256: 'x' }),
-      docsRoot: async () => null, attachment: () => null,
-    });
-    const floorCalls: string[][] = [];
-    const outcomes: Array<{ runId: string; outcome: unknown }> = [];
-    // garden's claims scan, as far as this test needs it: with records/ as --repo, a citation whose line does not hold
-    // the figure is a claims failure.
-    const w = await start({ keep: 'kept', argv: [] }, outcomes, undefined, {
-      floor: { ...floorIo, run: async (argv) => {
-        floorCalls.push(argv);
-        const repo = argv[argv.indexOf('--repo') + 1];
-        const html = readFileSync(argv[3]!, 'utf8');
-        if (argv.includes('--repo') && repo !== undefined && !readFileSync(join(repo, 'run-evidence-x.md'), 'utf8').includes('99%') && html.includes('99%')) {
-          return { stdout: JSON.stringify({ verdict: 'FAIL', failed: ['claims'], checks: { claims: { ok: false, by_kind: { 'figure-mismatch': 1 } }, contrast: { ok: true }, leaks: { ok: true }, notes: { ok: true } } }), code: 1 };
-        }
-        return floorIo.run();
-      } },
-    });
-    bindings.begin({ ref: '_unfiled/deck', mount: '_unfiled', doc: 'deck', projectId: null, owner: 'mike', chatId: 'c1', chatInstance: null, scopeProject: null, proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [], graphDb: null }, { pid: 'c1:t1', runId: 'create-run', base: 0 });
-    bindings.begin({ ref: '_unfiled/deck', mount: '_unfiled', doc: 'deck', projectId: null, owner: 'mike', chatId: 'c1', chatInstance: null, scopeProject: null, proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [], graphDb: null }, { pid: 'c1:t2', runId: RUN, base: 3, op: 'refine' });
-    await w.sub.launchBound({ ...spec(), packet, recordsRepo: true });
-    const runDir = join(chatDir, `refine-${RUN}`);
-    // The writer is told records/ is its self-check's --repo, and its self-check command carries it.
-    expect(w.launches[0]!.problem).toContain("records/ is one of the self-check's --repo folders");
-    expect(w.launches[0]!.problem).toContain(`--repo ${join(runDir, 'records')}`);
-    writeFileSync(join(runDir, 'revised.html'), '<html><body><h2 data-wid="h">Release 0.17</h2><p data-source="run-evidence-x.md:1">Coverage 99%</p></body></html>');
-    writeFileSync(join(runDir, 'notes.json'), JSON.stringify({ left_out: [], sources: [], assumptions: [] }));
-    w.fire({ type: 'sessionCompleted', session: RUN });
-    await waitFor(() => outcomes.length === 1);
-    expect(floorCalls[0]).toEqual(expect.arrayContaining(['--repo', join(runDir, 'records')]));
-    expect(outcomes[0]!.outcome).toMatchObject({ kind: 'failed', reason: expect.stringContaining('document floor') });
-    expect(w.announced.some((e) => e.event_type === DRAFT_COMPLETED)).toBe(false);
-  });
-
   it('lands a refine with existing repository citations without passing --repo to the floor', async () => {
     const cited = '<html><body><h2 data-wid="h">Release 0.17</h2><p data-source="src/x.ts:12">Coverage reached 80%.</p></body></html>';
     writeFileSync(join(docsRoot, 'deck', '_v3.html'), cited);
@@ -581,7 +541,6 @@ describe('A5: the refine launcher', () => {
       await launcher.launch(d as never);
       expect(launched[0]).toMatchObject({ runId: RUN, base: 4, allow: [ENTRY.id], ask: 'match the headings to my title', clisJson: '["codex","claude"]' });
       expect(launched[0]).toMatchObject({ graphDb: '/graphs/original.db', packet: { tokens: { 'run:original': ['run-original-x.md'], 'run:fresh': ['run-fresh-x.md'] } } });
-      expect(launched[0]!.recordsRepo).toBe(true);
       expect(bindings.get('_unfiled/deck')?.tokens).toHaveProperty('run:fresh');
       expect(bindings.attemptOf(RUN)?.attempt).toMatchObject({ op: 'refine', allow: [ENTRY.id], chatId: 'c2', chatInstance: 'inst-2', base: 4 });
       expect(bindings.allowOf(RUN)).toEqual([ENTRY.id]);
@@ -594,85 +553,104 @@ describe('A5: the refine launcher', () => {
 });
 
 describe('crew#1726: a refine that names chat reads the conversation up to its own turn', () => {
-  it('turns and files added after the create reach the refine, not only the create-time snapshot', async () => {
+  const user = (at: number, turnId: string, text: string, attachments?: Array<{ id: string; name: string }>): ChatTranscriptRecord =>
+    ({ at, turnId, kind: 'user', text, seats: ['claude'], owner: true, ...(attachments !== undefined ? { attachments } : {}) }) as unknown as ChatTranscriptRecord;
+  const refine = (chatId: string, sources: Array<{ token: string; label: string; status: 'ok' }>): ArtifactProposal => ({ pid: `${chatId}:t3`, chatId, turnId: 't3', kind: 'refine', brief: 'use the new figure', what: { title: 'Deck', label: 'Change · Deck' }, sources, helpers: { seats: ['codex', 'claude'] }, filedIn: { projectId: null }, target: { ref: '_unfiled/deck', title: 'Deck', base: 1 }, protected: [] }) as unknown as ArtifactProposal;
+  const CHAT = [{ token: 'chat', label: 'this chat', status: 'ok' as const }];
+  const text = (spec: BoundRefine, prefix = 'conversation-'): string => spec.packet.files.filter((f) => f.name.startsWith(prefix)).map((f) => f.bytes.toString('utf8')).join('\n');
+
+  /** A document made at t1 (its packet's `chat` holds the conversation to t1 and a file attached at t1), then a figure
+   *  and a file at t2 and the refine at t3, all in chat `c1` (instance `i1`). */
+  async function made(o: { instanceNow?: string } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'crew-refine-chat-'));
+    const docs = join(dir, 'docs', 'deck');
+    mkdirSync(docs, { recursive: true });
+    writeFileSync(join(docs, '_v1.html'), '<h2>x</h2>');
+    writeFileSync(join(docs, 'versions.json'), JSON.stringify({ head: 1, versions: [{ version: 1, html_file: '_v1.html' }] }));
+    const files: Record<string, string> = { 'att-0': join(dir, 'plan.csv'), 'att-1': join(dir, 'figures.csv') };
+    writeFileSync(files['att-0']!, 'quarter,target\nq3,40\n');
+    writeFileSync(files['att-1']!, 'region,revenue\nnorth,42\n');
+    const gone = new Set<string>();
+    const packetDeps = {
+      runs: async () => [] as never,
+      brief: async () => null,
+      docsRoot: async () => null,
+      attachment: (_chat: string, id: string) => (files[id] !== undefined && !gone.has(id) ? { name: id === 'att-0' ? 'plan.csv' : 'figures.csv', path: files[id]! } : null),
+    };
+    const records: ChatTranscriptRecord[] = [user(1, 't1', 'Write a note on revenue against the plan.', [{ id: 'att-0', name: 'plan.csv' }])];
+    // The create's packet, as the create launcher builds it (the conversation up to the create's turn).
+    const created = await buildSourcePacket({ runId: 'original-draft', chatId: 'c1', pid: 'c1:t1', cutoffTurnId: 't1', records: [...records],
+      resolution: { what: { title: 'Deck', label: 'Document' }, sources: CHAT } as unknown as ArtifactProposal }, packetDeps);
+    const bindings = new DocBindingStore(join(dir, 'b'));
+    bindings.begin({ ref: '_unfiled/deck', mount: '_unfiled', doc: 'deck', projectId: null, owner: 'mike', chatId: 'c1', chatInstance: 'i1', scopeProject: null, proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [], graphDb: null }, { pid: 'c1:t1', runId: 'original-draft', base: 0 });
+    bindings.addPacket('_unfiled/deck', created.canonical, created.tokens);
+    records.push(user(2, 't2', 'North was 42 this quarter.', [{ id: 'att-1', name: 'figures.csv' }]));
+    records.push(user(3, 't3', 'Use the new figure in the note.'));
+    const launched: BoundRefine[] = [];
+    const launcher = new RefineLauncher({
+      bindings, runExists: async () => false, docsRoot: async () => join(dir, 'docs'),
+      launchBound: async (sp) => { launched.push(sp); },
+      records: () => records, instanceOf: () => o.instanceNow ?? 'i1', chatIdOf: (id) => id, packetDeps,
+      clisJsonFor: (seats) => JSON.stringify(seats),
+    });
+    const go = async (chatId: string, sources: Array<{ token: string; label: string; status: 'ok' }>, runId: string): Promise<BoundRefine> => {
+      await launcher.launch({ kind: 'refine', pid: `${chatId}:t3`, chatId, actor: { id: 'mike', kind: 'human', trust: 'operator' }, identity: { artifactRef: '_unfiled/deck', runId }, resolution: refine(chatId, sources) } as never);
+      return launched.at(-1)!;
+    };
+    return { dir, go, gone, bindings };
+  }
+
+  it('turns and files added after the create reach the refine; the files the create held stay; a Go again reuses its own snapshot', async () => {
+    const m = await made();
     try {
-      const docs = join(dir, 'docs', 'deck');
-      mkdirSync(docs, { recursive: true });
-      writeFileSync(join(docs, '_v1.html'), '<h2>x</h2>');
-      writeFileSync(join(docs, 'versions.json'), JSON.stringify({ head: 1, versions: [{ version: 1, html_file: '_v1.html' }] }));
-      const figures = join(dir, 'figures.csv');
-      writeFileSync(figures, 'region,revenue\nnorth,42\n');
-      const packetDeps = {
-        runs: async () => [] as never,
-        brief: async () => null,
-        docsRoot: async () => null,
-        attachment: (_chat: string, id: string) => (id === 'att-1' ? { name: 'figures.csv', path: figures } : null),
-      };
-      const user = (at: number, turnId: string, text: string, attachments?: Array<{ id: string; name: string }>): ChatTranscriptRecord =>
-        ({ at, turnId, kind: 'user', text, seats: ['claude'], owner: true, ...(attachments !== undefined ? { attachments } : {}) }) as unknown as ChatTranscriptRecord;
-      const records: ChatTranscriptRecord[] = [user(1, 't1', 'Write a note on revenue.')];
-      // The create's packet, as the create launcher builds it (the conversation up to the create's turn).
-      const created = await buildSourcePacket({ runId: 'original-draft', chatId: 'c1', pid: 'c1:t1', cutoffTurnId: 't1', records: [...records],
-        resolution: { what: { title: 'Deck', label: 'Document' }, sources: [{ token: 'chat', status: 'ok' }] } as unknown as ArtifactProposal }, packetDeps);
-      const bindings = new DocBindingStore(join(dir, 'b'));
-      bindings.begin({ ref: '_unfiled/deck', mount: '_unfiled', doc: 'deck', projectId: null, owner: 'mike', chatId: 'c1', chatInstance: 'i1', scopeProject: null, proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [], graphDb: null }, { pid: 'c1:t1', runId: 'original-draft', base: 0 });
-      bindings.addPacket('_unfiled/deck', created.canonical, created.tokens);
-      // Later in the same chat: a figure and a file, then the refine.
-      records.push(user(2, 't2', 'North was 42 this quarter.', [{ id: 'att-1', name: 'figures.csv' }]));
-      records.push(user(3, 't3', 'Use the new figure in the note.'));
-      const refine = (sources: Array<{ token: string; label: string; status: 'ok' }>): ArtifactProposal => ({ pid: 'c1:t3', chatId: 'c1', turnId: 't3', kind: 'refine', brief: 'use the new figure', what: { title: 'Deck', label: 'Change · Deck' }, sources, helpers: { seats: ['codex', 'claude'] }, filedIn: { projectId: null }, target: { ref: '_unfiled/deck', title: 'Deck', base: 1 }, protected: [] }) as unknown as ArtifactProposal;
-      const launched: BoundRefine[] = [];
-      const launcher = new RefineLauncher({
-        bindings, runExists: async () => false, docsRoot: async () => join(dir, 'docs'),
-        launchBound: async (sp) => { launched.push(sp); },
-        records: () => records, instanceOf: () => 'i1', chatIdOf: (id) => id, packetDeps,
-        clisJsonFor: (seats) => JSON.stringify(seats),
-      });
-      const go = async (resolution: ArtifactProposal, runId: string): Promise<BoundRefine> => {
-        await launcher.launch({ kind: 'refine', pid: 'c1:t3', chatId: 'c1', actor: { id: 'mike', kind: 'human', trust: 'operator' }, identity: { artifactRef: '_unfiled/deck', runId }, resolution } as never);
-        return launched.at(-1)!;
-      };
-      const text = (spec: BoundRefine): string => spec.packet.files.filter((f) => f.name.startsWith('conversation-')).map((f) => f.bytes.toString('utf8')).join('\n');
-      const named = await go(refine([{ token: 'chat', label: 'this chat', status: 'ok' }]), 'refine-run-1');
+      // The file attached at the create's turn can no longer be read (removed since).
+      m.gone.add('att-0');
+      const named = await go1(m);
       expect(text(named)).toContain('North was 42 this quarter.');
       expect(text(named)).toContain('Use the new figure in the note.');
-      expect(named.packet.tokens['chat']).toEqual(expect.arrayContaining([expect.stringMatching(/^attachment-/u)]));
-      expect(named.packet.files.some((f) => f.name.startsWith('attachment-') && f.bytes.toString('utf8').includes('north,42'))).toBe(true);
-      // crew#1727: a document this chat made with no repository: its citations are checked against records/.
-      expect(named.recordsRepo).toBe(true);
+      expect(text(named, 'attachment-')).toContain('north,42');
+      // The file the create held rides along even when it can no longer be read again.
+      expect(text(named, 'attachment-')).toContain('q3,40');
+      // A Go again of the same refine (its launch failed after the packet was kept) reuses that snapshot, and
+      // rebuilding nothing it cannot read again: never two contents under one name.
+      m.gone.add('att-1');
+      const again = await m.go('c1', CHAT, 'refine-run-2');
+      expect(text(again)).toContain('North was 42 this quarter.');
+      expect(text(again, 'attachment-')).toContain('north,42');
     } finally {
-      removeScratch(dir);
+      removeScratch(m.dir);
     }
   });
-});
 
-describe('crew#1727: which refines check their citations against records/', () => {
-  it('a document first bound by a refine (made elsewhere, it may cite a repository snapshot) keeps the check without folders', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'crew-refine-origin-'));
+  it('the archived alias of the same chat refreshes too; a chat that reused the id never does', async () => {
+    const alias = await made();
     try {
-      const docs = join(dir, 'docs', 'deck');
-      mkdirSync(docs, { recursive: true });
-      writeFileSync(join(docs, '_v1.html'), '<h2>x</h2>');
-      writeFileSync(join(docs, 'versions.json'), JSON.stringify({ head: 1, versions: [{ version: 1, html_file: '_v1.html' }] }));
-      const bindings = new DocBindingStore(join(dir, 'b'));
-      const packetDeps = { runs: async () => [] as never, brief: async () => null, docsRoot: async () => null, attachment: () => null };
-      const launched: BoundRefine[] = [];
-      const launcher = new RefineLauncher({
-        bindings, runExists: async () => false, docsRoot: async () => join(dir, 'docs'),
-        launchBound: async (sp) => { launched.push(sp); },
-        records: () => [], instanceOf: () => 'i1', chatIdOf: (id) => id, packetDeps,
-        clisJsonFor: (seats) => JSON.stringify(seats),
-      });
-      const resolution = { pid: 'c1:t3', chatId: 'c1', turnId: 't3', kind: 'refine', brief: 'shorter', what: { title: 'Deck', label: 'Change · Deck' }, sources: [], helpers: { seats: ['codex', 'claude'] }, filedIn: { projectId: null }, target: { ref: '_unfiled/deck', title: 'Deck', base: 1 }, protected: [] } as unknown as ArtifactProposal;
-      const go = (runId: string): Promise<void> => launcher.launch({ kind: 'refine', pid: 'c1:t3', chatId: 'c1', actor: { id: 'mike', kind: 'human', trust: 'operator' }, identity: { artifactRef: '_unfiled/deck', runId }, resolution } as never);
-      await go('refine-1');
-      await go('refine-2');
-      expect(launched.map((l) => l.recordsRepo)).toEqual([undefined, undefined]);
+      expect(text(await alias.go('c1--archived', CHAT, 'refine-run-1'))).toContain('North was 42 this quarter.');
     } finally {
-      removeScratch(dir);
+      removeScratch(alias.dir);
+    }
+    const reused = await made({ instanceNow: 'i2' });
+    try {
+      const spec = await reused.go('c1', CHAT, 'refine-run-1');
+      expect(text(spec)).not.toContain('North was 42 this quarter.');
+      expect(text(spec)).toContain('Write a note on revenue against the plan.');
+    } finally {
+      removeScratch(reused.dir);
     }
   });
+
+  it('a refine that does not name chat keeps the create-time snapshot', async () => {
+    const m = await made();
+    try {
+      const spec = await m.go('c1', [], 'refine-run-1');
+      expect(text(spec)).not.toContain('North was 42 this quarter.');
+      expect(text(spec)).toContain('Write a note on revenue against the plan.');
+    } finally {
+      removeScratch(m.dir);
+    }
+  });
+
+  const go1 = (m: Awaited<ReturnType<typeof made>>): Promise<BoundRefine> => m.go('c1', CHAT, 'refine-run-1');
 });
 
 describe('A5: chat changes the open document, never a new page', () => {

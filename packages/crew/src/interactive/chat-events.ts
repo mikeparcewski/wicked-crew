@@ -413,9 +413,6 @@ export interface BoundRefine {
   graphDb: string | null;
   /** The card's two helpers, as the launch's roster. */
   clisJson: string;
-  /** (crew#1727) The document is grounded on no repository, so every citation it may carry is into this packet's
-   *  `records/`: the writer's self-check and crew's landing check run with `records/` as their one `--repo` folder. */
-  recordsRepo?: boolean | undefined;
   actor?: string | undefined;
 }
 
@@ -537,7 +534,7 @@ interface InFlight {
   failureDetail?: string | undefined;
   /** A5: the proposal-bound refine this flight is: its document, the head it revises (`expect_head`), what the person
    *  let it change, and the docs root its lineage is read from. */
-  bound?: { ref: string; base: number; allow: string[]; docsRoot: string; files: Array<{ name: string; sha256: string; bytes: number }>; repoDirs: string[] } | undefined;
+  bound?: { ref: string; base: number; allow: string[]; docsRoot: string; files: Array<{ name: string; sha256: string; bytes: number }> } | undefined;
 }
 
 /** One ask parked behind a busy doc (contract (c): FIFO per doc). In-memory on purpose: the
@@ -1019,7 +1016,6 @@ export async function startInteractiveChatSubscriber(
         doc: documentId,
         base: bound.base,
         allow: bound.allow,
-        repoDirs: bound.repoDirs,
         allowOf: (id) => opts.bindings?.allowOf(id) ?? [],
       },
       { ...(opts.draftFloorIo !== undefined ? { floor: opts.draftFloorIo } : {}), ...(opts.gardenIo !== undefined ? { garden: opts.gardenIo } : {}) },
@@ -1077,7 +1073,6 @@ export async function startInteractiveChatSubscriber(
     const outPath = join(runDir, 'revised.html');
     const mapPath = join(runDir, 'keep-map.json');
     const notesPath = notesPathOf(outPath);
-    const repoDirs = spec.recordsRepo === true ? [join(runDir, 'records')] : [];
     // The document is reserved from HERE, before the first await (codex A5 r2-r3): every seam serializing on this seam's
     // busy list sees it, and a terminal frame that arrives while the launch call is in flight is this run's.
     const flight: InFlight = {
@@ -1090,7 +1085,7 @@ export async function startInteractiveChatSubscriber(
       heartbeat: setInterval(() => {
         emitStatus({ ...docScope(flight.documentId, flight.projectId), state: 'working', message: flight.narration, ...narrationStamps(flight) });
       }, heartbeatMs),
-      bound: { ref: spec.artifactRef, base: spec.base, allow: [...spec.allow], docsRoot, files: spec.packet.files.map((f) => ({ name: f.name, sha256: f.sha256, bytes: f.bytes.length })), repoDirs },
+      bound: { ref: spec.artifactRef, base: spec.base, allow: [...spec.allow], docsRoot, files: spec.packet.files.map((f) => ({ name: f.name, sha256: f.sha256, bytes: f.bytes.length })) },
     };
     flight.heartbeat.unref?.();
     inFlight.set(spec.runId, flight);
@@ -1121,9 +1116,9 @@ export async function startInteractiveChatSubscriber(
       await adapter.launchRun({
         problem:
           boundRefineProblem(spec, { current: currentPath, out: outPath, notes: notesPath, map: mapPath }, kept) +
-          ' ' + packetClause(runDir, spec.packet, notesPath, { recordsRepo: repoDirs.length > 0 }) +
+          ' ' + packetClause(runDir, spec.packet, notesPath, { recordsRepo: false }) +
           ' ' +
-          draftQualityClause(outPath, { pages: null, exact: false, source: 'unknown' }, repoDirs, { revision: true, notes: notesPath, runId: spec.runId }),
+          draftQualityClause(outPath, { pages: null, exact: false, source: 'unknown' }, [], { revision: true, notes: notesPath, runId: spec.runId }),
         sessionId: spec.runId,
         clisJson: spec.clisJson,
         workflow: INTERACTIVE_CHAT_WORKFLOW,

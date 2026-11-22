@@ -32,9 +32,6 @@ export interface RefineGuardInput {
   base: number;
   /** The protected-edit ids the person let this refine change. */
   allow: readonly string[];
-  /** (crew#1727) The self-check's `--repo` folders: the packet's `records/` when the document is grounded on no
-   *  repository (its citations are then checked against those files), else none. */
-  repoDirs?: readonly string[];
   /** Earlier runs' accepted `allow` (their steps on the lineage release only those). */
   allowOf: (runId: string) => string[];
 }
@@ -45,7 +42,7 @@ export type RefineGuardResult =
 
 export async function guardRefine(input: RefineGuardInput, io: { floor?: DraftFloorIo; garden?: GardenIo } = {}): Promise<RefineGuardResult> {
   // 1. The floor: notes required, no process notes in the document. A refine keeps the page count the document has.
-  const floor = await runDraftFloor(input.outPath, { pages: null, exact: false, source: 'unknown' }, input.repoDirs ?? [], { notes: input.notesPath, runId: input.runId }, io.floor ?? {});
+  const floor = await runDraftFloor(input.outPath, { pages: null, exact: false, source: 'unknown' }, [], { notes: input.notesPath, runId: input.runId }, io.floor ?? {});
   if (floor.verdict === 'fail') return { ok: false, reason: `the revision did not meet the document floor: ${oneLine(floor.breaches.join(' '), 400)}`, floor };
   if (floor.verdict === 'unavailable') return { ok: false, reason: `the revision could not be checked on this host, so it was not applied (${oneLine(floor.summary, 300)})`, floor };
   // 2. The keep check, on crew's own map of the head the refine started from.

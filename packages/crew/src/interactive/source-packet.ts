@@ -104,6 +104,9 @@ export interface PacketInput {
   recheckProject?: string | null;
   /** Files the document's canonical packet already holds, by token (reused, never rebuilt). */
   held?: { tokens: Record<string, string[]>; bytes: (name: string) => Buffer };
+  /** (crew#1726) A refine's `chat` is read again up to {@link cutoffTurnId} rather than reused; the records the held
+   *  `chat` brought (attachments, run briefs) ride along, so nothing the document already cites leaves the packet. */
+  refreshChat?: boolean;
   /** Where the chat is kept NOW (its own id, or the archive id a reuse of the id moved it to): attachments and the
    *  chat's context briefs are read from there. File names keep {@link chatId}. Default: `chatId`. */
   storageChatId?: string;
@@ -618,7 +621,7 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
     const stage = new Stage();
     try {
       const held = input.held?.tokens[token];
-      if (held !== undefined && held.length > 0) {
+      if (held !== undefined && held.length > 0 && !(token === 'chat' && input.refreshChat === true)) {
         for (const n of held) stage.add(n, input.held!.bytes(n));
         stage.commit(token);
         tokens[token] = [...held];
@@ -672,6 +675,15 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
         if (leftOut > 0) struck.push({ token: 'chat', reason: `${leftOut} answer${leftOut === 1 ? '' : 's'} left out: records outside the target project` });
         const f = stage.add(`conversation-${chatId}-to-${cutoff ?? 'empty'}.md`, Buffer.from(lines.join('\n'), 'utf8'));
         names = [f.name, ...new Set(extra)];
+        // crew#1726: a refreshed snapshot keeps the records the held one brought (an attachment past the turn window, a
+        // brief no longer readable), by crew's own bytes; a name this read already staged keeps this read's file.
+        if (input.refreshChat === true) {
+          for (const n of input.held?.tokens['chat'] ?? []) {
+            if (packetDirOf(n) !== 'records' || stage.files.has(n) || out.has(n)) continue;
+            stage.add(n, input.held!.bytes(n));
+            names.push(n);
+          }
+        }
       } else if (token.startsWith('message:')) {
         const turn = token.slice('message:'.length);
         if (!TURN_ID.test(turn)) throw new Refused('not a turn id');
