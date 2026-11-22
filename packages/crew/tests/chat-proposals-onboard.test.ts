@@ -70,6 +70,8 @@ interface Rig {
   filed: Array<{ projectId: string; runId: string }>;
   daemonRefusal: string | null;
   created: Array<{ name: string; actor: string }>;
+  /** Another card's create of the same name lands first: the engine refuses this one (names are unique). */
+  createLoses: boolean;
 }
 
 function rig(): Rig {
@@ -104,6 +106,7 @@ function rig(): Rig {
     filed: [],
     daemonRefusal: null,
     created: [],
+    createLoses: false,
   };
   const registry = new LaunchOnceRegistry();
   for (const k of ['create', 'refine', 'demo'] as const) registry.register(k, r.launcher);
@@ -134,6 +137,10 @@ function rig(): Rig {
     fileRun: async (projectId, runId) => { r.filed.push({ projectId, runId }); },
     projects: async () => r.projects,
     createProject: async (name, actor) => {
+      if (r.createLoses) {
+        r.projects.push({ id: 'proj_other', name });
+        throw new Error(`a project named ${name} already exists`);
+      }
       r.created.push({ name, actor: actor.id });
       const p = { id: `proj_new${r.created.length}`, name };
       r.projects.push(p);
@@ -402,12 +409,48 @@ describe('onboard proposals', () => {
       ['x'.repeat(121), 'x'.repeat(121)],
       ['add it to my team', 'Invented Team'],
       ['add it to https://me:tok@host.example/team', 'https://me:tok@host.example/team'],
+      // xreview r1: a token or a path part of an address the person pasted is not a name they said; nor is part of a word.
+      ['add https://alice:ghp_SECRET123@github.com/acme/repo.git', 'ghp_SECRET123'],
+      ['add https://github.com/acme/repo.git', 'acme'],
+      ['add it to docsteam', 'docs'],
     ] as const).entries()) {
       const c = (await propose(r, `n${i}`, chatWith(r, `n${i}`, { words }), { onboard: { url: URL, project } }))!;
       expect(c).toMatchObject({ blocked: expect.stringMatching(/^no project has the name given \(projects here: /u), onboard: { projectId: null } });
       expect(c.onboard?.createProject ?? null).toBeNull();
       expect(JSON.stringify(c)).not.toContain(project);
     }
+  });
+
+  it('a Go again resumes the project its first Go made, by id: renamed since, archived since, or lost to another card (crew#1694 r1)', async () => {
+    const card = async (r: ReturnType<typeof rig>, chat: string) => (await propose(r, chat, chatWith(r, chat, { words: 'put it in Docs Team' }), { onboard: { url: URL, project: 'Docs Team' } }))!;
+    let r = rig();
+    // Renamed between a failed Go and its Go again: the same project, never a second one under the old name.
+    const p = await card(r, 'c2');
+    r.registerAnswer = { status: 500, body: { error: 'clone failed' } };
+    expect((await r.svc.decide('c2', p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(502);
+    r.projects.find((x) => x.id === 'proj_new1')!.name = 'Docs';
+    r.registerAnswer = { status: 201, body: { onboardRunId: 'x', projectAttached: true } };
+    expect((await r.svc.decide('c2', p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    expect(r.created).toHaveLength(1);
+    expect(r.registered.map((x) => x.data['projectId'])).toEqual(['proj_new1', 'proj_new1']);
+    // Archived (or deleted) between a failed Go and its Go again: refused with why, nothing made again.
+    r = rig();
+    const q = await card(r, 'c3');
+    r.registerAnswer = { status: 500, body: { error: 'clone failed' } };
+    expect((await r.svc.decide('c3', q.pid, { decision: 'go' }, ME, 'i1')).code).toBe(502);
+    expect(r.created).toHaveLength(1);
+    r.projects = r.projects.filter((x) => x.id !== 'proj_new1');
+    r.registerAnswer = { status: 201, body: { onboardRunId: 'x', projectAttached: true } };
+    const refused = await r.svc.decide('c3', q.pid, { decision: 'go' }, ME, 'i1');
+    expect(refused.code).toBe(502);
+    expect(JSON.stringify(refused.body)).toContain('archived or gone');
+    expect(r.created).toHaveLength(1);
+    // Two cards' Go race on one new name: the one whose create the engine refuses adopts the project the other made.
+    r = rig();
+    const s2 = await card(r, 'c4');
+    r.createLoses = true;
+    expect((await r.svc.decide('c4', s2.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    expect(r.registered.at(-1)!.data['projectId']).toBe('proj_other');
   });
 
   it('a bad address or an unreadable repository blocks Go with the reason; nothing is probed for a bad address', async () => {

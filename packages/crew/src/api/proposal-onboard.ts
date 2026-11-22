@@ -231,14 +231,21 @@ export interface OnboardTurn {
   words?: string;
 }
 
+/** Characters an address, a path or a credential carries: a name holding one is never repeated, and a word holding one
+ *  is never where a project name comes from. */
+const ADDRESS_CHARS = /[@:/\\?#&=]/u;
+
 /**
- * (crew#1694) The name a card may create a project under: one the person's own words say (ignoring case and spacing),
- * that `POST /projects` would take, and that could not carry an address or a credential (it is repeated on the card).
- * `null` when it is none of these.
+ * (crew#1694) The name a card may create a project under: one the person's own words say as whole words (ignoring case
+ * and spacing), outside any address, path or credential they wrote; that `POST /projects` would take; and that holds
+ * none of those characters itself (it is repeated on the card). `null` when it is none of these.
  */
-function creatableName(name: string, words: string): string | null {
-  if (!CreateProjectSchema.shape.name.safeParse(name).success || /[@:/\\?#&=]/u.test(name)) return null;
-  return norm(words).includes(norm(name)) ? name : null;
+export function creatableName(name: string, words: string): string | null {
+  if (!CreateProjectSchema.shape.name.safeParse(name).success || ADDRESS_CHARS.test(name)) return null;
+  // xreview r1: a token inside an address the person pasted (`https://u:TOKEN@host/acme/x`) is not a name they said.
+  const plain = words.split(/\s+/u).map((w) => (ADDRESS_CHARS.test(w) ? '\u0000' : w)).join(' ');
+  const escaped = norm(name).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  return new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, 'u').test(norm(plain)) ? name : null;
 }
 
 /** A stored address's identity: its credentials (if any) set aside first, so a registered origin that carries a token
@@ -407,6 +414,9 @@ export interface OnboardLauncherDeps {
  * run alone (crew-0182 review).
  */
 export class OnboardLauncher implements ProposalDispatcher {
+  /** (crew#1694) The project each card's Go created or adopted, by the card's run identity: a Go again resumes it by id. */
+  private readonly madeFor = new Map<string, string>();
+
   constructor(private readonly deps: OnboardLauncherDeps) {}
 
   private async repoOf(name: string): Promise<RepoEntry | undefined> {
@@ -427,7 +437,7 @@ export class OnboardLauncher implements ProposalDispatcher {
   async launch(d: ProposalDispatch): Promise<void> {
     const card = d.resolution.onboard;
     if (d.kind !== 'onboard' || card === undefined) throw new Error(`the onboard launcher takes only an onboard proposal (got ${d.kind})`);
-    const o = await this.projectFor(card, d.actor);
+    const o = await this.projectFor(card, d.identity.runId, d.actor);
     if (o.existing !== null) {
       if (o.projectId === null) throw new Error(`${o.existing.name} is already registered and no project was named`);
       await this.deps.attach(o.projectId, o.existing.id, d.actor);
@@ -469,15 +479,36 @@ export class OnboardLauncher implements ProposalDispatcher {
   }
 
   /**
-   * (crew#1694) The card's project, created first when the card says so. A Go again after the create landed finds it by
-   * its name (the card's own words, matched as the card matched them) and never creates a second.
+   * (crew#1694) The card's project, created first when the card says so. A Go again resumes the project this card's Go
+   * made, by id (renamed since or not); one archived or deleted since is refused, never made twice. After a restart it is
+   * found by its name, as the card matched it. A create that loses to another card's create of the same name (the
+   * engine keeps names unique) adopts that one.
    */
-  private async projectFor(o: NonNullable<ArtifactProposal['onboard']>, actor: Actor): Promise<NonNullable<ArtifactProposal['onboard']>> {
+  private async projectFor(o: NonNullable<ArtifactProposal['onboard']>, key: string, actor: Actor): Promise<NonNullable<ArtifactProposal['onboard']>> {
     const want = o.createProject ?? null;
     if (want === null) return o;
-    const m = matchProject(await this.deps.projects(), want.name);
-    if ('many' in m) throw new Error(`more than one project is named ${want.name} now; ask again and say which`);
-    const project = 'one' in m ? m.one : await this.deps.createProject(want.name, actor);
+    const known = this.madeFor.get(key);
+    const pick = async (): Promise<{ id: string; name: string } | null> => {
+      const projects = await this.deps.projects();
+      if (known !== undefined) {
+        const p = projects.find((x) => x.id === known);
+        if (p === undefined) throw new Error(`the project this card created (${want.name}) is archived or gone now; ask again`);
+        return p;
+      }
+      const m = matchProject(projects, want.name);
+      if ('many' in m) throw new Error(`more than one project is named ${want.name} now; ask again and say which`);
+      return 'one' in m ? m.one : null;
+    };
+    let project = await pick();
+    if (project === null) {
+      try {
+        project = await this.deps.createProject(want.name, actor);
+      } catch (err) {
+        project = await pick();
+        if (project === null) throw err;
+      }
+    }
+    this.madeFor.set(key, project.id);
     return { ...o, projectId: project.id, projectName: project.name, createProject: null };
   }
 
