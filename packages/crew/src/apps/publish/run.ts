@@ -6,7 +6,7 @@ import { join } from 'node:path';
 
 import { oidcAddressPolicy } from '../../api/auth.js';
 import type { AppActionGrant, AppPublished, AppPublishManifest, LaunchRunInput, SessionView } from '../../core/types.js';
-import { DialRefusedError, dialFetch } from '../../sources/dialer.js';
+import { DialRefusedError, dialFetch, validateAllowRanges } from '../../sources/dialer.js';
 import { projectMaySee, type AppSourceRegistry } from '../exec/sources.js';
 import { LOCK_PATH, SPEC_PATH } from '../check.js';
 import { AppStoreError, type AppPublisher, type AppStore, type StoredPublish } from '../store.js';
@@ -60,10 +60,29 @@ function discoveryRefusal(err: unknown, issuer: string): string | null {
   return err.message;
 }
 
-/** The issuer's endpoints, or `null` with why when the dialer's refusal says (crew#1457). */
+/**
+ * A URL a discovery document or the sign-in names, as it may be shown: an http(s) URL with no credentials, query or
+ * fragment, at most 300 characters, exactly as written (a trailing slash is the difference that matters); else `null`.
+ */
+function shownUrl(raw: unknown): string | null {
+  if (typeof raw !== 'string' || raw.length > 300 || !/^https?:\/\/\S+$/.test(raw)) return null;
+  try {
+    const u = new URL(raw);
+    return u.username === '' && u.password === '' && u.search === '' && u.hash === '' ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The issuer's endpoints, or `null` with why (crew#1457): the dialer's refusal, an error status, an oversize or
+ * non-JSON document, an issuer the document does not match (both shown when they are plain URLs), or endpoints that
+ * are not https. Nothing is dialled when the sign-in's allowed ranges are refused (the manifest says why).
+ */
 export async function publishDiscovery(identity: ManifestInput['body']['identity']): Promise<{ endpoints: ManifestInput['endpoints']; why: string | null }> {
   if (identity === null) return { endpoints: null, why: null };
   const none = (why: string | null = null) => ({ endpoints: null, why });
+  if (identity.allowRanges !== undefined && validateAllowRanges(identity.allowRanges) !== null) return none();
   try {
     if (!identity.issuer.startsWith('https://')) return none();
     const res = await dialFetch(`${identity.issuer.replace(/\/$/, '')}/.well-known/openid-configuration`, { signal: AbortSignal.timeout(10_000), headers: { accept: 'application/json' } }, oidcAddressPolicy(identity));
@@ -79,14 +98,32 @@ export async function publishDiscovery(identity: ManifestInput['body']['identity
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > 1024 * 1024) { await reader.cancel(); return none(); }
+      if (size > 1024 * 1024) { await reader.cancel(); return none('the document is over 1 MB'); }
       chunks.push(value);
     }
-    const doc = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
-    if (doc.issuer !== identity.issuer || typeof doc.authorization_endpoint !== 'string' || typeof doc.token_endpoint !== 'string') return none();
-    for (const raw of [doc.authorization_endpoint, doc.token_endpoint]) {
-      const url = new URL(raw);
-      if (url.protocol !== 'https:' || url.username !== '' || url.password !== '') return none();
+    let doc: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return none('the document is not a JSON object');
+      doc = parsed as Record<string, unknown>;
+    } catch {
+      return none('the document is not JSON');
+    }
+    if (doc.issuer !== identity.issuer) {
+      const says = shownUrl(doc.issuer);
+      const ours = shownUrl(identity.issuer);
+      const slash = typeof doc.issuer === 'string' && doc.issuer.replace(/\/$/, '') === identity.issuer.replace(/\/$/, '');
+      return none(`issuer mismatch: discovery says ${says ?? (doc.issuer === undefined ? 'no issuer' : 'an issuer that is not a plain URL')}, the sign-in says ${ours ?? 'an issuer that is not a plain URL'}${slash ? ' (they differ only in a trailing slash: use the issuer exactly as discovery writes it)' : ''}`);
+    }
+    if (typeof doc.authorization_endpoint !== 'string' || typeof doc.token_endpoint !== 'string') return none('the document names no authorization_endpoint or token_endpoint');
+    for (const [name, raw] of [['authorization_endpoint', doc.authorization_endpoint], ['token_endpoint', doc.token_endpoint]] as const) {
+      let url: URL | null = null;
+      try {
+        url = new URL(raw);
+      } catch {
+        url = null;
+      }
+      if (url === null || url.protocol !== 'https:' || url.username !== '' || url.password !== '') return none(`its ${name} is not an https URL without credentials`);
     }
     const algs = doc.id_token_signing_alg_values_supported;
     return { endpoints: { authorization: doc.authorization_endpoint, token: doc.token_endpoint, ...(Array.isArray(algs) && algs.every((a) => typeof a === 'string') ? { idTokenAlgs: algs as string[] } : {}) }, why: null };

@@ -131,6 +131,10 @@ describe('the publish manifest', () => {
     const why = 'dex.corp.test resolves to a private-network address (10.1.2.3), which crew reaches only when the sign-in allows its range (identity.allowRanges, e.g. 10.1.2.3/32)';
     expect(await message({ ...input(), endpoints: null, endpointsWhy: why })).toBe(`The issuer's discovery document could not be read: ${why}`);
     expect(await message({ ...input(), endpoints: null })).toBe("The issuer's discovery document could not be read");
+    // (coord r1 F2) The sign-in's allowed ranges are checked as the operator sign-in's are: 0.0.0.0/0 is refused.
+    const wide = input({ identity: { profile: 'oidc', issuer: 'https://dex.apps.test', clientId: 'esc', allowRanges: ['0.0.0.0/0'] } });
+    expect(await message({ ...wide, endpoints: null })).toMatch(/^The sign-in's allowed ranges are refused: 0\.0\.0\.0\/0 is not inside a loopback or private range/);
+    expect(await message(input({ identity: { profile: 'oidc', issuer: 'https://dex.apps.test', clientId: 'esc', allowRanges: ['10.1.2.3/32'] } }))).toBeUndefined();
   });
 
   it("(crew#1533) refuses a source the app's project may not see now: its config never reaches the image", async () => {
