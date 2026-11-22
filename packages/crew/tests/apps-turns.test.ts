@@ -592,9 +592,26 @@ describe('apps turns: check, land, refuse', () => {
       ['verdict: fail', ''],
       ['Verdict: Fail', ''],
       ['VERDICT:', ''],
+      // (coord r1) A finding that names a STACK-CHECK record mid-sentence keeps its words.
+      ["The builder's STACK-CHECK: line names no docs, so the duplicate of the date helper went unchecked.", "The builder's STACK-CHECK: line names no docs, so the duplicate of the date helper went unchecked."],
+      // The engine's heads that quote the contract in code spans.
+      ["no `VERDICT:` line in the evaluator's output (contract: end with `VERDICT: PASS` or `VERDICT: FAIL`)\nThe chart is wrong.", 'The chart is wrong.'],
+      ["the evaluator's `VERDICT:` line carries no token (contract: `VERDICT: PASS` or `VERDICT: FAIL`)\nThe chart is wrong.", 'The chart is wrong.'],
+      ["the evaluator's verdict token `CONDITIONAL` is not PASS (contract: `VERDICT: PASS` or `VERDICT: FAIL`; a condition is a FAIL whose condition is the finding)\nThe chart is wrong.", 'The chart is wrong.'],
+      // Numbered item lists leave no stray numbers.
+      ['1. ITEM 1: FAIL — The query leaks rows.\n2. ITEM 2: PASS — ok', 'The query leaks rows.'],
+      ['1. ITEM 1: FAIL — The query leaks rows. 2. ITEM 2: PASS — ok', 'The query leaks rows.'],
+      // Bookkeeping with no count.
+      ['The chart is wrong.\nMemories proposed: none\nTREE: (none)\nCounts: 0/0/0', 'The chart is wrong.'],
+      // A tail cut inside a fence (an odd count, the first closing): what follows is read as words, not as code.
+      ['SELECT 1\n```\nITEM 1: FAIL — The query leaks rows.\nVERDICT: FAIL', 'The query leaks rows. SELECT 1'],
     ];
     for (const [text, want] of cases) expect(refusalWords(text), text).toBe(want);
     expect(refusalWords(null)).toBe('');
+    // (coord r1) Failing items lead, so a long log above them never pushes them past the caller's cap.
+    const log = Array.from({ length: 40 }, (_, i) => `$ npm test -- step ${i}: exit 0 after a long run of output`).join('\n');
+    const led = refusalWords(`Commands run:\n${log}\nITEM 1: FAIL — The query leaks rows.\n  queries/x.sql:3 has no tenant filter.\nRULE r1: BROKEN — x.sql:3`);
+    expect(led.startsWith('The query leaks rows. queries/x.sql:3 has no tenant filter. RULE r1: BROKEN — x.sql:3. Commands run:')).toBe(true);
   });
 
   it('lastParagraph: the builder\'s last words, past fences, Counts in any form and a memories list', () => {
@@ -604,6 +621,8 @@ describe('apps turns: check, land, refuse', () => {
     expect(lastParagraph('I could not connect.\n\nMemories proposed: 1\n\n- [gotcha] Use the alternate socket')).toBe('I could not connect.');
     expect(lastParagraph('I could not connect.\n\nMemories proposed: 2\n1. [gotcha] one\n2. [gotcha] two')).toBe('I could not connect.');
     expect(lastParagraph('I declined.\n\nVERDICT:')).toBe('I declined.');
+    // (coord r1) A builder's bookkeeping with no count stays out of its quote, as on main.
+    expect(lastParagraph('I declined: no such table.\nMemories proposed: none\nTREE: (none)\nCounts: 0/0/0')).toBe('I declined: no such table.');
   });
 
   it('a build that made no change never quotes the STACK-CHECK footer or raw markdown (crew#1540)', async () => {

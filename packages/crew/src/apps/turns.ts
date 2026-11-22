@@ -203,62 +203,89 @@ const SETTLED = /^(?:PASS(?:ED)?|MET|KEPT|N\/A|NOT[ -]APPLICABLE|SKIP(?:PED)?|DE
  */
 const BOOKKEEPING: readonly RegExp[] = [
   /^the evaluator's verdict is [A-Z]+\b[.:]?/i,
-  /^the evaluator's verdict token \S+ is not PASS \(contract:[^)]*\)/i,
-  /^the evaluator's VERDICT: line carries no token \(contract:[^)]*\)/i,
-  /^no VERDICT: line in the evaluator's output \(contract:[^)]*\)/i,
   /^Reviewed as (?:the )?evaluator(?:[;,]\s*changed no files)?\.?/i,
   // A verdict record at the start of a line, in any case (as core reads it), bare or with its token.
   /^[*_]*verdict[*_]*\s*[:=]\s*(?:[*_]*(?:PASS|FAIL|CONDITIONAL|APPROVE|REJECT|SKIP)\b[*_]*[.:]?)?/i,
   // Run together into a line, only the record's own spelling.
   /[*_]*VERDICT[*_]*\s*[:=]\s*[*_]*[A-Z]{3,}\b[*_]*[.:]?/g,
-  /[*_]*Counts[*_]*\s*[:—–-]\s*(?:(?:derived|submitted|failed)\s+\d+\s*[/,]?\s*)+[.;]?/gi,
-  new RegExp(String.raw`[*_]*Memories proposed[*_]*\s*:?\s*\d+\b(?:\s*[;:—–-](?:(?!\s+${ITEM_AT})[^.\n])*\.?)?`, 'gi'),
-  /[*_]*TREE[*_]*\s*:\s*[0-9a-f]{7,64}\b…?/gi,
-  new RegExp(String.raw`[*_]*STACK-CHECK[*_]*\s*:.*?(?=\s+${ITEM_AT}|$)`, 'gi'),
+  /[*_]*Counts[*_]*\s*[:—–-]\s*(?:(?:(?:derived|submitted|failed)\s+\d+|\d+\s*\/\s*\d+\s*\/\s*\d+)\s*[/,]?\s*)+[.;]?/gi,
+  new RegExp(String.raw`[*_]*Memories proposed[*_]*\s*:?\s*(?:\d+\b|none\b|no\b)(?:\s*[;:—–-](?:(?!\s+${ITEM_AT})[^.\n])*\.?)?`, 'gi'),
+  /[*_]*TREE[*_]*\s*:\s*(?:[0-9a-f]{7,64}\b…?|\(?none\)?)/gi,
+  // A STACK-CHECK record is a line of its own (a finding that names one mid-sentence is a finding).
+  new RegExp(String.raw`^[*_]*STACK-CHECK[*_]*\s*:.*?(?=\s+${ITEM_AT}|$)`, 'i'),
   /\bLocal HEAD is\b[^.]*?\brecorded tree\b[^.]*\.?/gi,
 ];
+
+/**
+ * The engine's heads over an evaluator's words that quote the contract in code spans (core `validator.rs`
+ * `EVALUATOR_VERDICT_MISSING`, `denial_reason`): removed from the line as written, before its spans are masked.
+ */
+const QUOTING_HEADS: readonly RegExp[] = [
+  /^the evaluator's verdict token `[^`]*` is not PASS \(contract:[^)]*\)\s*/i,
+  /^the evaluator's `VERDICT:` line carries no token \(contract:[^)]*\)\s*/i,
+  /^no `VERDICT:` line in the evaluator's output \(contract:[^)]*\)\s*/i,
+];
+
+/** A builder's closing line that is bookkeeping whatever follows its label (main's filter, kept for the quote). */
+const BUILDER_RECORD = /^[*_]*(?:VERDICT|TREE|Counts|Memories proposed|STACK-CHECK)\b/i;
 
 /** A `Memories proposed: N` record that heads a list of the memories (N > 0): the list is bookkeeping too. */
 const MEMORIES_HEAD = /^[*_]*Memories proposed[*_]*\s*:?\s*[1-9]\d*\b\s*:?\s*$/i;
 /** A list entry: bulleted or numbered. */
 const LIST_ENTRY = /^\s*(?:[-*+]|\d+[.)])\s/;
 
+/** One line of a seat's words, and whether it is a failing item or a broken rule (or its continuation). */
+interface PersonLine { text: string; finding: boolean }
+
 /**
- * The lines of a seat's text that are words for the person (`''` marks a paragraph break): markdown unwrapped
+ * The lines of a seat's text that are words for the person (`text: ''` marks a paragraph break): markdown unwrapped
  * around words (a code span's contents are kept as they are, and never read as a record), the bookkeeping left
  * out, a settled item's line (PASS, KEPT, N/A, DEFERRED, …) dropped with its indented continuation, a failing item's
  * `ITEM n: FAIL —` head dropped from its words, and the list under a `Memories proposed` record dropped. A code
  * fence's contents are kept as words (`fences: 'keep'`, a refusal's evidence) or left out (`'skip'`, a builder's
- * closing words). Everything else is kept, so no finding is lost to a pattern.
+ * closing words; there a line that starts with a bookkeeping label is dropped whole). A text whose first fence
+ * closes one (a tail cut inside a fence: an odd count, the first with no language) starts inside it. Everything
+ * else is kept, so no finding is lost to a pattern.
  */
-function personLines(text: string, fences: 'keep' | 'skip'): string[] {
-  const out: string[] = [];
-  let fence = false;
+function personEntries(text: string, fences: 'keep' | 'skip'): PersonLine[] {
+  const out: PersonLine[] = [];
+  const rawLines = text.replace(/\r/g, '').split('\n');
+  const delimiters = rawLines.filter((l) => l.trim().startsWith('```'));
+  let fence = delimiters.length % 2 === 1 && delimiters[0]!.trim() === '```';
   let skipIndented = false;
+  let findingIndented = false;
   let skipList = false;
-  for (const raw of text.replace(/\r/g, '').split('\n')) {
+  for (const raw of rawLines) {
     if (raw.trim().startsWith('```')) {
       fence = !fence;
-      out.push('');
+      out.push({ text: '', finding: false });
       continue;
     }
     if (fence) {
-      if (fences === 'keep' && raw.trim() !== '') out.push(raw.trim());
+      if (fences === 'keep' && raw.trim() !== '') out.push({ text: raw.trim(), finding: findingIndented });
       continue;
     }
     if (raw.trim() === '') {
       skipIndented = false;
-      out.push('');
+      out.push({ text: '', finding: false });
       continue;
     }
     const indented = /^\s/.test(raw);
+    let written = raw.trim();
+    let headCut = false;
+    for (const re of QUOTING_HEADS) {
+      const next = written.replace(re, '');
+      if (next !== written) headCut = true;
+      written = next;
+    }
     const spans: string[] = [];
-    let line = raw.trim()
+    let line = written
       .replace(/`([^`]+)`/g, (_m, c: string) => `${SPAN}${spans.push(c) - 1}${SPAN}`)
-      .replace(/^(?:(?:#{1,6}|[-*+>])\s+)+/, '')
+      .replace(/^(?:(?:#{1,6}|[-*+>]|\d{1,3}[.)])\s+)+/, '')
       .replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, '$1')
       .replace(/(^|[\s(])__(?=\S)(.+?)(?<=\S)__(?=$|[\s).,;:!?])/g, '$1$2')
       .trim();
+    if (line === '' && headCut) continue;
     const head = ITEM_HEAD.test(line);
     if (skipList) {
       if (!head && (indented || LIST_ENTRY.test(raw))) continue;
@@ -266,7 +293,10 @@ function personLines(text: string, fences: 'keep' | 'skip'): string[] {
     }
     if (skipIndented && indented && !head) continue;
     skipIndented = false;
+    const continues = findingIndented && indented && !head;
+    findingIndented = continues;
     if (MEMORIES_HEAD.test(line)) skipList = true;
+    if (fences === 'skip' && BUILDER_RECORD.test(line)) continue;
     // A record cut from the start leaves the line to the next one's anchor; the words after it are still a new part.
     let lead = false;
     for (const re of BOOKKEEPING) {
@@ -276,27 +306,40 @@ function personLines(text: string, fences: 'keep' | 'skip'): string[] {
     }
     const parts = line.split(CUT).flatMap((seg, i) => {
       const t = (i > 0 || lead ? seg.replace(/^[\s—–:;,.\-]+/, '') : seg).trim();
-      return t === '' ? [] : t.split(ITEM_SPLIT);
+      // A list number left between records (`1. ITEM 1: … 2. ITEM 2: …`) is no word.
+      return t === '' ? [] : t.split(ITEM_SPLIT).map((x) => x.replace(/\s+\d{1,3}[.)]$/, '').trim()).filter((x) => x !== '' && !/^\d{1,3}[.)]$/.test(x));
     });
-    const kept: string[] = [];
+    const restore = (k: string): string => k.replace(new RegExp(`${SPAN}(\\d+)${SPAN}`, 'g'), (_m, n: string) => spans[Number(n)] ?? '');
+    let prose: string[] = [];
+    const flush = (): void => {
+      const t = joinWords(prose.map(restore).filter((k) => k.trim() !== ''));
+      if (t !== '') out.push({ text: t, finding: continues });
+      prose = [];
+    };
     parts.forEach((part, i) => {
       const m = ITEM_HEAD.exec(part);
       if (m === null) {
-        kept.push(part);
+        prose.push(part);
         return;
       }
+      flush();
       if (SETTLED.test(m[2]!.trim())) {
         if (i === parts.length - 1) skipIndented = true;
         return;
       }
       // A failing acceptance item reads as its words; a rule keeps its id (the person finds it in Steering).
-      const words = m[1]!.toUpperCase().startsWith('ITEM') ? part.slice(m[0].length).trim() : part;
-      if (words !== '') kept.push(words);
+      const words = restore(m[1]!.toUpperCase().startsWith('ITEM') ? part.slice(m[0].length).trim() : part);
+      if (words.trim() !== '') out.push({ text: words, finding: true });
+      if (i === parts.length - 1) findingIndented = true;
     });
-    const restored = kept.map((k) => k.replace(new RegExp(`${SPAN}(\\d+)${SPAN}`, 'g'), (_m, n: string) => spans[Number(n)] ?? '')).filter((k) => k.trim() !== '');
-    if (restored.length > 0) out.push(joinWords(restored));
+    flush();
   }
   return out;
+}
+
+/** The lines of {@link personEntries}, as text (`''` a paragraph break). */
+function personLines(text: string, fences: 'keep' | 'skip'): string[] {
+  return personEntries(text, fences).map((e) => e.text);
 }
 
 /** Parts joined: one that ends with no stop gets one before a part that starts a sentence (a wrapped line does not). */
@@ -305,12 +348,15 @@ const joinWords = (parts: readonly string[]): string =>
 
 /**
  * A refused step's reason, in the reviewer's (or crew's check's) own words for the person: its text with the
- * bookkeeping and the settled items left out (see {@link personLines}); `''` when nothing is left (the caller then
- * says it in crew's words only).
+ * bookkeeping and the settled items left out (see {@link personEntries}), failing items first; `''` when nothing
+ * is left (the caller then says it in crew's words only).
  */
 export function refusalWords(text: string | null | undefined): string {
   if (text == null) return '';
-  return joinWords(personLines(text, 'keep').filter((l) => l !== ''));
+  // The failing items and broken rules lead (with their continuations), so a long log above them never pushes them
+  // past the caller's cap; the other words follow in their order.
+  const entries = personEntries(text, 'keep').filter((e) => e.text !== '');
+  return joinWords([...entries.filter((e) => e.finding), ...entries.filter((e) => !e.finding)].map((e) => e.text));
 }
 
 /** The last paragraph of a seat's answer (code fences and bookkeeping lines left out, markdown stripped), or ''. */
