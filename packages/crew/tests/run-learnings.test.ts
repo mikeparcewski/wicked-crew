@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import Fastify from 'fastify';
 import type { SessionView } from 'wicked-crew-api-types';
 import { extractLearnings, creatorSeats } from '../src/learnings/extract.js';
+import { contextSteerNote } from '../src/working-doc/service.js';
 import {
   DISTILL_WORKFLOW,
   FILED_FILE,
@@ -144,7 +145,86 @@ describe('extractLearnings: what a run\'s record says it learned', () => {
   });
 });
 
-function harness(opts: { seats?: unknown[]; mode?: 'distill' | 'extract'; proposals?: ProposalRow[]; memories?: string[]; launchFails?: boolean; cancelFails?: number; view?: SessionView } = {}) {
+describe('crew#1408: the person’s Goal, Approach and Constraints from the context document', () => {
+  const context = [
+    { id: 'goal', text: 'EUR prints €1.240,00 and USD stays byte-identical.' },
+    { id: 'constraints', text: 'Reuse the stack’s route, never a hand-rolled one.' },
+  ];
+  it('are steering material, each once, named as the person’s section', () => {
+    const c = extractLearnings(runView(), [], context).filter((x) => x.source === 'steer');
+    expect(c.map((x) => [x.kind, x.form, x.content])).toEqual([
+      ['steering', 'material', 'The operator\'s Goal for this run: EUR prints €1.240,00 and USD stays byte-identical.'],
+      ['steering', 'material', 'The operator\'s Constraints for this run: Reuse the stack’s route, never a hand-rolled one.'],
+    ]);
+    // Next, Decisions or an empty section never come this way.
+    expect(extractLearnings(runView(), [], [{ id: 'next', text: 'Then the PDF.' }, { id: 'approach', text: '  ' }]).filter((x) => x.source === 'steer')).toEqual([]);
+  });
+
+  it('a section a queued steer already carried (the bridge’s standing note) is not handed over twice', () => {
+    const c = extractLearnings(runView(), events, [{ id: 'constraints', text: 'Every refusal line starts with "WICKED-RETRY none" and names the rule.' }]);
+    expect(c.filter((x) => x.source === 'steer')).toHaveLength(1);
+  });
+
+  it('only the SAME value counts as carried: an older note that merely contains the words does not hide the current one (review r1)', () => {
+    const older: LooseEvent[] = [{
+      type: 'workerMessageQueued',
+      message: "Operator steering from the job's context document (version 1, by the operator).\nIt adds to your brief.\n- Constraints and steering: Do not use TLS.\n[working-doc 9397a34b:aaaa0001]",
+    }];
+    const c = extractLearnings(runView(), older, [{ id: 'constraints', text: 'Use TLS.' }]).filter((x) => x.source === 'steer');
+    expect(c.map((x) => x.content)).toEqual(['The operator steered the work: - Constraints and steering: Do not use TLS.', 'The operator\'s Constraints for this run: Use TLS.']);
+  });
+
+  it('the end sweep reads them for the distil seat; a read that fails leaves the rest of the evidence', async () => {
+    const h = harness({ personContext: async () => context });
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+    await settle();
+    const handoff = JSON.parse(readFileSync(join(h.dir, 'run-1', HANDOFF_FILE), 'utf8')) as { evidence: Array<{ text: string }> };
+    expect(handoff.evidence.map((e) => e.text)).toContain('The operator\'s Constraints for this run: Reuse the stack’s route, never a hand-rolled one.');
+    expect(handoff.evidence).toHaveLength(8);
+  });
+
+  it('review r2: only what the evidence kept counts, case and words exactly, and the writer’s own labels end a section', () => {
+    const goal = `Make the invoice PDF right. ${'x'.repeat(1_400)}`;
+    const note = contextSteerNote(3, 'the operator', [{ id: 'goal', text: goal }, { id: 'constraints', text: 'Only edit src/Parser.ts.' }], [{ id: 'next', text: 'Then the CSV.' }], '[working-doc run-1:abcd0001]');
+    const queued: LooseEvent[] = [{ type: 'workerMessageQueued', message: note }];
+    const steer = (ctx: Array<{ id: string; text: string }>) => extractLearnings(runView(), queued, ctx).filter((x) => x.source === 'steer').map((x) => x.content);
+    // The queued note's candidate is clipped inside the long Goal: its Constraints never reached the evidence.
+    expect(steer([{ id: 'constraints', text: 'Only edit src/Parser.ts.' }]).at(-1)).toBe('The operator\'s Constraints for this run: Only edit src/Parser.ts.');
+    // A short note carried both, ended by "Next and trailing work (this step)": not handed over twice…
+    const short: LooseEvent[] = [{ type: 'workerMessageQueued', message: contextSteerNote(3, 'the operator', [{ id: 'constraints', text: 'Only edit src/Parser.ts.' }], [{ id: 'next', text: 'Then the CSV.' }], '[working-doc run-1:abcd0002]') }];
+    expect(extractLearnings(runView(), short, [{ id: 'constraints', text: 'Only edit src/Parser.ts.' }]).filter((x) => x.source === 'steer')).toHaveLength(1);
+    // …but a correction of case is a new value.
+    expect(extractLearnings(runView(), short, [{ id: 'constraints', text: 'Only edit src/parser.ts.' }]).filter((x) => x.source === 'steer')).toHaveLength(2);
+  });
+
+  it('review r2: the end is on disk before the context is read, so a daemon that dies mid-read ends it again at the next start', async () => {
+    const h = harness({ personContext: () => new Promise(() => undefined) });
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+    await settle();
+    expect(existsSync(join(h.dir, 'run-1'))).toBe(true);
+    expect(h.launches).toHaveLength(0);
+    const deps = (h.svc as unknown as { deps: Record<string, unknown> }).deps;
+    const next = new RunLearningsService({ ...deps, personContext: async () => context } as never);
+    await next.recover();
+    expect(h.launches).toHaveLength(1);
+  });
+
+  it('a context that cannot be read yet leaves the end unfiled; the next start’s recovery hands it over (review r1)', async () => {
+    let down = true;
+    const h = harness({ personContext: async () => { if (down) throw new Error('interactive is down'); return context; } });
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+    await settle();
+    expect(h.launches).toHaveLength(0);
+    expect(existsSync(join(h.dir, 'run-1', FILED_FILE))).toBe(false);
+    down = false;
+    await h.svc.recover();
+    expect(h.launches).toHaveLength(1);
+    const handoff = JSON.parse(readFileSync(join(h.dir, 'run-1', HANDOFF_FILE), 'utf8')) as { evidence: Array<{ text: string }> };
+    expect(handoff.evidence.map((e) => e.text)).toContain('The operator\'s Goal for this run: EUR prints €1.240,00 and USD stays byte-identical.');
+  });
+});
+
+function harness(opts: { seats?: unknown[]; mode?: 'distill' | 'extract'; proposals?: ProposalRow[]; memories?: string[]; launchFails?: boolean; cancelFails?: number; view?: SessionView; personContext?: () => Promise<Array<{ id: string; text: string }>> } = {}) {
   const dir = scratch();
   const view = opts.view ?? runView();
   const submitted: Array<{ runId: string; agent: string; args: SubmitArgs }> = [];
@@ -185,6 +265,7 @@ function harness(opts: { seats?: unknown[]; mode?: 'distill' | 'extract'; propos
     mode: opts.mode ?? 'distill',
     log: () => undefined,
     newRunId: () => `distill-${++n}`,
+    ...(opts.personContext !== undefined ? { personContext: opts.personContext } : {}),
   });
   return { svc, dir, submitted, queue, launches, views, cancels };
 }

@@ -88,6 +88,12 @@ function decodeSectionText(text: string): string {
   return text.replace(/^\u200b/u, '').replace(/\u200b$/u, '').replace(/\u2028/g, '\n');
 }
 
+/** A section's text as a version reads it back once written (crew#1409 review r2: a journaled value is compared in
+ *  this form, so a write whose text had a line separator is still recognized as landed). */
+export function writtenText(text: string): string {
+  return decodeSectionText(encodeSectionText(text));
+}
+
 /** The text of each section in a version's HTML (a section the version lacks is absent). Only the anchored element's
  *  own text: the content edit writes text, so there is no markup inside to keep. */
 export function sectionsOf(html: string): Partial<Record<SectionId, string>> {
