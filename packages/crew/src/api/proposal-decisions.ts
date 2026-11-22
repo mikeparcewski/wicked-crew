@@ -5,6 +5,10 @@
  *  - `operator` / `rejected`: a person turned it down (`POST /proposals/:id/reject`, or dismissing its decision).
  *  - `crew` / `replaced-by-edit`: an accept-with-edit approved an edited copy (`copy_id`) and rejected the original.
  *  - `crew` / `withdrawn-copy`: an accept-with-edit's copy whose approve failed, withdrawn so a retry leaves no duplicate.
+ *  - `operator` / `restated`: a person said a decision's proposal restates a rule they have (the decision's "Same").
+ *  - `crew` / `withdrawn`: crew withdrew a proposal it filed itself (a widening that did not land, an undone memory edit).
+ *  - `crew` / `stale`: a memory replacement whose memory is gone (edited again or retired), rejected so it cannot
+ *    bring retired words back.
  *
  * Crew records each decision it makes as a `proposal.decided` line on its audit trail and returns it on
  * `GET /proposals` (`Proposal.decision`). A row with none is UNKNOWN (estate's own tools, a crew path that records
@@ -18,12 +22,15 @@ import type { AuditLog } from './audit.js';
 
 export const PROPOSAL_DECIDED = 'proposal.decided';
 
-const REASONS: ReadonlySet<string> = new Set<ProposalDecisionReason>(['rejected', 'replaced-by-edit', 'withdrawn-copy']);
+const REASONS: ReadonlySet<string> = new Set<ProposalDecisionReason>(['rejected', 'restated', 'replaced-by-edit', 'withdrawn-copy', 'withdrawn', 'stale']);
 
-/** Record one decision crew made on a proposal. A person's own rejection is `rejected` by a human `actor`; the
- *  accept-with-edit's two are crew's, whoever asked for the accept. */
+/** The reasons that are a person's own decision (when a human actor made it); every other reason is crew's. */
+const PERSON_REASONS: ReadonlySet<ProposalDecisionReason> = new Set<ProposalDecisionReason>(['rejected', 'restated']);
+
+/** Record one decision crew made on a proposal. A person's own rejection (`rejected`, `restated`) by a human `actor`
+ *  is the operator's; every other reason is crew's, whoever asked for the request that led to it. */
 export function recordProposalDecision(audit: Pick<AuditLog, 'record'> | undefined, actor: Actor, proposalId: string, reason: ProposalDecisionReason, copyId?: string): void {
-  const by = reason === 'rejected' && actor.kind === 'human' ? 'operator' : 'crew';
+  const by = PERSON_REASONS.has(reason) && actor.kind === 'human' ? 'operator' : 'crew';
   audit?.record(PROPOSAL_DECIDED, actor, { detail: { proposalId, by, reason, ...(copyId !== undefined ? { copy_id: copyId } : {}) } });
 }
 
@@ -34,8 +41,8 @@ export function decisionOf(e: Pick<AuditEntry, 'ts' | 'action' | 'actor' | 'deta
   const id = d['proposalId'];
   const reason = d['reason'];
   if (typeof id !== 'string' || id === '' || typeof reason !== 'string' || !REASONS.has(reason)) return null;
-  // Only a person's line says a person decided.
-  const by = d['by'] === 'operator' && e.actor?.kind === 'human' ? 'operator' : 'crew';
+  // Only a person's line, for a person's reason, says a person decided.
+  const by = d['by'] === 'operator' && e.actor?.kind === 'human' && PERSON_REASONS.has(reason as ProposalDecisionReason) ? 'operator' : 'crew';
   const copy = d['copy_id'];
   return {
     id,

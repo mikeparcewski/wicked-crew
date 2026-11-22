@@ -29,6 +29,7 @@ type MockAdapter = {
   projectRulesSupported: Mock;
   readConformanceRule: Mock;
   retireConformanceRule: Mock;
+  projectList: Mock;
 };
 
 describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
@@ -49,6 +50,14 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
         return [...calls].reverse().find(([r]) => r.id === id)?.[0] ?? null;
       }),
       retireConformanceRule: vi.fn().mockResolvedValue(true),
+      // The projects a `project` facet resolves against (crew#1774): ids, and names that are not ids.
+      projectList: vi.fn().mockResolvedValue([
+        { id: 'proj-a', name: 'Alpha' },
+        { id: 'proj-tc', name: 'tiny-calc' },
+        { id: 'p', name: 'P' },
+        { id: 'proj-x', name: 'twin' },
+        { id: 'proj-y', name: 'Twin' },
+      ]),
     };
     const mockAdapter: MockAdapter = adapter;
     proposalTool = vi.fn();
@@ -233,6 +242,56 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
     expect(landing.error).toMatch(/still pending/);
     expect(adapter.upsertConformanceRule).not.toHaveBeenCalled();
     expect(tools()).not.toContain('proposal.approve');
+  });
+
+  // ── crew#1774: a project facet resolves to a known project id ──────────────────
+
+  it('crew#1774: a facet that is a project NAME lands the rule on that project\'s id, never the name', async () => {
+    stubEstate({ pending: [policy('pn1', 'policy:testing', { rule: 'x', severity: 'warn' }, { project: ' TINY-CALC ' })] });
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pn1/approve' });
+    expect((res.json() as { landing: unknown }).landing).toMatchObject({ outcome: 'landed', reach: 'project', project: 'proj-tc' });
+    expect(adapter.upsertConformanceRule).toHaveBeenCalledWith(expect.objectContaining({ targets: { project: 'proj-tc' } }));
+  });
+
+  it('crew#1774: the reserved default project is an id even though the project list leaves it out', async () => {
+    stubEstate({ pending: [policy('pd1', 'policy:testing', { rule: 'x', severity: 'warn' }, { project: 'default' })] });
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pd1/approve' });
+    expect((res.json() as { landing: unknown }).landing).toMatchObject({ outcome: 'landed', project: 'default' });
+  });
+
+  it('crew#1774: a facet naming no known project falls back to the filing run\'s project', async () => {
+    await app.close();
+    const index = new MembershipIndex();
+    index.set('r-9', 'proj-a');
+    app = Fastify({ logger: false });
+    registerRoutes(app, adapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), { bus: null, index, log: () => undefined }, undefined, {
+      callEstateTool: proposalTool as (t: string, a: Record<string, unknown>) => Promise<unknown>,
+    });
+    await app.ready();
+    stubEstate({ pending: [policy('pn2', 'policy:testing', { rule: 'x', severity: 'warn' }, { project: 'wicked-crew' }, { run_id: 'r-9' })] });
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pn2/approve' });
+    expect((res.json() as { landing: unknown }).landing).toMatchObject({ outcome: 'landed', project: 'proj-a' });
+  });
+
+  it('crew#1774: a facet naming no known project (or a name two projects share) with no run project fails loud and writes nothing', async () => {
+    for (const [id, facet] of [['pn3', 'wicked-crew'], ['pn4', 'twin']] as const) {
+      stubEstate({ pending: [policy(id, 'policy:testing', { rule: 'x', severity: 'warn' }, { project: facet })] });
+      const res = await app.inject({ method: 'POST', url: `/api/v1/proposals/${id}/approve` });
+      const landing = (res.json() as { landing: { outcome: string; error: string } }).landing;
+      expect(landing.outcome, facet).toBe('failed');
+      expect(landing.error).toContain(`its project facet is "${facet}"`);
+      expect(landing.error).toMatch(/still pending/);
+    }
+    expect(adapter.upsertConformanceRule).not.toHaveBeenCalled();
+    expect(tools()).not.toContain('proposal.approve');
+  });
+
+  it('crew#1774: projects that cannot be read fail the landing loud, never a guessed target', async () => {
+    adapter.projectList.mockRejectedValueOnce(new Error('engine busy'));
+    stubEstate({ pending: [policy('pn5', 'policy:testing', { rule: 'x', severity: 'warn' }, { project: 'proj-a' })] });
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pn5/approve' });
+    expect((res.json() as { landing: { outcome: string; error: string } }).landing).toMatchObject({ outcome: 'failed', error: expect.stringMatching(/projects could not be read.*engine busy/) });
+    expect(adapter.upsertConformanceRule).not.toHaveBeenCalled();
   });
 
   // ── Reach: every policy proposal lands with exactly the reach it says ──────────
