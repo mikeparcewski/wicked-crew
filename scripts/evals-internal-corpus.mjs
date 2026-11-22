@@ -181,13 +181,12 @@ import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   accessSync,
-  closeSync,
   constants as fsConstants,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
-  openSync,
   readdirSync,
   readFileSync,
   readlinkSync,
@@ -392,36 +391,66 @@ function publishJson(path, value, generation = newGeneration()) {
  * Run `fn(generation)` holding `lockPath` (exclusive create — a held lock is a refusal naming the
  * holder, never an interleaving), then release the lock however `fn` ends. One `generation` per
  * publication; the lock file records `pid` + generation for the operator who finds it stale.
+ *
+ * The holder line is written to `<lock>.<generation>.tmp` first and the lock is that file's hard link
+ * (`link` fails with EEXIST while another publication holds it), so the lock never exists without its
+ * holder (crew#1764 — an exclusive create followed by a write let the loser read an empty lock in
+ * between). A lock released between the EEXIST and the read of its holder is taken again, never
+ * reported as a holderless refusal: each such retry follows another publication's whole take and
+ * release, so with finitely many publishers it ends (in a held lock whose holder is read, or ours).
  */
 function withPublicationLock(lockPath, what, fn) {
   mkdirSync(dirname(lockPath), { recursive: true });
   const generation = newGeneration();
-  let fd;
+  const tmp = `${lockPath}.${generation}.tmp`;
+  let held = false;
   try {
-    fd = openSync(lockPath, 'wx');
-  } catch (err) {
-    if (err?.code === 'EEXIST') {
-      let holder = '';
-      try {
-        holder = readFileSync(lockPath, 'utf8').trim();
-      } catch {
-        /* an unreadable lock is still a held lock */
+    try {
+      writeFileSync(tmp, `pid ${process.pid} generation ${generation}\n`, 'utf8');
+      for (let attempt = 1; !held; attempt++) {
+        // (`attempt` only arms the test hook below: the loop is bounded by the other publications, not a count.)
+        try {
+          linkSync(tmp, lockPath);
+          held = true;
+        } catch (err) {
+          if (err?.code !== 'EEXIST') throw err;
+          const churn = injectedLockChurn(attempt);
+          if (churn || (attempt === 1 && faultArmed('lock-released-after-eexist'))) rmSync(lockPath, { force: true });
+          const holder = lockHolder(lockPath);
+          if (churn) writeFileSync(lockPath, `pid ${process.pid} generation churn-${attempt}\n`, 'utf8'); // test hook: taken again
+          if (holder === null) {
+            // A symlink to nothing refuses the link and reads as gone, forever: refuse it by name, never spin on it.
+            if (lstatSync(lockPath, { throwIfNoEntry: false })?.isSymbolicLink()) {
+              throw new RefusalError(
+                `${lockPath} is a symlink to nothing — refusing to publish \`${what}\` through it; remove it and retry`,
+              );
+            }
+            continue; // released since the EEXIST: try again
+          }
+          throw new RefusalError(
+            `another \`${what}\` publication holds ${lockPath}${holder === '' ? '' : ` (${holder})`} — refusing to interleave; if no ${what} is running, remove the lock and retry`,
+          );
+        }
       }
-      throw new RefusalError(
-        `another \`${what}\` publication holds ${lockPath}${holder === '' ? '' : ` (${holder})`} — refusing to interleave; if no ${what} is running, remove the lock and retry`,
-      );
+    } finally {
+      injectedFault('lock-temp-cleanup');
+      rmSync(tmp, { force: true });
     }
-    throw err;
-  }
-  // From here the lock is OURS: release it however publication ends.
-  try {
-    writeFileSync(fd, `pid ${process.pid} generation ${generation}\n`, 'utf8');
-    closeSync(fd);
-    fd = undefined;
+    injectedLockHold();
     return fn(generation);
   } finally {
-    if (fd !== undefined) closeSync(fd);
-    rmSync(lockPath, { force: true });
+    // From the link on, the lock is OURS: released however publication (or the temp's removal) ends.
+    if (held) rmSync(lockPath, { force: true });
+  }
+}
+
+/** The lock's holder line; `null` when the lock is gone (released since a link refused), `''` when unreadable or
+ *  empty (a lock an older version of this script was still writing, or a hand-made one). */
+function lockHolder(lockPath) {
+  try {
+    return readFileSync(lockPath, 'utf8').trim();
+  } catch (err) {
+    return err?.code === 'ENOENT' ? null : ''; // an unreadable lock is still a held lock
   }
 }
 
@@ -486,7 +515,8 @@ function injectedLookupFault(syscall) {
 /**
  * The TEST-ONLY fault hook (`faultArmed`): the named step THROWS — `swap:<n>` (the n-th repo's
  * staging → destination rename, after its destination was moved to `.prev`), `receipt` (the
- * receipt write, after every swap), `rollback` (the rollback itself — the double fault).
+ * receipt write, after every swap), `rollback` (the rollback itself — the double fault),
+ * `lock-temp-cleanup` (removing the lock's temp name, once the lock is taken: crew#1764).
  */
 function injectedFault(point) {
   if (faultArmed(point)) throw new Error(`injected fault at ${point} (${FAULT_ENV}, test hook)`);
@@ -501,6 +531,26 @@ function injectedFault(point) {
  */
 function injectedKill(point) {
   if (faultArmed(point)) process.kill(process.pid, 'SIGKILL');
+}
+
+/**
+ * The TEST-ONLY lock hold (`armedFaults`): `lock-hold-until:<path>` keeps a publication that took its
+ * lock waiting until `<path>` exists (at most 20 s, inside the tests' own timeout), so a concurrent
+ * publisher deterministically finds the lock held (crew#1764). `lock-churn:<n>`: for the first `<n>` refused
+ * links, the lock is released right after the refusal and taken again right after the holder read (another
+ * publisher each time). Inert outside the test env like every other point.
+ */
+function injectedLockChurn(attempt) {
+  const armed = armedFaults().find((p) => p.startsWith('lock-churn:'));
+  return armed !== undefined && attempt <= Number(armed.slice('lock-churn:'.length));
+}
+
+function injectedLockHold() {
+  const armed = armedFaults().find((p) => p.startsWith('lock-hold-until:'));
+  if (armed === undefined) return;
+  const release = armed.slice('lock-hold-until:'.length);
+  const cell = new Int32Array(new SharedArrayBuffer(4));
+  for (const end = Date.now() + 20_000; !existsSync(release) && Date.now() < end; ) Atomics.wait(cell, 0, 0, 25);
 }
 
 function sha256Hex(bytes) {
