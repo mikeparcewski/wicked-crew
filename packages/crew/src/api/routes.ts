@@ -177,7 +177,7 @@ import { RepoOrigins, originOf } from './repo-origins.js';
 import type { FreshenCheckout } from './chat-freshness.js';
 import { TestSetIndex } from '../qe/test-sets.js';
 import { estateExe, parseEstateTotals, projectGraphRefreshDiagnostics, readBlastRadiusPages, resolveProjectGraphBinding } from '../projects/graph.js';
-import { attachRepoToProject, registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
+import { attachRepoToProject, createProjectRecorded, registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { registerProjectAggregateRoutes } from './project-aggregates.js';
 import { composeLaunch, composePreflight, registerProductRoutes } from './product.js';
 import { buildWorkflowCatalogV2, parseCommand, resolveOption } from '../workflow-catalog/build-v2.js';
@@ -326,7 +326,7 @@ import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, 
 import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, removeStagedDocuments, stagedDocumentsRemoved, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
 import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks, webScopeReason } from './run-sources.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
-import { LaunchRefusal, ChatProposals, LaunchOnceRegistry, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
+import { CHAT_ENDED, LaunchRefusal, ChatProposals, LaunchOnceRegistry, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
 import { CATALOG_SEEDS } from '../workflow-catalog/catalog-data.js';
 import { registerInteractiveDocList } from '../interactive/doc-list-routes.js';
 import { REVIEWS_DIRNAME } from '../interactive/review-ledger.js';
@@ -2013,6 +2013,7 @@ export function registerRoutes(
   // crew#1744: the one `git_url` reader (GET /repos, the repo search; the daemon hands the review service the same).
   const repoOrigins = runtime.repoOrigins ?? new RepoOrigins();
   const onboardReads = {
+    projects: async () => (await adapter.projectList()).filter((p) => p.id !== DEFAULT_PROJECT_ID && p.status !== 'archived').map((p) => ({ id: p.id, name: p.name })),
     repos: () => adapter.listRepos(),
     projectRepoRefs: async (projectId: string) => (await adapter.projectMembers(projectId)).filter((m) => m.member_kind === 'crew.repo').map((m) => m.member_ref),
     checkoutOf: (name: string) => homeless(join(wickedWorkRoot('repos'), name)),
@@ -2027,6 +2028,8 @@ export function registerRoutes(
   proposalLaunchers.register('onboard', new OnboardLauncher({
     ...onboardReads,
     sessions: () => adapter.sessions(),
+    // crew#1694: the one project create, as `POST /projects` makes it (bus event, audit line, charter).
+    createProject: async (name, actor) => createProjectRecorded(adapter, projects, audit, actor, { name }),
     register: (data, ctx) => registerAndOnboard(data, { actor: ctx.actor, runId: ctx.runId, gitProtocols: CHAT_GIT_PROTOCOLS, log: { warn: (o, m) => app.log.warn(o as object, m) } }),
     attach: async (projectId, repoId, actor) => {
       await attachRepoToProject(adapter, projects, { projectId, repoId, actor, attachedBy: 'studio' });
@@ -5901,7 +5904,7 @@ export function registerRoutes(
     // studio#1094: the person route owns admission; the open's resolver validates their first repo pick.
     pickFirstRepo: async (chatId, repoRef, actor, pid) => {
       const previous = chatScopes.get(chatId);
-      if (previous === undefined) return { ok: false, status: 409, error: `chat ${chatId} has ended; start a new one` };
+      if (previous === undefined) return { ok: false, status: 409, error: CHAT_ENDED };
       if (previous.repos.length > 0) return { ok: false, status: 409, error: `chat ${chatId} already has a repository in scope` };
       if (previous.kind === 'everything') return { ok: false, status: 409, error: `chat ${chatId} already reads every registered repository` };
       const request: ChatScopeRequest = {
@@ -6021,7 +6024,6 @@ export function registerRoutes(
     acceptsOnboard: (chatId) => chatAcceptsOnboard.get(chatId) === true,
     onboard: {
       ...onboardReads,
-      projects: async () => (await adapter.projectList()).filter((p) => p.id !== DEFAULT_PROJECT_ID && p.status !== 'archived').map((p) => ({ id: p.id, name: p.name })),
       originOf,
       probe: (url) => probeGitUrl(url),
       // POST /repos's own intake refusal (no garden, an old one, the state home): the card says it before anyone presses.

@@ -113,7 +113,7 @@ describe('estate projection writer', () => {
   it.each(['current', 'removed'] as const)('serializes two sources with a %s tracker, across projector instances', async (state) => {
     // Keep preparation in memory so all three contenders reach the lane before the first call's setImmediate.
     let registry = await store.read();
-    const concurrentStore = { read: async () => registry, settled: async () => undefined, mutate: store.mutate.bind(store) };
+    const concurrentStore = { read: async () => registry, settled: async () => undefined, mutate: store.mutate.bind(store), amend: store.amend.bind(store) };
     const descriptions = new Map(await Promise.all(sources.map(async (s) => [s.name, await catalogs.read(s.name)] as const)));
     vi.spyOn(catalogs, 'read').mockImplementation(async (name) => descriptions.get(name) ?? null);
     let running = 0;

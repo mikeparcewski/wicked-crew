@@ -220,6 +220,7 @@ export class CreateLauncher implements ProposalDispatcher {
       repos: binding.repos.map((r) => ({ repoRef: r.id, name: r.name, rootPath: r.rootPath })),
       graphDb: binding.graphDb,
       clisJson,
+      ...(res.helpers !== null && res.helpers.seats[0] !== undefined ? { primary: res.helpers.seats[0] } : {}),
       packet,
       base: attempt.base,
       actor: d.actor.id,

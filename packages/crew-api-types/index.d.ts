@@ -10026,10 +10026,17 @@ export interface ProposalOnboard {
   name: string;
   /** Where it is cloned, home-relative (`~/.wicked/repos/<name>`); `null` for an existing registration. */
   checkout: string | null;
-  /** The project it joins; `null` = none (registered unfiled). */
+  /** The project it joins; `null` = none (registered unfiled), or a project Go creates first (`createProject`). */
   projectId: string | null;
   projectName: string | null;
   existing: { id: string; name: string } | null;
+  /**
+   * (crew#1694) The project Go creates first, when the name given matches no project (ignoring case and spacing) and
+   * `POST /projects` would take it: the trimmed name. `projectId` and `projectName` are then `null`, and `filedIn.label`
+   * says "Creates the project <name>". Nothing is created before Go; a Go again after the create landed reuses that
+   * project. ABSENT (or `null`) when the card joins an existing project or none.
+   */
+  createProject?: { name: string } | null;
 }
 
 /** One "From" chip: a source the block named, as crew resolved and authorized it. */
@@ -10326,6 +10333,21 @@ export interface ChatProposalDecisionBody {
  */
 export interface ChatProposalDecisionResponse {
   view: ChatProposalView;
+}
+
+/**
+ * (crew#1695) A refused `POST /chats/:id/proposals/:pid` (see {@link ChatProposalDecisionResponse} for the codes).
+ * `acceptingAt` is on every refusal that follows THIS Go's `proposal_accepting` record (502 `launch_failed`, a typed
+ * launch refusal, and a `chat_gone` after it): that record's `at`, so a client marks only the Go it pressed as stopped,
+ * never a newer accepting record another tab wrote meanwhile. ABSENT on a refusal before anything was recorded.
+ */
+export interface ChatProposalDecisionRefusal {
+  code?: string;
+  error: string;
+  view?: ChatProposalView;
+  excluded?: unknown;
+  retryWith?: { reducedAssurance: true };
+  acceptingAt?: number;
 }
 
 /**
@@ -16242,6 +16264,11 @@ export interface SourceUploadResponse {
   header: { detected: boolean; columns: string[] } | null;
   /** The first 20 rows, answered to a HUMAN actor only (an agent gets `[]`). */
   sample: string[][];
+  /**
+   * (crew#1731) A `.sqlite` file's virtual tables (a full-text index, an R-tree) that crew dropped from the snapshot,
+   * with their shadow tables: their rows are not in it. `[]` when there were none, and for a CSV/XLSX.
+   */
+  dropped: string[];
   catalog: SqlSourceCatalog;
 }
 

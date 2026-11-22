@@ -103,7 +103,7 @@ export async function makeZipBomb(mb, declared = 1024) {
  * schema text hides its kind behind a comment (`hiddenVirtual`), or a generated column; or an RTREE
  * table behind an ordinary table named `pragma_table_list` (`shadowPragma`).
  */
-export function makeSqlite(path, { trigger = false, view = false, hiddenVirtual = false, generated = false, shadowPragma = false } = {}) {
+export function makeSqlite(path, { trigger = false, view = false, hiddenVirtual = false, generated = false, shadowPragma = false, estateFts = false, unknownModule = false, implicitRowids = false, contentlessRewrite = false } = {}) {
   const db = new DatabaseSync(path, { defensive: false });
   db.exec("CREATE TABLE refunds (id INTEGER PRIMARY KEY, region TEXT, amount REAL); INSERT INTO refunds VALUES (1, 'EMEA', 10.5), (2, 'AMER', 99.99);");
   if (trigger) db.exec('CREATE TABLE audit (n TEXT); CREATE TRIGGER t AFTER INSERT ON refunds BEGIN INSERT INTO audit VALUES (new.region); END;');
@@ -114,11 +114,41 @@ export function makeSqlite(path, { trigger = false, view = false, hiddenVirtual 
     db.exec("UPDATE sqlite_schema SET sql = 'CREATE /* a table */ VIRTUAL TABLE notes USING fts5(body)' WHERE name = 'notes'");
   }
   if (generated) db.exec('CREATE TABLE g (a INTEGER, b INTEGER GENERATED ALWAYS AS (abs(a)) VIRTUAL); INSERT INTO g (a) VALUES (-3);');
+  if (estateFts) {
+    // crew#1731: an estate store's full-text index, as wicked-estate writes it (crates/wicked-estate-store/src/schema.sql:89,
+    // `nodes_fts`, a regular FTS5 table holding its own copy of the text), beside a plain table it indexes.
+    db.exec('CREATE TABLE nodes (symbol INTEGER PRIMARY KEY, name TEXT NOT NULL); CREATE INDEX idx_nodes_name ON nodes(name);');
+    db.exec('CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(\n  symbol UNINDEXED,\n  name,\n  signature,\n  doc\n);');
+    db.exec("INSERT INTO nodes VALUES (1, 'parseInvoice'); INSERT INTO nodes_fts(rowid, symbol, name, signature, doc) VALUES (1, 'sym-1', 'parseInvoice', 'fn(x)', 'zqxj-only-in-the-index');");
+  }
+  if (implicitRowids) {
+    // A table with no INTEGER PRIMARY KEY whose sparse rowids another table refers to (codex r1: a VACUUM renumbers them).
+    db.exec('CREATE TABLE records (body TEXT); CREATE TABLE refs (record_rowid INTEGER);');
+    db.exec("INSERT INTO records (rowid, body) VALUES (42, 'kept'), (7, 'dropped'); DELETE FROM records WHERE rowid = 7; INSERT INTO refs VALUES (42);");
+  }
+  if (contentlessRewrite) {
+    // codex r1: an FTS5 table holding text, its declaration rewritten to contentless, so the module's destroy leaves
+    // its `_content` table behind.
+    db.exec("CREATE VIRTUAL TABLE notes USING fts5(body); INSERT INTO notes VALUES ('zqxj-kept-by-a-rewrite');");
+    db.exec('PRAGMA writable_schema = ON');
+    db.exec("UPDATE sqlite_schema SET sql = 'CREATE VIRTUAL TABLE notes USING fts5(body, content='''')' WHERE name = 'notes'");
+  }
+  if (unknownModule) {
+    // A virtual table of a module this SQLite does not have (an extension's): it cannot be dropped.
+    db.exec('CREATE VIRTUAL TABLE notes USING fts5(body)');
+    db.exec('PRAGMA writable_schema = ON');
+    db.exec("UPDATE sqlite_schema SET sql = 'CREATE VIRTUAL TABLE notes USING nosuchmodule(body)' WHERE name = 'notes'");
+  }
   if (shadowPragma) {
     // An ordinary table named like SQLite's table-valued pragma, claiming an RTREE table is a plain one.
     db.exec('CREATE VIRTUAL TABLE geo USING rtree(id, a, b)');
     db.exec('CREATE TABLE pragma_table_list (schema TEXT, name TEXT, type TEXT, ncol INTEGER, wr INTEGER, strict INTEGER)');
     db.exec("INSERT INTO pragma_table_list SELECT 'main', name, 'table', 0, 0, 0 FROM sqlite_schema WHERE type = 'table'");
+  }
+  if (estateFts) {
+    // codex r2: text the file freed before it was uploaded (secure_delete off), left in its free pages (last, so no later
+    // write reuses them).
+    db.exec("PRAGMA secure_delete = OFF; CREATE TABLE scratch (t TEXT); INSERT INTO scratch VALUES ('zqxj-freed-before-upload'); DROP TABLE scratch;");
   }
   db.close();
 }

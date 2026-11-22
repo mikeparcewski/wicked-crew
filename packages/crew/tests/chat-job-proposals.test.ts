@@ -399,6 +399,48 @@ describe('document title from the person (#1537)', () => {
     expect(r.launcher.launched[0]!.resolution.helpers?.seats).toEqual(['codex', 'pi']);
   });
 
+  it('the first card keeps the writer and checker the person named in the same turn (crew#1737)', async () => {
+    const r = make();
+    await say(r, 't-named', 'Write a document titled Tiny math helper notes. Codex writes it and Pi checks it.');
+    await reply(r, 't-named', { entry: 'document', option: 'document', confidence: 0.99, lead: 'codex', seats: ['pi'] });
+    const p = open(r);
+    expect(p.helpers?.seats).toEqual(['codex', 'pi']);
+    expect(p.sentence?.tokens.find((t) => t.kind === 'seats')?.label).toBe('Codex writes, pi checks');
+    expect((await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    expect(r.launcher.launched[0]!.resolution.helpers?.seats).toEqual(['codex', 'pi']);
+  });
+
+  it('a seat the person never named is not taken from the block; a named writer alone gets a drawn checker (crew#1737)', async () => {
+    const r = make();
+    await say(r, 't-unnamed', 'Write a one-page note about the plugin.');
+    await reply(r, 't-unnamed', { entry: 'document', option: 'document', confidence: 0.99, lead: 'pi', seats: ['codex'] });
+    expect(open(r).helpers?.seats).toEqual(['claude', 'codex']);
+    const w = make();
+    await say(w, 't-writer', 'Write a one-page note about the plugin; Codex writes it.');
+    await reply(w, 't-writer', { entry: 'document', option: 'document', confidence: 0.99, lead: 'codex' });
+    expect(open(w).helpers?.seats).toEqual(['codex', 'claude']);
+    expect(open(w).blocked).toBeNull();
+    // A seat named only to check never becomes the writer: with no writer named, the card draws its own (xreview r1-r2).
+    const c = make();
+    await say(c, 't-checker', 'Write a one-page note about the plugin; Pi checks it.');
+    await reply(c, 't-checker', { entry: 'document', option: 'document', confidence: 0.99, seats: ['pi'] });
+    expect(open(c).helpers?.seats).toEqual(['claude', 'codex']);
+  });
+
+  it.each([
+    ['a quote line', 'Write a note on this excerpt:\n> Codex writes the output and pi checks it'],
+    ['quotation marks', 'Write a note explaining the phrase "Codex writes, pi checks".'],
+    ['code', 'Write a note about `codex --pi` usage.\n```\ncodex pi\n```'],
+    ['a tilde fence', 'Write a note about this config.\n~~~\nlead: codex\nchecker: pi\n~~~'],
+    ['a double-backtick span', 'Write a note on ``codex writes, pi checks`` from the docs.'],
+    ['a quotation over two lines', 'Write a note on this: "Codex writes it\nand pi checks it" was the old rule.'],
+  ])('a seat named only in what the person quoted is not their choice (xreview r1): %s', async (_name, words) => {
+    const r = make();
+    await say(r, 't-quoted', words);
+    await reply(r, 't-quoted', { entry: 'document', option: 'document', confidence: 0.99, lead: 'codex', seats: ['pi'] });
+    expect(open(r).helpers?.seats).toEqual(['claude', 'codex']);
+  });
+
   it('a removal that leaves one document helper keeps both and explains why (#1538)', async () => {
     const r = make();
     await pick(r, 'document');

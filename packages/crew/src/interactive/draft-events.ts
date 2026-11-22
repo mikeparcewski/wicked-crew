@@ -522,6 +522,9 @@ export interface BoundDraft {
   graphDb: string | null;
   /** The card's two helpers, as the launch's roster. */
   clisJson: string;
+  /** (crew#1751) The card's writer (its first helper): the launch's `primary`, so the creator steps land on it and the
+   *  other helper is the distinct checker. */
+  primary?: string | undefined;
   packet: SourcePacket;
   /** The document's head when the attempt started: the announce's `expect_head` (an interactive with the I1 contract
    *  lands nothing on a moved head and says `draft.conflict`). */
@@ -1710,6 +1713,7 @@ export async function startInteractiveDraftSubscriber(
           packetLine,
         sessionId: runId,
         clisJson: docClisJson ?? opts.clisJson ?? JSON.stringify(rosterOf(adapter, opts.roster)),
+        ...(bound?.primary !== undefined ? { primary: bound.primary } : {}),
         workflow,
         // A project-bound doc's governed draft is FILED (P7 gate DEFECT-1): the engine attaches
         // the crew.run membership atomically with the launch, so the run shows up in the
