@@ -13,7 +13,7 @@ const saved = (scope: string, steps: unknown[]): Preset => ({ name: NAME, create
 const NO_CHECK = [{ catalog: 'produce', id: 'draft' }, { catalog: 'critique', id: 'check' }];
 
 /** Core's listing: the global rows, with the asked project's rows replacing them by name. */
-function reads(rows: Preset[], catalog: () => Promise<CatalogEntry[]> = async () => []): DraftPresetReads & { listPresets: ReturnType<typeof vi.fn> } {
+function reads(rows: Preset[], catalog: () => Promise<CatalogEntry[]> = async () => []) {
   const listPresets = vi.fn(async (projectId?: string) => {
     const by = new Map<string, Preset>();
     for (const r of rows.filter((x) => x.scope === 'global')) by.set(r.name, r);
@@ -51,6 +51,19 @@ describe('sourcedDraftRefusal (crew#1445)', () => {
     expect(await sourcedDraftRefusal({ listPresets: async () => { throw new Error('old engine'); }, catalog: async () => [] }, 'p1', NAME)).toBe(none);
     expect(await sourcedDraftRefusal(reads([saved('global', STEPS)]), undefined, NAME)).toBe(none);
     expect(await sourcedDraftRefusal(reads([saved('global', STEPS), saved('project:p1', STEPS)]), 'p1', NAME)).toBe(none);
+  });
+
+  it('a saved global row in place of the built-in row is compared with the built-in def, as the catalog does', async () => {
+    const def = { id: NAME, phases: [{ id: 'draft', kind: 'produce', role: 'creator' }, { id: 'check', kind: 'critique', role: 'evaluator', rubric: 'fidelity-to-source' }] };
+    const withDef = (rows: Preset[]) => ({ ...reads(rows), getWorkflow: (id: string) => (id === NAME ? def : null) }) as unknown as DraftPresetReads;
+    expect(await sourcedDraftRefusal(withDef([saved('global', STEPS)]), undefined, NAME)).toBeNull();
+    expect(await sourcedDraftRefusal(withDef([saved('global', NO_CHECK)]), undefined, NAME)).toMatch(/lacks the fidelity-to-source check on its `check` step/u);
+    expect(await sourcedDraftRefusal(withDef([saved('global', STEPS), saved('project:p1', STEPS)]), 'p1', NAME)).toBeNull();
+  });
+
+  it('a writing step after the check makes it stale', async () => {
+    const rewrite = [...STEPS, { catalog: 'produce', id: 'polish', role: 'creator' }];
+    expect(await sourcedDraftRefusal(reads([BUILTIN, saved('project:p1', rewrite)]), 'p1', NAME)).toMatch(/`polish` step rewrites the output after `check`/u);
   });
 
   it('an unreadable phase catalog is said as that, never as a weaker preset', async () => {

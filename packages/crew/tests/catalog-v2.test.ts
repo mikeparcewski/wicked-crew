@@ -177,6 +177,13 @@ describe('the v2 wire', () => {
     expect(inProject(shadow('interactive-draft-sourced', draft), 'respond', 'rfp').status).toBe('available');
     expect(inProject(shadow('interactive-draft-sourced', draft.filter((s) => s.rubric === undefined)), 'respond', 'rfp')).toMatchObject({ status: 'unavailable', statusNote: expect.stringMatching(/fewer checks/u) });
     expect(inProject(shadow('sourced-report', report), 'competitive', null)).toMatchObject({ status: 'available', source: 'saved' });
+    expect(inProject(shadow('sourced-report', report.map((s) => { const out = { ...s }; delete out.rubric; return out; })), 'competitive', null).status).toBe('unavailable');
+    // The built-in def carries a QE preset's instruments (builtin-catalog.ts): a project shadow without them is off.
+    expect(inProject(shadow('migration', migration, []), 'migrate', 'move')).toMatchObject({ status: 'unavailable', statusNote: expect.stringMatching(/qe_acceptance/u) });
+    expect(inProject(shadow('migration', migration, QE), 'migrate', 'move')).toMatchObject({ status: 'available', source: 'saved' });
+    // A writing step added after the check makes it stale: what lands is no longer what was checked.
+    const rewritten = shadow('sourced-report', [...report, { catalog: 'produce', id: 'polish', role: 'creator' }]);
+    expect(resolve(rewritten, 'competitive', null).resolved).toMatchObject({ status: 'unavailable', statusNote: expect.stringMatching(/`polish` step rewrites the output/u) });
     // A saved row with no built-in row or def behind it is not a shadow: the card's workflow is not served.
     const bare = servedState({ defs: defs.filter((d) => d.id !== 'interactive-draft-sourced' && d.id !== 'sourced-report'), presets: projectListing(shadow('interactive-draft-sourced', draft)).filter((p) => p.name !== 'sourced-report').concat([{ ...shadow('sourced-report', report), scope: 'project:p1' } as Preset]), entries });
     expect(resolveOption('respond', 'rfp', bare)!.resolved).toMatchObject({ status: 'unavailable', statusNote: expect.stringMatching(/does not serve/u) });

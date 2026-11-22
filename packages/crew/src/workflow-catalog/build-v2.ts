@@ -216,13 +216,33 @@ export function promisesOf(steps: readonly PresetStep[], entries: readonly Catal
   return out;
 }
 
-/** The built-in's promises a saved shadow of it lacks on the same step, as plain words; empty when it keeps them all. */
+/** The ids of the writing steps after step `id` in a plan read by {@link readSteps}. */
+function writersAfter(read: readonly ReadStep[], id: string): string[] {
+  const at = read.findIndex((s) => s.id === id);
+  return at < 0 ? [] : read.slice(at + 1).filter((s) => s.writes).map((s) => s.id);
+}
+
+/**
+ * The built-in's promises a saved shadow of it lacks on the same step, as plain words; empty when it keeps them all. A
+ * rubric check is kept only while it still judges what lands: a writing step after it that the built-in does not have
+ * there makes the check stale (xreview r2).
+ */
 export function shadowShortfall(builtinSteps: readonly PresetStep[], shadowSteps: readonly PresetStep[], entries: readonly CatalogEntry[]): string[] {
   const kept = new Set(promisesOf(shadowSteps, entries).map((p) => `${p.step}\u0000${p.what}`));
+  const builtinRead = readSteps(builtinSteps, entries);
+  const shadowRead = readSteps(shadowSteps, entries);
+  const out: string[] = [];
   const lost = promisesOf(builtinSteps, entries).filter((p) => !kept.has(`${p.step}\u0000${p.what}`));
   // A lost consent says its hold too: name it once.
   const consentLost = new Set(lost.filter((p) => p.what === 'consent before install').map((p) => p.step));
-  return lost.filter((p) => !(p.what === 'a hold for a person' && consentLost.has(p.step))).map((p) => `${p.what} on its \`${p.step}\` step`);
+  for (const p of lost) if (!(p.what === 'a hold for a person' && consentLost.has(p.step))) out.push(`${p.what} on its \`${p.step}\` step`);
+  for (const p of promisesOf(builtinSteps, entries)) {
+    if (!p.what.endsWith(' check') || !kept.has(`${p.step}\u0000${p.what}`)) continue;
+    const allowed = new Set(writersAfter(builtinRead, p.step));
+    const added = writersAfter(shadowRead, p.step).filter((w) => !allowed.has(w));
+    if (added.length > 0) out.push(`${p.what} on what lands (its \`${added.join('`, `')}\` step rewrites the output after \`${p.step}\`)`);
+  }
+  return out;
 }
 
 /** What reads a sourced draft's preset needs ({@link sourcedDraftRefusal}): the engine's preset listing and phase catalog. */
@@ -230,6 +250,8 @@ export interface DraftPresetReads {
   /** The engine's effective rows for a scope (a project's row replaces the global one by name; none = global). */
   listPresets(projectId?: string): Promise<Preset[]>;
   catalog(): Promise<CatalogEntry[]>;
+  /** The served def by name, a built-in's first (the def crew derived from the engine at boot), as the catalog reads it. */
+  getWorkflow?(id: string): WorkflowDef | null;
 }
 
 /**
@@ -250,14 +272,23 @@ export async function sourcedDraftRefusal(reads: DraftPresetReads, projectId: st
   } catch {
     return noDraft;
   }
-  if (builtin === undefined) return noDraft;
+  // The same baseline the catalog uses (`resolveOption`): the built-in row, else the built-in def (a saved global row
+  // replaces the built-in's row in the global listing too; agy r2).
+  let def: WorkflowDef | null = null;
+  try {
+    def = builtin === undefined ? (reads.getWorkflow?.(workflow) ?? null) : null;
+  } catch {
+    def = null;
+  }
+  const baseline = builtin?.steps ?? (def !== null ? stepsOfDef(def) : null);
+  if (baseline === null) return noDraft;
   let entries: CatalogEntry[];
   try {
     entries = await reads.catalog();
   } catch (err) {
     return `your saved \`${workflow}\` could not be checked against the built-in (the phase catalog is unreadable: ${err instanceof Error ? err.message : String(err)}); try again`;
   }
-  const missing = shadowShortfall(builtin.steps, effective.steps, entries);
+  const missing = shadowShortfall(baseline, effective.steps, entries);
   return missing.length === 0 ? null : `your saved \`${workflow}\` has fewer checks than the built-in (it lacks ${missing.join(', ')}); delete it or add them back`;
 }
 
