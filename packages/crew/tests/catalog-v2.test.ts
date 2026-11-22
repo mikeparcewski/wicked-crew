@@ -151,17 +151,17 @@ describe('the v2 wire', () => {
     expect(whats(plugin)).toContain('consent before install');
     const noConsent = plugin.filter((s) => !whats([s]).includes('consent before install'));
     offWith(shadow('editor-plugin', noConsent, QE), 'studio-plugin', 'editor', /consent before install/u);
-    // A migration without its unconditional cutover hold, parity kept; and one whose hold moved to another step.
+    // A migration without its unconditional cutover hold (Migrate · In place); and one whose hold moved to another step.
     const migration = builtinSteps('migration');
     const held = promisesOf(migration, entries).find((p) => p.what === 'a hold for a person')!;
     expect(held).toBeDefined();
     const noHold = migration.map((s) => (s.id === held.step ? { ...s, gate: null } : s));
     expect(whats(noHold)).not.toContain('a hold for a person');
-    offWith(shadow('migration', noHold, QE), 'migrate', 'move', /a hold for a person on its `[\w-]+` step/u);
+    offWith(shadow('migration', noHold, QE), 'migrate', 'in-place', /a hold for a person on its `[\w-]+` step/u);
     const moved = noHold.map((s, i) => (i === 0 ? { ...s, gate: { human_confirm: { unconditional: true } } } : s));
     expect(migration[0]!.id).not.toBe(held.step);
     expect(whats(moved)).toContain('a hold for a person');
-    offWith(shadow('migration', moved, QE), 'migrate', 'move', /a hold for a person/u);
+    offWith(shadow('migration', moved, QE), 'migrate', 'in-place', /a hold for a person/u);
     // A sourced draft without its check: Respond is off.
     const draft = builtinSteps('interactive-draft-sourced');
     expect(whats(draft)).toContain('the fidelity-to-source check');
@@ -169,7 +169,7 @@ describe('the v2 wire', () => {
     // Shadows that keep every promise resolve to them ("Your version"); consent before the held step keeps its hold.
     keeps(shadow('sourced-report', report), 'competitive', null, 'saved');
     keeps(shadow('editor-plugin', plugin, QE), 'studio-plugin', 'editor', 'saved');
-    keeps(shadow('migration', migration.map((s) => (s.id === held.step ? { ...s, gate: 'consent_before' } : s)), QE), 'migrate', 'move', 'saved');
+    keeps(shadow('migration', migration.map((s) => (s.id === held.step ? { ...s, gate: 'consent_before' } : s)), QE), 'migrate', 'in-place', 'saved');
     keeps(shadow('interactive-draft-sourced', draft), 'respond', 'rfp', 'studio');
     // A project's listing carries its shadow INSTEAD of the built-in row: the built-in def is the baseline.
     const projectListing = (preset: Preset): Preset[] => [...presets.filter((p) => p.name !== preset.name), { ...preset, scope: 'project:p1' } as Preset];
@@ -179,8 +179,8 @@ describe('the v2 wire', () => {
     expect(inProject(shadow('sourced-report', report), 'competitive', null)).toMatchObject({ status: 'available', source: 'saved' });
     expect(inProject(shadow('sourced-report', report.map((s) => { const out = { ...s }; delete out.rubric; return out; })), 'competitive', null).status).toBe('unavailable');
     // The built-in def carries a QE preset's instruments (builtin-catalog.ts): a project shadow without them is off.
-    expect(inProject(shadow('migration', migration, []), 'migrate', 'move')).toMatchObject({ status: 'unavailable', statusNote: expect.stringMatching(/qe_acceptance/u) });
-    expect(inProject(shadow('migration', migration, QE), 'migrate', 'move')).toMatchObject({ status: 'available', source: 'saved' });
+    expect(inProject(shadow('migration', migration, []), 'migrate', 'in-place')).toMatchObject({ status: 'unavailable', statusNote: expect.stringMatching(/qe_acceptance/u) });
+    expect(inProject(shadow('migration', migration, QE), 'migrate', 'in-place')).toMatchObject({ status: 'available', source: 'saved' });
     // A writing step added after the check makes it stale: what lands is no longer what was checked.
     const rewritten = shadow('sourced-report', [...report, { catalog: 'produce', id: 'polish', role: 'creator' }]);
     expect(resolve(rewritten, 'competitive', null).resolved).toMatchObject({ status: 'unavailable', statusNote: expect.stringMatching(/`polish` step rewrites the output/u) });
