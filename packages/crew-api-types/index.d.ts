@@ -18263,6 +18263,21 @@ export interface AppTurnRecord {
   /** Not landed: a stable code (`check_failed`, `review_refused`, `launch_refused`, `cancelled`, …) and crew's words. */
   code: string | null;
   reason: string | null;
+  /**
+   * (crew#1379) Refused: the steering rules the refused step was found to BREAK (the engine's `rule_check` denial,
+   * winning or behind the reviewer's), each with the judge's cite as text (for the person; never instructions).
+   * A client links each id to the rule in Steering. ABSENT when no broken rule refused the turn, and on turns
+   * recorded before it.
+   */
+  rules?: AppTurnRule[];
+}
+
+/** (crew#1379) A steering rule a refused app turn broke. */
+export interface AppTurnRule {
+  /** The rule's id (as Steering names it). */
+  id: string;
+  /** Why the judge found it broken: its cite, else its reason (one line, at most 300 characters); `''` when none was recorded. */
+  reason: string;
 }
 
 /** `GET /apps` item. */
