@@ -796,9 +796,6 @@ export const VIEWS_SNAPSHOT_MAX_AGE_MS = 2_000;
  * object for every caller until the store may have changed: hand a caller a clone (`runView`,
  * `sessionsDetail`), never these objects, since callers decorate views in place.
  */
-/** crew#1775: how many one-run engine reads (`runView`) may be in the engine at once; the rest wait their turn. */
-export const RUN_READS_IN_FLIGHT = 4;
-
 export interface RunViewsSnapshot {
   readonly views: readonly SessionView[];
 }
@@ -2939,32 +2936,10 @@ export class CoreAdapter {
    * starts now, so it is never older than a change this adapter made or a frame it delivered.
    */
   async runView(runId: string): Promise<SessionView | undefined> {
-    const view = JSON.parse(await this.inRunReadSlot(() => this.core.sessionDetail(runId))) as SessionView | null;
+    const view = JSON.parse(await this.core.sessionDetail(runId)) as SessionView | null;
     if (view === null) return undefined;
     await this.resolveIdentities([view]);
     return view;
-  }
-
-  /** One-run engine reads on their way now, and the reads waiting for one of their slots (crew#1775). */
-  private runReadsInFlight = 0;
-  private readonly runReadsWaiting: Array<() => void> = [];
-
-  /**
-   * crew#1775 (review): at most {@link RUN_READS_IN_FLIGHT} one-run reads are in the engine at once. Each holds a
-   * libuv worker while the engine serves them one at a time on its single read connection, so an unbounded burst
-   * (a page of gate reads, a run end's handlers) would take the workers every other engine call and file read needs.
-   * A waiting read starts when it gets a slot, so it still reads the store as it is then.
-   */
-  private async inRunReadSlot<T>(read: () => Promise<T>): Promise<T> {
-    if (this.runReadsInFlight < RUN_READS_IN_FLIGHT) this.runReadsInFlight++;
-    else await new Promise<void>((admit) => this.runReadsWaiting.push(admit));
-    try {
-      return await read();
-    } finally {
-      const next = this.runReadsWaiting.shift();
-      if (next !== undefined) next(); // the slot passes straight to the next read
-      else this.runReadsInFlight--;
-    }
   }
 
   /**
