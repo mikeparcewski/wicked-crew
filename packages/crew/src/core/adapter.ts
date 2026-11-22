@@ -729,6 +729,7 @@ const VIEW_NEUTRAL_CALLS: ReadonlySet<string> = new Set([
   'campaignDetail',
   'sessions',
   'sessionsDetail',
+  'sessionDetail',
   'workOutput',
   'unitTranscript',
   'runEvents',
@@ -804,7 +805,6 @@ interface ViewsRead {
   readonly epoch: number;
   readonly at: number;
   readonly snapshot: RunViewsSnapshot;
-  readonly byId: ReadonlyMap<string, SessionView>;
 }
 
 function deepFreeze(value: unknown): void {
@@ -2929,15 +2929,17 @@ export class CoreAdapter {
 
   /**
    * One run's view (as `sessionsDetail` serves it), or `undefined` for an unknown id: the caller's own
-   * copy of that run only, so a request about one run costs O(1) in the number of runs on the store
-   * once the snapshot is read (F35). `fresh`: the caller holds a newer record of the store than the
-   * snapshot's (say a gate row the engine wrote before its frame landed), so the run is read from a
-   * fold that starts after this call.
+   * copy. crew#1775: read through the engine's per-run read (`sessionDetail`, core#1346), off the actor,
+   * so a request about one run never folds the store. The whole-store snapshot was invalidated by every
+   * engine frame, so while runs were active each gate read paid for a fresh fold of every run (and its
+   * parse on the event loop), and studio's per-page gate reads queued behind those folds. The read
+   * starts now, so it is never older than a change this adapter made or a frame it delivered.
    */
-  async runView(runId: string, opts?: { fresh?: boolean }): Promise<SessionView | undefined> {
-    if (opts?.fresh === true) this.viewsEpoch++;
-    const view = (await this.viewsRead()).byId.get(runId);
-    return view === undefined ? undefined : structuredClone(view);
+  async runView(runId: string): Promise<SessionView | undefined> {
+    const view = JSON.parse(await this.core.sessionDetail(runId)) as SessionView | null;
+    if (view === null) return undefined;
+    await this.resolveIdentities([view]);
+    return view;
   }
 
   /**
@@ -2992,7 +2994,7 @@ export class CoreAdapter {
       const views = JSON.parse(await this.core.sessionsDetail()) as SessionView[];
       await this.resolveIdentities(views);
       deepFreeze(views);
-      const done: ViewsRead = { epoch, at, snapshot: Object.freeze({ views }), byId: new Map(views.map((v) => [v.session.id, v] as const)) };
+      const done: ViewsRead = { epoch, at, snapshot: Object.freeze({ views }) };
       this.viewsLatest = done;
       return done;
     })();

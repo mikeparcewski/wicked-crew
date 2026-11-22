@@ -1094,7 +1094,7 @@ export async function createServer(
   const observedRuns = new Set<string>();
   const archiveRunCodebase = async (runId: string, trigger: 'deliver' | 'run_end', view?: SessionView, cancelled = false): Promise<void> => {
     try {
-      const v = view ?? (await adapter.sessionsDetail()).find((x) => x.session.id === runId);
+      const v = view ?? (await adapter.runView(runId));
       if (v === undefined || v.session.repo_ref == null) return;
       const repoRoot = (await adapter.listRepos()).find((r) => r.id === v.session.repo_ref)?.root_path ?? null;
       const before = codebaseArchives.get(runId);
@@ -1168,7 +1168,7 @@ export async function createServer(
   // G12: the run's own engine `draft_render` record (its latest unit of that step, read fresh: the floor runs as the run
   // ends), which the floor reuses when it measured these exact bytes with the floor's own print profile.
   const floorEngineRender = async (runId: string): Promise<Record<string, unknown> | null> =>
-    latestDraftRender((await adapter.runView(runId, { fresh: true }))?.units);
+    latestDraftRender((await adapter.runView(runId))?.units);
   const draftFloorIo = { chrome: floorChrome, engineRender: floorEngineRender };
   /**
    * A3 (§6.2): a proposal-bound attempt's outcome was recorded. A failure is said on the run (`run.landing_failed`, the
@@ -1409,7 +1409,7 @@ export async function createServer(
     audit,
     // crew#828: the run's own status (and, once it has ended, its recorded event count).
     runFacts: async (runId) => {
-      const view = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+      const view = await adapter.runView(runId);
       if (view === undefined) return null;
       const ended = ['completed', 'failed', 'cancelled'].includes(String(view.session.status));
       if (!ended) return { ended, events: null };
@@ -1595,7 +1595,7 @@ export async function createServer(
       cancelRun: (id) => adapter.cancelRun(id),
     },
     replyOf: async (checkRunId) => {
-      const view = (await adapter.sessionsDetail()).find((v) => v.session.id === checkRunId);
+      const view = await adapter.runView(checkRunId);
       const unit = view?.units.find((u) => u.ord === 1) ?? view?.units[0];
       return view !== undefined && unit !== undefined ? adapter.workOutput(coreUnitId(checkRunId, unit)) : null;
     },
@@ -1689,7 +1689,7 @@ export async function createServer(
     sessionsDetail: () => adapter.sessionsDetail(),
     launch: launchScheduled,
     // crew#1578: a scheduled run that never got seats is its schedule's to end, on the run's own record.
-    runViewFresh: (runId) => adapter.runView(runId, { fresh: true }),
+    runViewFresh: (runId) => adapter.runView(runId),
     cancel: cancelOnItsRecord(
       (runId) => adapter.cancelRun(runId),
       (runId, detail) => audit.record('run.cancelled', SCHEDULE_ACTOR, { runId, detail }),
@@ -2155,7 +2155,7 @@ export async function createServer(
     turns: chatTurns,
     workOutput: (unitId) => adapter.workOutput(unitId),
     units: async (runId) => {
-      const view = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+      const view = await adapter.runView(runId);
       return (view?.units ?? []).map((u) => {
         const la = (u as { last_attempt?: unknown }).last_attempt;
         return {
@@ -2381,9 +2381,8 @@ export async function createServer(
       if (key !== undefined && (deliverDispatches.delete(key) || unseen)) {
         observedRuns.add(session);
         void adapter
-          .sessionsDetail()
-          .then((views) => {
-            const view = views.find((v) => v.session.id === session);
+          .runView(session)
+          .then((view) => {
             if (view === undefined) return undefined;
             if (unseen && deliverUnitOf(view)?.ord !== ord) return undefined;
             return archiveRunCodebase(session, 'deliver', view);
@@ -2455,8 +2454,7 @@ export async function createServer(
         .then(async () => {
           if (deliveryIndex.urlFor(session) !== undefined) {
             try {
-              const views = await adapter.sessionsDetail();
-              const repoRef = views.find((v) => v.session.id === session)?.session.repo_ref;
+              const repoRef = (await adapter.runView(session))?.session.repo_ref;
               if (repoRef !== null && repoRef !== undefined) {
                 const repos = await adapter.listRepos();
                 const repoRoot = repos.find((r) => r.id === repoRef)?.root_path;
@@ -2514,7 +2512,7 @@ export async function createServer(
     if (event.type === 'runBaseResolved' && session !== undefined) {
       // A lookup that fails or finds no view yet is tried again (codex r2: one miss lost the invalidation for good).
       const note = (tries: number): void => {
-        void adapter.runView(session, { fresh: tries > 0 }).then(
+        void adapter.runView(session).then(
           (v) => {
             const repo = v?.session.repo_ref;
             if (typeof repo === 'string' && repo !== '') { void repoWatcher.noteLaunch(repo); return; }
@@ -2547,8 +2545,7 @@ export async function createServer(
     if (event.type === 'sessionCompleted' && session !== undefined && projectId !== undefined) {
       void (async () => {
         try {
-          const views = await adapter.sessionsDetail();
-          const view = views.find((v) => v.session.id === session);
+          const view = await adapter.runView(session);
           const repoRef = view?.session.repo_ref ?? null;
           const repoRoot =
             repoRef !== null
@@ -3124,7 +3121,7 @@ export async function createServer(
     decideGate: registered.decideGate,
     audit,
     runFacts: async (runId) => {
-      const v = (await adapter.sessionsDetail()).find((x) => x.session.id === runId);
+      const v = await adapter.runView(runId);
       if (v === undefined) return undefined;
       return {
         projectId: runProject(v, runId, (id) => membershipIndex.projectOf(id)),

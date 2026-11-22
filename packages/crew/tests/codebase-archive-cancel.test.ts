@@ -14,6 +14,7 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent } from '../src/core/types.js';
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 const armedStateHome = crewStateHome();
 const settle = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -71,7 +72,8 @@ describe('crew#1508 — cancelled codebase archives follow the reap outcome', ()
       workOutput: async () => '',
       onboardedRepoOf: () => undefined,
     } as unknown as CoreAdapter;
-    app = await createServer(adapter, {
+    // crew#1775: the run-end archive reads the run alone (`runView`), as the daemon's adapter serves it.
+    app = await createServer(withRunViews(adapter), {
       auth: { mode: 'off' },
       seats: { signedIn: () => true },
       auditPath: join(scratch, 'audit.log'),
