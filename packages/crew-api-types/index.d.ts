@@ -5979,6 +5979,15 @@ export interface GovernanceEvalSample {
   kind: 'good' | 'bad';
   steering_type: string;
   signals: GovernanceEvalSignals;
+  /**
+   * (crew#1128, core#397) The memory axis: memories the worker's recall for this action SHOULD surface. `id:<memory
+   * id>` names one memory; any other entry is a case-insensitive content substring. A run over a sample that declares
+   * memories needs the daemon's memory store (crew passes it when the store exists; without it the engine refuses the
+   * run, naming the sample).
+   */
+  expected_memories?: string[];
+  /** (crew#1128, core#397) Memories that must NOT surface for this action (same matcher). */
+  unexpected_memories?: string[];
 }
 
 /**
@@ -6020,6 +6029,39 @@ export interface GovernanceEvalResult {
   fired: string[];
   verdict: 'caught' | 'gap' | 'false_positive';
   nearest_rules?: GovernanceEvalNearestRule[];
+  /**
+   * (crew#1128, core#397) The memory axis for this sample: `null` when it declares no memories. Optional on the contract
+   * because an engine before core#397 (and a history row it produced) carries no such key.
+   */
+  memory?: GovernanceEvalMemoryResult | null;
+}
+
+/**
+ * (crew#1128, core#397) What the worker's recall surfaced for one sample, against its declared memories: `surfaced` is
+ * every memory id the recall returned (rank order); `missing` the `expected_memories` entries nothing matched;
+ * `unexpected_surfaced` the `unexpected_memories` entries that surfaced. `verdict`: `false_positive` when an unexpected
+ * memory surfaced, else `gap` when an expected one did not, else `caught`.
+ */
+export interface GovernanceEvalMemoryResult {
+  surfaced: string[];
+  missing: string[];
+  unexpected_surfaced: string[];
+  verdict: 'caught' | 'gap' | 'false_positive';
+}
+
+/** (crew#1128, core#397) A stored memory no sample's recall surfaced. */
+export interface GovernanceEvalUnsurfacedMemory {
+  memory_id: string;
+  scope: string;
+}
+
+/**
+ * (crew#1128, core#397) The report's memory axis: verdict counts over the samples that declare memories, and coverage
+ * of the store's memories (`memories` in the store, `surfaced` by at least one sample's recall, the rest listed).
+ */
+export interface GovernanceEvalMemoryAxis {
+  summary: GovernanceEvalSummary;
+  coverage: { memories: number; surfaced: number; unsurfaced: GovernanceEvalUnsurfacedMemory[] };
 }
 
 /** The report's roll-up counts (snake_case — the engine's serde output, passed through verbatim). */
@@ -6097,6 +6139,11 @@ export interface GovernanceEvalReport {
   summary: GovernanceEvalSummary;
   degraded: 'facet-only' | null;
   rule_coverage?: GovernanceEvalRuleCoverage;
+  /**
+   * (crew#1128, core#397) The memory axis: `null` when the run had no memory store (the daemon passes its store only
+   * when the file exists). Absent from an engine before core#397.
+   */
+  memory?: GovernanceEvalMemoryAxis | null;
 }
 
 /** The `POST /testing/corpora/import` request body — a named eval corpus for later runs. */

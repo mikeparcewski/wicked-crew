@@ -887,6 +887,37 @@ accepts<
     rule_coverage: { exercised: number; unexercised: { rule_id: string; steering_type: Wire.SteeringType }[] };
   }
 >();
+// (crew#1128, core#397) The memory axis: the engine's report with a memory store (evals.rs `MemoryAxis`,
+// `MemoryResult`) validates, a result's `memory` may be null (the sample declares none), and the declared key sets are
+// exactly the producer's (both directions).
+const ENGINE_MEMORY_RESULT = { surfaced: ['m1'], missing: [] as string[], unexpected_surfaced: [] as string[], verdict: 'caught' as const };
+const ENGINE_MEMORY_AXIS = {
+  summary: { total: 1, caught: 1, gaps: 0, false_positives: 0 },
+  coverage: { memories: 2, surfaced: 1, unsurfaced: [{ memory_id: 'm2', scope: 'project:p' }] },
+};
+// The producer's shapes against the declarations directly (field types, not only names; codex r1 on #1758) …
+accepts<Wire.GovernanceEvalMemoryResult, typeof ENGINE_MEMORY_RESULT>();
+accepts<Wire.GovernanceEvalMemoryAxis, typeof ENGINE_MEMORY_AXIS>();
+// … and inside a report, on a result row whose `memory` is only the producer's (never intersected with the contract's).
+accepts<
+  Wire.GovernanceEvalReport,
+  {
+    results: Array<Omit<Wire.GovernanceEvalResult, 'memory'> & { memory: typeof ENGINE_MEMORY_RESULT | null }>;
+    summary: Wire.GovernanceEvalSummary;
+    degraded: null;
+    memory: typeof ENGINE_MEMORY_AXIS | null;
+  }
+>();
+accepts<keyof Wire.GovernanceEvalMemoryResult, keyof typeof ENGINE_MEMORY_RESULT>();
+accepts<keyof typeof ENGINE_MEMORY_RESULT, keyof Wire.GovernanceEvalMemoryResult>();
+accepts<keyof Wire.GovernanceEvalMemoryAxis['coverage'], keyof typeof ENGINE_MEMORY_AXIS.coverage>();
+accepts<keyof typeof ENGINE_MEMORY_AXIS.coverage, keyof Wire.GovernanceEvalMemoryAxis['coverage']>();
+// A sample that declares memories is a legal import body (the schema takes the engine's two matcher lists) …
+accepts<z.input<typeof ImportEvalCorpusSchema>, { name: string; samples: Array<Wire.GovernanceEvalSample & { expected_memories: string[]; unexpected_memories: string[] }> }>();
+// … and the schema TYPES those lists (coord F2 on #1758): a non-string matcher is refused. Without the schema's two
+// fields, `z.input` would not name them at all, this body would be accepted, and the directive below would be unused.
+// @ts-expect-error -- a matcher list is strings
+accepts<z.input<typeof ImportEvalCorpusSchema>, { name: string; samples: Array<Omit<Wire.GovernanceEvalSample, 'expected_memories'> & { expected_memories: number[] }> }>();
 // Steering `effect` (api-types 0.27.0): the operator-authorable `warn` band is a legal effect on
 // the wire alongside the policy-era three; a rule WITHOUT one stays recall-only (still legal).
 accepts<Wire.ConformanceRule['effect'], 'deny' | 'warn' | 'allow_with_conditions' | 'allow' | undefined>();
@@ -1574,6 +1605,15 @@ describe('wire contract (wicked-crew-api-types) drift guard', () => {
     expect(rows.reduce((n, r) => n + r.exercised, 0)).toBe(rc.exercised);
     expect(rows.reduce((n, r) => n + r.unexercised, 0)).toBe(rc.unexercised.length);
     expect(ENGINE_REPORT_WITH_COVERAGE.summary.total).toBe(ENGINE_REPORT_WITH_COVERAGE.results.length);
+  });
+
+  it("(crew#1128) the engine's memory-axis fixture is internally consistent (coverage partitions the store; a caught row misses nothing)", () => {
+    const { coverage, summary } = ENGINE_MEMORY_AXIS;
+    expect(coverage.surfaced + coverage.unsurfaced.length).toBe(coverage.memories);
+    expect(summary.caught + summary.gaps + summary.false_positives).toBe(summary.total);
+    expect(ENGINE_MEMORY_RESULT.verdict).toBe('caught');
+    expect([ENGINE_MEMORY_RESULT.missing, ENGINE_MEMORY_RESULT.unexpected_surfaced]).toEqual([[], []]);
+    expect(ENGINE_MEMORY_RESULT.surfaced.length).toBeGreaterThan(0);
   });
 
   it('the shipped built-in workflows are contract-shaped at runtime too', () => {

@@ -4,10 +4,11 @@ import { createRequire } from 'node:module';
 import type { BusUnavailable } from './engine-bus.js';
 import { attachEngineBus, detachEngineBus, type EngineBus } from './bus.js';
 import { mkdir, access, readFile, writeFile, chmod, rm, link, rename, realpath, stat, lstat } from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
 import { isPlainRunId, WALKTHROUGH_AUTHOR_SUBDIR, walkthroughRootDir } from './walkthrough-root.js';
 import { mcpStateDir } from '../mcp/registry-store.js';
+import { resolveMemoryDbPath } from './estate-mcp-client.js';
 import { crewStateHome, isDefaultStateHome, wickedWorkRoot } from '../projects/state-home.js';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -4044,6 +4045,22 @@ export class CoreAdapter {
   }
 
   /**
+   * (crew#1128) The memory store the evals' memory axis recalls from (core#397): the store this daemon's workers recall
+   * from ({@link resolveMemoryDbPath}: `WICKED_MEMORY_DB`, else `<state home>/mcp/memory.db`, else the operator's
+   * global store), opened read-only by the engine. `undefined` while that file does not exist: the engine refuses a
+   * run whose `memoryDb` is missing, so a daemon with no memories yet keeps the rules-only report (`memory: null`), and
+   * a sample that declares memories gets the engine's own "no memory store" refusal.
+   */
+  private static governanceMemoryDb(): string | undefined {
+    const path = resolveMemoryDbPath();
+    try {
+      return statSync(path).isFile() ? path : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Run the governance evals: every sample of the corpus (`corpus` = an `evals:<name>` estate
    * scope minted by {@link importGovernanceCorpus}; omitted = the engine's built-in default
    * corpus) is pushed through the decide path and compared to what its `kind` says SHOULD have
@@ -4064,10 +4081,12 @@ export class CoreAdapter {
       throw new GovernanceEvalsUnsupportedError('Running governance evals');
     }
     const knowledgeDb = CoreAdapter.governanceKnowledgeDb();
+    const memoryDb = CoreAdapter.governanceMemoryDb();
     const payload = {
       ...(args.type !== undefined ? { type: args.type } : {}),
       ...(args.corpus !== undefined ? { corpus: args.corpus } : {}),
       ...(knowledgeDb !== undefined ? { knowledgeDb } : {}),
+      ...(memoryDb !== undefined ? { memoryDb } : {}),
       dbPath: this.dbPath,
     };
     return parseEngineJson<GovernanceEvalReport>(
