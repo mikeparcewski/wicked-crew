@@ -280,6 +280,7 @@ import {
   deliverRepoFor,
   deliverTargetView,
   isGitHubLogin,
+  pinnedGhExec,
   pushIdentityOf,
   readDeliverOriginUrl,
   resolvePullRequest as resolvePullRequestViaGh,
@@ -2272,6 +2273,17 @@ export function registerRoutes(
   /** Repo root for a repo ref, from the registry — shared by the reprovision path below. */
   const repoRootOf = async (repoRef: string): Promise<string | undefined> =>
     (await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path;
+  /** (crew#1792) The push identity a repository's PR reads run as: its pin or the setting, else `GH_ACCOUNT` (the
+   *  deliver-target route's own resolution). Settings that cannot be read leave it to `GH_ACCOUNT`. */
+  const readIdentityOf = (repoRef: string) => async (): Promise<string | null> => {
+    let configured = '';
+    try {
+      configured = deliverIdentityFor(await adapter.getSettings(), repoRef).login;
+    } catch {
+      configured = '';
+    }
+    return pushIdentityOf(configured);
+  };
   /** The lookups a review-change exclusion reads (the launch and the job proposal read the same ones, CJ13). */
   const reviewChangeDeps = (repoRef: string, repoRoot: string): ReviewChangeDeps => ({
     repoRef,
@@ -2281,7 +2293,7 @@ export function registerRoutes(
     pushed: (id) => deliveryIndex.pushedFor(id),
     deliveredCommit: (id) => deliveryIndex.commitFor(id),
     revisesPr: (id) => retryIndex.revisesPrFor(id),
-    gh: runtime.reviewChange?.gh ?? defaultGhExec,
+    gh: pinnedGhExec(readIdentityOf(repoRef), runtime.reviewChange?.gh ?? defaultGhExec),
     git: runtime.reviewChange?.git ?? (async (args, cwd) => {
       try {
         return { ...(await execCapped('git', args, { cwd, timeout: 5_000 })), code: 0 };
@@ -2292,8 +2304,12 @@ export function registerRoutes(
       }
     }),
   });
-  /** DES-L9: PR number → head branch, through `gh pr view` unless the runtime injected an answerer. */
-  const resolvePullRequest = runtime.resolvePullRequest ?? resolvePullRequestViaGh;
+  /** DES-L9: PR number → head branch, through `gh pr view` as the repository's push identity (crew#1792) unless the
+   *  runtime injected an answerer. */
+  const resolvePullRequest = (repoRoot: string, number: number, repoRef: string): Promise<PullRequestResolution> =>
+    runtime.resolvePullRequest !== undefined
+      ? runtime.resolvePullRequest(repoRoot, number)
+      : resolvePullRequestViaGh(repoRoot, number, pinnedGhExec(readIdentityOf(repoRef)));
   /** crew#627: the intent's linked issues, read under the daemon's identity at launch. */
   /** (DES-PM-001 §3.2) A project's live `crew.repo` members, for a tracker set. */
   const repoMembersOf = async (projectId: string): Promise<string[]> => (await adapter.projectMembers(projectId)).filter((m) => m.member_kind === 'crew.repo').map((m) => m.member_ref);
@@ -3909,7 +3925,7 @@ export function registerRoutes(
       if (root === undefined) {
         return reply.code(404).send({ error: `repoRef names an unknown repo: ${revisedRepo}` });
       }
-      const resolved = await resolvePullRequest(root, b.revisesPr);
+      const resolved = await resolvePullRequest(root, b.revisesPr, revisedRepo);
       if (!resolved.ok) return reply.code(409).send({ error: resolved.error });
       revisesPr = { number: b.revisesPr, headRef: resolved.pr.headRef, url: resolved.pr.url };
       input.baseRef = revisesPr.headRef;
@@ -5088,7 +5104,7 @@ export function registerRoutes(
               const again =
                 revisedRoot === undefined
                   ? ({ ok: false, error: `repo ${repoRef} is no longer registered — cannot re-check pull request #${revising.number}` } as const)
-                  : await resolvePullRequest(revisedRoot, revising.number);
+                  : await resolvePullRequest(revisedRoot, revising.number, repoRef);
               if (!again.ok) {
                 revisionRefused = again.error;
                 return;

@@ -18,9 +18,11 @@ export function parseReviewTarget(words: string): ReviewTarget | null {
     // A PR-shaped token with an impossible number names no target: never re-read its digits as a commit.
     return Number.isSafeInteger(number) && number > 0 ? { kind: 'pr', number } : null;
   }
-  const branch = /\bbranch\s+([^\s`'"<>]+)|\b(wicked\/[A-Za-z0-9._/-]+)/i.exec(words);
+  const branch = /\bbranch\s+[`'"]?([^\s`'"<>]+)|\b(wicked\/[A-Za-z0-9._/-]+)/i.exec(words);
   if (branch !== null) {
-    const name = branch[1] ?? branch[2]!;
+    // crew#1793: the sentence's punctuation after the name ("branch foo: is it right?", "… branch foo.") is not part
+    // of it; git refuses a ref that ends in `.` or holds `:`, so no real branch loses a character here.
+    const name = (branch[1] ?? branch[2]!).replace(/[.,:;!?)\]}]+$/, '');
     if (isSafeRefName(name)) return { kind: 'branch', name };
   }
   const commit = /\b[0-9a-f]{7,40}\b/i.exec(words);
@@ -109,6 +111,12 @@ function runBranch(view: SessionView): string {
   return typeof branch === 'string' && branch !== '' ? branch : `wicked/${view.session.id}`;
 }
 
+/** The commit the engine based the run on (wicked-core `Session.base_commit`, `null` on the wire when unrecorded). */
+function baseCommitOf(view: SessionView | undefined): string | null {
+  const base = view === undefined ? undefined : field(view.session, 'base_commit');
+  return typeof base === 'string' && /^[0-9a-f]{40}$/i.test(base) ? base : null;
+}
+
 /** Engine views may lack the daemon's created_at; undated runs must remain in the exclusion window. */
 function inWindow(view: SessionView, cutoff: number): boolean {
   for (const key of ['created_at', 'started_at']) {
@@ -131,6 +139,8 @@ export async function reviewChangeExclusion(words: string, deps: ReviewChangeDep
   }
   const byId = new Map(views.map((view) => [view.session.id, view]));
   const candidates = new Set<string>();
+  /** Runs joined only because their branch contains a reviewed commit (crew#1794). */
+  const contained = new Set<string>();
   let headSha: string | null = null;
   let baseRef: string | undefined;
   let why: string | undefined;
@@ -168,8 +178,12 @@ export async function reviewChangeExclusion(words: string, deps: ReviewChangeDep
       if (out.code !== 0) throw new Error('could not read branches containing the review commit');
       for (const ref of out.stdout.trim().split('\n')) {
         const match = /^refs\/(?:heads|remotes\/origin)\/wicked\/(.+)$/.exec(ref);
-        if (match !== null) candidates.add(match[1]!);
+        // crew#1794: a branch that merely CONTAINS the commit names a run only when that run is one of this
+        // repository's on this daemon; another daemon's or another repository's run branch (copied to origin) is
+        // no evidence of who wrote the commit, and its authors cannot be read here anyway.
+        if (match !== null && byId.has(match[1]!)) contained.add(match[1]!);
       }
+      for (const id of contained) candidates.add(id);
     }
     if (headBranch?.startsWith('wicked/')) candidates.add(headBranch.slice('wicked/'.length));
     for (const view of views) {
@@ -200,7 +214,18 @@ export async function reviewChangeExclusion(words: string, deps: ReviewChangeDep
         const commit = deps.deliveredCommit(id);
         if (commit !== undefined && headSha !== null) code = (await git(['merge-base', '--is-ancestor', commit, headSha])).code;
       } catch { /* An unreadable membership proof still contributes. */ }
-      if (code !== 1) runs.push(id);
+      if (code === 1) continue;
+      // crew#1794: every run branched from the default branch after a commit landed there contains it. A run whose
+      // recorded base (the engine's `base_commit`) already holds the commit started after it, so it did not write it.
+      // Only git's proof (exit 0) removes it; no recorded base or a failed check keeps it.
+      const reviewed = target?.kind === 'commit' && contained.has(id) ? target.sha : null;
+      const base = reviewed === null ? null : baseCommitOf(byId.get(id));
+      if (reviewed !== null && base !== null) {
+        try {
+          if ((await git(['merge-base', '--is-ancestor', reviewed, base])).code === 0) continue;
+        } catch { /* An unreadable base keeps the run. */ }
+      }
+      runs.push(id);
     }
     provenance = runs.length > 0 ? 'built_here' : 'outside';
   }
