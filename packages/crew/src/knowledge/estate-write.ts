@@ -7,6 +7,14 @@ import { Semaphore } from '../mcp/estate-relay.js';
 const writer = new Semaphore(1);
 const LOCK_RETRY_DELAYS_MS = [250, 1_000, 3_000];
 
+/**
+ * (crew#1741) Run one other estate call (a read that spawns its own process) on the same single lane as the writes, so
+ * a boot's confirmation reads never start a process per source at once, nor overlap a write.
+ */
+export function onEstateLane<T>(fn: () => Promise<T>): Promise<T> {
+  return writer.run(fn);
+}
+
 /** Retry only SQLite contention refusals: estate committed nothing, so the same generation is safe to resend. */
 export function replaceSource(
   call: (tool: string, args: Record<string, unknown>) => Promise<unknown>,

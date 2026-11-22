@@ -32,7 +32,7 @@ import type { McpRegistryStore } from '../mcp/registry-store.js';
 import { ASK_ENUM_MAX, ASK_NAME_MAX } from '../sources/ask.js';
 import type { SqlCatalog } from '../sources/catalog/types.js';
 import type { SourceCatalogStore } from '../sources/store.js';
-import { replaceSource } from './estate-write.js';
+import { onEstateLane, replaceSource } from './estate-write.js';
 import { gateSourceOf, type GateSource } from './gate/sources.js';
 import { projectionKey } from './package.js';
 
@@ -397,7 +397,8 @@ export class SourceProjector {
     if (ack === undefined || ack.confirmed) return;
     let held: unknown;
     try {
-      held = await this.call('knowledge.source_catalog', { sourceId, page: 0, visible: [`source:${sourceId}`] });
+      // On the one estate lane the writes share: N kept acknowledgements never start N estate processes at once.
+      held = await onEstateLane(() => this.call('knowledge.source_catalog', { sourceId, page: 0, visible: [`source:${sourceId}`] }));
     } catch (err) {
       this.deps.log?.(`[knowledge] estate's generation of ${sourceId} could not be read, so it waits for its projection: ${message(err)}`);
       return;

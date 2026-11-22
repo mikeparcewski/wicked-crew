@@ -17,7 +17,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { SourceProjector } from '../src/knowledge/projector.js';
 import { trackerIdOf } from '../src/knowledge/registry/entry.js';
 import { TrackerProjector } from '../src/knowledge/trackers/projector.js';
-import { addEstateTombstones, configOf, McpRegistry, normalizeRegistryFile } from '../src/mcp/registry.js';
+import { addEstateTombstones, configOf, dropEstateTombstones, McpRegistry, normalizeRegistryFile } from '../src/mcp/registry.js';
 import { McpRegistryStore, type McpRegistryFile } from '../src/mcp/registry-store.js';
 import { probeMcpServer } from '../src/mcp/probe.js';
 import type { SecretStore } from '../src/mcp/secrets.js';
@@ -343,6 +343,52 @@ describe('estate tombstones survive the entry and a restart (crew#1328 item 1, c
       await booting;
       expect(back.projector.projectedDescriptor(SOURCE_ID)).toBe(key);
     }
+  });
+
+  it('crew#1740: an amend that changes nothing writes nothing, even for a tombstone another pass already dropped', async () => {
+    const { store, registry, onDisk } = rig([sourceRecord()]);
+    await registry.remove('shop-db');
+    const generation = onDisk().generation;
+    const kept = (await store.generations()).map((g) => g.generation);
+    const before = statSync(store.path);
+    // Two passes settle the same tombstone: the first drops it, the second finds nothing to drop.
+    const [first, second] = await Promise.all([
+      store.amend((f) => dropEstateTombstones(f, 'source', new Set([SOURCE_ID]))),
+      store.amend((f) => dropEstateTombstones(f, 'source', new Set([SOURCE_ID]))),
+    ]);
+    expect([first, second]).toEqual([true, false]);
+    const dropped = statSync(store.path);
+    expect(dropped.ino).not.toBe(before.ino);
+    expect(await store.amend(() => false)).toBe(false);
+    const after = statSync(store.path);
+    expect([after.ino, after.mtimeMs]).toEqual([dropped.ino, dropped.mtimeMs]);
+    expect(onDisk().generation).toBe(generation);
+    expect((await store.generations()).map((g) => g.generation)).toEqual(kept);
+  });
+
+  it('crew#1741: the boot checks of many kept acknowledgements run one estate process at a time, never beside a write (codex r1)', async () => {
+    const { store, registry, acksFile } = rig([pmRecord()]);
+    await registry.remove('jira');
+    const ids = ['a', 'b', 'c'].map((x) => `3f0c9a1e-0000-4000-8000-0000000c17${x}1`);
+    writeFileSync(acksFile, JSON.stringify({ version: 2, acked: Object.fromEntries(ids.map((id, i) => [id, { key: `k${i}`, generation: 16 + i }])) }));
+    let running = 0;
+    let peak = 0;
+    const tools: string[] = [];
+    const call = async (tool: string): Promise<unknown> => {
+      running++;
+      peak = Math.max(peak, running);
+      tools.push(tool);
+      await new Promise<void>((r) => setTimeout(r, 5));
+      running--;
+      return tool === 'knowledge.source_catalog' ? { generation: 0, pages: 1, docs: [] } : {};
+    };
+    const projector = new SourceProjector({ store, catalogs: registry.catalogs, acksFile, call });
+    const trackers = new TrackerProjector({ store, call });
+    await Promise.all([projector.backfill(), trackers.reconcile()]);
+    await until(() => tools.filter((t) => t === 'knowledge.source_catalog').length === ids.length);
+    await until(() => running === 0);
+    expect(tools.filter((t) => t === 'knowledge.replace_source').length).toBeGreaterThan(0);
+    expect(peak).toBe(1);
   });
 
   it('crew#1741: a version 1 acknowledgement file (no generation) admits nothing after a restart', async () => {
