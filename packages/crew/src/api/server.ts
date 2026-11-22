@@ -52,6 +52,8 @@ import { registerSetupRoutes } from '../setup/routes.js';
 import { voiceBlock } from '../persona/voice.js';
 import { VoiceInjectInputs } from '../voice/inject-input.js';
 import { factsUnitResolver, registerInsightsRoutes } from '../insights/routes.js';
+import { RepoOrigins } from './repo-origins.js';
+import { migrateInertPolicyRules } from './policy-landing.js';
 import { ReviewService } from '../insights/review-service.js';
 import { InsightsStore } from '../insights/store.js';
 import { ANALYZE_CLI, REVIEW_WORKFLOW, defaultReviewsDir, loadReviewWorkflow } from '../insights/workflow.js';
@@ -1494,6 +1496,8 @@ export async function createServer(
   // The run review folds runs as `GET /runs` serves them (launch time, delivery, project are the daemon's
   // joins, not the engine's record): bound once the routes are registered below.
   let decorateRun: ((view: SessionView) => SessionView) | null = null;
+  // crew#1744: the daemon's one `git_url` reader (GET /repos, the repo search, the review's issue link).
+  const repoOrigins = new RepoOrigins();
   const reviewService = new ReviewService({
     store: insightsStore,
     adapter: {
@@ -1503,7 +1507,8 @@ export async function createServer(
       },
       runEvents: (id) => adapter.runEvents(id),
       seatsForWorkflow: (id) => adapter.seatsForWorkflow(id),
-      listRepos: () => adapter.listRepos(),
+      // crew#1744: the "open an issue" link needs the repo's remote: the same reader GET /repos uses.
+      listRepos: () => repoOrigins.list(() => adapter.listRepos()),
     },
     reviewsDir: defaultReviewsDir(),
     // crew#1592: the review's seat comes from the seats new work may use (the strict reader: a bad setting refuses).
@@ -2955,6 +2960,7 @@ export async function createServer(
     {
       seatHealth,
       deliveryFreeze,
+      repoOrigins,
       // wicked-studio#284: the watchdog's remembered frames ride `GET /runs/:id/events`.
       stallFrames: (runId) => stallFrameIndex.framesFor(runId),
       voiceInputs,
@@ -3112,6 +3118,17 @@ export async function createServer(
   if (registered.decisions !== null) {
     const decisionsService = registered.decisions;
     decisionsService.track(decisionsService.redrive());
+  }
+
+  // crew#1774: policy rules landed with a project NAME (not an id) apply to no run; retarget or retire them once, off
+  // the boot path (OFF under a test runner, like the other boot sweeps).
+  if (!(process.env['VITEST'] !== undefined || process.env['NODE_ENV'] === 'test')) {
+    void migrateInertPolicyRules({
+      adapter,
+      audit,
+      estateTool: callEstateTool,
+      log: (m) => app.log.warn(m),
+    });
   }
 
   // Standing orders (Studio OS behaviour 10): the store, the evaluator over THE gate decision path

@@ -2,7 +2,9 @@
 //   GET  /api/v1/memory           → memory.list (complete browse) + query/facet/limit post-filter
 //   GET  /api/v1/memory/coverage  → memory.coverage
 //   POST /api/v1/memory/retire    → memory.erase {scope_prefix}  (SUBTREE-scoped)
-//   POST /api/v1/memory/retire-item → memory.erase {id}  (exactly ONE memory — studio#206)
+//   POST /api/v1/memory/retire-item → memory.retire {id}  (exactly ONE memory, soft — studio#206, crew#1697)
+//   POST /api/v1/memory/erase-item → memory.erase {id}  (exactly ONE memory, for good — crew#1697)
+//   POST /api/v1/memory/unretire → memory.unretire {id}; GET /memory?retired=1; POST /knowledge/forget (crew#1697)
 //   POST /api/v1/memory/edit      → memory.list + memory.capture + memory.erase {id} (whole or not at all)
 //
 // Fastify inject() with a mock adapter and a STUBBED estate-mcp client (runtime.callEstateTool) —
@@ -19,6 +21,7 @@ import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { EstateMcpError } from '../src/core/estate-mcp-client.js';
+import { AuditLog } from '../src/api/audit.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { memoryRows, withRunLearnings } from '../src/learnings/recall.js';
 
@@ -30,6 +33,8 @@ type MockAdapter = {
 describe('memory-management routes (DES-MEM-FACETED-001)', () => {
   let app: FastifyInstance;
   let estateTool: Mock;
+  /** The decisions crew records on the trail (crew#1261): `[proposalId, by, reason]`. */
+  let decided: Array<[unknown, unknown, unknown]>;
 
   beforeEach(async () => {
     const mockAdapter: MockAdapter = {
@@ -52,11 +57,22 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
       new GateCache(),
       new ElicitationCache(),
       undefined,
-      undefined,
+      { audit: decidingAudit(), authMode: 'off' },
       { callEstateTool: estateTool as (t: string, a: Record<string, unknown>) => Promise<unknown> },
     );
     await app.ready();
   });
+
+  /** A trail that writes nothing and keeps the `proposal.decided` lines this test can read. */
+  function decidingAudit(): AuditLog {
+    decided = [];
+    const audit = AuditLog.noop();
+    vi.spyOn(audit, 'record').mockImplementation((action, _actor, fields) => {
+      if (action === 'proposal.decided') decided.push([fields?.detail?.['proposalId'], fields?.detail?.['by'], fields?.detail?.['reason']]);
+      return 0;
+    });
+    return audit;
+  }
 
   afterEach(async () => {
     await app.close();
@@ -337,12 +353,182 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
     expect((res.json() as { error: string }).error).toContain('unexpected shape');
   });
 
-  // ── POST /memory/retire-item (studio#206: one row, never its scope subtree) ──────
+  // ── POST /memory/retire-item (crew#1697: a SOFT retire of one row, never its scope subtree) ──────
+  // Wire shapes as estate writes them: wicked-estate v0.35.10 crates/wicked-estate-mcp/src/tools/memory.rs:305-307
+  // ({"retired_count"|"restored_count": n}), :420 (retired_at on a retired list row), src/lib.rs:1127 (an estate
+  // without the tool: -32602 "unknown tool: <tool>").
 
-  it('retires ONE memory by id: sends only `id` to memory.erase, never a scope_prefix', async () => {
-    estateTool.mockResolvedValueOnce({ deleted_count: 1 });
+  it('retires ONE memory softly: memory.retire {id} only, never memory.erase', async () => {
+    estateTool.mockResolvedValueOnce({ retired_count: 1 });
 
     const res = await app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload: { memory_id: 'm1' } });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ retired: 1 });
+    expect(estateTool).toHaveBeenCalledTimes(1);
+    expect(estateTool).toHaveBeenCalledWith('memory.retire', { id: 'm1' });
+  });
+
+  it('404s a retire of an id with no live memory (it retired 0)', async () => {
+    estateTool.mockResolvedValueOnce({ retired_count: 0 });
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload: { memory_id: 'gone' } });
+
+    expect(res.statusCode).toBe(404);
+    expect((res.json() as { error: string }).error).toContain('gone');
+  });
+
+  it('refuses a stray scope_prefix or an empty id on retire-item, never calling the client', async () => {
+    for (const payload of [{ memory_id: 'm1', scope_prefix: 'org:acme' }, { memory_id: '' }, { memory_id: '   ' }, {}]) {
+      const res = await app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload });
+      expect(res.statusCode, JSON.stringify(payload)).toBe(400);
+    }
+    expect(estateTool).not.toHaveBeenCalled();
+  });
+
+  it('answers 501 when the estate predates soft retire, and never erases instead', async () => {
+    estateTool.mockRejectedValueOnce(new EstateMcpError('unknown tool: memory.retire', -32602));
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload: { memory_id: 'm1' } });
+
+    expect(res.statusCode).toBe(501);
+    const body = res.json() as { error: string; code: string };
+    expect(body.code).toBe('estate_upgrade_required');
+    expect(body.error).toContain('#552');
+    expect(estateTool).toHaveBeenCalledTimes(1);
+    expect(estateTool).not.toHaveBeenCalledWith('memory.erase', expect.anything());
+  });
+
+  it('answers 501 when the memory implementer has no retirement (-32601 not available)', async () => {
+    estateTool.mockRejectedValueOnce(new EstateMcpError('memory.retire not available: memory implementer does not support retirement', -32601));
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload: { memory_id: 'm1' } });
+
+    expect(res.statusCode).toBe(501);
+  });
+
+  it('codex review: a memory store that did not open stays a 502 with its words, never "upgrade estate"', async () => {
+    estateTool.mockRejectedValueOnce(new EstateMcpError('memory domain not available: unable to open database file', -32601));
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload: { memory_id: 'm1' } });
+
+    expect(res.statusCode).toBe(502);
+    expect((res.json() as { error: string }).error).toContain('unable to open database file');
+  });
+
+  it('502s a retire that reports more than one memory for one id', async () => {
+    estateTool.mockResolvedValueOnce({ retired_count: 2 });
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload: { memory_id: 'm1' } });
+
+    expect(res.statusCode).toBe(502);
+  });
+
+  // ── POST /memory/unretire (crew#1697) ───────────────────────────────────────────
+
+  it('restores ONE retired memory: memory.unretire {id} → { restored: 1 }', async () => {
+    estateTool.mockResolvedValueOnce({ restored_count: 1 });
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/memory/unretire', payload: { memory_id: 'm1' } });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ restored: 1 });
+    expect(estateTool).toHaveBeenCalledWith('memory.unretire', { id: 'm1' });
+  });
+
+  it('404s a restore of an id with no retired memory, 400s a bad body, 501s an old estate', async () => {
+    estateTool.mockResolvedValueOnce({ restored_count: 0 });
+    expect((await app.inject({ method: 'POST', url: '/api/v1/memory/unretire', payload: { memory_id: 'live' } })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'POST', url: '/api/v1/memory/unretire', payload: { id: 'm1' } })).statusCode).toBe(400);
+    estateTool.mockRejectedValueOnce(new EstateMcpError('unknown tool: memory.unretire', -32602));
+    const old = await app.inject({ method: 'POST', url: '/api/v1/memory/unretire', payload: { memory_id: 'm1' } });
+    expect(old.statusCode).toBe(501);
+    expect((old.json() as { code: string }).code).toBe('estate_upgrade_required');
+  });
+
+  // ── GET /memory?retired=1 (crew#1697) ─────────────────────────────────────────
+
+  it('lists retired memories via memory.list {retired: true}, each with retired_at', async () => {
+    estateTool.mockResolvedValueOnce({
+      items: [{ memory_id: 'm1', scope: 'org:acme', content: 'old fact', tier: 'semantic', facets: {}, created_at: 100, retired_at: 200 }],
+    });
+
+    const res = await app.inject({ method: 'GET', url: '/api/v1/memory?retired=1&scope_prefix=org:acme' });
+
+    expect(res.statusCode).toBe(200);
+    expect(estateTool).toHaveBeenCalledWith('memory.list', { scope_prefix: 'org:acme', retired: true });
+    expect((res.json() as { memories: unknown[] }).memories).toEqual([
+      { id: 'm1', content: 'old fact', tier: 'semantic', scope: 'org:acme', facets: {}, created_at: 100, retired_at: 200 },
+    ]);
+  });
+
+  it('lists live memories for retired=0 (no retired arg) and 400s any other retired value', async () => {
+    estateTool.mockResolvedValueOnce({ items: [] });
+    expect((await app.inject({ method: 'GET', url: '/api/v1/memory?retired=0' })).statusCode).toBe(200);
+    expect(estateTool).toHaveBeenCalledWith('memory.list', {});
+    const bad = await app.inject({ method: 'GET', url: '/api/v1/memory?retired=yes' });
+    expect(bad.statusCode).toBe(400);
+    expect(estateTool).toHaveBeenCalledTimes(1);
+  });
+
+  it('codex review: 501s a retired list the memory implementer refuses (-32601 retirement is unsupported)', async () => {
+    estateTool.mockRejectedValueOnce(new EstateMcpError('memory.list retired view not available: retirement is unsupported', -32601));
+    const res = await app.inject({ method: 'GET', url: '/api/v1/memory?retired=1' });
+    expect(res.statusCode).toBe(501);
+    expect((res.json() as { code: string }).code).toBe('estate_upgrade_required');
+  });
+
+  it('501s a retired list from an estate that ignored the flag (rows without retired_at), never showing live rows as retired', async () => {
+    estateTool.mockResolvedValueOnce({
+      items: [{ memory_id: 'm1', scope: '', content: 'live fact', tier: 'semantic', facets: {}, created_at: 100 }],
+    });
+
+    const res = await app.inject({ method: 'GET', url: '/api/v1/memory?retired=true' });
+
+    expect(res.statusCode).toBe(501);
+    expect((res.json() as { code: string }).code).toBe('estate_upgrade_required');
+  });
+
+  // ── POST /knowledge/forget (crew#1697, wicked-estate#553) ─────────────────────
+  // Wire shape: wicked-estate v0.35.10 crates/wicked-estate-mcp/src/tools/knowledge.rs:147-150
+  // ({"forgotten", "skipped_live_source"}); a refusal is -32603 "knowledge.forget refused for <id>: …"
+  // (crates/wicked-estate-knowledge/src/engine.rs forget_in_batch).
+
+  it('forgets by exactly one target, forwarding it verbatim', async () => {
+    for (const payload of [{ id: 'doc:1' }, { source: 'https://x/y.md' }, { scope_prefix: 'project:p1' }, { scope_prefix: '', confirm_erase_all: true }]) {
+      estateTool.mockResolvedValueOnce({ forgotten: 3, skipped_live_source: 1 });
+      const res = await app.inject({ method: 'POST', url: '/api/v1/knowledge/forget', payload });
+      expect(res.statusCode, JSON.stringify(payload)).toBe(200);
+      expect(res.json()).toEqual({ forgotten: 3, skipped_live_source: 1 });
+      expect(estateTool).toHaveBeenLastCalledWith('knowledge.forget', payload);
+    }
+  });
+
+  it('400s no target, two targets, a blank target, an unconfirmed total wipe or a stray field, never calling estate', async () => {
+    for (const payload of [{}, { id: 'a', source: 'b' }, { id: '  ' }, { scope_prefix: '' }, { scope_prefix: '', confirm_erase_all: false }, { id: 'a', kind: 'memory' }]) {
+      const res = await app.inject({ method: 'POST', url: '/api/v1/knowledge/forget', payload });
+      expect(res.statusCode, JSON.stringify(payload)).toBe(400);
+    }
+    expect(estateTool).not.toHaveBeenCalled();
+  });
+
+  it('409s a live-source item named by id, 501s an estate before #553, 502s a malformed answer', async () => {
+    estateTool.mockRejectedValueOnce(
+      new EstateMcpError('knowledge.forget refused for doc:live: live-source structure is owned by knowledge.replace_source', -32603),
+    );
+    expect((await app.inject({ method: 'POST', url: '/api/v1/knowledge/forget', payload: { id: 'doc:live' } })).statusCode).toBe(409);
+    estateTool.mockRejectedValueOnce(new EstateMcpError('unknown tool: knowledge.forget', -32602));
+    expect((await app.inject({ method: 'POST', url: '/api/v1/knowledge/forget', payload: { id: 'doc:1' } })).statusCode).toBe(501);
+    estateTool.mockResolvedValueOnce({ forgotten: 'all' });
+    expect((await app.inject({ method: 'POST', url: '/api/v1/knowledge/forget', payload: { id: 'doc:1' } })).statusCode).toBe(502);
+  });
+
+  // ── POST /memory/erase-item (crew#1697: the hard delete retire-item was; one row, never its subtree) ──
+
+  it('erases ONE memory by id: sends only `id` to memory.erase, never a scope_prefix', async () => {
+    estateTool.mockResolvedValueOnce({ deleted_count: 1 });
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/memory/erase-item', payload: { memory_id: 'm1' } });
 
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ erased: 1 });
@@ -353,7 +539,7 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
   it('404s an id estate does not hold (it erased 0)', async () => {
     estateTool.mockResolvedValueOnce({ deleted_count: 0 });
 
-    const res = await app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload: { memory_id: 'gone' } });
+    const res = await app.inject({ method: 'POST', url: '/api/v1/memory/erase-item', payload: { memory_id: 'gone' } });
 
     expect(res.statusCode).toBe(404);
     expect((res.json() as { error: string }).error).toContain('gone');
@@ -361,7 +547,7 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
 
   it('refuses a scope_prefix beside the id (strict) and an empty id, never calling the client', async () => {
     for (const payload of [{ memory_id: 'm1', scope_prefix: 'org:acme' }, { memory_id: '' }, { memory_id: '   ' }, {}]) {
-      const res = await app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload });
+      const res = await app.inject({ method: 'POST', url: '/api/v1/memory/erase-item', payload });
       expect(res.statusCode, JSON.stringify(payload)).toBe(400);
     }
     expect(estateTool).not.toHaveBeenCalled();
@@ -370,7 +556,7 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
   it('answers 501 estate_upgrade_required when the estate predates erase-by-id, with no fallback erase', async () => {
     estateTool.mockRejectedValueOnce(new EstateMcpError('scope_prefix (non-empty) required for erase', -32602));
 
-    const res = await app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload: { memory_id: 'm1' } });
+    const res = await app.inject({ method: 'POST', url: '/api/v1/memory/erase-item', payload: { memory_id: 'm1' } });
 
     expect(res.statusCode).toBe(501);
     const body = res.json() as { error: string; code: string };
@@ -384,7 +570,7 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
   it('502s an erase that reports more than one deletion for one id', async () => {
     estateTool.mockResolvedValueOnce({ deleted_count: 3 });
 
-    const res = await app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload: { memory_id: 'm1' } });
+    const res = await app.inject({ method: 'POST', url: '/api/v1/memory/erase-item', payload: { memory_id: 'm1' } });
 
     expect(res.statusCode).toBe(502);
   });
@@ -752,6 +938,8 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
       expect(res.statusCode).toBe(502);
       expect(proposals.get('n1')!.state).toBe('rejected');
       expect(proposals.get('rival')!.state).toBe('pending');
+      // crew#1261: the edit took back its own filing; that is on record as crew's, and the rival's row has none.
+      expect(decided).toEqual([['n1', 'crew', 'withdrawn']]);
     });
 
     it('codex r2 #3: a lost submit whose filing was approved meanwhile names the approved copy, never "nothing changed"', async () => {
@@ -773,8 +961,9 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
     it('coord merge check: a crash-left replacement, two edits, then its approve: refused, rejected, only the current words remain', async () => {
       const { s, proposals } = queue([APPROVED], { orphan: true });
       expect((await edit({ memory_id: 'proposal:p0', content: 'second words' })).statusCode).toBe(200);
-      // The edit of p0 settled p0's earlier replacement: rejected as superseded.
+      // The edit of p0 settled p0's earlier replacement: rejected as superseded, on record as crew's `stale` (crew#1261).
       expect(proposals.get('o1')!.state).toBe('rejected');
+      expect(decided).toContainEqual(['o1', 'crew', 'stale']);
       expect((await edit({ memory_id: 'proposal:n1', content: 'current words' })).statusCode).toBe(200);
       const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/o1/approve' });
       expect(res.statusCode).not.toBe(200);
@@ -832,5 +1021,29 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
     expect((await edit({ memory_id: 'm1', content: 'other words' })).statusCode).toBe(409);
     release();
     expect((await first).statusCode).toBe(200);
+  });
+
+  it('codex review: a retire of a memory being edited is refused (409), so the edit\'s erase cannot destroy a retired row', async () => {
+    store([OLD]);
+    const base = estateTool.getMockImplementation()!;
+    let release!: () => void;
+    estateTool.mockImplementationOnce(async (tool: string, args: Record<string, unknown>) => { await new Promise<void>((r) => { release = r; }); return base(tool, args); });
+    const first = edit({ memory_id: 'm1', content: 'new words' });
+    await vi.waitFor(() => expect(estateTool).toHaveBeenCalledTimes(1));
+    const retire = await app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload: { memory_id: 'm1' } });
+    expect(retire.statusCode).toBe(409);
+    expect(estateTool).not.toHaveBeenCalledWith('memory.retire', expect.anything());
+    release();
+    expect((await first).statusCode).toBe(200);
+  });
+
+  it('codex review: an edit of a memory being retired is refused (409)', async () => {
+    let release!: () => void;
+    estateTool.mockImplementationOnce(async () => { await new Promise<void>((r) => { release = r; }); return { retired_count: 1 }; });
+    const retire = app.inject({ method: 'POST', url: '/api/v1/memory/retire-item', payload: { memory_id: 'm1' } });
+    await vi.waitFor(() => expect(estateTool).toHaveBeenCalledTimes(1));
+    expect((await edit({ memory_id: 'm1', content: 'other words' })).statusCode).toBe(409);
+    release();
+    expect((await retire).statusCode).toBe(200);
   });
 });

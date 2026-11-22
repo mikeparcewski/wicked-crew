@@ -352,8 +352,9 @@ export class ReviewService {
     return { recommendation: rec, open: await this.targetOf(rec) };
   }
 
-  /** Dismiss with a reason. A proposal-backed one rejects its proposal in the approve queue too. */
-  async dismiss(id: string, reason: string): Promise<{ recommendation: Recommendation }> {
+  /** Dismiss with a reason. A proposal-backed one rejects its proposal in the approve queue too, and `rejected` hears
+   *  which (the caller records the person's decision, crew#1261). */
+  async dismiss(id: string, reason: string, rejected?: (proposalId: string) => void): Promise<{ recommendation: Recommendation }> {
     const text = line(reason, 500);
     if (text === null) throw new RecommendationError(400, 'a dismissal needs a reason');
     const found = this.deps.store.findRecommendation(id);
@@ -365,6 +366,7 @@ export class ReviewService {
       } catch (err) {
         throw new RecommendationError(502, `its proposal could not be rejected: ${err instanceof Error ? err.message : String(err)}`);
       }
+      rejected?.(found.rec.proposalId);
     }
     const rec = this.deps.store.updateRecommendation(id, { state: 'dismissed', reason: text, decidedAt: this.now().toISOString() }) as Recommendation;
     return { recommendation: rec };
