@@ -32,6 +32,7 @@ class FakeBackend implements DocBackend {
   docs = new Map<string, Array<{ html: string; author: string }>>();
   crash = false;
   refuse = false;
+  moved = false;
   undetermined = false;
   async create(_p: string, docId: string, _r: string, html: string) { this.docs.set(docId, [{ html, author: 'crew' }]); return { head: 0 }; }
   async read(_p: string, docId: string) { const v = this.docs.get(docId); return v === undefined ? null : { head: v.length - 1, html: v.at(-1)!.html }; }
@@ -41,6 +42,7 @@ class FakeBackend implements DocBackend {
     const v = this.docs.get(docId)!;
     const head = v.length - 1;
     if (batch.expectHead !== head) return { headMoved: true as const, head };
+    if (this.moved) { this.moved = false; v.push({ html: v[head]!.html, author: 'someone' }); return { headMoved: true as const, head: head + 1 }; }
     let html = v[head]!.html;
     for (const it of batch.items) {
       const esc = it.value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -132,6 +134,11 @@ describe('crew#1240: times name their zone', () => {
     expect(reconcileSection('decisions', `Mine\n${now}`, [now], Infinity, new Set([now]))).toBeNull();
     // A line of that shape crew never wrote is a person's: it stays.
     expect(reconcileSection('decisions', old, [now], Infinity, new Set())).toBe(`${old}\n${now}`);
+    // Only the line's own time loses its zone, never a person's quoted words (review r1).
+    const quotedOld = 'You · 10:00 · approved: “Deploy at 12:00 UTC+1.”';
+    const quotedNow = 'You · 10:00 UTC-5 · approved: “Deploy at 12:00 UTC+1.”';
+    expect(zoneless(quotedNow)).toBe(quotedOld);
+    expect(reconcileSection('decisions', quotedOld, [quotedNow], Infinity, new Set([quotedOld]))).toBe(quotedNow);
   });
 });
 
@@ -161,16 +168,23 @@ describe('crew#1409: a write is journaled before interactive is asked', () => {
     const ok = await t.service.propose('run-1', { base: 0, author: 'operator', sections: { constraints: 'Reuse the stack’s route.' } }, HUMAN);
     expect(ok.ok).toBe(true);
     expect(t.store.get('run-1')!.pending ?? null).toBeNull();
+    // interactive says the head moved under it: nothing landed, nothing journaled stays.
+    t.backend.moved = true;
+    const moved = await t.service.propose('run-1', { base: 1, author: 'operator', sections: { next: 'Then the PDF.' } }, HUMAN);
+    expect(moved).toMatchObject({ ok: false, code: 409 });
+    expect(t.store.get('run-1')!.pending ?? null).toBeNull();
+    // A later edit on the new head goes through.
+    expect((await t.service.propose('run-1', { base: 2, author: 'operator', sections: { next: 'Then the PDF.' } }, HUMAN)).ok).toBe(true);
     t.backend.refuse = true;
-    await expect(t.service.propose('run-1', { base: 1, author: 'operator', sections: { next: 'Then the PDF.' } }, HUMAN)).rejects.toThrow(/refused/u);
+    await expect(t.service.propose('run-1', { base: 3, author: 'operator', sections: { next: 'Then the invoice.' } }, HUMAN)).rejects.toThrow(/refused/u);
     expect(t.store.get('run-1')!.pending ?? null).toBeNull();
     t.backend.undetermined = true;
-    await expect(t.service.propose('run-1', { base: 1, author: 'operator', sections: { next: 'Then the PDF.' } }, HUMAN)).rejects.toThrow(UndeterminedWriteError);
-    expect(t.store.get('run-1')!.pending).toMatchObject({ expectHead: 1, author: { kind: 'human', id: 'local' }, values: { next: 'Then the PDF.' } });
+    await expect(t.service.propose('run-1', { base: 3, author: 'operator', sections: { next: 'Then the invoice.' } }, HUMAN)).rejects.toThrow(UndeterminedWriteError);
+    expect(t.store.get('run-1')!.pending).toMatchObject({ expectHead: 3, author: { kind: 'human', id: 'local' }, values: { next: 'Then the invoice.' } });
     // It landed: the next read attributes it to the person.
     await t.service.view('run-1');
     expect(t.store.get('run-1')!.pending).toBeNull();
-    expect(t.store.get('run-1')!.trail.at(-1)).toMatchObject({ version: 2, author: { kind: 'human', id: 'local' }, sections: ['next'] });
+    expect(t.store.get('run-1')!.trail.at(-1)).toMatchObject({ version: 4, author: { kind: 'human', id: 'local' }, sections: ['next'] });
   });
 });
 
@@ -187,5 +201,17 @@ describe('crew#1408: the person’s context for the run’s learnings', () => {
       { id: 'approach', text: 'Fix the formatter first.' },
       { id: 'constraints', text: 'Reuse the stack’s route, never a hand-rolled one.' },
     ]);
+  });
+
+  it('a write still settling is not read as the context: it throws, so the run’s end waits for it (review r1)', async () => {
+    const t = setup();
+    await t.service.ensure('run-1');
+    t.backend.crash = true;
+    void t.service.propose('run-1', { base: 0, author: 'operator', sections: { goal: 'EUR prints €1.240,00.' } }, HUMAN);
+    await new Promise((r) => setTimeout(r, 20));
+    // A new daemon whose clock says the write is fresh, and interactive has not shown it yet.
+    const b = setup({ stateHome: t.stateHome, backend: new FakeBackend() });
+    b.backend.docs.set('working-run-1', [t.backend.docs.get('working-run-1')![0]!]);
+    await expect(b.service.personContextOf('run-1')).rejects.toThrow(/not settled/u);
   });
 });

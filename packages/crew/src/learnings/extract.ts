@@ -243,21 +243,47 @@ function fromEvents(events: readonly LooseEvent[]): LearningCandidate[] {
 export interface PersonContextSection { id: string; text: string }
 
 const CONTEXT_LABELS: Readonly<Record<string, string>> = { goal: 'Goal', approach: 'Approach', constraints: 'Constraints' };
+/** A context document note's section line, as crew writes it (`working-doc/service.ts` `contextLines`, `steerNote`):
+ *  "- Goal: …", "- Constraints and steering: …". */
+const NOTE_SECTION = /^- (Goal|Approach|Constraints and steering)(?: \(this step\))?: ?(.*)$/u;
+const NOTE_SECTION_IDS: Readonly<Record<string, string>> = { Goal: 'goal', Approach: 'approach', 'Constraints and steering': 'constraints' };
+/** Any other section line of such a note (where a section's text ends). */
+const NOTE_ANY_SECTION = /^- (Goal|Approach|Decisions|Constraints and steering|Open questions|Next)(?: \(this step\))?:/u;
+
+/** The section values a queued context document note carried, exactly ("id\0normalized text"): a section of the
+ *  person's context is not handed over twice, and only the SAME value counts (crew#1408 review r1). */
+function carriedSections(events: readonly LooseEvent[]): Set<string> {
+  const out = new Set<string>();
+  for (const e of events) {
+    if (e.type !== 'workerMessageQueued') continue;
+    const message = str(e['message']);
+    if (message === null || !/^Operator steering from|^Standing operator (?:context|constraint) from/u.test(message.trimStart())) continue;
+    let id: string | null = null;
+    let lines: string[] = [];
+    const flush = (): void => { if (id !== null) out.add(`${id}\u0000${normalizeLearning(lines.join('\n'))}`); id = null; lines = []; };
+    for (const line of message.split('\n')) {
+      const m = NOTE_SECTION.exec(line);
+      if (m !== null) { flush(); id = NOTE_SECTION_IDS[m[1]!] ?? null; lines = [m[2] ?? '']; continue; }
+      if (NOTE_ANY_SECTION.test(line) || /^\[working-doc [^\]]*\]\s*$/u.test(line)) { flush(); continue; }
+      if (id !== null) lines.push(line);
+    }
+    flush();
+  }
+  return out;
+}
 
 /**
  * (crew#1408) The person's Goal, Approach and Constraints from the run's context document. With the engine's context
  * block they no longer travel as queued notes ({@link fromEvents}), so they are read here. A section whose words a
  * queued steer already carried (the bridge's standing note) is not handed over twice.
  */
-function fromPersonContext(context: readonly PersonContextSection[], steered: readonly LearningCandidate[]): LearningCandidate[] {
-  const carried = steered.filter((c) => c.source === 'steer').map((c) => normalizeLearning(c.content));
+function fromPersonContext(context: readonly PersonContextSection[], carried: ReadonlySet<string>): LearningCandidate[] {
   const out: LearningCandidate[] = [];
   for (const section of context) {
     const label = CONTEXT_LABELS[section.id];
     const text = str(section.text);
     if (label === undefined || text === null) continue;
-    const words = normalizeLearning(text);
-    if (carried.some((c) => c.includes(words))) continue;
+    if (carried.has(`${section.id}\u0000${normalizeLearning(text)}`)) continue;
     const content = clip(`The operator's ${label} for this run: ${text.trim()}`);
     out.push({ key: keyOf('steering', content), kind: 'steering', source: 'steer', form: 'material', content, ord: null, cli: null });
   }
@@ -271,8 +297,7 @@ function fromPersonContext(context: readonly PersonContextSection[], steered: re
  */
 export function extractLearnings(view: SessionView, events: readonly LooseEvent[], context: readonly PersonContextSection[] = []): LearningCandidate[] {
   const repo = repoOf(view) ?? 'this repository';
-  const steered = fromEvents(events);
-  const all = [...fromRepoChecks(view, repo), ...fromOperatorRulings(view), ...fromQeReview(view), ...steered, ...fromPersonContext(context, steered)];
+  const all = [...fromRepoChecks(view, repo), ...fromOperatorRulings(view), ...fromQeReview(view), ...fromEvents(events), ...fromPersonContext(context, carriedSections(events))];
   const seen = new Set<string>();
   return all.filter((c) => (seen.has(c.key) ? false : (seen.add(c.key), true)));
 }

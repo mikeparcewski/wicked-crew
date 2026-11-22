@@ -323,13 +323,17 @@ export class RunLearningsService {
     const dir = this.dirOf(runId);
     if (phase === 'end' && (existsSync(join(dir, FILED_FILE)) || this.distillOf(runId) !== null)) return;
     const events = (await this.deps.adapter.runEvents(runId)) ?? [];
-    // Only the end hands material to the distil seat: the person's context is read then (crew#1408).
+    // Only the end hands material to the distil seat: the person's context is read then (crew#1408). Not known yet (the
+    // document cannot be read, a write is still settling): the end waits, unfiled, for the next start's recovery,
+    // rather than file or distil without it.
     let context: readonly PersonContextSection[] = [];
+    let contextUnknown = false;
     if (phase === 'end' && this.deps.personContext !== undefined) {
       try {
         context = await this.deps.personContext(runId);
       } catch (err) {
-        this.deps.log(`[learnings] ${runId}: the person's context could not be read: ${err instanceof Error ? err.message : String(err)}`);
+        contextUnknown = true;
+        this.deps.log(`[learnings] ${runId}: the person's context could not be read (${err instanceof Error ? err.message : String(err)}); its end is tried again at the next start`);
       }
     }
     const candidates = extractLearnings(view, events, context);
@@ -343,6 +347,7 @@ export class RunLearningsService {
     if (phase !== 'end') return;
     const material = candidates.filter((x) => x.form === 'material' && fresh(x));
     mkdirSync(dir, { recursive: true });
+    if (contextUnknown) return;
     if (material.length === 0) {
       if (failed === 0) this.markFiled(runId, { distilled: false, filed: 0 });
       return;

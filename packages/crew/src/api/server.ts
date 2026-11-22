@@ -1520,6 +1520,8 @@ export async function createServer(
   // Run learnings (src/learnings): every run proposes what it learned to the approve queue — template
   // learnings at its checkpoints, the rest distilled at its end by one cheap seat that did not build it.
   const LEARNINGS_ACTOR: Actor = { id: 'run-learnings', kind: 'system', trust: 'operator' };
+  let workingDocsReady: (svc: WorkingDocService) => void = () => undefined;
+  const workingDocsMade = new Promise<WorkingDocService>((resolve) => { workingDocsReady = resolve; });
   const runLearnings = new RunLearningsService({
     adapter: {
       sessionsDetail: () => adapter.sessionsDetail(),
@@ -1534,9 +1536,9 @@ export async function createServer(
       },
     },
     submit: submitLearning,
-    // (crew#1408) The person's Goal, Approach and Constraints from the run's context document (made further down; a run
-    // ends well after start-up).
-    personContext: (runId) => workingDocs.personContextOf(runId),
+    // (crew#1408) The person's Goal, Approach and Constraints from the run's context document, once it is made (further
+    // down: the start-up recovery may ask first, and waits).
+    personContext: async (runId) => (await workingDocsMade).personContextOf(runId),
     listProposals: async () => proposalRows(await callEstateTool('proposal.list', {})),
     listMemoryContents: async () => memoryContents(await callEstateTool('memory.list', {})),
     launched: (distillRunId, sourceRunId, projectId) => {
@@ -3224,6 +3226,7 @@ export async function createServer(
     log: (m) => app.log.warn(m),
   });
   workingDocTap = (e) => workingDocs.onEvent(e);
+  workingDocsReady(workingDocs);
   // (context-doc-switch) The engine's context blocks are set at once (one cheap call per live document, serial), not
   // after the slower line catch-up below: a seat spawned meanwhile would miss a block the engine does not hold yet.
   void workingDocs.contextCatchUp();

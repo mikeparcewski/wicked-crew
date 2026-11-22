@@ -200,10 +200,13 @@ function zoneOf(d: Date): string {
 
 /** A time as {@link clock} writes it, and as crew wrote it before it named the zone (crew#1240). */
 const TIME = String.raw`\d{2}:\d{2}(?: UTC(?:[+-]\d{1,2}(?::\d{2})?)?)?`;
-/** A line's times without their zone: the line as crew wrote it before it named the zone. */
-const ZONE = /(\d{2}:\d{2}) UTC(?:[+-]\d{1,2}(?::\d{2})?)?/gu;
+/** A generated line's own time without its zone: the line as crew wrote it before it named the zone. Only the line's
+ *  time field (a note's after its who, a gate's or pause's at the end), never a person's quoted words. */
+const ZONED = String.raw`(\d{2}:\d{2}) UTC(?:[+-]\d{1,2}(?::\d{2})?)?`;
+const NOTE_TIME = new RegExp(`^([^·\n]{1,40} · )${ZONED}( · )`, 'u');
+const END_TIME = new RegExp(` · (answered )?${ZONED}$`, 'u');
 export function zoneless(line: string): string {
-  return line.replace(ZONE, '$1');
+  return line.replace(NOTE_TIME, '$1$2$3').replace(END_TIME, ' · $1$2');
 }
 
 const GATE_WORDS: Record<string, string> = {

@@ -164,6 +164,15 @@ describe('crew#1408: the person’s Goal, Approach and Constraints from the cont
     expect(c.filter((x) => x.source === 'steer')).toHaveLength(1);
   });
 
+  it('only the SAME value counts as carried: an older note that merely contains the words does not hide the current one (review r1)', () => {
+    const older: LooseEvent[] = [{
+      type: 'workerMessageQueued',
+      message: "Operator steering from the job's context document (version 1, by the operator).\nIt adds to your brief.\n- Constraints and steering: Do not use TLS.\n[working-doc 9397a34b:aaaa0001]",
+    }];
+    const c = extractLearnings(runView(), older, [{ id: 'constraints', text: 'Use TLS.' }]).filter((x) => x.source === 'steer');
+    expect(c.map((x) => x.content)).toEqual(['The operator steered the work: - Constraints and steering: Do not use TLS.', 'The operator\'s Constraints for this run: Use TLS.']);
+  });
+
   it('the end sweep reads them for the distil seat; a read that fails leaves the rest of the evidence', async () => {
     const h = harness({ personContext: async () => context });
     h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
@@ -171,10 +180,20 @@ describe('crew#1408: the person’s Goal, Approach and Constraints from the cont
     const handoff = JSON.parse(readFileSync(join(h.dir, 'run-1', HANDOFF_FILE), 'utf8')) as { evidence: Array<{ text: string }> };
     expect(handoff.evidence.map((e) => e.text)).toContain('The operator\'s Constraints for this run: Reuse the stack’s route, never a hand-rolled one.');
     expect(handoff.evidence).toHaveLength(8);
-    const broken = harness({ personContext: async () => { throw new Error('interactive is down'); } });
-    broken.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+  });
+
+  it('a context that cannot be read yet leaves the end unfiled; the next start’s recovery hands it over (review r1)', async () => {
+    let down = true;
+    const h = harness({ personContext: async () => { if (down) throw new Error('interactive is down'); return context; } });
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
     await settle();
-    expect((JSON.parse(readFileSync(join(broken.dir, 'run-1', HANDOFF_FILE), 'utf8')) as { evidence: unknown[] }).evidence).toHaveLength(6);
+    expect(h.launches).toHaveLength(0);
+    expect(existsSync(join(h.dir, 'run-1', FILED_FILE))).toBe(false);
+    down = false;
+    await h.svc.recover();
+    expect(h.launches).toHaveLength(1);
+    const handoff = JSON.parse(readFileSync(join(h.dir, 'run-1', HANDOFF_FILE), 'utf8')) as { evidence: Array<{ text: string }> };
+    expect(handoff.evidence.map((e) => e.text)).toContain('The operator\'s Goal for this run: EUR prints €1.240,00 and USD stays byte-identical.');
   });
 });
 

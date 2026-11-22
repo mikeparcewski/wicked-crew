@@ -743,7 +743,8 @@ export class WorkingDocService {
    * (crew#1408) The person's CURRENT Goal, Approach and Constraints in the run's document: each section whose latest
    * write is a person's (crew's trail), with its text at the head, as the engine's block carries them. `[]` when the run
    * has no document, or none of it is a person's. What a finished run's learnings read: with the engine's block a
-   * person's context no longer travels as queued notes. A write of unknown outcome is settled first.
+   * person's context no longer travels as queued notes. A write of unknown outcome is settled first; one still
+   * unsettled throws (the context is not known yet), as does a document that cannot be read.
    */
   async personContextOf(runId: string): Promise<Array<{ id: SectionId; text: string }>> {
     if (this.d.store.get(runId) === undefined) return [];
@@ -751,6 +752,7 @@ export class WorkingDocService {
       await this.reconcile(runId);
       const rec = this.d.store.get(runId);
       if (rec === undefined) return [];
+      if (rec.pending != null) throw new Error('a write of unknown outcome has not settled yet');
       const head = await this.d.backend.read(rec.projectId, rec.docId);
       if (head === null) return [];
       return this.contextBlock(runId, head.head, sectionsOf(head.html), { kind: 'system', id: 'crew' }).block.sections.map((x) => ({ id: x.id, text: x.text }));
