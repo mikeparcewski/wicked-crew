@@ -27,6 +27,7 @@
  * person's own processes (DES §7.3).
  */
 
+import { createHash } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { record, z } from '../zod.js';
 
@@ -130,18 +131,23 @@ export const APPS_PAGE_MAX = 200;
 /** Which list a cursor continues: its `project` (`null` = every project) and `archived` scope. */
 type AppsListFilter = { project: string | null; scope: (typeof LIST_SCOPES)[number] };
 
+/** The list a cursor belongs to, as a short fixed-length tag (a project id may be long: the cursor stays bounded). */
+function appsListTag(filter: AppsListFilter): string {
+  return createHash('sha256').update(JSON.stringify([filter.project, filter.scope])).digest('base64url').slice(0, 16);
+}
+
 /** (crew#1678) A page's `nextCursor`: the last app's place in the list's order and the list it is in, opaque to a client. */
 function appsCursorOf(key: AppListKey, filter: AppsListFilter): string {
-  return Buffer.from(JSON.stringify([key.createdAt, key.slug, filter.project, filter.scope]), 'utf8').toString('base64url');
+  return Buffer.from(JSON.stringify([key.createdAt, key.slug, appsListTag(filter)]), 'utf8').toString('base64url');
 }
 
 /** The place a cursor names, or `undefined` when it is malformed or was given for another list (project or scope). */
 function appsCursorKey(cursor: string, filter: AppsListFilter): AppListKey | undefined {
   try {
     const v: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
-    if (!Array.isArray(v) || v.length !== 4) return undefined;
-    const [createdAt, slug, project, scope] = v as [unknown, unknown, unknown, unknown];
-    if (project !== filter.project || scope !== filter.scope) return undefined;
+    if (!Array.isArray(v) || v.length !== 3) return undefined;
+    const [createdAt, slug, tag] = v as [unknown, unknown, unknown];
+    if (tag !== appsListTag(filter)) return undefined;
     return typeof createdAt === 'number' && Number.isFinite(createdAt) && typeof slug === 'string' && slug !== '' ? { createdAt, slug } : undefined;
   } catch {
     return undefined;

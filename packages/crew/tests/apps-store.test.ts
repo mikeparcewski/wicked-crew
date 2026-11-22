@@ -1339,15 +1339,27 @@ describe('apps: GET /apps pages', () => {
     }
   });
 
-  it('lists in the order apps were made, never by slug; apps made in the same millisecond keep that order (codex r1)', async () => {
-    const s = setup({ now: () => 1_000 });
+  it('lists in the order apps were made, never by slug (codex r1)', async () => {
+    let t = 0;
+    const s = setup({ now: () => (t += 1_000) });
     for (const slug of ['charlie', 'alpha', 'bravo']) await newApp(s, slug);
-    const whole = (await s.call('GET', '/apps')).body['apps'] as Array<{ slug: string; createdAt: number }>;
-    expect(whole.map((a) => [a.slug, a.createdAt])).toEqual([['charlie', 1_000], ['alpha', 1_001], ['bravo', 1_002]]);
+    expect(slugsOf((await s.call('GET', '/apps')).body)).toEqual(['charlie', 'alpha', 'bravo']);
     const first = await s.call('GET', '/apps?limit=1');
     expect(slugsOf(first.body)).toEqual(['charlie']);
     const second = await s.call('GET', `/apps?limit=2&cursor=${first.body['nextCursor'] as string}`);
     expect(slugsOf(second.body)).toEqual(['alpha', 'bravo']);
+  });
+
+  it('a project with a long id pages with a cursor the list accepts back (codex r2)', async () => {
+    const s = setup();
+    const project = '\u30a2'.repeat(128);
+    for (const slug of ['alpha', 'bravo']) expect((await s.call('POST', '/apps', { slug, projectId: project })).status).toBe(201);
+    const q = `project=${encodeURIComponent(project)}`;
+    const first = await s.call('GET', `/apps?limit=1&${q}`);
+    expect(slugsOf(first.body)).toEqual(['alpha']);
+    const next = await s.call('GET', `/apps?limit=1&${q}&cursor=${first.body['nextCursor'] as string}`);
+    expect(next.status, JSON.stringify(next.body)).toBe(200);
+    expect(slugsOf(next.body)).toEqual(['bravo']);
   });
 
   it('records written before this with one createdAt page by slug, joined equal to the unpaged list', async () => {

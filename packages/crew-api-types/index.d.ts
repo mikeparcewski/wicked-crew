@@ -18522,8 +18522,9 @@ export interface AppArchived {
  * (crew#1678) `?limit=<1..200>` answers one page in that order, with {@link AppsListResponse.nextCursor}; the next
  * page is `?limit=<n>&cursor=<nextCursor>` with the same `project` and `archived`. A cursor without `limit`, a
  * malformed one, or one given for another `project` or `archived` is `400`. Without `limit` the answer is every app,
- * as before. Each page is read when it is asked for: an app made later is on a later page, one removed is not
- * repeated, and one archived or restored behind the cursor shows when the list is read again from the first page.
+ * as before. Each page is read when it is asked for: an app made after the cursor's app is on a later page and one
+ * removed is not repeated; one archived, restored, or still being made behind the cursor shows when the list is read
+ * again from the first page.
  */
 export interface AppsListResponse {
   apps: AppSummary[];
