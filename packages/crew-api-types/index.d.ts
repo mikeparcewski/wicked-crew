@@ -457,6 +457,14 @@ export interface ChatArtifactsCapabilities {
    * seat about them only then (else it points the person to Repositories → Add a repository). ABSENT on an older daemon.
    */
   onboard?: boolean;
+  /**
+   * (studio#1140) A demo video's cut may be sent as `ChatMessageContext.artifact` (`<mount>/<doc>` of the cut
+   * document): crew reads it as a video the chat can't change. The seat is told so and pointed to the video editor's
+   * own controls (Chapters, Captions, Theme), and a `refine` of it is blocked, at the card and at Go. ABSENT
+   * on an older daemon, which would read a cut as a page a refine may change: a client does not send a cut as in view
+   * there.
+   */
+  cutInView?: boolean;
 }
 
 // ── A run's working document (program DES-POWER-MODE §8.3, §9; api-types 0.148.0) ──────────────────

@@ -103,7 +103,7 @@ import {
   type JobContext,
   type JobFacts,
 } from './chat-jobs.js';
-import { artifactExists, artifactHead, chatMount, parseArtifactRef, UNFILED_MOUNT } from './chat-context.js';
+import { artifactExists, artifactHead, artifactIsCut, chatMount, parseArtifactRef, UNFILED_MOUNT } from './chat-context.js';
 import { ATTACHMENT_MAX_FILE_BYTES } from './chat-attachments.js';
 import { documentPathPlan, type PacketDeps } from '../interactive/source-packet.js';
 import { tornTailPrefix } from './chat-transcripts.js';
@@ -589,6 +589,9 @@ export const PROPOSAL_WORKFLOWS: Readonly<Record<Exclude<ArtifactProposalKind, '
   refine: 'interactive-chat',
   demo: 'demo',
 };
+
+/** studio#1140: why a refine of a demo cut is blocked (the card says it after the document's title). */
+export const CUT_BLOCKED = "a demo video: this chat can't change it. Change it by hand in the video editor (chapters, trims, captions, theme)";
 
 const STOPS: Readonly<Record<Exclude<ArtifactProposalKind, 'theme' | 'job' | 'onboard'>, string>> = {
   create: 'Stops for you if the check fails. The plan or an escalation may also ask.',
@@ -1130,6 +1133,8 @@ export class ChatProposals {
           const root = await this.deps.docsRoot(ref.projectId);
           const head = root === null ? null : artifactHead(root, ref.doc);
           if (head === null) blocked.push(`${title} · no such document`);
+          // studio#1140: a demo video changes in its editor; a page refine would write a page version over a cut.
+          else if (artifactIsCut(root!, ref.doc)) blocked.push(`${title} · ${CUT_BLOCKED}`);
           else {
             target = { ref: ref.ref, title, base: head };
             projectId = projectOfMount(ref.mount);
@@ -1712,6 +1717,8 @@ export class ChatProposals {
       const root = await this.deps.docsRoot(ref.projectId);
       const head = root === null ? null : artifactHead(root, ref.doc);
       if (head === null) return { code: 409, body: { code: 'source_gone', error: `${resolution.target.title} is gone`, view: viewOf(folded) } };
+      // studio#1140: a refine recorded before crew blocked cuts (or a document that became one) never launches on a cut.
+      if (artifactIsCut(root!, ref.doc)) return { code: 409, body: { code: 'proposal_blocked', error: `${resolution.target.title} · ${CUT_BLOCKED}`, view: viewOf(folded) } };
       if (head !== resolution.target.base) {
         // A newer proposal exists: this one is not re-opened over it (the chat moved on). The re-resolution is still
         // recorded, so the fold settles it as superseded for every reader (and its frame says so).

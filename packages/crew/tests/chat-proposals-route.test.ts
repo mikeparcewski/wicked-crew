@@ -203,9 +203,9 @@ describe('chat proposals (server, A2)', () => {
     // and the test configuration stubs it with the rest (A3: `stubOps` names the stubbed kinds). A theme starts no run,
     // so its launcher is real everywhere (A7).
     expect(((await prod.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse).capabilities?.chatArtifacts)
-      .toEqual({ context: true, instructions: true, proposals: true, create: false, refine: false, theme: true, demo: false, onboard: true });
+      .toEqual({ context: true, instructions: true, proposals: true, create: false, refine: false, theme: true, demo: false, onboard: true, cutInView: true });
     expect(((await stub.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse).capabilities?.chatArtifacts)
-      .toEqual({ context: true, instructions: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps: ['create', 'refine', 'demo'], onboard: true });
+      .toEqual({ context: true, instructions: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps: ['create', 'refine', 'demo'], onboard: true, cutInView: true });
   });
 
   it.each(['run', 'retire', 'close', 'delete'] as const)('%s waits for a held Go launch (#1279)', async (action) => {

@@ -169,6 +169,65 @@ describe('the resolver', () => {
     expect(r.docsRootCalls).not.toContain('other');
   });
 
+  it('studio#1140: a refine of a demo cut is blocked (chat cannot change a video) and carries no target, so Go starts nothing', async () => {
+    const dir = join(ROOT, 'mikes', 'demo-8e0ffbece431');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, '_v2.html'), '<h1>Sign-in demo</h1>');
+    writeFileSync(join(dir, 'versions.json'), JSON.stringify({ head: 2, kind: 'demo', versions: [{ version: 2, kind: 'demo' }] }));
+    const r = rig();
+    const t = chatWith(r, 'c1', { projectId: 'mikes', open: 'mikes/demo-8e0ffbece431' });
+    const p = (await propose(r, 'c1', t, { refine: 'mikes/demo-8e0ffbece431', ask: 'change the chapter caption' }))!;
+    expect(p.blocked).toBe("Coverage deck · a demo video: this chat can't change it. Change it by hand in the video editor (chapters, trims, captions, theme)");
+    expect(p.target).toBeUndefined();
+    const res = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    expect(res.code).toBe(409);
+    expect(r.launcher.launched).toEqual([]);
+  });
+
+  it('studio#1140: a refine recorded before cuts were blocked never launches on a cut at Go', async () => {
+    const dir = join(ROOT, 'mikes', 'cut-later');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, '_v1.html'), '<h1>v1</h1>');
+    writeFileSync(join(dir, 'versions.json'), JSON.stringify({ head: 1, versions: [{ version: 1 }] }));
+    const r = rig();
+    const t = chatWith(r, 'c1', { projectId: 'mikes', open: 'mikes/cut-later' });
+    const p = (await propose(r, 'c1', t, { refine: 'mikes/cut-later', ask: 'change the caption' }))!;
+    expect(p.blocked).toBeNull();
+    expect(p.target).toMatchObject({ ref: 'mikes/cut-later', base: 1 });
+    // The same document is a cut when Go is pressed (a card an older crew recorded on a cut).
+    writeFileSync(join(dir, 'versions.json'), JSON.stringify({ head: 1, kind: 'demo', versions: [{ version: 1, kind: 'demo' }] }));
+    const res = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    expect(res.code).toBe(409);
+    expect(res.body).toMatchObject({ code: 'proposal_blocked', error: "Coverage deck · a demo video: this chat can't change it. Change it by hand in the video editor (chapters, trims, captions, theme)" });
+    expect(r.launcher.launched).toEqual([]);
+    expect(kinds(r, 'c1')).toEqual(['proposal']);
+  });
+
+  it('studio#1140: the cut a run\'s "Edit the cut" makes (no top-level kind) is blocked at the card and at Go', async () => {
+    const dir = join(ROOT, 'mikes', 'demo-1a2b3c4d5e6f');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, '_v0.html'), '<p>Importing…</p>');
+    writeFileSync(join(dir, '_v1.html'), '<h1>Sign-in demo</h1>');
+    const real = { head: 1, versions: [{ version: 0, parent: null, feedback_file: null, html_file: '_v0.html' }, { version: 1, parent: 0, kind: 'demo' }] };
+    writeFileSync(join(dir, 'versions.json'), JSON.stringify(real));
+    const blockedText = "Coverage deck · a demo video: this chat can't change it. Change it by hand in the video editor (chapters, trims, captions, theme)";
+    const r = rig();
+    const t = chatWith(r, 'c1', { projectId: 'mikes', open: 'mikes/demo-1a2b3c4d5e6f' });
+    const p = (await propose(r, 'c1', t, { refine: 'mikes/demo-1a2b3c4d5e6f', ask: 'change the chapter caption' }))!;
+    expect(p.blocked).toBe(blockedText);
+    expect(p.target).toBeUndefined();
+    // A card recorded while it was still the placeholder (version 0 only, no kind) is stopped at Go once it is a cut.
+    writeFileSync(join(dir, 'versions.json'), JSON.stringify({ head: 0, versions: [real.versions[0]] }));
+    const t2 = chatWith(r, 'c2', { projectId: 'mikes', open: 'mikes/demo-1a2b3c4d5e6f' });
+    const q = (await propose(r, 'c2', t2, { refine: 'mikes/demo-1a2b3c4d5e6f', ask: 'change the chapter caption' }))!;
+    expect(q.blocked).toBeNull();
+    writeFileSync(join(dir, 'versions.json'), JSON.stringify({ ...real, head: 0 }));
+    const res = await r.svc.decide('c2', q.pid, { decision: 'go' }, ME, 'i1');
+    expect(res.code).toBe(409);
+    expect(res.body).toMatchObject({ code: 'proposal_blocked', error: blockedText });
+    expect(r.launcher.launched).toEqual([]);
+  });
+
   it('#1406: refine keeps authorized sources, anchors on refresh, and unchanged allow on retry', async () => {
     const r = rig();
     const t = chatWith(r, 'c1', { open: 'mikes/coverage-deck', namedRuns: ['source-run'] });
