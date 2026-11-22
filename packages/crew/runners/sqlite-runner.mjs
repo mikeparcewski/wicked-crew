@@ -57,6 +57,33 @@ try {
     await new Promise((done) => process.stdout.write(JSON.stringify({ ok: true, table, header: { detected, columns: names }, sample: body.slice(0, req.limits.sampleRows).map((r) => names.map((_n, i) => r[i] ?? '')) }), done));
     process.exit(0);
   }
+  if (req.op === 'strip') {
+    // (crew#1731) An uploaded .sqlite's virtual tables (a full-text index, an R-tree) are dropped from crew's COPY of
+    // the file, never the person's: DROP TABLE runs the module's own destroy, which drops its shadow tables too. A
+    // module this SQLite does not have cannot be dropped, and the upload is refused naming it. VACUUM then rewrites
+    // the copy, so nothing of what was dropped stays in its free pages.
+    const quote = (n) => '"' + String(n).replace(/"/g, '""') + '"';
+    const w = new DatabaseSync(req.path, { enableForeignKeyConstraints: false, enableDoubleQuotedStringLiterals: false, allowExtension: false });
+    let answer;
+    try {
+      w.enableDefensive(true);
+      w.exec('PRAGMA trusted_schema = 0; PRAGMA journal_mode = DELETE;');
+      const failed = [];
+      for (const name of req.tables) {
+        try {
+          w.exec('DROP TABLE main.' + quote(name));
+        } catch (e) {
+          failed.push({ name, error: String(e && e.message || e) });
+        }
+      }
+      if (failed.length === 0) w.exec('VACUUM');
+      answer = { ok: true, failed };
+    } finally {
+      w.close();
+    }
+    await new Promise((done) => process.stdout.write(JSON.stringify(answer), done));
+    process.exit(0);
+  }
   const db = new DatabaseSync(req.uri, { readOnly: true, enableForeignKeyConstraints: false, enableDoubleQuotedStringLiterals: false, allowExtension: false });
   db.enableDefensive(true);
   db.exec('PRAGMA query_only = 1; PRAGMA trusted_schema = 0;');
@@ -75,7 +102,14 @@ try {
       const count = db.prepare('SELECT count(*) AS c FROM ' + quoted).get().c;
       tables.push({ name: o.name, sql: o.sql, columns: cols, rows: Number(count) });
     }
-    out({ ok: true, objects: objects.map((o) => ({ type: o.type, name: o.name, virtual: o.type === 'table' && kinds.get(o.name) !== 'table' && !String(o.name).startsWith('sqlite_') })), tables });
+    // A shadow table (FTS5's `_data`, `_idx`, …) is an ordinary table that belongs to its virtual table and goes with
+    // it; it is never called virtual (crew#1731). Any other kind that is not a plain table counts as virtual.
+    const kindOf = (o) => {
+      if (o.type !== 'table' || String(o.name).startsWith('sqlite_')) return null;
+      const k = kinds.get(o.name);
+      return k === 'table' ? null : k === 'shadow' ? 'shadow' : 'virtual';
+    };
+    out({ ok: true, objects: objects.map((o) => ({ type: o.type, name: o.name, virtual: kindOf(o) === 'virtual', shadow: kindOf(o) === 'shadow' })), tables });
   } else {
     const ctx = { tables: req.tables, functions: req.functions, denied: req.denied };
     db.setAuthorizer((action, a1, a2, dbName, tv) => authorize(constants, ctx, action, a1, a2, dbName, tv));

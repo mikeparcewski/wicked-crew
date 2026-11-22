@@ -103,7 +103,7 @@ export async function makeZipBomb(mb, declared = 1024) {
  * schema text hides its kind behind a comment (`hiddenVirtual`), or a generated column; or an RTREE
  * table behind an ordinary table named `pragma_table_list` (`shadowPragma`).
  */
-export function makeSqlite(path, { trigger = false, view = false, hiddenVirtual = false, generated = false, shadowPragma = false } = {}) {
+export function makeSqlite(path, { trigger = false, view = false, hiddenVirtual = false, generated = false, shadowPragma = false, estateFts = false, unknownModule = false } = {}) {
   const db = new DatabaseSync(path, { defensive: false });
   db.exec("CREATE TABLE refunds (id INTEGER PRIMARY KEY, region TEXT, amount REAL); INSERT INTO refunds VALUES (1, 'EMEA', 10.5), (2, 'AMER', 99.99);");
   if (trigger) db.exec('CREATE TABLE audit (n TEXT); CREATE TRIGGER t AFTER INSERT ON refunds BEGIN INSERT INTO audit VALUES (new.region); END;');
@@ -114,6 +114,19 @@ export function makeSqlite(path, { trigger = false, view = false, hiddenVirtual 
     db.exec("UPDATE sqlite_schema SET sql = 'CREATE /* a table */ VIRTUAL TABLE notes USING fts5(body)' WHERE name = 'notes'");
   }
   if (generated) db.exec('CREATE TABLE g (a INTEGER, b INTEGER GENERATED ALWAYS AS (abs(a)) VIRTUAL); INSERT INTO g (a) VALUES (-3);');
+  if (estateFts) {
+    // crew#1731: an estate store's full-text index, as wicked-estate writes it (crates/wicked-estate-store/src/schema.sql:89,
+    // `nodes_fts`, a regular FTS5 table holding its own copy of the text), beside a plain table it indexes.
+    db.exec('CREATE TABLE nodes (symbol INTEGER PRIMARY KEY, name TEXT NOT NULL); CREATE INDEX idx_nodes_name ON nodes(name);');
+    db.exec('CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(\n  symbol UNINDEXED,\n  name,\n  signature,\n  doc\n);');
+    db.exec("INSERT INTO nodes VALUES (1, 'parseInvoice'); INSERT INTO nodes_fts(rowid, symbol, name, signature, doc) VALUES (1, 'sym-1', 'parseInvoice', 'fn(x)', 'zqxj-only-in-the-index');");
+  }
+  if (unknownModule) {
+    // A virtual table of a module this SQLite does not have (an extension's): it cannot be dropped.
+    db.exec('CREATE VIRTUAL TABLE notes USING fts5(body)');
+    db.exec('PRAGMA writable_schema = ON');
+    db.exec("UPDATE sqlite_schema SET sql = 'CREATE VIRTUAL TABLE notes USING nosuchmodule(body)' WHERE name = 'notes'");
+  }
   if (shadowPragma) {
     // An ordinary table named like SQLite's table-valued pragma, claiming an RTREE table is a plain one.
     db.exec('CREATE VIRTUAL TABLE geo USING rtree(id, a, b)');

@@ -9,19 +9,23 @@
  *   The first 20 rows are returned for the PERSON's sheet only (the route never gives them to an agent).
  * - XLSX is a zip: entries are inflated with a hard output cap, so a file that expands past 200 MB is
  *   refused before it is held (a zip bomb). Zip64, encryption and unknown methods are refused.
- * - `.sqlite`: refused if it holds a view, a trigger or a virtual table (§5.1), inspected in the
- *   snapshot runner's child process, never in the daemon.
+ * - `.sqlite`: refused if it holds a view or a trigger (§5.1), inspected in the snapshot runner's child
+ *   process, never in the daemon. A virtual table (a full-text index, an R-tree) is dropped from crew's copy
+ *   with its shadow tables, in the same child, and the result names it (crew#1731); one whose module this
+ *   SQLite lacks cannot be dropped, and the file is refused naming it.
+ * - A crash mid-upload leaves its `.tmp-*` files behind: each upload first removes the ones older than
+ *   {@link STALE_TMP_MS} (crew#1724).
  * - Limits: 50 MB file, 200 MB after decompression, 1,000,000 rows, 200 columns, 30 s to parse.
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 
 import { mcpStateDir } from '../mcp/registry-store.js';
 import type { SqlCatalog } from './catalog/types.js';
-import { isRunnerFailure, sqliteIngest, sqliteInspect } from './drivers/sqlite.js';
+import { isRunnerFailure, sqliteIngest, sqliteInspect, sqliteStrip } from './drivers/sqlite.js';
 import { SourceQueryError } from './drivers/types.js';
 
 export const UPLOAD_LIMITS = Object.freeze({
@@ -72,7 +76,37 @@ export interface UploadResult {
   header: { detected: boolean; columns: string[] } | null;
   /** CSV/XLSX: the first rows, for the person's sheet only. */
   sample: string[][];
+  /** `.sqlite`: the virtual tables dropped from the snapshot with their shadow tables (crew#1731); `[]` otherwise. */
+  dropped: string[];
   catalog: SqlCatalog;
+}
+
+/**
+ * (crew#1724) A `.tmp-*` file in the snapshot store older than this is left by an upload that never finished (the daemon
+ * died mid-upload). Twice the upload's deadline: a live upload's files are younger than its deadline, and the margin
+ * covers the steps after its last check (storing the snapshot, the cleanup).
+ */
+export const STALE_TMP_MS = 2 * UPLOAD_LIMITS.parseMs;
+/** The temporary files an upload writes in the store: its bytes, the snapshot being built and its journals. */
+const TMP_FILE_RE = /^\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:upload|sqlite(?:-journal|-wal|-shm)?)$/;
+
+/** Remove the store's stale `.tmp-*` files (crew#1724). Housekeeping: a failure is never the upload's. */
+async function sweepStale(dir: string, now: number = Date.now()): Promise<void> {
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return;
+  }
+  for (const n of names) {
+    if (!TMP_FILE_RE.test(n)) continue;
+    const p = join(dir, n);
+    try {
+      if (now - (await stat(p)).mtimeMs > STALE_TMP_MS) await rm(p, { force: true });
+    } catch {
+      // gone already, or not ours to judge now
+    }
+  }
 }
 
 async function store(tmp: string, dir: string): Promise<{ digest: string; bytes: number; path: string }> {
@@ -179,6 +213,7 @@ export async function ingestUpload(filename: string, data: Buffer, opts: { dir?:
   await writeFile(join(dir, '.gitignore'), '*\n', { flag: 'wx', mode: 0o600 }).catch((err: NodeJS.ErrnoException) => {
     if (err.code !== 'EEXIST') throw err;
   });
+  await sweepStale(dir);
   const tmp = join(dir, `.tmp-${randomUUID()}.sqlite`);
   const input = join(dir, `.tmp-${randomUUID()}.upload`);
   const kind = kindOf(filename, data);
@@ -186,17 +221,36 @@ export async function ingestUpload(filename: string, data: Buffer, opts: { dir?:
     if (kind === 'sqlite') {
       if (data.subarray(0, 16).toString('latin1') !== 'SQLite format 3\0') throw new UploadError('bad_sqlite', 'the file is not a SQLite database');
       await writeFile(tmp, data, { mode: 0o600 });
-      const inspected = await inspectWithin(tmp, deadline);
-      const bad = inspected.objects.filter((o) => (o.type !== 'table' && o.type !== 'index') || o.virtual);
-      if (bad.length > 0) {
-        throw new UploadError('sqlite_code', `an uploaded .sqlite may hold only tables and indexes; it holds ${bad.map((o) => `${o.virtual ? 'the virtual table' : `the ${o.type}`} ${o.name}`).join(', ')}`);
+      let inspected = await inspectWithin(tmp, deadline);
+      const code = inspected.objects.filter((o) => o.type !== 'table' && o.type !== 'index');
+      if (code.length > 0) {
+        throw new UploadError('sqlite_code', `an uploaded .sqlite may hold only tables and indexes; it holds ${code.map((o) => `the ${o.type} ${o.name}`).join(', ')}`);
+      }
+      // (crew#1731) Virtual tables are dropped from this copy (their shadow tables go with them), then the copy is
+      // inspected again: what is left must be plain tables and indexes.
+      const dropped = inspected.objects.filter((o) => o.virtual).map((o) => o.name);
+      if (dropped.length > 0) {
+        within(deadline);
+        let failed: Array<{ name: string; error: string }>;
+        try {
+          failed = (await sqliteStrip(tmp, dropped, Math.max(1, deadline - Date.now()))).failed;
+        } catch (err) {
+          if (err instanceof SourceQueryError && err.errorClass === 'timeout') throw tooSlow();
+          throw unavailable(err) ?? err;
+        }
+        if (failed.length > 0) {
+          throw new UploadError('sqlite_code', `an uploaded .sqlite may hold only tables and indexes, and crew could not drop ${failed.map((f) => `the virtual table ${f.name} (${f.error})`).join(', ')} from its copy; drop ${failed.length === 1 ? 'it' : 'them'} from a copy of the file (DROP TABLE <name>) and upload that`);
+        }
+        inspected = await inspectWithin(tmp, deadline);
+        const left = inspected.objects.filter((o) => (o.type !== 'table' && o.type !== 'index') || o.virtual || o.shadow);
+        if (left.length > 0) throw new UploadError('sqlite_code', `an uploaded .sqlite may hold only tables and indexes; after its virtual tables were dropped it still holds ${left.map((o) => o.name).join(', ')}`);
       }
       if (inspected.generated.length > 0) throw new UploadError('sqlite_code', `an uploaded .sqlite may not hold generated or hidden columns; it holds ${inspected.generated.join(', ')}`);
       const total = inspected.catalog.relations.reduce((a, r) => a + (r.rowEstimate ?? 0), 0);
       if (total > UPLOAD_LIMITS.rows) throw new UploadError('too_many_rows', `the database has more than ${UPLOAD_LIMITS.rows} rows`);
       if (inspected.catalog.relations.some((r) => r.columns.length > UPLOAD_LIMITS.columns)) throw new UploadError('too_many_columns', `a table has more than ${UPLOAD_LIMITS.columns} columns`);
       const s = await store(tmp, dir);
-      return { digest: s.digest, bytes: s.bytes, kind, table: null, header: null, sample: [], catalog: (await inspectWithin(s.path, deadline)).catalog };
+      return { digest: s.digest, bytes: s.bytes, kind, table: null, header: null, sample: [], dropped, catalog: (await inspectWithin(s.path, deadline)).catalog };
     }
     await writeFile(input, data, { mode: 0o600 });
     within(deadline);
@@ -222,6 +276,7 @@ export async function ingestUpload(filename: string, data: Buffer, opts: { dir?:
       table: ingested.table,
       header: ingested.header,
       sample: ingested.sample,
+      dropped: [],
       catalog: (await inspectWithin(s.path, deadline)).catalog,
     };
   } finally {
