@@ -101,6 +101,17 @@ describe('crew#1261: who rejected a proposal, and why', () => {
     expect(others.some((r) => 'decision' in r)).toBe(false);
   });
 
+  it('a reject estate refuses records nothing, and never changes an earlier decision (review r2)', async () => {
+    const s = await server({ rows: [memory('p1')] });
+    await s.app.inject({ method: 'POST', url: '/api/v1/proposals/p1/reject' });
+    const before = (await s.rejected())[0]!['decision'];
+    // An id estate does not know: it refuses.
+    expect((await s.app.inject({ method: 'POST', url: '/api/v1/proposals/ghost/reject' })).statusCode).toBeGreaterThanOrEqual(400);
+    await s.audit.flush();
+    expect((await s.audit.readAll({ action: PROPOSAL_DECIDED })).map((e) => e.detail?.['proposalId'])).toEqual(['p1']);
+    expect((await s.rejected())[0]!['decision']).toEqual(before);
+  });
+
   it('a decision made after the first list (the trail already read) shows on the next one', async () => {
     const s = await server({ rows: [memory('p1')] });
     expect(await s.rejected()).toEqual([]);

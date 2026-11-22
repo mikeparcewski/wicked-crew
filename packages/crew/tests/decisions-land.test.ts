@@ -316,7 +316,7 @@ describe('DC-S4a structured hosts → ledger → one landing path', () => {
     expect(states).toEqual({ r1: ['remembered', 'needs-you'], r2: ['dismissed', null] });
   });
 
-  it('crew#1261: a person rejecting a decision\'s proposal, or dismissing the decision, is on record as their rejection; a refused reject is not', async () => {
+  it('crew#1261: a person rejecting a decision\'s proposal, or dismissing the decision, is on record as their rejection', async () => {
     const auditDir = mkdtempSync(join(tmpdir(), 'crew-decisions-audit-'));
     try {
       const audit = new AuditLog(join(auditDir, 'audit.log'), () => undefined);
