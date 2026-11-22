@@ -40,10 +40,13 @@ afterAll(() => {
 describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => {
   it('crew#1289: a large CSV leaves the daemon event loop responsive', async () => {
     const data = largeCsv();
-    // crew#1762: what blocks the loop is work on this thread, so each gap between ticks is measured in this
-    // thread's CPU time. A parse here holds the thread for the whole gap (CPU time ~ the gap, past one second);
-    // a loaded runner that does not schedule the process for a while stretches the wall-clock gap only (556 ms
-    // seen on macOS CI, with the parse in its child), which says nothing about the code.
+    // crew#1762: two bounds, because a wall-clock gap alone also measures the runner (556 ms seen on macOS CI, with
+    // the parse in its child, from a process the runner did not schedule for a while):
+    //   - this thread's CPU time per gap, under 500 ms: a parse on the main thread holds it for the whole gap
+    //     (past one second); a descheduled process accrues none;
+    //   - the wall-clock gap, under 2000 ms: a loop blocked while idle (the parse moved to a spawnSync of its
+    //     child) burns no CPU here but stalls for the whole parse (4-7 s on CI runners, 2.5 s locally). Well above
+    //     the runner stalls seen.
     const cpuMs = (): number => {
       const u = process.threadCpuUsage();
       return (u.user + u.system) / 1000;
@@ -67,6 +70,7 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
       expect(result.catalog.relations[0]?.rowEstimate).toBe(850_000);
       expect(ticks).toBeGreaterThan(10);
       expect(maxBusy, `the longest gap between ticks was ${Math.round(maxGap)} ms of wall time`).toBeLessThan(500);
+      expect(maxGap, `the loop stalled while idle (a synchronous wait on the parser?); its longest busy stretch was ${Math.round(maxBusy)} ms`).toBeLessThan(2000);
     } finally {
       clearInterval(ticker);
     }
