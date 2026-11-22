@@ -69,11 +69,11 @@ function fakeRegistry(fail: () => boolean = () => false) {
   return { registry, repos };
 }
 
-function setup(opts: { auth?: boolean; stage?: AppSourceStage | null; turns?: AppTurnLauncher | null; failRegister?: () => boolean; verifyUnitToken?: (t: string) => Promise<{ runId: string; phase: string } | null> } = {}) {
+function setup(opts: { auth?: boolean; stage?: AppSourceStage | null; turns?: AppTurnLauncher | null; failRegister?: () => boolean; verifyUnitToken?: (t: string) => Promise<{ runId: string; phase: string } | null>; now?: () => number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'apps-store-'));
   dirs.push(dir);
   const reg = fakeRegistry(opts.failRegister);
-  const store = new AppStore({ stateFile: join(dir, 'daemon-apps.json'), appsRoot: join(dir, 'apps'), registry: reg.registry, sourceStage: opts.stage ?? null, turns: opts.turns ?? null });
+  const store = new AppStore({ stateFile: join(dir, 'daemon-apps.json'), appsRoot: join(dir, 'apps'), registry: reg.registry, sourceStage: opts.stage ?? null, turns: opts.turns ?? null, ...(opts.now !== undefined ? { now: opts.now } : {}) });
   const app = Fastify({ logger: false });
   apps.push(app);
   const tokens: Record<string, Actor> = { human: HUMAN, agent: AGENT, observer: OBSERVER, plugin: { id: 'plugin:x@1', kind: 'plugin', trust: 'observer' } };
@@ -1328,10 +1328,43 @@ describe('apps: GET /apps pages', () => {
     expect(slugsOf((await s.call('GET', '/apps?limit=10&archived=archived')).body)).toEqual(['bravo']);
     expect(slugsOf((await s.call('GET', '/apps?limit=10&archived=all&project=p1')).body)).toEqual(['alpha', 'bravo']);
     expect(slugsOf((await s.call('GET', '/apps?limit=10&project=other')).body)).toEqual([]);
-    for (const q of ['limit=0', 'limit=201', 'limit=two', 'limit=1.5', 'cursor=abc', 'limit=1&cursor=abc', `limit=1&cursor=${Buffer.from('[1]').toString('base64url')}`]) {
+    const cursor = (await s.call('GET', '/apps?limit=1&archived=all')).body['nextCursor'] as string;
+    expect(slugsOf((await s.call('GET', `/apps?limit=1&archived=all&cursor=${cursor}`)).body)).toEqual(['bravo']);
+    // A cursor continues only the list that gave it (codex r1): another scope or project is refused, never a silent skip.
+    for (const q of ['limit=0', 'limit=201', 'limit=two', 'limit=1.5', 'cursor=abc', 'limit=1&cursor=abc', `limit=1&cursor=${Buffer.from('[1]').toString('base64url')}`,
+      `limit=1&cursor=${cursor}`, `limit=1&archived=archived&cursor=${cursor}`, `limit=1&archived=all&project=p1&cursor=${cursor}`]) {
       const res = await s.call('GET', `/apps?${q}`);
       expect(res.status, q).toBe(400);
       expect(res.body.code, q).toBe('bad_request');
     }
+  });
+
+  it('lists in the order apps were made, never by slug; apps made in the same millisecond keep that order (codex r1)', async () => {
+    const s = setup({ now: () => 1_000 });
+    for (const slug of ['charlie', 'alpha', 'bravo']) await newApp(s, slug);
+    const whole = (await s.call('GET', '/apps')).body['apps'] as Array<{ slug: string; createdAt: number }>;
+    expect(whole.map((a) => [a.slug, a.createdAt])).toEqual([['charlie', 1_000], ['alpha', 1_001], ['bravo', 1_002]]);
+    const first = await s.call('GET', '/apps?limit=1');
+    expect(slugsOf(first.body)).toEqual(['charlie']);
+    const second = await s.call('GET', `/apps?limit=2&cursor=${first.body['nextCursor'] as string}`);
+    expect(slugsOf(second.body)).toEqual(['alpha', 'bravo']);
+  });
+
+  it('records written before this with one createdAt page by slug, joined equal to the unpaged list', async () => {
+    const s = setup();
+    for (const slug of ['delta', 'bravo', 'charlie', 'alpha']) await newApp(s, slug);
+    // Records as an earlier daemon wrote them: one shared createdAt.
+    const state = JSON.parse(readFileSync(s.store.stateFile, 'utf8')) as { apps: Record<string, { createdAt: number }> };
+    for (const a of Object.values(state.apps)) a.createdAt = 5;
+    writeFileSync(s.store.stateFile, JSON.stringify(state));
+    const store = new AppStore({ stateFile: s.store.stateFile, appsRoot: s.store.appsRoot, registry: fakeRegistry().registry });
+    const app = Fastify({ logger: false });
+    apps.push(app);
+    registerAppRoutes(app, { store, audit: { record: vi.fn() } });
+    const get = async (q: string) => (await app.inject({ method: 'GET', url: `/api/v1/apps${q}` })).json() as Record<string, unknown>;
+    expect(slugsOf(await get(''))).toEqual(['alpha', 'bravo', 'charlie', 'delta']);
+    const p1 = await get('?limit=3');
+    expect(slugsOf(p1)).toEqual(['alpha', 'bravo', 'charlie']);
+    expect(slugsOf(await get(`?limit=3&cursor=${p1['nextCursor'] as string}`))).toEqual(['delta']);
   });
 });

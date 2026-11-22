@@ -127,17 +127,21 @@ const LIST_SCOPES = ['active', 'archived', 'all'] as const;
 /** (crew#1678) The most apps one page of `GET /apps` answers. */
 export const APPS_PAGE_MAX = 200;
 
-/** (crew#1678) A page's `nextCursor`: the last app's place in the list's order, opaque to a client. */
-function appsCursorOf(key: AppListKey): string {
-  return Buffer.from(JSON.stringify([key.createdAt, key.slug]), 'utf8').toString('base64url');
+/** Which list a cursor continues: its `project` (`null` = every project) and `archived` scope. */
+type AppsListFilter = { project: string | null; scope: (typeof LIST_SCOPES)[number] };
+
+/** (crew#1678) A page's `nextCursor`: the last app's place in the list's order and the list it is in, opaque to a client. */
+function appsCursorOf(key: AppListKey, filter: AppsListFilter): string {
+  return Buffer.from(JSON.stringify([key.createdAt, key.slug, filter.project, filter.scope]), 'utf8').toString('base64url');
 }
 
-/** The place a cursor names, or `undefined` when it is not one {@link appsCursorOf} made. */
-function appsCursorKey(cursor: string): AppListKey | undefined {
+/** The place a cursor names, or `undefined` when it is malformed or was given for another list (project or scope). */
+function appsCursorKey(cursor: string, filter: AppsListFilter): AppListKey | undefined {
   try {
     const v: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
-    if (!Array.isArray(v) || v.length !== 2) return undefined;
-    const [createdAt, slug] = v as [unknown, unknown];
+    if (!Array.isArray(v) || v.length !== 4) return undefined;
+    const [createdAt, slug, project, scope] = v as [unknown, unknown, unknown, unknown];
+    if (project !== filter.project || scope !== filter.scope) return undefined;
     return typeof createdAt === 'number' && Number.isFinite(createdAt) && typeof slug === 'string' && slug !== '' ? { createdAt, slug } : undefined;
   } catch {
     return undefined;
@@ -209,10 +213,11 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
       if (q.data.cursor !== undefined) return refuse(reply, 400, { code: 'bad_request', error: 'cursor: a cursor continues a paged list; send limit with it' });
       return { apps: store.list(q.data.project, scope) };
     }
-    const after = q.data.cursor === undefined ? null : appsCursorKey(q.data.cursor);
-    if (after === undefined) return refuse(reply, 400, { code: 'bad_request', error: 'cursor: not a cursor this list gave' });
+    const filter: AppsListFilter = { project: q.data.project ?? null, scope };
+    const after = q.data.cursor === undefined ? null : appsCursorKey(q.data.cursor, filter);
+    if (after === undefined) return refuse(reply, 400, { code: 'bad_request', error: 'cursor: not a cursor of this list (send the same project and archived as the page that gave it)' });
     const page = store.listPage(q.data.project, scope, q.data.limit, after);
-    return { apps: page.apps, nextCursor: page.next === null ? null : appsCursorOf(page.next) };
+    return { apps: page.apps, nextCursor: page.next === null ? null : appsCursorOf(page.next, filter) };
   });
 
   app.post(`${V}/apps`, { config: { manifest: { requestType: 'CreateAppBody', responseType: 'AppDetailResponse', statusCodes: [201, 400, 404, 409, 422, 503] } } }, async (req, reply) => {

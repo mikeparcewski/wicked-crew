@@ -997,6 +997,9 @@ export class AppStore {
         await git.setMain(commit);
         const receipt: AppReceipt | null = human ? { kind: 'you', tree, version: 1, at, actor: input.actor } : null;
         this.transact(slug, () => {
+          // crew#1678: an app is listed in the order it was published here (a slower create started earlier never
+          // lands behind a later one), so a paged list's cursor never skips it.
+          a.createdAt = Math.max(at, ...Object.values(this.state.apps).map((x) => x.createdAt + 1));
           this.state.apps[slug] = a;
           this.record(a, { commit, tree, at, author: { kind: 'crew', id: 'wicked-crew' }, receipt, summary: 'A new app', check: { level: 'spec', checked: [] }, base: null });
           if (human) this.pushHistory(a, 1);
