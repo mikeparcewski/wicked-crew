@@ -7750,6 +7750,22 @@ export interface RequirementDetail extends RequirementSummary {
   errorPathCount: number;
   businessRules: unknown[];
   legacyComponents: unknown[];
+  /** (crew#1699, wicked-core-ts >= 0.15.48) The requirement's code links, typed, from the engine's `SatisfiedBy`
+   *  edges (wicked-core#1483): the source for code links (`legacyComponents` is the document's untyped list). Empty
+   *  when no code target remains (a row flagged `uncounted: 'unindexed'`); `null` when the engine does not say (an
+   *  older engine); ABSENT from an older daemon. */
+  components?: RequirementComponent[] | null;
+}
+
+/** (crew#1699) One code link of a requirement. `symbolId` is the estate SymbolId (deep-link key); `kind` the node
+ *  kind label (`Function`, `Method`, or an `Other` tag); `confidence` the edge's (1.0 for the builder's own link,
+ *  0.5 for an older build's name-resolved one). */
+export interface RequirementComponent {
+  symbolId: string;
+  name: string;
+  file: string;
+  kind: string;
+  confidence: number;
 }
 
 export interface RequirementsPage {
