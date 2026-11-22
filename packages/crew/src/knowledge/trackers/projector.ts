@@ -43,7 +43,7 @@ const RETRY_MAX_MS = 10 * 60_000;
 export type EstateCall = (tool: string, args: Record<string, unknown>) => Promise<unknown>;
 
 export interface TrackerProjectorDeps {
-  store: Pick<McpRegistryStore, 'read' | 'mutate' | 'settled'>;
+  store: Pick<McpRegistryStore, 'read' | 'mutate' | 'amend' | 'settled'>;
   /** Every run's addresses, with the run's project and repo (for the `run:` end's deps). */
   addresses?: () => Promise<Array<{ runId: string; projectId: string | null; repoId: string | null; addresses: RunAddress[] }>>;
   /** The PR a run delivered (`https://github.com/o/r/pull/7`), for the trail's `closes` link; absent = none drawn. */
@@ -287,7 +287,8 @@ export class TrackerProjector {
     if (tombstoneFailed) (this.deps.schedule ?? ((fn, ms) => void setTimeout(fn, ms).unref?.()))(() => this.changed(), RETRY_MAX_MS);
     // Only this projector writes a tracker id, one pass at a time, so the last generation estate took for an id dropped
     // here is this pass's empty one (or the id is live, and the next pass projects it), even if it was removed again.
-    if (tombstonesDone.size > 0) await this.deps.store.mutate((f) => dropEstateTombstones(f, 'tracker', tombstonesDone));
+    // (crew#1740) Housekeeping, not an operator change: written in place, keeping no restore point.
+    if (tombstonesDone.size > 0) await this.deps.store.amend((f) => dropEstateTombstones(f, 'tracker', tombstonesDone));
     // An unreadable address record is not "no issues": nothing is projected this time, and the reconcile retries.
     let runs: Awaited<ReturnType<NonNullable<TrackerProjectorDeps['addresses']>>> = [];
     if (this.deps.addresses !== undefined) {

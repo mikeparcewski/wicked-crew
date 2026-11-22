@@ -9,7 +9,7 @@
 //   - crew#1328 item 3 (the allowlist half): a re-save that changes a source's allowed views with no new description
 //     names the source for re-projection.
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -135,16 +135,17 @@ describe('estate tombstones survive the entry and a restart (crew#1328 item 1, c
     expect(key).not.toBeNull();
     // The daemon stops after the removal lands and before its erasure runs (no listener).
     await registry.remove('shop-db');
-    // Restarted: the acknowledgement is still true (estate still holds that projection) until the erasure.
-    const after = new SourceProjector({ store, catalogs: registry.catalogs, call, acksFile });
-    expect(after.projectedDescriptor(SOURCE_ID)).toBe(key);
+    // Restarted: the acknowledgement is still on disk until the erasure (provisional: crew#1741).
+    expect((JSON.parse(readFileSync(acksFile, 'utf8')) as { acked: Record<string, { key: string }> }).acked[SOURCE_ID]?.key).toBe(key);
     let ackOnDiskAtSend: unknown = 'unread';
     const watching = new SourceProjector({
       store,
       catalogs: registry.catalogs,
       acksFile,
       call: async (tool, args) => {
-        ackOnDiskAtSend = (JSON.parse(readFileSync(acksFile, 'utf8')) as { acked: Record<string, string> }).acked[SOURCE_ID] ?? null;
+        // The boot check of the kept acknowledgement (crew#1741) reads; estate holds no catalog for it here.
+        if (tool !== 'knowledge.replace_source') return null;
+        ackOnDiskAtSend = (JSON.parse(readFileSync(acksFile, 'utf8')) as { acked: Record<string, unknown> }).acked[SOURCE_ID] ?? null;
         return call(tool, args);
       },
     });
@@ -253,7 +254,104 @@ describe('estate tombstones survive the entry and a restart (crew#1328 item 1, c
     const second = projector.projectedDescriptor(SOURCE_ID);
     expect(second).not.toBeNull();
     expect(second).not.toBe(first);
-    expect((JSON.parse(readFileSync(acksFile, 'utf8')) as { acked: Record<string, string> }).acked[SOURCE_ID]).toBe(second);
+    expect((JSON.parse(readFileSync(acksFile, 'utf8')) as { acked: Record<string, { key: string }> }).acked[SOURCE_ID]?.key).toBe(second);
+  });
+
+  it('crew#1740: a tombstone drop keeps no restore point, and a pass with nothing to drop writes nothing (fails before the fix)', async () => {
+    const { store, registry, onDisk } = rig([sourceRecord(), pmRecord()]);
+    await registry.remove('shop-db');
+    await registry.remove('jira');
+    const generation = onDisk().generation;
+    const kept = (await store.generations()).map((g) => g.generation);
+    expect(onDisk().estateTombstones).toHaveLength(3);
+    const call = async (): Promise<unknown> => ({});
+    await new TrackerProjector({ store, call }).reconcile();
+    await new SourceProjector({ store, catalogs: registry.catalogs, call }).backfill();
+    // Every tombstone is gone, and the operator's restore points are the two removals' alone.
+    expect(onDisk().estateTombstones).toBeUndefined();
+    expect(onDisk().generation).toBe(generation);
+    expect((await store.generations()).map((g) => g.generation)).toEqual(kept);
+    // A later pass drops nothing and writes nothing (the file is the same one, untouched).
+    const before = statSync(store.path);
+    await new TrackerProjector({ store, call }).reconcile();
+    await new SourceProjector({ store, catalogs: registry.catalogs, call }).backfill();
+    const after = statSync(store.path);
+    expect([after.ino, after.mtimeMs]).toEqual([before.ino, before.mtimeMs]);
+    // A real write after the drop still keeps the generation it replaces, now without the tombstones.
+    await store.mutate(() => undefined);
+    expect(onDisk().generation).toBe(generation! + 1);
+    expect((await store.readGeneration(generation!))?.estateTombstones).toBeUndefined();
+  });
+
+  it('crew#1741: a kept acknowledgement is provisional after a restart until estate is seen to hold its generation (fails before the fix)', async () => {
+    const { store, registry, acksFile } = rig([sourceRecord()]);
+    await describeShop(store, registry);
+    let taken = 0;
+    const first = new SourceProjector({
+      store,
+      catalogs: registry.catalogs,
+      acksFile,
+      call: async (_tool, args) => void (taken = args['generation'] as number),
+    });
+    expect(await first.project('shop-db')).toBe(true);
+    const key = first.projectedDescriptor(SOURCE_ID)!;
+    expect(JSON.parse(readFileSync(acksFile, 'utf8'))).toEqual({ version: 2, acked: { [SOURCE_ID]: { key, generation: taken } } });
+
+    // Restarted, with estate holding `held` for the source (estate's own answer shape: wicked-estate-mcp
+    // tools/knowledge.rs dispatch_source_catalog), and the boot projection held until released.
+    const restart = (held: number | null) => {
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((r) => (release = r));
+      let sending = false;
+      const reads: unknown[] = [];
+      const projector = new SourceProjector({
+        store,
+        catalogs: registry.catalogs,
+        acksFile,
+        call: async (tool, args) => {
+          if (tool === 'knowledge.source_catalog') {
+            reads.push(args);
+            if (held === null) throw new Error(`no visible catalog for source "${SOURCE_ID}" (pass visible with source:<that id> to read one)`);
+            return { sourceId: SOURCE_ID, label: 'shop-db', generation: held, page: 0, pages: 1, total_docs: 1, untrusted: true, catalog: {}, docs: [] };
+          }
+          sending = true;
+          await gate;
+          taken = args['generation'] as number;
+          return {};
+        },
+      });
+      return { projector, release: () => release(), sending: () => sending, reads };
+    };
+
+    // Estate still holds the acknowledged generation: admitted once that is read, before the boot projection lands.
+    const same = restart(taken);
+    expect(same.projector.projectedDescriptor(SOURCE_ID)).toBeNull();
+    const boot = same.projector.backfill();
+    await until(() => same.sending());
+    expect(same.reads).toEqual([{ sourceId: SOURCE_ID, page: 0, visible: [`source:${SOURCE_ID}`] }]);
+    expect(same.projector.projectedDescriptor(SOURCE_ID)).toBe(key);
+    same.release();
+    await boot;
+
+    // Estate was rolled back (an older generation), or holds none: nothing is admitted until the projection lands.
+    for (const held of [taken - 16, null]) {
+      const back = restart(held);
+      const booting = back.projector.backfill();
+      await until(() => back.sending());
+      expect(back.projector.projectedDescriptor(SOURCE_ID)).toBeNull();
+      back.release();
+      await booting;
+      expect(back.projector.projectedDescriptor(SOURCE_ID)).toBe(key);
+    }
+  });
+
+  it('crew#1741: a version 1 acknowledgement file (no generation) admits nothing after a restart', async () => {
+    const { store, registry, acksFile } = rig([sourceRecord()]);
+    writeFileSync(acksFile, JSON.stringify({ version: 1, acked: { [SOURCE_ID]: 'some-key' } }));
+    const logs: string[] = [];
+    const projector = new SourceProjector({ store, catalogs: registry.catalogs, acksFile, call: async () => ({}), log: (m) => logs.push(m) });
+    expect(projector.projectedDescriptor(SOURCE_ID)).toBeNull();
+    expect(logs).toEqual([]);
   });
 
   it('a tracker erased then restored unchanged is projected again (codex on #1735)', async () => {
