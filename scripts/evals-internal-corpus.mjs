@@ -181,13 +181,12 @@ import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   accessSync,
-  closeSync,
   constants as fsConstants,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
-  openSync,
   readdirSync,
   readFileSync,
   readlinkSync,
@@ -392,13 +391,19 @@ function publishJson(path, value, generation = newGeneration()) {
  * Run `fn(generation)` holding `lockPath` (exclusive create — a held lock is a refusal naming the
  * holder, never an interleaving), then release the lock however `fn` ends. One `generation` per
  * publication; the lock file records `pid` + generation for the operator who finds it stale.
+ *
+ * The holder line is written to `<lock>.<generation>.tmp` first and the lock is that file's hard link
+ * (`link` fails with EEXIST while another publication holds it), so the lock never exists without its
+ * holder: a racer that loses always reads who holds it (crew#1764 — an exclusive create followed by a
+ * write let the loser read an empty lock in between).
  */
 function withPublicationLock(lockPath, what, fn) {
   mkdirSync(dirname(lockPath), { recursive: true });
   const generation = newGeneration();
-  let fd;
+  const tmp = `${lockPath}.${generation}.tmp`;
   try {
-    fd = openSync(lockPath, 'wx');
+    writeFileSync(tmp, `pid ${process.pid} generation ${generation}\n`, 'utf8');
+    linkSync(tmp, lockPath);
   } catch (err) {
     if (err?.code === 'EEXIST') {
       let holder = '';
@@ -412,15 +417,13 @@ function withPublicationLock(lockPath, what, fn) {
       );
     }
     throw err;
+  } finally {
+    rmSync(tmp, { force: true });
   }
   // From here the lock is OURS: release it however publication ends.
   try {
-    writeFileSync(fd, `pid ${process.pid} generation ${generation}\n`, 'utf8');
-    closeSync(fd);
-    fd = undefined;
     return fn(generation);
   } finally {
-    if (fd !== undefined) closeSync(fd);
     rmSync(lockPath, { force: true });
   }
 }
