@@ -18,6 +18,7 @@
 import { createHash } from 'node:crypto';
 import type { SessionView } from 'wicked-crew-api-types';
 import type { LooseEvent } from '../insights/run-facts.js';
+import { SECTION_LABELS } from '../working-doc/sections.js';
 
 /** What a learning is (the payload's `capture`). */
 export type LearningKind = 'gotcha' | 'decision' | 'pattern' | 'steering';
@@ -243,28 +244,28 @@ function fromEvents(events: readonly LooseEvent[]): LearningCandidate[] {
 export interface PersonContextSection { id: string; text: string }
 
 const CONTEXT_LABELS: Readonly<Record<string, string>> = { goal: 'Goal', approach: 'Approach', constraints: 'Constraints' };
-/** A context document note's section line, as crew writes it (`working-doc/service.ts` `contextLines`, `steerNote`):
- *  "- Goal: …", "- Constraints and steering: …". */
-const NOTE_SECTION = /^- (Goal|Approach|Constraints and steering)(?: \(this step\))?: ?(.*)$/u;
-const NOTE_SECTION_IDS: Readonly<Record<string, string>> = { Goal: 'goal', Approach: 'approach', 'Constraints and steering': 'constraints' };
-/** Any other section line of such a note (where a section's text ends). */
-const NOTE_ANY_SECTION = /^- (Goal|Approach|Decisions|Constraints and steering|Open questions|Next)(?: \(this step\))?:/u;
+/** A section's label in a context document note → its id (the writer's own labels, `working-doc/sections.ts`). */
+const LABEL_IDS: ReadonlyMap<string, string> = new Map(Object.entries(SECTION_LABELS).map(([id, label]) => [label, id]));
+/** A note's section line, as crew writes it (`working-doc/service.ts` `contextLines`, `steerNote`): "- Goal: …",
+ *  "- Next and trailing work (this step): …". */
+const LABEL_ALTERNATION = [...LABEL_IDS.keys()].map((l) => l.replace(/[.*+?^$()|[\]\\{}]/gu, '\\$&')).join('|');
+const NOTE_SECTION = new RegExp(`^- (${LABEL_ALTERNATION})(?: \\(this step\\))?:(?: (.*))?$`, 'u');
+const STEER_PREFIX = 'The operator steered the work: ';
+/** A section's value as compared: line breaks as LF, the ends trimmed; case and inner whitespace kept. */
+const sectionValue = (t: string): string => t.replace(/\r\n?/gu, '\n').trim();
 
-/** The section values a queued context document note carried, exactly ("id\0normalized text"): a section of the
- *  person's context is not handed over twice, and only the SAME value counts (crew#1408 review r1). */
-function carriedSections(events: readonly LooseEvent[]): Set<string> {
+/** The section values the run's queued steers carried INTO THE EVIDENCE ("id\0value"): what the steer candidates
+ *  kept after their clip, never what the raw note held beyond it (review r2). Only the SAME value counts. */
+function carriedSections(steers: readonly LearningCandidate[]): Set<string> {
   const out = new Set<string>();
-  for (const e of events) {
-    if (e.type !== 'workerMessageQueued') continue;
-    const message = str(e['message']);
-    if (message === null || !/^Operator steering from|^Standing operator (?:context|constraint) from/u.test(message.trimStart())) continue;
+  for (const c of steers) {
+    if (c.source !== 'steer' || !c.content.startsWith(STEER_PREFIX)) continue;
     let id: string | null = null;
     let lines: string[] = [];
-    const flush = (): void => { if (id !== null) out.add(`${id}\u0000${normalizeLearning(lines.join('\n'))}`); id = null; lines = []; };
-    for (const line of message.split('\n')) {
+    const flush = (): void => { if (id !== null) out.add(`${id}\u0000${sectionValue(lines.join('\n'))}`); id = null; lines = []; };
+    for (const line of c.content.slice(STEER_PREFIX.length).split('\n')) {
       const m = NOTE_SECTION.exec(line);
-      if (m !== null) { flush(); id = NOTE_SECTION_IDS[m[1]!] ?? null; lines = [m[2] ?? '']; continue; }
-      if (NOTE_ANY_SECTION.test(line) || /^\[working-doc [^\]]*\]\s*$/u.test(line)) { flush(); continue; }
+      if (m !== null) { flush(); id = LABEL_IDS.get(m[1]!) ?? null; lines = [m[2] ?? '']; continue; }
       if (id !== null) lines.push(line);
     }
     flush();
@@ -283,7 +284,7 @@ function fromPersonContext(context: readonly PersonContextSection[], carried: Re
     const label = CONTEXT_LABELS[section.id];
     const text = str(section.text);
     if (label === undefined || text === null) continue;
-    if (carried.has(`${section.id}\u0000${normalizeLearning(text)}`)) continue;
+    if (carried.has(`${section.id}\u0000${sectionValue(text)}`)) continue;
     const content = clip(`The operator's ${label} for this run: ${text.trim()}`);
     out.push({ key: keyOf('steering', content), kind: 'steering', source: 'steer', form: 'material', content, ord: null, cli: null });
   }
@@ -297,7 +298,8 @@ function fromPersonContext(context: readonly PersonContextSection[], carried: Re
  */
 export function extractLearnings(view: SessionView, events: readonly LooseEvent[], context: readonly PersonContextSection[] = []): LearningCandidate[] {
   const repo = repoOf(view) ?? 'this repository';
-  const all = [...fromRepoChecks(view, repo), ...fromOperatorRulings(view), ...fromQeReview(view), ...fromEvents(events), ...fromPersonContext(context, carriedSections(events))];
+  const steered = fromEvents(events);
+  const all = [...fromRepoChecks(view, repo), ...fromOperatorRulings(view), ...fromQeReview(view), ...steered, ...fromPersonContext(context, carriedSections(steered))];
   const seen = new Set<string>();
   return all.filter((c) => (seen.has(c.key) ? false : (seen.add(c.key), true)));
 }

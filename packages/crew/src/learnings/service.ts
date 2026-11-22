@@ -328,6 +328,9 @@ export class RunLearningsService {
     // rather than file or distil without it.
     let context: readonly PersonContextSection[] = [];
     let contextUnknown = false;
+    // The end is on disk before anything is awaited for it: a daemon that dies mid-read is found by the next start's
+    // recovery, which ends it again (review r2).
+    if (phase === 'end') mkdirSync(dir, { recursive: true });
     if (phase === 'end' && this.deps.personContext !== undefined) {
       try {
         context = await this.deps.personContext(runId);

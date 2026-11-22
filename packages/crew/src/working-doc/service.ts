@@ -35,7 +35,7 @@ import { stripRulesBrief } from '../decisions/rules-brief.js';
 import type { CoreEvent } from '../core/types.js';
 import {
   PLUGIN_SECTIONS, SECTION_LABELS, SECTION_MAX_CHARS, SECTION_STEER, anchorOf, changedSections, encodeSectionText, initialHtml, isSectionId,
-  sectionsOf, type SectionId,
+  sectionsOf, writtenText, type SectionId,
 } from './sections.js';
 import { CONTEXT_SEEN_MAX, type ContextRecipient, type ContextRecord, type DocAuthor, type SteerRecord, type TrailEntry, type WorkingDocRecord, type WorkingDocStore } from './store.js';
 import {
@@ -929,7 +929,7 @@ export class WorkingDocService {
     }
     const got = sectionsOf(html);
     const ids = Object.keys(p.values) as SectionId[];
-    const landed = ids.every((id) => got[id] === p.values[id]);
+    const landed = ids.every((id) => got[id] === writtenText(p.values[id] ?? ''));
     // One save: the write settled and, if it was crew's lines and landed, the ownership it carries (xreview r7).
     this.d.store.update(runId, (r) => { r.pending = null; if (landed && p.ownedDecisions !== undefined) r.ownedDecisions = p.ownedDecisions; });
     if (landed) {

@@ -185,6 +185,11 @@ describe('crew#1409: a write is journaled before interactive is asked', () => {
     await t.service.view('run-1');
     expect(t.store.get('run-1')!.pending).toBeNull();
     expect(t.store.get('run-1')!.trail.at(-1)).toMatchObject({ version: 4, author: { kind: 'human', id: 'local' }, sections: ['next'] });
+    // review r2: a value with a line separator reads back as a line break; it is still recognized as landed.
+    t.backend.undetermined = true;
+    await expect(t.service.propose('run-1', { base: 4, author: 'operator', sections: { goal: 'First\u2028Second' } }, HUMAN)).rejects.toThrow(UndeterminedWriteError);
+    await t.service.view('run-1');
+    expect(t.store.get('run-1')!.trail.at(-1)).toMatchObject({ version: 5, author: { kind: 'human', id: 'local' }, sections: ['goal'] });
   });
 });
 

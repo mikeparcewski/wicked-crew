@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import Fastify from 'fastify';
 import type { SessionView } from 'wicked-crew-api-types';
 import { extractLearnings, creatorSeats } from '../src/learnings/extract.js';
+import { contextSteerNote } from '../src/working-doc/service.js';
 import {
   DISTILL_WORKFLOW,
   FILED_FILE,
@@ -180,6 +181,32 @@ describe('crew#1408: the person’s Goal, Approach and Constraints from the cont
     const handoff = JSON.parse(readFileSync(join(h.dir, 'run-1', HANDOFF_FILE), 'utf8')) as { evidence: Array<{ text: string }> };
     expect(handoff.evidence.map((e) => e.text)).toContain('The operator\'s Constraints for this run: Reuse the stack’s route, never a hand-rolled one.');
     expect(handoff.evidence).toHaveLength(8);
+  });
+
+  it('review r2: only what the evidence kept counts, case and words exactly, and the writer’s own labels end a section', () => {
+    const goal = `Make the invoice PDF right. ${'x'.repeat(1_400)}`;
+    const note = contextSteerNote(3, 'the operator', [{ id: 'goal', text: goal }, { id: 'constraints', text: 'Only edit src/Parser.ts.' }], [{ id: 'next', text: 'Then the CSV.' }], '[working-doc run-1:abcd0001]');
+    const queued: LooseEvent[] = [{ type: 'workerMessageQueued', message: note }];
+    const steer = (ctx: Array<{ id: string; text: string }>) => extractLearnings(runView(), queued, ctx).filter((x) => x.source === 'steer').map((x) => x.content);
+    // The queued note's candidate is clipped inside the long Goal: its Constraints never reached the evidence.
+    expect(steer([{ id: 'constraints', text: 'Only edit src/Parser.ts.' }]).at(-1)).toBe('The operator\'s Constraints for this run: Only edit src/Parser.ts.');
+    // A short note carried both, ended by "Next and trailing work (this step)": not handed over twice…
+    const short: LooseEvent[] = [{ type: 'workerMessageQueued', message: contextSteerNote(3, 'the operator', [{ id: 'constraints', text: 'Only edit src/Parser.ts.' }], [{ id: 'next', text: 'Then the CSV.' }], '[working-doc run-1:abcd0002]') }];
+    expect(extractLearnings(runView(), short, [{ id: 'constraints', text: 'Only edit src/Parser.ts.' }]).filter((x) => x.source === 'steer')).toHaveLength(1);
+    // …but a correction of case is a new value.
+    expect(extractLearnings(runView(), short, [{ id: 'constraints', text: 'Only edit src/parser.ts.' }]).filter((x) => x.source === 'steer')).toHaveLength(2);
+  });
+
+  it('review r2: the end is on disk before the context is read, so a daemon that dies mid-read ends it again at the next start', async () => {
+    const h = harness({ personContext: () => new Promise(() => undefined) });
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+    await settle();
+    expect(existsSync(join(h.dir, 'run-1'))).toBe(true);
+    expect(h.launches).toHaveLength(0);
+    const deps = (h.svc as unknown as { deps: Record<string, unknown> }).deps;
+    const next = new RunLearningsService({ ...deps, personContext: async () => context } as never);
+    await next.recover();
+    expect(h.launches).toHaveLength(1);
   });
 
   it('a context that cannot be read yet leaves the end unfiled; the next start’s recovery hands it over (review r1)', async () => {
