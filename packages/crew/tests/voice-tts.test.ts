@@ -920,7 +920,7 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
     await s.installDone();
     expect((await s.status()).install).toBeNull();
     await s.speak('hello', VOICE_A.id);
-    expect(calls.filter((c) => c.args[1] === '-c')).toHaveLength(2);
+    expect(calls.filter((c) => c.args[1] === '-c')).toHaveLength(1); // one probe: the install uses startInstall's (crew#1559)
     for (const kind of ['venv', 'pip', 'piper']) expect(calls.some((c) => c.args.includes(kind))).toBe(true);
     for (const c of calls) {
       expect(c.cwd).toBe(resolve(dir));
@@ -1176,5 +1176,63 @@ describe('voice suite hygiene', () => {
     await s.speak('hello', VOICE_A.id);
     await s.sample(VOICE_A.id);
     expect(readdirSync(process.cwd()).sort()).toEqual(before);
+  });
+});
+
+describe('crew#1559: install, probe and platform hardening', () => {
+  it('item 2: an install uses the probe it was admitted on, and never probes a second time', async () => {
+    const probe = vi.fn((cmd: string) => (cmd === 'python3' ? PY : null));
+    const inst = installSpawn();
+    const s = service({ spawn: inst.spawn, probe });
+    expect(await s.startInstall([VOICE_A.id])).toEqual({ started: true });
+    await s.installDone();
+    expect((await s.status()).install).toBeNull();
+    expect(probe.mock.calls.filter(([cmd]) => cmd === 'python3')).toHaveLength(1);
+    expect(inst.calls.filter((c) => c.args.includes('venv'))).toHaveLength(1);
+  });
+
+  it('item 2: a launch whose signal is already aborted is refused before anything is spawned', async () => {
+    const inst = installSpawn();
+    const ac = new AbortController();
+    ac.abort();
+    expect(await probePython('python3', dir, { signal: ac.signal, spawn: inst.spawn })).toBeNull();
+    expect(inst.spawn).not.toHaveBeenCalled();
+  });
+
+  it('item 3: the glibc is read once per process, not on every status', async () => {
+    vi.resetModules();
+    const fresh = await import('../src/voice/tts.js');
+    const report = vi.spyOn(process.report, 'getReport');
+    try {
+      const s = new fresh.TtsService({ dir, locksDir: locks, platform: 'linux', env: { PATH: '/usr/bin' }, probe: () => PY, voices: [VOICE_A] });
+      await s.status();
+      await s.status();
+      await new fresh.TtsService({ dir, locksDir: locks, platform: 'linux', env: { PATH: '/usr/bin' }, probe: () => PY, voices: [VOICE_A] }).status();
+      expect(report).toHaveBeenCalledTimes(1);
+    } finally {
+      report.mockRestore();
+    }
+  });
+
+  it('item 6: the probe runs with the service env, not the daemon process env', async () => {
+    const inst = installSpawn();
+    const s = new TtsService({ dir, locksDir: locks, platform: 'linux', glibc: () => '2.35', spawn: inst.spawn, voices: [VOICE_A], env: { PATH: '/svc/only/bin', CREW_1559_MARK: 'svc' } });
+    await s.pickPython();
+    const probes = inst.calls.filter((c) => c.args[0] === '-I' && c.args[1] === '-c');
+    expect(probes.length).toBeGreaterThan(0);
+    for (const c of probes) {
+      expect(c.env['PATH']).toBe('/svc/only/bin');
+      expect(c.env['CREW_1559_MARK']).toBe('svc');
+    }
+  });
+
+  it('item 6: WICKED_CREW_PYTHON is trimmed before it is tested and resolved', async () => {
+    const probe = vi.fn((cmd: string) => (cmd === '/x/mine' ? { ...PY, path: '/x/mine' } : null));
+    const picked = await service({ probe, env: { PATH: '/usr/bin', WICKED_CREW_PYTHON: '  /x/mine \n' } }).pickPython();
+    expect(probe.mock.calls.map(([cmd]) => cmd)).toEqual(['/x/mine']);
+    expect(picked.python?.path).toBe('/x/mine');
+    const named = vi.fn((cmd: string) => (cmd === 'python3.12' ? PY : null));
+    await service({ probe: named, env: { PATH: '/usr/bin', WICKED_CREW_PYTHON: ' python3.12 ' } }).pickPython();
+    expect(named.mock.calls.map(([cmd]) => cmd)).toEqual(['python3.12']);
   });
 });
