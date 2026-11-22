@@ -323,8 +323,12 @@ function distinctName(name: string): boolean {
 }
 
 const REPO_OPS = new Set(['pull', 'pulls', 'pull-requests', 'merge_requests', 'tree', 'blob', 'commit', 'commits', 'compare']);
+/** First path segments that are a host's own pages, not an owner: an organisation's or a group's link names no
+ *  repository (`github.com/orgs/acme/projects/7`, `gitlab.com/groups/acme/-/merge_requests`), so it picks none. */
+const NOT_AN_OWNER = new Set(['orgs', 'users', 'enterprises', 'settings', 'sponsors', 'marketplace', 'apps', 'topics', 'collections', 'search', 'notifications', 'groups', 'dashboard', 'explore', 'workspace', 'account']);
 
-/** The repository one link names, or null: studio's `linkedRepo` (repoProjects.ts). GitHub and Bitbucket:
+/** The repository one link names, or null: studio's `linkedRepo` (repoProjects.ts), and a host's own pages
+ *  ({@link NOT_AN_OWNER}) name none. GitHub and Bitbucket:
  *  `<owner>/<repo>`, whatever follows. Elsewhere the segment before the first repository operation after it (or
  *  GitLab's `-` before one; on gitlab.com any `-`); with no operation, a GitLab project home names its last segment and
  *  a clone link (`…/<repo>.git`) its repository. Other links name nothing. */
@@ -333,6 +337,7 @@ function linkedRepo(link: string): string | null {
   try { url = new URL(link); } catch { return null; }
   const segs = url.pathname.split('/').filter((x) => x !== '').map((x) => { try { return decodeURIComponent(x); } catch { return x; } });
   const host = url.hostname.toLowerCase().replace(/^www\./u, '');
+  if (NOT_AN_OWNER.has((segs[0] ?? '').toLowerCase())) return null;
   let repo: string | undefined;
   if (host === 'github.com' || host === 'bitbucket.org') repo = segs.length >= 2 ? segs[1] : undefined;
   else {
