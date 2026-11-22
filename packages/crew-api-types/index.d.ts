@@ -398,6 +398,15 @@ export interface HealthCapabilities {
    */
   chatJobProposals?: boolean;
   /**
+   * (crew#1697) The Memory page's soft retire and restore are served: `POST /memory/retire-item` retires (hides, keeps)
+   * instead of erasing, `GET /memory?retired=1` lists the retired ones, `POST /memory/unretire` restores one and
+   * `POST /memory/erase-item` deletes one for good. ABSENT on an older daemon: `retire-item` ERASES there and the
+   * other three are not served.
+   */
+  memoryRestore?: boolean;
+  /** (crew#1697) `POST /knowledge/forget` is served ({@link ForgetKnowledgeBody}). ABSENT on an older daemon. */
+  knowledgeForget?: boolean;
+  /**
    * (api-types 0.196.0) A job proposal's Start takes `power` ({@link ChatProposalDecisionBody.power}). ABSENT on an
    * older daemon: send no `power` (the strict body refuses it); a chat job then always stops at its first plan.
    */
@@ -12461,10 +12470,23 @@ export interface Proposal {
 /** (crew#1261) Why a proposal ended `rejected`. `rejected`: turned down (by a person when `by` is `operator`).
  *  `replaced-by-edit`: an accept-with-edit approved an edited copy (`copy_id`) in its place. `withdrawn-copy`: an
  *  accept-with-edit's copy whose approve failed, withdrawn so a retry leaves no duplicate. */
-export type ProposalDecisionReason = 'rejected' | 'replaced-by-edit' | 'withdrawn-copy';
+/**
+ * (crew#1261) Why a proposal was rejected:
+ *  - `rejected`: a person turned it down (`POST /proposals/:id/reject`, dismissing its decision or its review
+ *    recommendation).
+ *  - `restated`: a person said its decision restates a rule they already have (the decision's "Same").
+ *  - `replaced-by-edit`: an accept-with-edit approved an edited copy (`copy_id`) in its place.
+ *  - `withdrawn-copy`: an accept-with-edit's copy whose approve failed, withdrawn so a retry leaves no duplicate.
+ *  - `withdrawn`: crew withdrew a proposal it filed itself because what it was for did not happen (a widening that
+ *    did not land, a memory edit that was undone).
+ *  - `stale`: a memory replacement whose memory had since been edited or retired; approving it would bring retired
+ *    words back.
+ * A client that does not know a reason reads it as crew's own (never a person's).
+ */
+export type ProposalDecisionReason = 'rejected' | 'restated' | 'replaced-by-edit' | 'withdrawn-copy' | 'withdrawn' | 'stale';
 
-/** (crew#1261) A rejection crew recorded. `by: 'operator'` only for a person's own rejection; `crew` for crew's own
- *  (an accept-with-edit) or a caller that is not a person. */
+/** (crew#1261) A rejection crew recorded. `by: 'operator'` only for a person's own decision (`rejected`,
+ *  `restated`); `crew` for crew's own or a caller that is not a person. */
 export interface ProposalDecision {
   by: 'operator' | 'crew';
   reason: ProposalDecisionReason;
@@ -13040,6 +13062,9 @@ export interface MemoryItem {
    * cannot assert an undated memory in range.
    */
   created_at?: number;
+  /** (crew#1697) Unix SECONDS when the memory was soft-retired. Present only on a `GET /memory?retired=1` row (estate
+   *  `memory.list {retired: true}`); a live memory never carries it. */
+  retired_at?: number;
 }
 
 /**
@@ -13072,6 +13097,13 @@ export interface ListMemoriesQuery {
    * upper bound.
    */
   until?: string;
+  /**
+   * (crew#1697) `1`/`true` lists the soft-RETIRED memories instead of the live ones (estate `memory.list {retired:
+   * true}`), each with {@link MemoryItem.retired_at}; `0`/`false`/omitted lists the live ones. Any other value is a
+   * 400. 501 `estate_upgrade_required` when the estate predates soft retire (wicked-estate#552). The other filters
+   * apply to either list. Served when {@link HealthCapabilities.memoryRestore} is true.
+   */
+  retired?: string;
 }
 
 /** `GET /memory` → 200. */
@@ -13108,17 +13140,73 @@ export interface RetireMemoryBody {
 
 /**
  * `POST /memory/retire-item` body (studio#206; api-types 0.60.0): exactly ONE memory, by the
- * `memory_id` `GET /memory` listed. 404 when no memory has that id; 501 `estate_upgrade_required`
- * when the estate predates erase-by-id (wicked-estate#188) — nothing is deleted then.
+ * `memory_id` `GET /memory` listed. Since crew#1697 a SOFT retire ({@link RetireMemoryItemResponse}): 404 when
+ * no live memory has that id; 501 `estate_upgrade_required` when the estate predates soft retire
+ * (wicked-estate#552) — nothing is changed then. To delete for good: {@link EraseMemoryItemBody}.
  */
 export interface RetireMemoryItemBody {
   memory_id: string;
 }
 
-/** `POST /memory/retire` / `POST /memory/retire-item` → 200. How many memories were deleted
- *  (always 1 for `retire-item`). */
+/** `POST /memory/retire` / `POST /memory/erase-item` → 200. How many memories were deleted for good
+ *  (always 1 for `erase-item`). */
 export interface RetireMemoryResponse {
   erased: number;
+}
+
+/**
+ * (crew#1697) `POST /memory/retire-item` → 200: the memory was soft-retired (estate `memory.retire`). It is hidden
+ * from every recall and from `GET /memory`, kept with its id, listed by `GET /memory?retired=1` and restored by
+ * `POST /memory/unretire`. Always 1. (Before crew#1697 this route erased the memory and answered
+ * {@link RetireMemoryResponse}; `POST /memory/erase-item` is that hard delete now.)
+ */
+export interface RetireMemoryItemResponse {
+  retired: number;
+}
+
+/**
+ * (crew#1697) `POST /memory/erase-item` body: delete ONE memory for good (estate `memory.erase {id}`), live or
+ * retired; the right-to-erasure path. 404 when no memory has that id; 501 `estate_upgrade_required` when the estate
+ * predates erase-by-id (wicked-estate#188). Answers {@link RetireMemoryResponse}.
+ */
+export interface EraseMemoryItemBody {
+  memory_id: string;
+}
+
+/**
+ * (crew#1697) `POST /memory/unretire` body: restore ONE soft-retired memory with the same id (estate
+ * `memory.unretire`). 404 when no retired memory has that id; 501 `estate_upgrade_required` when the estate predates
+ * soft retire (wicked-estate#552).
+ */
+export interface UnretireMemoryBody {
+  memory_id: string;
+}
+
+/** (crew#1697) `POST /memory/unretire` → 200. Always 1. */
+export interface UnretireMemoryResponse {
+  restored: number;
+}
+
+/**
+ * (crew#1697) `POST /knowledge/forget` body (estate `knowledge.forget`): hard-delete document knowledge by EXACTLY
+ * one of `id` (one item; a document takes its chunks with it), `source` (every item ingested from that exact
+ * source) or `scope_prefix` (a scope subtree; `""` needs `confirm_erase_all: true`). Other kinds (memories, code)
+ * are never touched. A live data source's structure is skipped (counted in `skipped_live_source`) or, named by
+ * `id`, refused with 409: it is refreshed through its source, not forgotten. 400 for a body that names none or more
+ * than one target; 501 `estate_upgrade_required` when the estate predates forget (wicked-estate#553).
+ */
+export interface ForgetKnowledgeBody {
+  id?: string;
+  source?: string;
+  scope_prefix?: string;
+  confirm_erase_all?: boolean;
+}
+
+/** (crew#1697) `POST /knowledge/forget` → 200: how many items were deleted, and how many live-source items a
+ *  `source`/`scope_prefix` target left in place. */
+export interface ForgetKnowledgeResponse {
+  forgotten: number;
+  skipped_live_source: number;
 }
 
 /**

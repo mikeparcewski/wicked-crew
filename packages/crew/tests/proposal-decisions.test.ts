@@ -48,7 +48,8 @@ function estate(rows: Row[], approveFails = new Set<string>()) {
         rows.push({ id, kind_type: String(args['kind_type']), payload: args['payload'] as Record<string, unknown>, facets: args['facets'] as Record<string, string>, provenance: {}, state: 'pending', created_at: 2 });
         return { id };
       }
-      case 'memory.list': return { memories: [] };
+      // estate's own shape (wicked-estate crates/wicked-estate-mcp/src/tools/memory.rs list_item): `{ items }`.
+      case 'memory.list': return { items: [] };
       default: throw new Error(`unexpected tool ${tool}`);
     }
   });
@@ -143,6 +144,27 @@ describe('crew#1261: who rejected a proposal, and why', () => {
     expect((await s.rejected()).map((r) => [r['id'], r['decision']])).toEqual([
       ['copy-1', { by: 'crew', reason: 'withdrawn-copy', at: expect.any(Number) }],
     ]);
+  });
+
+  it('a stale replacement (its memory is gone) is rejected as crew\'s `stale`, on the plain approve and the edited one', async () => {
+    const stale = (id: string): Row => ({ ...memory(id), payload: { content: `new words ${id}`, capture: 'memory', replaces: 'mem-gone' } });
+    const s = await server({ rows: [stale('p1'), stale('p2')] });
+    const plain = await s.app.inject({ method: 'POST', url: '/api/v1/proposals/p1/approve' });
+    expect(plain.statusCode, plain.body).toBe(409);
+    const edited = await s.app.inject({ method: 'POST', url: '/api/v1/proposals/p2/approve', payload: { content: 'newer words' } });
+    expect(edited.statusCode, edited.body).toBe(409);
+    expect((await s.rejected()).map((r) => [r['id'], r['decision']])).toEqual([
+      ['p1', { by: 'crew', reason: 'stale', at: expect.any(Number) }],
+      ['p2', { by: 'crew', reason: 'stale', at: expect.any(Number) }],
+    ]);
+  });
+
+  it('only a person\'s reasons read as the operator: restated is theirs, stale and withdrawn are crew\'s', () => {
+    const human = { id: 'local', kind: 'human', trust: 'admin' } as Actor;
+    const line = (reason: string) => decisionOf({ ts: 5_000, action: PROPOSAL_DECIDED, actor: human, detail: { proposalId: 'p9', by: 'operator', reason } })?.decision;
+    expect(line('restated')).toMatchObject({ by: 'operator', reason: 'restated' });
+    expect(line('stale')).toMatchObject({ by: 'crew', reason: 'stale' });
+    expect(line('withdrawn')).toMatchObject({ by: 'crew', reason: 'withdrawn' });
   });
 
   it('after a restart the decisions are read back from the trail', async () => {

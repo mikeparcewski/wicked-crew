@@ -29,7 +29,7 @@ describe('a project policy landing round-trips through the engine (DC-S3)', () =
     const built = policyProposalToRule('pp-engine', 'policy:development', { rule: 'always run the linter', severity: 'warn' }, {
       project: 'proj-a',
       language: 'ts',
-    });
+    }, { projects: [{ id: 'proj-a', name: 'A' }] });
     if ('error' in built) throw new Error(built.error);
     await adapter.upsertConformanceRule(built.rule);
     const stored = await adapter.readConformanceRule('proposal:pp-engine');
