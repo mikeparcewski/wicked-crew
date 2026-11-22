@@ -555,7 +555,7 @@ describe('A5: the refine launcher', () => {
 describe('crew#1726: a refine that names chat reads the conversation up to its own turn', () => {
   const user = (at: number, turnId: string, text: string, attachments?: Array<{ id: string; name: string }>): ChatTranscriptRecord =>
     ({ at, turnId, kind: 'user', text, seats: ['claude'], owner: true, ...(attachments !== undefined ? { attachments } : {}) }) as unknown as ChatTranscriptRecord;
-  const refine = (chatId: string, sources: Array<{ token: string; label: string; status: 'ok' }>): ArtifactProposal => ({ pid: `${chatId}:t3`, chatId, turnId: 't3', kind: 'refine', brief: 'use the new figure', what: { title: 'Deck', label: 'Change · Deck' }, sources, helpers: { seats: ['codex', 'claude'] }, filedIn: { projectId: null }, target: { ref: '_unfiled/deck', title: 'Deck', base: 1 }, protected: [] }) as unknown as ArtifactProposal;
+  const refine = (chatId: string, sources: Array<{ token: string; label: string; status: 'ok' }>, turn = 't3'): ArtifactProposal => ({ pid: `${chatId}:${turn}`, chatId, turnId: turn, kind: 'refine', brief: 'use the new figure', what: { title: 'Deck', label: 'Change · Deck' }, sources, helpers: { seats: ['codex', 'claude'] }, filedIn: { projectId: null }, target: { ref: '_unfiled/deck', title: 'Deck', base: 1 }, protected: [] }) as unknown as ArtifactProposal;
   const CHAT = [{ token: 'chat', label: 'this chat', status: 'ok' as const }];
   const text = (spec: BoundRefine, prefix = 'conversation-'): string => spec.packet.files.filter((f) => f.name.startsWith(prefix)).map((f) => f.bytes.toString('utf8')).join('\n');
 
@@ -605,11 +605,11 @@ describe('crew#1726: a refine that names chat reads the conversation up to its o
       records: () => records, instanceOf: () => o.instanceNow ?? 'i1', chatIdOf: (id) => id, packetDeps,
       clisJsonFor: (seats) => JSON.stringify(seats),
     });
-    const go = async (chatId: string, sources: Array<{ token: string; label: string; status: 'ok' }>, runId: string): Promise<BoundRefine> => {
-      await launcher.launch({ kind: 'refine', pid: `${chatId}:t3`, chatId, actor: { id: 'mike', kind: 'human', trust: 'operator' }, identity: { artifactRef: '_unfiled/deck', runId }, resolution: refine(chatId, sources) } as never);
+    const go = async (chatId: string, sources: Array<{ token: string; label: string; status: 'ok' }>, runId: string, turn = 't3'): Promise<BoundRefine> => {
+      await launcher.launch({ kind: 'refine', pid: `${chatId}:${turn}`, chatId, actor: { id: 'mike', kind: 'human', trust: 'operator' }, identity: { artifactRef: '_unfiled/deck', runId }, resolution: refine(chatId, sources, turn) } as never);
       return launched.at(-1)!;
     };
-    return { dir, go, gone, bindings };
+    return { dir, go, gone, bindings, records };
   }
 
   it('turns and files added after the create reach the refine; the files the create held stay; a Go again reuses its own snapshot', async () => {
@@ -679,6 +679,20 @@ describe('crew#1726: a refine that names chat reads the conversation up to its o
       expect(text(named)).toContain('North was 42 this quarter.');
       expect(text(named, 'doc-')).toContain('<h2>x</h2>');
       expect(text(named, 'doc-')).not.toContain('<h2>y</h2>');
+    } finally {
+      removeScratch(m.dir);
+    }
+  });
+
+  it('a Go again of an earlier refine keeps its own snapshot after a later refine kept a newer one', async () => {
+    const m = await made();
+    try {
+      await go1(m);
+      m.records.push(user(4, 't4', 'Also say south was 17.'));
+      expect(text(await m.go('c1', CHAT, 'refine-run-4', 't4'))).toContain('Also say south was 17.');
+      const again = await m.go('c1', CHAT, 'refine-run-1b');
+      expect(again.packet.files.filter((f) => f.name.startsWith('conversation-')).map((f) => f.name)).toEqual(['conversation-c1-to-t3.md']);
+      expect(text(again)).not.toContain('Also say south was 17.');
     } finally {
       removeScratch(m.dir);
     }

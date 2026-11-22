@@ -125,6 +125,7 @@ export class RefineLauncher implements ProposalDispatcher {
       ...(chatNow !== null ? { storageChatId: chatNow } : {}),
       held: { tokens: binding.tokens, bytes: (name) => this.deps.bindings.packetBytes(ref.ref, name) },
       ...(refreshChat ? { refreshChat: true } : {}),
+      chatSnapshot: ownSnapshot,
       // As the create read it: a document moved out of its chat's scope keeps only what is in its project.
       ...(binding.scopeProject !== binding.projectId ? { recheckProject: binding.projectId } : {}),
     }, this.deps.packetDeps);

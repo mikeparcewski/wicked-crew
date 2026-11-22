@@ -107,6 +107,9 @@ export interface PacketInput {
   /** (crew#1726) A refine's `chat` is read again up to {@link cutoffTurnId} rather than reused; the records the held
    *  `chat` brought (attachments, run briefs) ride along, so nothing the document already cites leaves the packet. */
   refreshChat?: boolean;
+  /** (crew#1726) The conversation snapshot a held `chat` carries when the binding holds it (a Go again's own, up to its
+   *  cutoff); else the newest one held. */
+  chatSnapshot?: string;
   /** Where the chat is kept NOW (its own id, or the archive id a reuse of the id moved it to): attachments and the
    *  chat's context briefs are read from there. File names keep {@link chatId}. Default: `chatId`. */
   storageChatId?: string;
@@ -641,10 +644,12 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
     try {
       const held = input.held?.tokens[token];
       if (held !== undefined && held.length > 0 && !(token === 'chat' && input.refreshChat === true)) {
-        // crew#1726 r2: the binding unions every snapshot a `chat` token was given; a held `chat` carries only its newest
-        // conversation (the last one recorded) with all its records, so a Go again never grows past what it launched with.
+        // crew#1726 r2: the binding unions every snapshot a `chat` token was given; a held `chat` carries one conversation
+        // with all its records, so a Go again never grows past what it launched with: this attempt's own snapshot when
+        // held (never a later refine's), else the newest one recorded.
         const snapshots = token === 'chat' ? held.filter(isConversationName) : [];
-        const keep = snapshots.length > 1 ? held.filter((n) => !isConversationName(n) || n === snapshots.at(-1)) : held;
+        const one = input.chatSnapshot !== undefined && snapshots.includes(input.chatSnapshot) ? input.chatSnapshot : snapshots.at(-1);
+        const keep = snapshots.length > 1 ? held.filter((n) => !isConversationName(n) || n === one) : held;
         for (const n of keep) stage.add(n, input.held!.bytes(n));
         stage.commit(token);
         tokens[token] = [...keep];
