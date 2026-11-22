@@ -90,8 +90,17 @@ export const STALE_TMP_MS = 2 * UPLOAD_LIMITS.parseMs;
 /** The temporary files an upload writes in the store: its bytes, the snapshot being built and its journals. */
 const TMP_FILE_RE = /^\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:upload|sqlite(?:-journal|-wal|-shm)?)$/;
 
-/** Remove the store's stale `.tmp-*` files (crew#1724). Housekeeping: a failure is never the upload's. */
-async function sweepStale(dir: string, now: number = Date.now()): Promise<void> {
+/**
+ * The temporary files of the uploads this process is running (codex r1): never swept, however long one has stalled. Only
+ * one daemon writes a state home's snapshot store, so these are all the live ones.
+ */
+const liveTmp = new Set<string>();
+
+/**
+ * Remove the store's stale `.tmp-*` files (crew#1724), never a live upload's. Housekeeping: a failure is never the
+ * upload's. `now`: TESTS ONLY.
+ */
+export async function sweepStale(dir: string, now: number = Date.now()): Promise<void> {
   let names: string[];
   try {
     names = await readdir(dir);
@@ -101,6 +110,7 @@ async function sweepStale(dir: string, now: number = Date.now()): Promise<void> 
   for (const n of names) {
     if (!TMP_FILE_RE.test(n)) continue;
     const p = join(dir, n);
+    if (liveTmp.has(p.replace(/-(?:journal|wal|shm)$/, ''))) continue;
     try {
       if (now - (await stat(p)).mtimeMs > STALE_TMP_MS) await rm(p, { force: true });
     } catch {
@@ -217,6 +227,8 @@ export async function ingestUpload(filename: string, data: Buffer, opts: { dir?:
   const tmp = join(dir, `.tmp-${randomUUID()}.sqlite`);
   const input = join(dir, `.tmp-${randomUUID()}.upload`);
   const kind = kindOf(filename, data);
+  liveTmp.add(tmp);
+  liveTmp.add(input);
   try {
     if (kind === 'sqlite') {
       if (data.subarray(0, 16).toString('latin1') !== 'SQLite format 3\0') throw new UploadError('bad_sqlite', 'the file is not a SQLite database');
@@ -229,6 +241,9 @@ export async function ingestUpload(filename: string, data: Buffer, opts: { dir?:
       // (crew#1731) Virtual tables are dropped from this copy (their shadow tables go with them), then the copy is
       // inspected again: what is left must be plain tables and indexes.
       const dropped = inspected.objects.filter((o) => o.virtual).map((o) => o.name);
+      // Every table that belonged to them: one that outlives the drop (a declaration rewritten so the module's destroy
+      // skips it) is refused, never kept as a plain table (codex r1).
+      const theirs = new Set([...dropped, ...inspected.objects.filter((o) => o.shadow).map((o) => o.name)]);
       if (dropped.length > 0) {
         within(deadline);
         let failed: Array<{ name: string; error: string }>;
@@ -242,7 +257,7 @@ export async function ingestUpload(filename: string, data: Buffer, opts: { dir?:
           throw new UploadError('sqlite_code', `an uploaded .sqlite may hold only tables and indexes, and crew could not drop ${failed.map((f) => `the virtual table ${f.name} (${f.error})`).join(', ')} from its copy; drop ${failed.length === 1 ? 'it' : 'them'} from a copy of the file (DROP TABLE <name>) and upload that`);
         }
         inspected = await inspectWithin(tmp, deadline);
-        const left = inspected.objects.filter((o) => (o.type !== 'table' && o.type !== 'index') || o.virtual || o.shadow);
+        const left = inspected.objects.filter((o) => (o.type !== 'table' && o.type !== 'index') || o.virtual || o.shadow || theirs.has(o.name));
         if (left.length > 0) throw new UploadError('sqlite_code', `an uploaded .sqlite may hold only tables and indexes; after its virtual tables were dropped it still holds ${left.map((o) => o.name).join(', ')}`);
       }
       if (inspected.generated.length > 0) throw new UploadError('sqlite_code', `an uploaded .sqlite may not hold generated or hidden columns; it holds ${inspected.generated.join(', ')}`);
@@ -282,5 +297,7 @@ export async function ingestUpload(filename: string, data: Buffer, opts: { dir?:
   } finally {
     // The file and any journal a runner ended mid-transaction left beside it.
     await Promise.all([rm(input, { force: true }), ...['', '-journal', '-wal', '-shm'].map((s) => rm(`${tmp}${s}`, { force: true }))]);
+    liveTmp.delete(tmp);
+    liveTmp.delete(input);
   }
 }

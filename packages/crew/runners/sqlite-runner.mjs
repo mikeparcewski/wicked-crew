@@ -60,14 +60,15 @@ try {
   if (req.op === 'strip') {
     // (crew#1731) An uploaded .sqlite's virtual tables (a full-text index, an R-tree) are dropped from crew's COPY of
     // the file, never the person's: DROP TABLE runs the module's own destroy, which drops its shadow tables too. A
-    // module this SQLite does not have cannot be dropped, and the upload is refused naming it. VACUUM then rewrites
-    // the copy, so nothing of what was dropped stays in its free pages.
+    // module this SQLite does not have cannot be dropped, and the upload is refused naming it. secure_delete zeroes the
+    // pages the drop frees, so nothing of what was dropped stays in the copy's bytes; no VACUUM, which would renumber
+    // the rowids of a table without an INTEGER PRIMARY KEY that another table may refer to (codex r1).
     const quote = (n) => '"' + String(n).replace(/"/g, '""') + '"';
     const w = new DatabaseSync(req.path, { enableForeignKeyConstraints: false, enableDoubleQuotedStringLiterals: false, allowExtension: false });
     let answer;
     try {
       w.enableDefensive(true);
-      w.exec('PRAGMA trusted_schema = 0; PRAGMA journal_mode = DELETE;');
+      w.exec('PRAGMA trusted_schema = 0; PRAGMA journal_mode = DELETE; PRAGMA secure_delete = ON;');
       const failed = [];
       for (const name of req.tables) {
         try {
@@ -76,7 +77,6 @@ try {
           failed.push({ name, error: String(e && e.message || e) });
         }
       }
-      if (failed.length === 0) w.exec('VACUUM');
       answer = { ok: true, failed };
     } finally {
       w.close();

@@ -150,8 +150,8 @@ export async function sqliteIngest(
 }
 
 /**
- * (crew#1731) Drop `tables` (virtual tables) from the upload's copy at `path`, in the writer child, then VACUUM it.
- * Answers the ones that could not be dropped (a module this SQLite lacks); nothing is vacuumed then.
+ * (crew#1731) Drop `tables` (virtual tables) from the upload's copy at `path`, in the writer child, with the freed pages
+ * zeroed. Answers the ones that could not be dropped (a module this SQLite lacks).
  */
 export async function sqliteStrip(path: string, tables: string[], deadlineMs: number): Promise<{ failed: Array<{ name: string; error: string }> }> {
   const a = await runChild({ op: 'strip', path, tables }, deadlineMs);

@@ -16,7 +16,7 @@ import type { McpUpstreamConfig } from '../src/mcp/probe.js';
 import { specWith } from './support/apps-harness.js';
 import { observeSqliteRunnerForTests, runnerEnv, sqliteIngest, sqliteRead } from '../src/sources/drivers/sqlite.js';
 import { checkSqlQuery, readSqlQuery, SourcePolicyError } from '../src/sources/sql.js';
-import { ingestUpload, snapshotPath, STALE_TMP_MS, UploadError, UPLOAD_LIMITS } from '../src/sources/uploads.js';
+import { ingestUpload, snapshotPath, STALE_TMP_MS, sweepStale, UploadError, UPLOAD_LIMITS } from '../src/sources/uploads.js';
 import { detectHeader, looksLikeHeader } from '../runners/upload-parse.mjs';
 import { makeSqlite, makeXlsx, makeZipBomb, zip } from './fixtures/apps-sources/uploads/make.mjs';
 
@@ -299,11 +299,11 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
 
   it('crew#1731: a virtual table is dropped from the snapshot with its shadow tables and named, even with its kind hidden in the schema text or behind a table named pragma_table_list (fails before the fix)', async () => {
     const { DatabaseSync } = await import('node:sqlite');
-    makeSqlite(join(work, 'estate.sqlite'), { estateFts: true });
+    makeSqlite(join(work, 'estate.sqlite'), { estateFts: true, implicitRowids: true });
     makeSqlite(join(work, 'vt.sqlite'), { hiddenVirtual: true });
     makeSqlite(join(work, 'shadow.sqlite'), { shadowPragma: true }); // codex r2: S3
     for (const [f, vtab, tables] of [
-      ['estate.sqlite', 'nodes_fts', ['nodes', 'refunds']],
+      ['estate.sqlite', 'nodes_fts', ['nodes', 'records', 'refs', 'refunds']],
       ['vt.sqlite', 'notes', ['refunds']],
       ['shadow.sqlite', 'geo', ['pragma_table_list', 'refunds']],
     ] as const) {
@@ -316,10 +316,14 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
       snap.close();
       expect(kinds.sort(), f).toEqual(tables.map((t) => `${t}:table`));
     }
-    // The index's own text is gone from the snapshot's bytes (the copy is vacuumed), and the person's file is untouched.
+    // The index's own text is gone from the snapshot's bytes (the freed pages are zeroed), the person's file is untouched,
+    // and a kept table's rowids are as uploaded (no VACUUM renumbers them: codex r1).
     const estate = await ingestUpload('estate.sqlite', readFileSync(join(work, 'estate.sqlite')), { dir });
     expect(readFileSync(snapshotPath(estate.digest, dir)).includes('zqxj-only-in-the-index')).toBe(false);
     expect(readFileSync(join(work, 'estate.sqlite')).includes('zqxj-only-in-the-index')).toBe(true);
+    const snap = new DatabaseSync(snapshotPath(estate.digest, dir), { readOnly: true });
+    expect(snap.prepare('SELECT r.body FROM refs JOIN records r ON r.rowid = refs.record_rowid').all().map((x) => x['body'])).toEqual(['kept']);
+    snap.close();
   });
 
   it('crew#1731: a virtual table that cannot be dropped is refused by its own name, never a shadow table called virtual; code is refused first', async () => {
@@ -328,6 +332,13 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
     expect(err).toBeInstanceOf(UploadError);
     expect((err as UploadError).code).toBe('sqlite_code');
     expect((err as UploadError).message).toMatch(/could not drop the virtual table notes \(no such module: nosuchmodule\) from its copy; drop it from a copy of the file \(DROP TABLE <name>\)/);
+    // A table of the virtual table's that outlives its drop (a rewritten declaration) is refused, never kept as plain.
+    makeSqlite(join(work, 'rewritten.sqlite'), { contentlessRewrite: true });
+    const before = readdirSync(dir).length;
+    const rewritten = await ingestUpload('rewritten.sqlite', readFileSync(join(work, 'rewritten.sqlite')), { dir }).catch((e: unknown) => e);
+    expect((rewritten as UploadError).code).toBe('sqlite_code');
+    expect((rewritten as UploadError).message).toBe('an uploaded .sqlite may hold only tables and indexes; after its virtual tables were dropped it still holds notes_content');
+    expect(readdirSync(dir).length).toBe(before);
     makeSqlite(join(work, 'fts-trig.sqlite'), { estateFts: true, trigger: true });
     const both = await ingestUpload('fts-trig.sqlite', readFileSync(join(work, 'fts-trig.sqlite')), { dir }).catch((e: unknown) => e);
     expect((both as UploadError).message).toBe('an uploaded .sqlite may hold only tables and indexes; it holds the trigger t');
@@ -351,6 +362,16 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
       await ingestUpload('ok.csv', Buffer.from('a,b\n1,2\n'), { dir: store });
       const left = readdirSync(store).filter((n) => n.startsWith('.tmp-')).sort();
       expect(left).toEqual([`.tmp-${fresh}.upload`, '.tmp-notes.txt']);
+      // A live upload's files are never swept, however old they look (codex r1): a sweep while one runs keeps them.
+      const live = ingestUpload('big.csv', Buffer.from('a,b,c\n' + '1234,2345,3456\n'.repeat(900_000)), { dir: store });
+      const own = (): string[] => readdirSync(store).filter((n) => /^\.tmp-.*\.(upload|sqlite)$/.test(n) && n !== `.tmp-${fresh}.upload`);
+      for (let i = 0; i < 2000 && own().length === 0; i++) await new Promise((r) => setTimeout(r, 2));
+      const inFlight = own();
+      expect(inFlight.length).toBeGreaterThan(0);
+      await sweepStale(store, Date.now() + 10 * STALE_TMP_MS);
+      expect(readdirSync(store).filter((n) => inFlight.includes(n))).toEqual(inFlight);
+      expect(readdirSync(store)).not.toContain(`.tmp-${fresh}.upload`);
+      expect((await live).table).toBe('big');
     } finally {
       rmSync(store, { recursive: true, force: true });
     }
