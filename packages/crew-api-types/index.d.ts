@@ -7789,10 +7789,13 @@ export interface RequirementsPage {
 }
 
 /**
- * `GET /repos/:id/requirements` 404 when the repository's `requirements_graph.json` has not been
+ * `GET /repos/:id/requirements` answer when the repository's `requirements_graph.json` has not been
  * generated (0.154.0). A state, not a refusal: `code` is the discriminator a client matches on, and
  * `workflow` names the preset that generates the graph (its last step runs `wicked-core domain-graph`).
- * Any other 404 on the route (an unknown repo) carries no `code`.
+ * Sent with status 200 after crew 0.18.20 (studio#986), so the route's 200 body is
+ * `RequirementsPage | RequirementsNotGenerated`, told apart by `code === 'notGenerated'`; an older daemon
+ * sends this body with a 404. `error` stays for those older readers. A 404 on the route now means only an
+ * unknown repository, and carries no `code`.
  */
 export interface RequirementsNotGenerated {
   error: string;

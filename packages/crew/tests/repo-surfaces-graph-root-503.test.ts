@@ -102,7 +102,9 @@ describe('repo surfaces — a current engine with no repo-graph root answers 503
     expect(br.statusCode).toBe(404);
     expect((br.json() as { error: string }).error).toMatch(/not built/);
     const req = await app.inject({ method: 'GET', url: '/api/v1/repos/ok/requirements' });
-    expect(req.statusCode).toBe(404);
+    // studio#986: not generated yet is the typed state, answered 200 (a 404 before).
+    expect(req.statusCode).toBe(200);
+    expect((req.json() as { code?: unknown }).code).toBe('notGenerated');
   });
 
   it('/graph for a repo whose in-tree graph is IGNORED carries the repos wire\'s own finding as the reason (F-2R2-005)', async () => {
