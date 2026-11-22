@@ -253,6 +253,12 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
     expect(adapter.upsertConformanceRule).toHaveBeenCalledWith(expect.objectContaining({ targets: { project: 'proj-tc' } }));
   });
 
+  it('crew#1774: the reserved default project is an id even though the project list leaves it out', async () => {
+    stubEstate({ pending: [policy('pd1', 'policy:testing', { rule: 'x', severity: 'warn' }, { project: 'default' })] });
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/pd1/approve' });
+    expect((res.json() as { landing: unknown }).landing).toMatchObject({ outcome: 'landed', project: 'default' });
+  });
+
   it('crew#1774: a facet naming no known project falls back to the filing run\'s project', async () => {
     await app.close();
     const index = new MembershipIndex();

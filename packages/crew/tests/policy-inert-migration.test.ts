@@ -54,6 +54,10 @@ describe('crew#1774: rules that name no project are retargeted or retired', () =
     await adapter.upsertConformanceRule(landed('byrun', 'carddemo'));
     await adapter.upsertConformanceRule(landed('nowhere', 'autogpt-exec'));
     await adapter.upsertConformanceRule(landed('good', studio.id));
+    // The reserved default project is an id too, though the project list leaves it out (codex review).
+    await adapter.upsertConformanceRule(landed('reserved', 'default'));
+    // The filing run of `byrun` is in the studio project, as the engine records it (not a crew-side index).
+    await adapter.projectMemberAttach(studio.id, 'crew.run', 'run-1');
     // A deleted project's id is still an id: never touched.
     await adapter.upsertConformanceRule(landed('deleted', 'proj_000000000000000001'));
     const estateTool = vi.fn(async (tool: string) => {
@@ -62,13 +66,7 @@ describe('crew#1774: rules that name no project are retargeted or retired', () =
     });
     const { log, record } = audit();
 
-    const out = await migrateInertPolicyRules({
-      adapter,
-      audit: log,
-      estateTool,
-      projectOf: (run) => (run === 'run-1' ? studio.id : undefined),
-      log: () => undefined,
-    });
+    const out = await migrateInertPolicyRules({ adapter, audit: log, estateTool, log: () => undefined });
 
     expect(out).toEqual({ retargeted: ['proposal:byname', 'proposal:byrun'], retired: ['proposal:nowhere'] });
     expect((await adapter.readConformanceRule('proposal:byname'))?.targets.project).toBe(crew.id);
@@ -78,6 +76,8 @@ describe('crew#1774: rules that name no project are retargeted or retired', () =
     expect(gone?.targets.project).toBe('autogpt-exec');
     expect((await adapter.readConformanceRule('proposal:good'))?.targets.project).toBe(studio.id);
     expect((await adapter.readConformanceRule('proposal:deleted'))?.retired).not.toBe(true);
+    expect(await adapter.readConformanceRule('proposal:reserved')).toMatchObject({ targets: { project: 'default' } });
+    expect((await adapter.readConformanceRule('proposal:reserved'))?.retired).not.toBe(true);
     expect(record).toHaveBeenCalledWith('governance.rule.upserted', expect.anything(), {
       detail: expect.objectContaining({ id: 'proposal:byname', via: 'inert-project-migration', from: 'wicked-crew', project: crew.id }),
     });
@@ -87,23 +87,36 @@ describe('crew#1774: rules that name no project are retargeted or retired', () =
 
     // A second boot finds nothing to do and asks estate nothing.
     estateTool.mockClear();
-    expect(await migrateInertPolicyRules({ adapter, audit: log, estateTool, projectOf: () => undefined, log: () => undefined })).toEqual({ retargeted: [], retired: [] });
+    expect(await migrateInertPolicyRules({ adapter, audit: log, estateTool, log: () => undefined })).toEqual({ retargeted: [], retired: [] });
     expect(estateTool).not.toHaveBeenCalled();
   });
 
-  it('retires nothing when the approve queue cannot be read (a run might have resolved it)', async () => {
+  it('retires nothing when the approve queue cannot be read, or answers a shape that is not a list (a run might have resolved it)', async () => {
     await adapter.upsertConformanceRule(landed('queue-down', 'no-such-project'));
     const { log } = audit();
-    const out = await migrateInertPolicyRules({
-      adapter,
-      audit: log,
-      estateTool: async () => {
-        throw new Error('estate down');
+    for (const answer of [() => Promise.reject(new Error('estate down')), () => Promise.resolve({}), () => Promise.resolve({ proposals: null })]) {
+      const out = await migrateInertPolicyRules({ adapter, audit: log, estateTool: answer, log: () => undefined });
+      expect(out.retired).toEqual([]);
+      expect((await adapter.readConformanceRule('proposal:queue-down'))?.retired).not.toBe(true);
+    }
+  });
+
+  it('retires nothing whose filing run\'s project cannot be read from the engine', async () => {
+    await adapter.upsertConformanceRule(landed('run-unread', 'still-no-project'));
+    const { log } = audit();
+    const flaky = Object.assign(Object.create(adapter) as CoreAdapter, {
+      memberProjects: async () => {
+        throw new Error('engine busy');
       },
-      projectOf: () => undefined,
+    });
+    const out = await migrateInertPolicyRules({
+      adapter: flaky,
+      audit: log,
+      estateTool: async () => ({ proposals: [{ id: 'run-unread', provenance: { run_id: 'run-9' } }] }),
       log: () => undefined,
     });
-    expect(out.retired).toEqual([]);
-    expect((await adapter.readConformanceRule('proposal:queue-down'))?.retired).not.toBe(true);
+    // (The earlier test's rule, with no filing run, resolves nowhere and is retired now that the queue reads.)
+    expect(out.retired).not.toContain('proposal:run-unread');
+    expect((await adapter.readConformanceRule('proposal:run-unread'))?.retired).not.toBe(true);
   });
 });

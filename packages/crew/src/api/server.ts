@@ -3126,7 +3126,6 @@ export async function createServer(
       adapter,
       audit,
       estateTool: callEstateTool,
-      projectOf: (runId) => membershipIndex.projectOf(runId),
       log: (m) => app.log.warn(m),
     });
   }

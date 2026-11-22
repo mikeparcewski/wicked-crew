@@ -19,6 +19,7 @@ import type { CoreAdapter } from '../core/adapter.js';
 import type { Actor, ConformanceRule, PolicyLandingResult, PolicyReach, SteeringType } from '../core/types.js';
 import type { AuditLog } from './audit.js';
 import { STEERING_TYPE_VALUES, STEERING_TYPES } from './governance-steering.js';
+import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 
 const V = '/api/v1';
 
@@ -159,6 +160,8 @@ export interface KnownProject {
  */
 export function projectIdFor(facet: string | undefined, projects: readonly KnownProject[]): string | undefined {
   if (typeof facet !== 'string' || facet.trim() === '') return undefined;
+  // The reserved default project is an id the engine matches, though the project list leaves it out (codex review).
+  if (facet === DEFAULT_PROJECT_ID) return DEFAULT_PROJECT_ID;
   const byId = projects.find((p) => p.id === facet);
   if (byId !== undefined) return byId.id;
   const want = facet.trim().toLowerCase();
@@ -278,12 +281,11 @@ export async function landPolicyRule(
 }
 
 export interface InertRuleMigrationDeps {
-  adapter: PolicyLandingDeps['adapter'] & Pick<CoreAdapter, 'listConformanceRules' | 'projectList'>;
+  /** `memberProjects` is the engine's own run→project read: authoritative, unlike an index a failed hydrate left empty. */
+  adapter: PolicyLandingDeps['adapter'] & Pick<CoreAdapter, 'listConformanceRules' | 'projectList' | 'memberProjects'>;
   audit: AuditLog;
   /** The approve queue (estate `proposal.*`): an approved proposal's `provenance.run_id`. */
   estateTool: (tool: string, args: Record<string, unknown>) => Promise<unknown>;
-  /** The project a run is filed in (the membership index). */
-  projectOf: (runId: string) => string | undefined;
   log: (msg: string) => void;
 }
 
@@ -303,7 +305,7 @@ export async function migrateInertPolicyRules(deps: InertRuleMigrationDeps): Pro
   const done = { retargeted: [] as string[], retired: [] as string[] };
   try {
     const [rules, projects] = await Promise.all([deps.adapter.listConformanceRules(), deps.adapter.projectList()]);
-    const known = new Set(projects.map((p) => p.id));
+    const known = new Set([...projects.map((p) => p.id), DEFAULT_PROJECT_ID]);
     const inert = rules.filter((r) => {
       const target = r.targets?.project;
       return (
@@ -319,10 +321,13 @@ export async function migrateInertPolicyRules(deps: InertRuleMigrationDeps): Pro
     const runOf = new Map<string, string>();
     let queueRead = true;
     try {
-      const listed = (await deps.estateTool('proposal.list', { state: 'approved' })) as { proposals?: Array<{ id?: unknown; provenance?: Record<string, unknown> }> };
-      for (const p of listed.proposals ?? []) {
-        const run = p.provenance?.['run_id'];
-        if (typeof p.id === 'string' && typeof run === 'string' && run !== '') runOf.set(p.id, run);
+      const listed = await deps.estateTool('proposal.list', { state: 'approved' });
+      const rows = typeof listed === 'object' && listed !== null ? (listed as Record<string, unknown>)['proposals'] : undefined;
+      // An answer that is not a list of proposals is a failed read, never an empty queue (codex review).
+      if (!Array.isArray(rows)) throw new Error('proposal.list returned an unexpected shape');
+      for (const p of rows as Array<{ id?: unknown; provenance?: Record<string, unknown> } | null>) {
+        const run = p?.provenance?.['run_id'];
+        if (typeof p?.id === 'string' && typeof run === 'string' && run !== '') runOf.set(p.id, run);
       }
     } catch (err) {
       queueRead = false;
@@ -333,7 +338,18 @@ export async function migrateInertPolicyRules(deps: InertRuleMigrationDeps): Pro
       const ref = rule.provenance.ref ?? '';
       const proposalId = ref.startsWith('proposal:') ? ref.slice('proposal:'.length) : rule.id;
       const run = runOf.get(proposalId);
-      const project = resolvePolicyProject(facet, run !== undefined ? deps.projectOf(run) : undefined, projects);
+      // The filing run's project, read from the engine; a read that fails leaves the rule for the next boot.
+      let runProject: string | undefined;
+      let runKnown = true;
+      if (run !== undefined) {
+        try {
+          runProject = (await deps.adapter.memberProjects('crew.run', run))[0] ?? (await deps.adapter.memberProjects('crew.chat', run))[0];
+        } catch (err) {
+          runKnown = false;
+          deps.log(`[policy-landing] the project of run ${run} could not be read for rule ${rule.id}: ${message(err)}`);
+        }
+      }
+      const project = resolvePolicyProject(facet, runProject, projects);
       if (project !== undefined) {
         const landing = await landPolicyRule(
           deps,
@@ -349,7 +365,7 @@ export async function migrateInertPolicyRules(deps: InertRuleMigrationDeps): Pro
         continue;
       }
       // Without the filing runs a rule might have resolved through its run: it is left for the next boot.
-      if (!queueRead) continue;
+      if (!queueRead || !runKnown) continue;
       try {
         await deps.adapter.retireConformanceRule(rule.id);
         deps.audit.record('governance.rule.retired', MIGRATION_ACTOR, { detail: { id: rule.id, via: 'inert-project-migration', project: facet } });
