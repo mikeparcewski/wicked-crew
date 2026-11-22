@@ -250,7 +250,7 @@ describe.skipIf(process.platform === 'win32')('the data gate admits a first-use 
   }, 90_000);
 
   afterAll(async () => {
-    sup?.stopAll();
+    await sup?.stopAll();
     await app?.close();
     adapter?.close();
     if (base !== undefined) removeScratch(base);

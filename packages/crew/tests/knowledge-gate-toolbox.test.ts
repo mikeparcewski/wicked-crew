@@ -26,7 +26,8 @@ import { McpRegistry } from '../src/mcp/registry.js';
 import { McpRegistryStore } from '../src/mcp/registry-store.js';
 import type { SecretStore } from '../src/mcp/secrets.js';
 import { yamlQuotedBody } from '../src/knowledge/adapters/toolbox/document.js';
-import { ToolboxSupervisor, type SupervisorDeps } from '../src/knowledge/adapters/toolbox/supervisor.js';
+import { ToolboxProcess, ToolboxSupervisor, type SupervisorDeps } from '../src/knowledge/adapters/toolbox/supervisor.js';
+import type { ToolboxDocument } from '../src/knowledge/adapters/toolbox/document.js';
 import { DataGate } from '../src/knowledge/gate/gate.js';
 import { SourceReadLog } from '../src/knowledge/gate/record.js';
 import { registerGateRoutes } from '../src/knowledge/gate/routes.js';
@@ -280,14 +281,24 @@ const until = async (fn: () => boolean, ms = 5_000): Promise<void> => {
 
 const Q = 'SELECT t.a, t.b FROM s.t AS t';
 
+/**
+ * crew#1752: nothing may still write under `r.base` when it is removed. The adapters exit and remove their own run
+ * directories (`stopAll` resolves after both), and the audit trail's appends are fire-and-forget (a read's line is
+ * still queued when the answer returns), so both are awaited first.
+ */
+async function quiesce(r: Rig): Promise<void> {
+  await r.sup.stopAll();
+  await r.app.close();
+  await r.audit.flush();
+}
+
 describe.skipIf(process.platform === 'win32')('the gate on a Toolbox-runtime source (stand-in process)', () => {
   let r: Rig;
   beforeAll(async () => {
     r = await rig();
   }, 60_000);
   afterAll(async () => {
-    r.sup.stopAll();
-    await r.app.close();
+    await quiesce(r);
     rmSync(r.base, { recursive: true, force: true });
   });
 
@@ -629,6 +640,45 @@ describe.skipIf(process.platform === 'win32')('the gate on a Toolbox-runtime sou
 });
 
 
+describe.skipIf(process.platform === 'win32')('stopping the Toolbox adapters (crew#1752)', () => {
+  it('stopAll resolves only once every adapter has exited and its run directory is gone, a preview in flight included', async () => {
+    const r = await rig();
+    const runRoot = join(r.base, 'mcp', 'adapters', 'toolbox', 'run');
+    const files = (d: string): string[] => (existsSync(d) ? readdirSync(d, { recursive: true, encoding: 'utf8' }).filter((f) => !statSync(join(d, f)).isDirectory()) : []);
+    try {
+      expect((await r.app.inject({ method: 'POST', url: '/api/v1/sources/tb/test' })).json()).toMatchObject({ ok: true });
+      const pid = r.sup.current(TB_ID)?.pid ?? null;
+      expect(alive(pid)).toBe(true);
+      expect(files(runRoot).some((f) => f.endsWith('tools.yaml'))).toBe(true);
+      // A preview of the saved entry, started and not awaited: its process is starting when the stop begins.
+      const preview = r.app.inject({ method: 'POST', url: '/api/v1/mcp/servers/tb/test' });
+      await until(() => readdirSync(runRoot).some((d) => d.startsWith('preview-')));
+      await r.sup.stopAll();
+      // Nothing of either process is left the moment the stop resolves: no process, no file under the run root.
+      expect(alive(pid)).toBe(false);
+      expect(files(runRoot)).toEqual([]);
+      await preview;
+    } finally {
+      await quiesce(r);
+      rmSync(r.base, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('a process that never spawned is closed at once, and leaves no directory', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'kd-b2-nospawn-'));
+    try {
+      writeFileSync(join(base, 'file'), '');
+      const doc = { yaml: 'sources: {}\n', secretVar: null, caPem: null } as unknown as ToolboxDocument;
+      const p = new ToolboxProcess(join(base, 'no-binary'), join(base, 'file', 'run'), doc, null, 60_000, () => undefined);
+      await expect(p.start()).rejects.toThrow();
+      await p.closed;
+      expect(p.pid).toBeNull();
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('Toolbox host memory bound (crew#1320)', () => {
   it('reads this process memory and returns null for an exited pid', async () => {
     const { processMemory } = await import('../src/knowledge/adapters/toolbox/memory.js');
@@ -663,8 +713,7 @@ describe('Toolbox host memory bound (crew#1320)', () => {
         await until(() => !alive(before));
         expect((await call(r, 'wmt_a', 'mcp:tb/execute_sql', { sql: Q })).answer).toMatchObject({ rowCount: 2 });
       } finally {
-        r.sup.stopAll();
-        await r.app.close();
+        await quiesce(r);
         rmSync(r.base, { recursive: true, force: true });
       }
     }, 20_000);
