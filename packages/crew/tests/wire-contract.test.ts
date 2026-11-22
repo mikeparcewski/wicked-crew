@@ -895,10 +895,14 @@ const ENGINE_MEMORY_AXIS = {
   summary: { total: 1, caught: 1, gaps: 0, false_positives: 0 },
   coverage: { memories: 2, surfaced: 1, unsurfaced: [{ memory_id: 'm2', scope: 'project:p' }] },
 };
+// The producer's shapes against the declarations directly (field types, not only names; codex r1 on #1758) …
+accepts<Wire.GovernanceEvalMemoryResult, typeof ENGINE_MEMORY_RESULT>();
+accepts<Wire.GovernanceEvalMemoryAxis, typeof ENGINE_MEMORY_AXIS>();
+// … and inside a report, on a result row whose `memory` is only the producer's (never intersected with the contract's).
 accepts<
   Wire.GovernanceEvalReport,
   {
-    results: Array<Wire.GovernanceEvalResult & { memory: typeof ENGINE_MEMORY_RESULT | null }>;
+    results: Array<Omit<Wire.GovernanceEvalResult, 'memory'> & { memory: typeof ENGINE_MEMORY_RESULT | null }>;
     summary: Wire.GovernanceEvalSummary;
     degraded: null;
     memory: typeof ENGINE_MEMORY_AXIS | null;

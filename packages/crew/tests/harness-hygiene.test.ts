@@ -22,6 +22,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
+import { resolveMemoryDbPath } from '../src/core/estate-mcp-client.js';
 import { crewStateHome } from '../src/projects/state-home.js';
 import { resolveSkillsRoot } from '../src/skills/store.js';
 import { removeScratch } from './setup/scratch.js';
@@ -90,6 +91,13 @@ describe('hermetic env arming (tests/setup/hermetic-home.ts)', () => {
     // writes `evals:` junk into the OPERATOR's real estate knowledge store — the store the
     // mem/search domains answer from (crew#396).
     expectArmed('WICKED_CREW_KNOWLEDGE_DB', join(homedir(), '.wicked-estate'));
+  });
+
+  it('the memory store resolves into the armed state home, never an inherited operator store (crew#1128)', () => {
+    // An exported WICKED_MEMORY_DB outranks the state home in the ladder, so the harness clears it: the governance
+    // evals hand the resolved store to the engine's memory axis, which would read the operator's memories.
+    expect(process.env['WICKED_MEMORY_DB']).toBeUndefined();
+    expect(resolveMemoryDbPath()).toBe(join(crewStateHome(), 'mcp', 'memory.db'));
   });
 
   it('the walkthrough evidence roots are armed away from the real ~/.wicked (WT-W1)', () => {
