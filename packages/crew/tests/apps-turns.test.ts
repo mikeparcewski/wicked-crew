@@ -20,7 +20,7 @@ import { McpBroker, type McpBrokerDeps } from '../src/mcp/broker.js';
 import type { McpCallResponse } from '../src/core/types.js';
 import { registerAppRoutes } from '../src/apps/routes.js';
 import { AppStore, type AppRepoRegistry } from '../src/apps/store.js';
-import { APPS_SELF_CHECK_COMMAND, AppTurnService, PackageKnowledge, SPEC_SHAPE_GUIDE, appsUnitResolver, brokenRulesOf, builderLines, changeLine, packageJson, reasonNamingRules, turnProblem, type KnowledgePackage, type TurnEngine } from '../src/apps/turns.js';
+import { APPS_SELF_CHECK_COMMAND, AppTurnService, PackageKnowledge, SPEC_SHAPE_GUIDE, appsUnitResolver, brokenRulesOf, builderLines, changeLine, lastParagraph, packageJson, reasonNamingRules, refusalWords, turnProblem, type KnowledgePackage, type TurnEngine } from '../src/apps/turns.js';
 import { readRules } from '../src/sources/policy/rules.js';
 import { builderCatalog } from './fixtures/apps-sources/builder-catalog.js';
 import { chatKnowledgeFor } from '../src/api/chat-mcp.js';
@@ -515,6 +515,139 @@ describe('apps turns: check, land, refuse', () => {
     await s.call('POST', '/apps/escalations/turns', { base: 2, message: 'next' });
     expect(s.launched[1]!.problem).toContain('"code":"no_change","why":"the builder made no change (it may have declined)"');
     expect(s.launched[1]!.problem).not.toContain('pg_sleep is refused');
+  });
+
+  // crew#1347: the evaluator's verdict text, as the engine records it (its head, then the evaluator's own tail).
+  const EVALUATOR_FAIL = [
+    "the evaluator's verdict is FAIL",
+    'Reviewed as evaluator; changed no files.',
+    'ITEM 1: PASS — The KPI tile reads the escalated count.',
+    'ITEM 2: FAIL — New query `escalated_west_count` embeds filter values as literals; declare parameters.',
+    '',
+    "Local HEAD is v6 with the reviewed changes uncommitted, so its tree differs from crew's recorded tree.",
+    '',
+    'Counts: derived 3 / submitted 3 / failed 1.',
+    'Memories proposed 0; no resolved environment issue warranted capture.',
+    'TREE: e2e47a84c0ffee00',
+    'VERDICT: FAIL',
+  ].join('\n');
+
+  it('a refused review\'s reason is its failing items in plain words, never the evaluator\'s bookkeeping (crew#1347)', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    s.set(runId, 'awaiting_human', { build: { status: 'done' }, check: { status: 'done' }, review: { status: 'rejected', denial_reason: EVALUATOR_FAIL } });
+    const d = (await s.call('GET', '/apps/escalations')).body.app;
+    expect(d.turn).toBeNull();
+    const reason = d.turns![0]!.reason!;
+    expect(d.turns![0]).toMatchObject({ state: 'refused', code: 'review_refused' });
+    expect(reason).toBe('The reviewer refused the change: New query escalated_west_count embeds filter values as literals; declare parameters. Nothing landed.');
+    for (const bookkeeping of ['Counts', 'Memories proposed', 'TREE', 'VERDICT', "evaluator's verdict", 'Reviewed as evaluator', 'ITEM 1', 'Local HEAD', '`']) expect(reason).not.toContain(bookkeeping);
+  });
+
+  it('refusalWords: the bookkeeping and the settled items go; every finding stays (xreview r1 cases)', () => {
+    expect(refusalWords(EVALUATOR_FAIL.replace(/\s+/g, ' '))).toBe('New query escalated_west_count embeds filter values as literals; declare parameters.');
+    const cases: Array<[string, string]> = [
+      // A plain finding loses only its head and verdict line.
+      ["the evaluator's verdict is FAIL\nThe chart reads a column the message did not ask for.\n**VERDICT: FAIL**", 'The chart reads a column the message did not ask for.'],
+      ["the evaluator's verdict is FAIL\nCounts: derived 1\nVERDICT: FAIL", ''],
+      // Counts before the findings, all run together: the item survives.
+      ["the evaluator's verdict is FAIL Counts: derived 1 / submitted 1 / failed 1 ITEM 1: FAIL — The query reads the wrong table. TREE: deadbeef VERDICT: FAIL", 'The query reads the wrong table.'],
+      // A failing item's continuation lines are its evidence and its fix.
+      ["ITEM 1: FAIL — The regional total is incorrect.\n  queries/count.sql:8 omits the viewer's region predicate.\n  Add that predicate before aggregating.\nVERDICT: FAIL", "The regional total is incorrect. queries/count.sql:8 omits the viewer's region predicate. Add that predicate before aggregating."],
+      // A passing item's continuation goes with it; prose after it stays.
+      ['ITEM 1: PASS — ok\n  evidence: a.sql:1\nThe change also deletes the totals page.', 'The change also deletes the totals page.'],
+      // A finding that names a protocol word is a finding; words after a Counts or VERDICT record stay.
+      ["STACK-CHECK is missing from the builder's report; the custom implementation duplicates the framework.", "STACK-CHECK is missing from the builder's report; the custom implementation duplicates the framework."],
+      ['Counts: derived 1 / submitted 0 / failed 1 — QE registration remains blocked.\nITEM 1: PASS — ok', 'QE registration remains blocked.'],
+      ['VERDICT: FAIL — The chart reads a column the message did not ask for', 'The chart reads a column the message did not ask for'],
+      // A broken rule beside a failing item is kept, with its id; a deferred item is no reason.
+      ['ITEM 1: FAIL — The chart uses the wrong aggregation.\nRULE viewer-isolation: BROKEN — queries/count.sql omits the viewer predicate.\nVERDICT: FAIL', 'The chart uses the wrong aggregation. RULE viewer-isolation: BROKEN — queries/count.sql omits the viewer predicate.'],
+      ['ITEM 1: DEFERRED — CI on the pull request\nRULE r1: BROKEN — x.sql:3 hardcodes a region\nVERDICT: FAIL', 'RULE r1: BROKEN — x.sql:3 hardcodes a region'],
+      // Any case and stop after the status; N/A forms are settled; a reference to another item is not split.
+      ['ITEM 1: Fail. New query embeds literals.\nITEM 2: FAIL — Missing label\nITEM 3: NOT-APPLICABLE — out of scope\nITEM 4: FAIL — Contradicts ITEM 1: filter is hardcoded', 'New query embeds literals. Missing label. Contradicts ITEM 1: filter is hardcoded'],
+      ['Reviewed as evaluator ITEM 1: FAIL — New query embeds literals; declare parameters.', 'New query embeds literals; declare parameters.'],
+      // Identifiers, globs and operators keep their characters; only wrapping markdown goes.
+      ['read_policy queries/sales__west.sql: pg_sleep is not allowed; `__typename` and `queries/**/*.sql`', 'read_policy queries/sales__west.sql: pg_sleep is not allowed; __typename and queries/**/*.sql'],
+      ['`*` is not allowed in SELECT; -1 is not a valid limit; `>= 0` is required', '* is not allowed in SELECT; -1 is not a valid limit; >= 0 is required'],
+      ['_STACK-CHECK:_ looked at x\n*Counts*: derived 3 / submitted 3 / failed 0\n*TREE*: e2e47a84c0', ''],
+      // A check's and a rule check's own words are kept as they are.
+      ['apps_check: refused: check_failed - read_policy queries/x.sql: pg_sleep is not allowed', 'apps_check: refused: check_failed - read_policy queries/x.sql: pg_sleep is not allowed'],
+      ['1 steering rule(s) broken: learn-tests-with-fixes - no test file is added or changed', '1 steering rule(s) broken: learn-tests-with-fixes - no test file is added or changed'],      // (xreview r2) Sibling items at one indent are records, not a settled item's continuation.
+      ['  ITEM 1: PASS — ok\n  ITEM 2: FAIL — Missing tenant predicate.\n  RULE isolation: BROKEN — Unscoped reads.', 'Missing tenant predicate. RULE isolation: BROKEN — Unscoped reads.'],
+      // Words after a Counts or VERDICT record are their own part, never a settled item's.
+      ['ITEM 1: PASS — query exists. Counts: derived 1 / submitted 0 / failed 1 — QE registration remains blocked.', 'QE registration remains blocked.'],
+      ['ITEM 1: PASS — ok. VERDICT: FAIL — The query leaks rows.', 'The query leaks rows.'],
+      // A STACK-CHECK or Memories record ends at the next item or rule, in any case.
+      ['STACK-CHECK: looked at turns.ts :: offers native helpers RULE isolation: BROKEN — queries/count.sql:8 omits the tenant predicate.', 'RULE isolation: BROKEN — queries/count.sql:8 omits the tenant predicate.'],
+      ['STACK-CHECK: looked at x item 1: fail — The query leaks rows.', 'The query leaks rows.'],
+      ['Memories proposed 0; no captures ITEM 1: FAIL — The query leaks rows.', 'The query leaks rows.'],
+      ['Memories proposed 0; no resolved environment issue warranted capture', ''],
+      // What a code span quotes is never read as a record, and its characters stay (two globs on one line).
+      ['ITEM 1: FAIL — The banner still displays `VERDICT: FAIL`.', 'The banner still displays VERDICT: FAIL.'],
+      ['ITEM 1: FAIL — The report says `ITEM 2: PASS` even though tenant isolation fails.', 'The report says ITEM 2: PASS even though tenant isolation fails.'],
+      ['Both `queries/**/*.sql` and `views/**/*.sql` bypass the allowlist.', 'Both queries/**/*.sql and views/**/*.sql bypass the allowlist.'],
+      // A refusal's fenced evidence is kept as words.
+      ['ITEM 1: FAIL —\n```text\nERROR: relation "tickets" does not exist\n```', 'ERROR: relation "tickets" does not exist'],
+      // A verdict record in any case, bare or with its token.
+      ['verdict: fail', ''],
+      ['Verdict: Fail', ''],
+      ['VERDICT:', ''],
+      // (coord r1) A finding that names a STACK-CHECK record mid-sentence keeps its words.
+      ["The builder's STACK-CHECK: line names no docs, so the duplicate of the date helper went unchecked.", "The builder's STACK-CHECK: line names no docs, so the duplicate of the date helper went unchecked."],
+      // The engine's heads that quote the contract in code spans.
+      ["no `VERDICT:` line in the evaluator's output (contract: end with `VERDICT: PASS` or `VERDICT: FAIL`)\nThe chart is wrong.", 'The chart is wrong.'],
+      ["the evaluator's `VERDICT:` line carries no token (contract: `VERDICT: PASS` or `VERDICT: FAIL`)\nThe chart is wrong.", 'The chart is wrong.'],
+      ["the evaluator's verdict token `CONDITIONAL` is not PASS (contract: `VERDICT: PASS` or `VERDICT: FAIL`; a condition is a FAIL whose condition is the finding)\nThe chart is wrong.", 'The chart is wrong.'],
+      // Numbered item lists leave no stray numbers.
+      ['1. ITEM 1: FAIL — The query leaks rows.\n2. ITEM 2: PASS — ok', 'The query leaks rows.'],
+      ['1. ITEM 1: FAIL — The query leaks rows. 2. ITEM 2: PASS — ok', 'The query leaks rows.'],
+      // (coord fold check) A sentence's own closing number is a word, in a finding and after a record.
+      ['Expected 3 rows, got 2.', 'Expected 3 rows, got 2.'],
+      ['ITEM 1: FAIL — Expected 3 rows, got 2.', 'Expected 3 rows, got 2.'],
+      ['ITEM 1: FAIL — Expected 3 rows, got 2. ITEM 2: PASS — ok', 'Expected 3 rows, got 2.'],
+      // Bookkeeping with no count.
+      ['The chart is wrong.\nMemories proposed: none\nTREE: (none)\nCounts: 0/0/0', 'The chart is wrong.'],
+      // A tail cut inside a fence (an odd count, the first closing): what follows is read as words, not as code.
+      ['SELECT 1\n```\nITEM 1: FAIL — The query leaks rows.\nVERDICT: FAIL', 'The query leaks rows. SELECT 1'],
+    ];
+    for (const [text, want] of cases) expect(refusalWords(text), text).toBe(want);
+    expect(refusalWords(null)).toBe('');
+    // (coord r1) Failing items lead, so a long log above them never pushes them past the caller's cap.
+    const log = Array.from({ length: 40 }, (_, i) => `$ npm test -- step ${i}: exit 0 after a long run of output`).join('\n');
+    const led = refusalWords(`Commands run:\n${log}\nITEM 1: FAIL — The query leaks rows.\n  queries/x.sql:3 has no tenant filter.\nRULE r1: BROKEN — x.sql:3`);
+    expect(led.startsWith('The query leaks rows. queries/x.sql:3 has no tenant filter. RULE r1: BROKEN — x.sql:3. Commands run:')).toBe(true);
+  });
+
+  it('lastParagraph: the builder\'s last words, past fences, Counts in any form and a memories list', () => {
+    expect(lastParagraph("I could not read the app's files, so I changed nothing.\n\n```sql\nselect 1\n```\n\n**STACK-CHECK:** looked at nothing :: offers nothing.\n\nMemories proposed: 1\n- [gotcha] worktree path was unreadable")).toBe("I could not read the app's files, so I changed nothing.");
+    expect(lastParagraph('I declined: no such table.\n\nCounts — derived 0 / submitted 0 / failed 0')).toBe('I declined: no such table.');
+    // (xreview r2) A memories list past a blank line, bulleted or numbered, and a bare verdict record.
+    expect(lastParagraph('I could not connect.\n\nMemories proposed: 1\n\n- [gotcha] Use the alternate socket')).toBe('I could not connect.');
+    expect(lastParagraph('I could not connect.\n\nMemories proposed: 2\n1. [gotcha] one\n2. [gotcha] two')).toBe('I could not connect.');
+    expect(lastParagraph('I declined.\n\nVERDICT:')).toBe('I declined.');
+    // (coord r1) A builder's bookkeeping with no count stays out of its quote, as on main.
+    expect(lastParagraph('I declined: no such table.\nMemories proposed: none\nTREE: (none)\nCounts: 0/0/0')).toBe('I declined: no such table.');
+    expect(lastParagraph('I made no change: the table has 3 columns, the message names 4.')).toBe('I made no change: the table has 3 columns, the message names 4.');
+  });
+
+  it('a build that made no change never quotes the STACK-CHECK footer or raw markdown (crew#1540)', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    s.outputs.set(`${runId}:build`, 'I could not read the app\'s files: **access to the worktree was refused**, so I changed nothing.\n\n**STACK-CHECK:** looked at nothing (no file access) :: offers nothing this change needs.\n\nMemories proposed 0');
+    s.set(runId, 'failed', { build: { status: 'rejected', denial_reason: 'executes-code phase reported done but left no change in the worktree' } });
+    s.emit({ type: 'sessionFailed', session: runId });
+    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull());
+    const t = (await s.call('GET', '/apps/escalations')).body.app.turns![0]!;
+    expect(t).toMatchObject({ state: 'failed', code: 'no_change' });
+    expect(t.reason).toBe('The builder made no change it could hand on. It said: “I could not read the app\'s files: access to the worktree was refused, so I changed nothing.” Nothing landed.');
+
+    // A builder that said nothing but the footer: crew's words only, no quote.
+    const run2 = (await s.call('POST', '/apps/escalations/turns', { base: 2, message: 'again' })).body['runId'] as string;
+    s.outputs.set(`${run2}:build`, '**STACK-CHECK:** looked at nothing (no file access) :: offers nothing this change needs.');
+    s.set(run2, 'failed', { build: { status: 'rejected', denial_reason: 'executes-code phase reported done but left no change in the worktree' } });
+    s.emit({ type: 'sessionFailed', session: run2 });
+    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull());
+    expect((await s.call('GET', '/apps/escalations')).body.app.turns![1]!.reason).toBe('The builder made no change it could hand on. Nothing landed.');
   });
 
   it('a build refused for another reason keeps that reason (only "left no change" is no_change)', async () => {
