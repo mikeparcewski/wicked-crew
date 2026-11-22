@@ -101,18 +101,27 @@ export class RefineLauncher implements ProposalDispatcher {
       { pid: d.pid, runId: d.identity.runId, base: target.base, allow, op: 'refine', chatId: d.chatId, chatInstance: instance },
     );
     this.deps.fence?.(ref.doc, (this.deps.bindings.get(ref.ref)?.attempts ?? []).map((a) => a.runId).filter((id) => id !== d.identity.runId), ref.mount);
+    // crew#1726: a refine that names `chat`, asked in the chat the document was made in, reads the conversation up to
+    // its own cutoff (turns and files added since the create included). Every other held token keeps its copy: its
+    // bytes may not be readable again (a brief gone after a restart, a removed run).
+    const fresh = new Set(
+      chatNow !== null && d.chatId === binding.chatId && instance === binding.chatInstance && d.resolution.sources.some((s) => s.token === 'chat' && s.status === 'ok')
+        ? ['chat']
+        : [],
+    );
+    const heldTokens = Object.fromEntries(Object.entries(binding.tokens).filter(([token]) => !fresh.has(token)));
     const resolution = {
       ...d.resolution,
       sources: [
-        ...d.resolution.sources.filter((s) => binding.tokens[s.token] === undefined),
-        ...Object.keys(binding.tokens).map((token) => ({ token, label: token, status: 'ok' as const })),
+        ...d.resolution.sources.filter((s) => heldTokens[s.token] === undefined),
+        ...Object.keys(heldTokens).map((token) => ({ token, label: token, status: 'ok' as const })),
       ],
     };
     const packet = await buildSourcePacket({
       runId: d.identity.runId, chatId: d.chatId, pid: d.pid, cutoffTurnId: packetCutoff(records, d.pid, d.resolution.turnId),
       resolution, records,
       ...(chatNow !== null ? { storageChatId: chatNow } : {}),
-      held: { tokens: binding.tokens, bytes: (name) => this.deps.bindings.packetBytes(ref.ref, name) },
+      held: { tokens: heldTokens, bytes: (name) => this.deps.bindings.packetBytes(ref.ref, name) },
     }, this.deps.packetDeps);
     refuseLostSources(resolution, packet);
     this.deps.bindings.addPacket(ref.ref, packet.canonical, packet.tokens);
@@ -129,6 +138,10 @@ export class RefineLauncher implements ProposalDispatcher {
       allow,
       clisJson,
       packet,
+      // crew#1727: a document a chat made with no repository behind it cites only its packets' records/ (every refine
+      // carries them again), so each citation is checked there. A document made elsewhere may cite a repository
+      // snapshot this refine does not have: its check stays without folders.
+      ...(held !== null && held.attempts[0]?.op !== 'refine' && held.repos.length === 0 ? { recordsRepo: true } : {}),
       graphDb: binding.graphDb,
       actor: d.actor.id,
     });
