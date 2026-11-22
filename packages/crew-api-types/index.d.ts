@@ -955,6 +955,8 @@ export type ToolActivityEvent = {
   target: string | null;
   ok: boolean | null;
   durationMs: number | null;
+  /** The launch's seat key (core#1786); absent from cores before it, never null. */
+  cli?: string;
 };
 
 /** `/ws` frame: new working notes from the power orchestrator's stream (bus `wicked.run.notes.recorded`): its

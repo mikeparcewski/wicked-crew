@@ -157,6 +157,18 @@ respondsWith<Wire.CoreEvent, Wire.PowerHandoffEvent>();
 respondsWith<Wire.CoreEvent, Wire.PowerToggledEvent>();
 respondsWith<Wire.CoreEvent, Wire.PowerActivityEvent>();
 respondsWith<Wire.CoreEvent, Wire.ToolActivityEvent>();
+// (core#1786) `toolActivity` names its launch's seat as `cli`, keyed as core's `CoreEvent::ToolActivity`
+// serializer writes it (wicked-core src/event.rs, core#1790): a non-empty string, never null. A frame from
+// a core before it has no `cli` key at all, so the field is optional, not nullable.
+const TOOL_ACTIVITY_WITH_CLI = {
+  type: 'toolActivity', session: 'run-1', ord: 2, attempt: 0, cli: 'opencode#2', at: 1, id: 'call-1',
+  state: 'finished', kind: 'run', tool: 'bash', target: 'npm test', ok: true, durationMs: 1200,
+} satisfies Wire.ToolActivityEvent;
+const { cli: _seat, ...TOOL_ACTIVITY_PRE_1786 } = TOOL_ACTIVITY_WITH_CLI;
+void _seat;
+void (TOOL_ACTIVITY_PRE_1786 satisfies Wire.ToolActivityEvent);
+// @ts-expect-error -- core never sends `cli: null`; an older core omits the key
+void ({ ...TOOL_ACTIVITY_WITH_CLI, cli: null } satisfies Wire.ToolActivityEvent);
 respondsWith<Wire.CoreEvent, Wire.PowerWorkingNotesEvent>();
 respondsWith<Wire.CoreEvent, Wire.PowerEvent>();
 // … and `gateEvaluated.denial` names both new layers alongside the established ones. The literals
