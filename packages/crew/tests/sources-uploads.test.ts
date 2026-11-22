@@ -40,20 +40,33 @@ afterAll(() => {
 describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => {
   it('crew#1289: a large CSV leaves the daemon event loop responsive', async () => {
     const data = largeCsv();
+    // crew#1762: what blocks the loop is work on this thread, so each gap between ticks is measured in this
+    // thread's CPU time. A parse here holds the thread for the whole gap (CPU time ~ the gap, past one second);
+    // a loaded runner that does not schedule the process for a while stretches the wall-clock gap only (556 ms
+    // seen on macOS CI, with the parse in its child), which says nothing about the code.
+    const cpuMs = (): number => {
+      const u = process.threadCpuUsage();
+      return (u.user + u.system) / 1000;
+    };
     let last = performance.now();
+    let lastCpu = cpuMs();
     let maxGap = 0;
+    let maxBusy = 0;
     let ticks = 0;
     const ticker = setInterval(() => {
       const now = performance.now();
+      const cpu = cpuMs();
       maxGap = Math.max(maxGap, now - last);
+      maxBusy = Math.max(maxBusy, cpu - lastCpu);
       last = now;
+      lastCpu = cpu;
       ticks++;
     }, 10);
     try {
       const result = await ingestUpload('responsive.csv', data, { dir });
       expect(result.catalog.relations[0]?.rowEstimate).toBe(850_000);
       expect(ticks).toBeGreaterThan(10);
-      expect(maxGap).toBeLessThan(500);
+      expect(maxBusy, `the longest gap between ticks was ${Math.round(maxGap)} ms of wall time`).toBeLessThan(500);
     } finally {
       clearInterval(ticker);
     }
