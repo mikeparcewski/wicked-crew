@@ -26,7 +26,7 @@ import type { AppFiles } from '../check.js';
 import { actionHash } from '../check.js';
 import { canonicalJson, ESTATE_SERVER } from '../../mcp/classify.js';
 import type { McpToolRecord } from '../../mcp/registry-store.js';
-import { classifyAddress } from '../../sources/dialer.js';
+import { classifyAddress, validateAllowRanges } from '../../sources/dialer.js';
 import { CREW_SOURCE, DEFAULT_PORT } from '../../sources/kinds.js';
 import { lookupSource, type AppSource, type AppSourceRegistry } from '../exec/sources.js';
 import { parseToolQueryText } from '../exec/texts.js';
@@ -53,6 +53,8 @@ export interface ManifestInput {
    * signing algorithms it says it uses (the page checks the ID token's `alg` against them).
    */
   endpoints: { authorization: string; token: string; idTokenAlgs?: string[] } | null;
+  /** (crew#1457) Why discovery read nothing, when the caller knows (e.g. the issuer is on a private network its allowed ranges do not cover). */
+  endpointsWhy?: string;
 }
 
 export type ManifestOutcome = { ok: true; manifest: AppPublishManifest; sources: ImageSources; digest: string } | { ok: false; findings: PublishFinding[] };
@@ -160,7 +162,11 @@ export async function buildManifest(input: ManifestInput): Promise<ManifestOutco
     } else if (!body.audience.kind.startsWith('oidc-')) {
       find('audience', 'OIDC sign-in judges group values or email domains');
     }
-    if (input.endpoints === null) find('identity', "The issuer's discovery document could not be read");
+    // (crew#1457) The sign-in's allowed ranges are checked as the operator sign-in's are (`api/auth.ts`): only
+    // loopback or private CIDRs. Refused ranges are not dialled, so discovery is not reported beside them.
+    const ranges = id.allowRanges === undefined ? null : validateAllowRanges(id.allowRanges);
+    if (ranges !== null) find('identity', `The sign-in's allowed ranges are refused: ${ranges}`);
+    else if (input.endpoints === null) find('identity', `The issuer's discovery document could not be read${input.endpointsWhy !== undefined && input.endpointsWhy !== '' ? `: ${input.endpointsWhy}` : ''}`);
     // The page checks the sign-in's nonce, which needs the ID token: the scope always asks for `openid`.
     if (id.scope !== undefined && !id.scope.split(/\s+/).includes('openid')) find('identity', 'The sign-in scope must include openid');
   }

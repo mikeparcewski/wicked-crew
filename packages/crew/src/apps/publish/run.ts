@@ -6,7 +6,7 @@ import { join } from 'node:path';
 
 import { oidcAddressPolicy } from '../../api/auth.js';
 import type { AppActionGrant, AppPublished, AppPublishManifest, LaunchRunInput, SessionView } from '../../core/types.js';
-import { dialFetch } from '../../sources/dialer.js';
+import { DialRefusedError, dialFetch, validateAllowRanges } from '../../sources/dialer.js';
 import { projectMaySee, type AppSourceRegistry } from '../exec/sources.js';
 import { LOCK_PATH, SPEC_PATH } from '../check.js';
 import { AppStoreError, type AppPublisher, type AppStore, type StoredPublish } from '../store.js';
@@ -31,13 +31,64 @@ export interface PublishDeps {
 
 /** Discovery uses the same bounded, address-pinned dialer and address policy as operator sign-in. */
 export async function publishEndpoints(identity: ManifestInput['body']['identity']): Promise<ManifestInput['endpoints']> {
-  if (identity === null) return null;
+  return (await publishDiscovery(identity)).endpoints;
+}
+
+/**
+ * (crew#1457) Why a discovery read nothing, in words for the Publish sheet: an issuer on a private (or loopback)
+ * address the sign-in's allowed ranges do not cover names the range that would allow it; any other refusal of the
+ * dialer is its own words (a malformed URL is described, never quoted); anything else is `null` (the finding then says only that it could not be read).
+ */
+function discoveryRefusal(err: unknown, issuer: string): string | null {
+  if (!(err instanceof DialRefusedError)) return null;
+  if (err.code === 'address_unconfirmed' && err.addresses !== undefined && err.addresses.length > 0) {
+    let host = issuer;
+    try {
+      host = new URL(issuer).hostname;
+    } catch {
+      /* the issuer as written */
+    }
+    const where = err.addresses.map((a) => a.address).join(', ');
+    const kind = err.addresses.every((a) => a.class === 'loopback') ? 'a loopback address on this machine' : 'a private-network address';
+    // The narrowest range that allows it: exactly the addresses it resolved to (the person may widen it).
+    const ranges = err.addresses.map((a) => `${a.address}/${a.address.includes(':') ? 128 : 32}`);
+    return `${host} resolves to ${kind} (${where}), which crew reaches only when the sign-in allows its range (identity.allowRanges, e.g. ${ranges.join(', ')})`;
+  }
+  // A URL the dialer would not parse is described, never quoted: the issuer as typed may carry a password, a path or a
+  // query (xreview r1). The other refusals name only the host, its addresses and the status.
+  if (err.code === 'url_refused') return 'the issuer is not a URL crew dials (https, a host, no credentials)';
+  return err.message;
+}
+
+/**
+ * A URL a discovery document or the sign-in names, as it may be shown: an http(s) URL with no credentials, query or
+ * fragment, at most 300 characters, exactly as written (a trailing slash is the difference that matters); else `null`.
+ */
+function shownUrl(raw: unknown): string | null {
+  if (typeof raw !== 'string' || raw.length > 300 || !/^https?:\/\/\S+$/.test(raw)) return null;
   try {
-    if (!identity.issuer.startsWith('https://')) return null;
+    const u = new URL(raw);
+    return u.username === '' && u.password === '' && u.search === '' && u.hash === '' ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The issuer's endpoints, or `null` with why (crew#1457): the dialer's refusal, an error status, an oversize or
+ * non-JSON document, an issuer the document does not match (both shown when they are plain URLs), or endpoints that
+ * are not https. Nothing is dialled when the sign-in's allowed ranges are refused (the manifest says why).
+ */
+export async function publishDiscovery(identity: ManifestInput['body']['identity']): Promise<{ endpoints: ManifestInput['endpoints']; why: string | null }> {
+  if (identity === null) return { endpoints: null, why: null };
+  const none = (why: string | null = null) => ({ endpoints: null, why });
+  if (identity.allowRanges !== undefined && validateAllowRanges(identity.allowRanges) !== null) return none();
+  try {
+    if (!identity.issuer.startsWith('https://')) return none();
     const res = await dialFetch(`${identity.issuer.replace(/\/$/, '')}/.well-known/openid-configuration`, { signal: AbortSignal.timeout(10_000), headers: { accept: 'application/json' } }, oidcAddressPolicy(identity));
     if (!res.ok) {
       await res.body?.cancel();
-      return null;
+      return none(`it answered HTTP ${res.status}`);
     }
     const reader = res.body?.getReader();
     const chunks: Uint8Array[] = [];
@@ -47,19 +98,37 @@ export async function publishEndpoints(identity: ManifestInput['body']['identity
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > 1024 * 1024) { await reader.cancel(); return null; }
+      if (size > 1024 * 1024) { await reader.cancel(); return none('the document is over 1 MB'); }
       chunks.push(value);
     }
-    const doc = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
-    if (doc.issuer !== identity.issuer || typeof doc.authorization_endpoint !== 'string' || typeof doc.token_endpoint !== 'string') return null;
-    for (const raw of [doc.authorization_endpoint, doc.token_endpoint]) {
-      const url = new URL(raw);
-      if (url.protocol !== 'https:' || url.username !== '' || url.password !== '') return null;
+    let doc: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return none('the document is not a JSON object');
+      doc = parsed as Record<string, unknown>;
+    } catch {
+      return none('the document is not JSON');
+    }
+    if (doc.issuer !== identity.issuer) {
+      const says = shownUrl(doc.issuer);
+      const ours = shownUrl(identity.issuer);
+      const slash = typeof doc.issuer === 'string' && doc.issuer.replace(/\/$/, '') === identity.issuer.replace(/\/$/, '');
+      return none(`issuer mismatch: discovery says ${says ?? (doc.issuer === undefined ? 'no issuer' : 'an issuer that is not a plain URL')}, the sign-in says ${ours ?? 'an issuer that is not a plain URL'}${slash ? ' (they differ only in a trailing slash: use the issuer exactly as discovery writes it)' : ''}`);
+    }
+    if (typeof doc.authorization_endpoint !== 'string' || typeof doc.token_endpoint !== 'string') return none('the document names no authorization_endpoint or token_endpoint');
+    for (const [name, raw] of [['authorization_endpoint', doc.authorization_endpoint], ['token_endpoint', doc.token_endpoint]] as const) {
+      let url: URL | null = null;
+      try {
+        url = new URL(raw);
+      } catch {
+        url = null;
+      }
+      if (url === null || url.protocol !== 'https:' || url.username !== '' || url.password !== '') return none(`its ${name} is not an https URL without credentials`);
     }
     const algs = doc.id_token_signing_alg_values_supported;
-    return { authorization: doc.authorization_endpoint, token: doc.token_endpoint, ...(Array.isArray(algs) && algs.every((a) => typeof a === 'string') ? { idTokenAlgs: algs as string[] } : {}) };
-  } catch {
-    return null;
+    return { endpoints: { authorization: doc.authorization_endpoint, token: doc.token_endpoint, ...(Array.isArray(algs) && algs.every((a) => typeof a === 'string') ? { idTokenAlgs: algs as string[] } : {}) }, why: null };
+  } catch (err) {
+    return none(discoveryRefusal(err, identity.issuer));
   }
 }
 
@@ -70,6 +139,12 @@ export function publishAudience(m: Pick<AppPublishManifest, 'audience' | 'identi
   return `${values}${m.identity === null ? '' : ` who sign in at ${m.identity.issuer}`}`.replace(/\s+/g, ' ').trim();
 }
 
+/** The manifest's discovery fields: the endpoints, and why there are none when that is known. */
+async function discoveryOf(identity: ManifestInput['body']['identity']): Promise<Pick<ManifestInput, 'endpoints' | 'endpointsWhy'>> {
+  const d = await publishDiscovery(identity);
+  return { endpoints: d.endpoints, ...(d.why !== null ? { endpointsWhy: d.why } : {}) };
+}
+
 export class PublishService implements AppPublisher {
   constructor(private readonly deps: PublishDeps) {}
 
@@ -77,7 +152,7 @@ export class PublishService implements AppPublisher {
     let visible: Promise<ReadonlySet<string>> | undefined;
     const maySee = (source: Parameters<typeof projectMaySee>[0]): Promise<boolean> =>
       projectMaySee(source, () => (visible ??= this.deps.visibleSources(this.deps.projectOf(input.app.slug))));
-    return buildManifest({ ...input, registry: this.deps.registry, maySee, grantOf: (action) => this.deps.grantOf(input.app.slug, action), endpoints: await publishEndpoints(input.body.identity) });
+    return buildManifest({ ...input, registry: this.deps.registry, maySee, grantOf: (action) => this.deps.grantOf(input.app.slug, action), ...await discoveryOf(input.body.identity) });
   }
 
   async launch(p: StoredPublish, input: { repoId: string; projectId: string; excludeSeats: string[] }): Promise<void> {
