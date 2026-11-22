@@ -2759,7 +2759,8 @@ export async function createServer(
   });
   toolboxProber = dataGate;
   app.addHook('onClose', async () => {
-    toolboxSupervisor.stopAll();
+    // crew#1752: resolves once every adapter has exited and its run directory is gone.
+    await toolboxSupervisor.stopAll();
   });
   // DES-KNOWLEDGE-DATA-001 §4.1: every stored catalog's STRUCTURE (never a row) is projected into estate's knowledge
   // plane, keyed by the registry id; what was described before this release is projected once, off the boot path.
