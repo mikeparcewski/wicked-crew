@@ -1315,6 +1315,28 @@ describe('requirements: typed code links and the product-only marker (crew#1699)
     expect(gone!.uncounted).toBe('unindexed');
   });
 
+  it('a new link set alone (same repo, same rows) rebuilds the index: no stale links after a refresh (codex r1)', async () => {
+    vi.useFakeTimers();
+    try {
+      forgetRequirementsReads();
+      const root = await mkdtemp(join(tmpdir(), 'req-links-cache-'));
+      await markIndexed(root);
+      let links: unknown = satisfiedBy;
+      const reader: RequirementsGraphReader = {
+        async getRequirementsGraphForRepo() {
+          return { graph: { metadata: { schema_version: '1.1.0', product_only: true }, domains }, coverage: null, build: null,
+            rows: verdicts, satisfied_by: links } as EstateRequirementsRead;
+        },
+      };
+      expect((await getRequirement(repoAt(root), 'billing::REQ-001', reader))!.components).toHaveLength(1);
+      links = { billing: { ...satisfiedBy.billing, 'REQ-001': [] } };
+      vi.setSystemTime(Date.now() + REQUIREMENTS_READ_TTL_MS + 1);
+      expect((await getRequirement(repoAt(root), 'billing::REQ-001', reader))!.components).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('an engine that does not say (absent or null) gives null; a malformed link is left out', async () => {
     for (const absent of [true, false]) {
       const { repo, reader } = await engine(true, null, absent);
