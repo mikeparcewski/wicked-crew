@@ -197,6 +197,14 @@ describe('chat requirements maps (crew#1412)', () => {
     expect(text).toContain(`2 more rows are not listed here (this file holds ${REQUIREMENTS_MAP_ROWS} of ${REQUIREMENTS_MAP_ROWS + 2})`);
   });
 
+  it('a row whose code left the index reads "code no longer indexed", never as a placeholder (crew#1699)', () => {
+    const gone = { ...row(7), placeholder: true, uncounted: 'unindexed' } as RequirementSummary;
+    const { text } = renderRequirementsMap({ id: 'r', name: 'r' }, pageOf([gone, { ...row(8), placeholder: true }]), []);
+    const lines = text.split('\n');
+    expect(lines.find((l) => l.startsWith('- **REQ-7**'))).toMatch(/\[code no longer indexed, not counted\]$/);
+    expect(lines.find((l) => l.startsWith('- **REQ-8**'))).toMatch(/\[placeholder, not counted as a real requirement\]$/);
+  });
+
   it('an unknown code age is STALE, and a huge provenance string cannot grow the file past its limit (codex r1)', () => {
     const unknown = renderRequirementsMap({ id: 'r', name: 'r' }, pageOf([row(1)]), []);
     expect(unknown.summary).toContain('STALE');

@@ -40,7 +40,11 @@ import { WICKED_CORE_EXE_NAME } from '../core/adapter.js';
 import { execCapped } from '../core/exec.js';
 import { codeGraphDb, requirementsOverrides } from '../core/repoPaths.js';
 import type { RepoEntry } from '../core/types.js';
-import type { RequirementBusinessDomain, RequirementBusinessDomainCatalogEntry } from 'wicked-crew-api-types';
+import type {
+  RequirementBusinessDomain,
+  RequirementBusinessDomainCatalogEntry,
+  RequirementComponent,
+} from 'wicked-crew-api-types';
 
 interface ArtifactCorroboration {
   status?: unknown;
@@ -85,7 +89,10 @@ interface ArtifactDomain {
 
 /** The domain-model document the engine reads back from estate (`load_domain_graph`). */
 export interface EstateRequirementsGraph {
-  metadata?: { coverage?: ArtifactCoverage; business_domains?: unknown };
+  /** `product_only` (wicked-core#1236, domain-model 1.1.0): `true` when the build left tests, data, manifests and
+   *  documents out, so the engine's per-row verdict (`rows[..].uncounted`) is the category. A read never sets or
+   *  relabels it; absent means a build from before the field, which makes no claim. */
+  metadata?: { coverage?: ArtifactCoverage; business_domains?: unknown; product_only?: unknown };
   domains?: Record<string, ArtifactDomain>;
 }
 
@@ -113,6 +120,11 @@ export interface EstateRequirementsRead {
    * rows with `real` and no `uncounted` number exactly `coverage.real`. ABSENT from an older engine, null when
    * nothing is built; a requirement from a build before `code_symbol` has no entry. */
   rows?: Record<string, Record<string, unknown> | null | undefined> | null;
+  /** Each listed requirement's live code links, by domain then requirement id, from the store's `SatisfiedBy` edges
+   * (wicked-core#1483; core `src/repo.rs` requirements_graph_for_repo, `wicked_governance::SatisfiedByLink`):
+   * `[{ symbol, name, file, kind, confidence }]`, sorted by symbol, empty when no code target remains. ABSENT from an
+   * older engine, null when nothing is built. */
+  satisfied_by?: Record<string, Record<string, unknown> | null | undefined> | null;
 }
 
 /** The one read this module needs from the engine — `CoreAdapter.getRequirementsGraphForRepo`. */
@@ -386,6 +398,43 @@ function isConfigFile(f: string): boolean {
   return !SOURCE_FILE.test(base) && (base.includes('pnpm-lock') || base.includes('package-lock'));
 }
 
+/** The category of one row. A build with the product-only marker (wicked-core#1236) left non-product files out, so
+ * the engine's verdict decides: `not_product` is config and data, any other row is product (an extracted rule in a
+ * `.json` or `.flow-meta.xml` file lists under Functional). Without the marker, the components' files decide. */
+export function categoryOfRow(
+  productOnly: boolean,
+  uncounted: RequirementUncounted | null,
+  components: readonly string[],
+): RequirementCategory {
+  if (productOnly) return uncounted === 'not_product' ? 'config-data' : 'functional';
+  return categoryOfComponents(components);
+}
+
+/** One code link of a requirement, typed (wicked-core#1483): the estate SymbolId, the node's name, file and kind
+ *  label (`Function`, `Method`, or an `Other` tag), and the edge's confidence. */
+export type { RequirementComponent };
+
+/** A requirement's typed code links from the engine's `satisfied_by`, or `null` when the engine does not say (an
+ * older engine, nothing built, no entry for the row). A malformed link is left out, never guessed. */
+export function componentsOf(
+  links: EstateRequirementsRead['satisfied_by'],
+  domain: string,
+  reqId: string,
+): RequirementComponent[] | null {
+  if (links === undefined || links === null || typeof links !== 'object') return null;
+  const reqs = Object.hasOwn(links, domain) ? links[domain] : undefined;
+  if (reqs === undefined || reqs === null || typeof reqs !== 'object') return null;
+  const list = Object.hasOwn(reqs, reqId) ? reqs[reqId] : undefined;
+  if (!Array.isArray(list)) return null;
+  return list.flatMap((l: unknown) => {
+    const { symbol, name, file, kind, confidence } = (l ?? {}) as Record<string, unknown>;
+    return typeof symbol === 'string' && typeof name === 'string' && typeof file === 'string' &&
+      typeof kind === 'string' && typeof confidence === 'number' && Number.isFinite(confidence)
+      ? [{ symbolId: symbol, name, file, kind, confidence }]
+      : [];
+  });
+}
+
 /**
  * Why the coverage share leaves a listed requirement out, as the engine decides it: its unit is not a
  * behaviour (`structural`: a type shape or a signature), is outside product code (`not_product`), or is
@@ -575,6 +624,8 @@ export interface RequirementDetail extends RequirementSummary {
   errorPathCount: number;
   businessRules: unknown[];
   legacyComponents: unknown[];
+  /** The typed code links ({@link componentsOf}); `null` when the engine does not say. */
+  components: RequirementComponent[] | null;
 }
 
 interface IndexEntry {
@@ -586,6 +637,8 @@ interface IndexEntry {
   real: boolean;
   /** The engine gave its verdict on this row (else it was read off the document). */
   judged: boolean;
+  /** The row's typed code links ({@link componentsOf}). */
+  components: RequirementComponent[] | null;
 }
 
 /** Rows the share leaves out, split as the list marks them: with a stated rule, or a placeholder. */
@@ -685,6 +738,7 @@ async function buildIndexRead(
     .update(JSON.stringify(read.coverage ?? null))
     .update(JSON.stringify(read.build ?? null))
     .update(JSON.stringify(read.rows ?? null))
+    .update(JSON.stringify(read.satisfied_by ?? null))
     .update(JSON.stringify(read.code ?? null))
     .update(JSON.stringify(read.target ?? null))
     .digest('hex');
@@ -693,6 +747,7 @@ async function buildIndexRead(
     return { index: cached, coverage: cached.coverage, minimum: cached.minimum };
   }
   const overrides = await readOverrides(repo);
+  const productOnly = graph.metadata?.product_only === true;
 
   const entries: IndexEntry[] = [];
   const byKey = new Map<string, IndexEntry>();
@@ -727,7 +782,7 @@ async function buildIndexRead(
         ...(bd ? { businessDomain: bd } : {}),
         reqId,
         title,
-        category: categoryOfComponents(components),
+        category: categoryOfRow(productOnly, uncounted, components),
         statement: statements[0] ?? '',
         status: ov?.status ?? req.status ?? 'active',
         risk,
@@ -741,7 +796,10 @@ async function buildIndexRead(
       // Statements are part of the haystack: searching the requirements means
       // searching the actual rule text, not just titles and ids.
       const haystack = `${reqId} ${domain} ${title} ${req.description ?? ''} ${statements.join(' ')} ${ov?.notes ?? ''} ${bd?.name ?? ''}`.toLowerCase();
-      const entry: IndexEntry = { summary, haystack, source: req, real, judged: verdict !== null };
+      const entry: IndexEntry = {
+        summary, haystack, source: req, real, judged: verdict !== null,
+        components: componentsOf(read.satisfied_by, domain, reqId),
+      };
       entries.push(entry);
       byKey.set(key, entry);
     }
@@ -999,6 +1057,7 @@ export async function getRequirement(
     errorPathCount: (src.error_paths ?? []).length,
     businessRules: (src.business_rules ?? []).slice(0, 10),
     legacyComponents: (src.legacy_components ?? []).slice(0, 10),
+    components: entry.components,
   };
 }
 

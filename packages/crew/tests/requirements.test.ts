@@ -1223,3 +1223,108 @@ describe('requirements list: the business domain of each row (wicked-core#1425)'
     }
   });
 });
+
+// crew#1699: core's typed `satisfied_by` and the product-only marker (wicked-core#1697, core-ts 0.15.48). The read's
+// shape is the writer's: core `src/repo.rs` requirements_graph_for_repo returns `"satisfied_by": links` beside `rows`,
+// each link `wicked_governance::SatisfiedByLink { symbol, name, file, kind, confidence }` (domain_model.rs SatisfiedByLink;
+// its test `listed_satisfied_by_links_identify_each_builders_code_node` pins the JSON), and a 1.1.0 build writes
+// `metadata.product_only: true` beside `metadata.coverage` (domain_model.rs DomainMetadata.product_only).
+describe('requirements: typed code links and the product-only marker (crew#1699)', () => {
+  const rule = { id: 'RULE-1', statement: 'A stated rule.', confidence: 0.9 };
+  const req = (title: string, component: string) => ({
+    title, description: '', status: 'active', business_rules: [rule], legacy_components: [component],
+    data_access: [], dependencies: [], validations: [], error_paths: [],
+  });
+  const domains = {
+    billing: {
+      description: 'Billing',
+      requirements: {
+        'REQ-001': req('refund', 'src/billing.ts#refund'),
+        'REQ-002': req('discount rule', 'rules/discount.flow-meta.xml#Discount'),
+        'REQ-003': req('lockfile', 'package-lock.json#lockfileVersion'),
+        'REQ-004': req('gone', 'src/gone.ts#gone'),
+      },
+    },
+  };
+  const verdicts = {
+    billing: {
+      'REQ-001': { real: true, uncounted: null, code_mismatch: null },
+      'REQ-002': { real: true, uncounted: null, code_mismatch: null },
+      'REQ-003': { real: true, uncounted: 'not_product', code_mismatch: null },
+      'REQ-004': { real: true, uncounted: 'unindexed', code_mismatch: null },
+    },
+  };
+  const link = (symbol: string, name: string, file: string, confidence = 1.0) => ({ symbol, name, file, kind: 'Function', confidence });
+  const satisfiedBy = {
+    billing: {
+      'REQ-001': [link('ts-typescript . . . billing/src/billing/refund().', 'refund', 'src/billing.ts')],
+      'REQ-002': [link('flow . . . rules/discount/Discount', 'Discount', 'rules/discount.flow-meta.xml', 0.5)],
+      'REQ-003': [],
+      'REQ-004': [],
+    },
+  };
+  async function engine(productOnly: boolean | undefined, links: unknown = satisfiedBy, absent = false): Promise<{ repo: RepoEntry; reader: RequirementsGraphReader }> {
+    forgetRequirementsReads();
+    const root = await mkdtemp(join(tmpdir(), 'req-links-'));
+    await markIndexed(root);
+    const graph = {
+      metadata: { schema_version: '1.1.0', ...(productOnly === undefined ? {} : { product_only: productOnly }) },
+      domains,
+    };
+    const read = { graph, coverage: null, build: null, rows: verdicts, ...(absent ? {} : { satisfied_by: links }) };
+    return { repo: repoAt(root), reader: { async getRequirementsGraphForRepo() { return read as EstateRequirementsRead; } } };
+  }
+  const categories = async (productOnly: boolean | undefined) => {
+    const { repo, reader } = await engine(productOnly);
+    const page = await listRequirements(repo, { offset: 0, limit: 50 }, reader);
+    return Object.fromEntries(page!.items.map((i) => [i.reqId, i.category]));
+  };
+
+  it('with the marker, the engine\'s verdict is the category: an extracted rule in a config-looking file is Functional', async () => {
+    expect(await categories(true)).toEqual({
+      'REQ-001': 'functional', 'REQ-002': 'functional', 'REQ-003': 'config-data', 'REQ-004': 'functional',
+    });
+  });
+
+  it('without the marker (an older build, or a false one), the file extension still decides', async () => {
+    const guessed = { 'REQ-001': 'functional', 'REQ-002': 'functional', 'REQ-003': 'config-data', 'REQ-004': 'functional' };
+    expect(await categories(undefined)).toEqual(guessed);
+    expect(await categories(false)).toEqual(guessed);
+  });
+
+  it('a .json rule under the marker lists as Functional, while the guess calls it config', async () => {
+    const saved = domains.billing.requirements['REQ-002'];
+    domains.billing.requirements['REQ-002'] = req('discount rule', 'rules/discount.json#Discount');
+    try {
+      expect((await categories(true))['REQ-002']).toBe('functional');
+      expect((await categories(undefined))['REQ-002']).toBe('config-data');
+    } finally {
+      domains.billing.requirements['REQ-002'] = saved;
+    }
+  });
+
+  it('the detail carries each requirement\'s typed code links, empty for a row whose code left the index', async () => {
+    const { repo, reader } = await engine(true);
+    const detail = await getRequirement(repo, 'billing::REQ-002', reader);
+    expect(detail!.components).toEqual([
+      { symbolId: 'flow . . . rules/discount/Discount', name: 'Discount', file: 'rules/discount.flow-meta.xml', kind: 'Function', confidence: 0.5 },
+    ]);
+    expect(detail!.legacyComponents).toEqual(['rules/discount.flow-meta.xml#Discount']);
+    const gone = await getRequirement(repo, 'billing::REQ-004', reader);
+    expect(gone!.components).toEqual([]);
+    expect(gone!.uncounted).toBe('unindexed');
+  });
+
+  it('an engine that does not say (absent or null) gives null; a malformed link is left out', async () => {
+    for (const absent of [true, false]) {
+      const { repo, reader } = await engine(true, null, absent);
+      expect((await getRequirement(repo, 'billing::REQ-001', reader))!.components).toBeNull();
+    }
+    const bad = { billing: { 'REQ-001': [{ symbol: 1, name: 'x', file: 'f', kind: 'Function', confidence: 1 }, link('s', 'refund', 'src/billing.ts')] } };
+    const { repo, reader } = await engine(true, bad);
+    expect((await getRequirement(repo, 'billing::REQ-001', reader))!.components).toEqual([
+      { symbolId: 's', name: 'refund', file: 'src/billing.ts', kind: 'Function', confidence: 1 },
+    ]);
+    expect((await getRequirement(repo, 'billing::REQ-002', reader))!.components).toBeNull();
+  });
+});
