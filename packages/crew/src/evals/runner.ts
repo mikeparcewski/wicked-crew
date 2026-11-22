@@ -136,7 +136,7 @@ export async function runDefaultEvals(input: RunInput): Promise<{ report: Defaul
     if (mine.length === 0) extra.push('no cases yet');
     if (suite === 'needs-you' && input.project !== null) extra.push('what needs you is daemon-wide: run every project to score it');
     if (suite === 'shape') {
-      extra.push('exact scoring: a case is right only when the card and the option both match; an ambiguous case only when it asks or lands on a listed shape');
+      extra.push('exact scoring: a case is right only when the card and the option both match; an ambiguous case only when it lands on a listed shape, or asks with one among its choices');
       extra.push('corpus cases replay today\'s detection with the recorded seat answers; real cases are corrections only, a diagnostic slice (deployment accuracy comes from the audited sample)');
     }
     if (suite === 'recall' && mine.length === 0) {
