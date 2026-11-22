@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuditLog } from '../src/api/audit.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { GateCache } from '../src/api/gate-cache.js';
-import { PROPOSAL_DECIDED, decisionOf } from '../src/api/proposal-decisions.js';
+import { PROPOSAL_DECIDED, decisionOf, recordProposalDecision } from '../src/api/proposal-decisions.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { Actor } from '../src/core/types.js';
@@ -84,7 +84,10 @@ async function server(o: { rows: Row[]; audit?: AuditLog; actor?: Actor; approve
 
 describe('crew#1261: who rejected a proposal, and why', () => {
   it('a person’s rejection says operator/rejected with when; a row crew made no decision on says nothing', async () => {
-    const s = await server({ rows: [memory('p1'), memory('p2', 'rejected')] });
+    const s = await server({ rows: [memory('p1'), memory('p2', 'rejected'), memory('p3'), memory('p4', 'approved')] });
+    // Decisions on record for rows that are not rejected (a stale line) are never attached to them.
+    recordProposalDecision(s.audit, { id: 'local', kind: 'human', trust: 'admin' }, 'p3', 'rejected');
+    recordProposalDecision(s.audit, { id: 'local', kind: 'human', trust: 'admin' }, 'p4', 'rejected');
     expect((await s.app.inject({ method: 'POST', url: '/api/v1/proposals/p1/reject' })).statusCode).toBe(200);
     const rows = await s.rejected();
     const p1 = rows.find((r) => r['id'] === 'p1')!;
@@ -93,7 +96,16 @@ describe('crew#1261: who rejected a proposal, and why', () => {
     expect(rows.find((r) => r['id'] === 'p2')).not.toHaveProperty('decision');
     // Pending and approved rows never carry one.
     const all = ((await s.app.inject({ method: 'GET', url: '/api/v1/proposals' })).json() as { proposals: Array<Record<string, unknown>> }).proposals;
-    expect(all.filter((r) => r['state'] !== 'rejected').some((r) => 'decision' in r)).toBe(false);
+    const others = all.filter((r) => r['state'] !== 'rejected');
+    expect(others.map((r) => r['id'])).toEqual(['p3', 'p4']);
+    expect(others.some((r) => 'decision' in r)).toBe(false);
+  });
+
+  it('a decision made after the first list (the trail already read) shows on the next one', async () => {
+    const s = await server({ rows: [memory('p1')] });
+    expect(await s.rejected()).toEqual([]);
+    await s.app.inject({ method: 'POST', url: '/api/v1/proposals/p1/reject' });
+    expect((await s.rejected())[0]!['decision']).toMatchObject({ by: 'operator', reason: 'rejected' });
   });
 
   it('a caller that is not a person never reads as the operator', async () => {

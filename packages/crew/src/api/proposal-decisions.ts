@@ -7,9 +7,9 @@
  *  - `crew` / `withdrawn-copy`: an accept-with-edit's copy whose approve failed, withdrawn so a retry leaves no duplicate.
  *
  * Crew records each decision it makes as a `proposal.decided` line on its audit trail and returns it on
- * `GET /proposals` (`Proposal.decision`). A rejection crew did not make (estate's own tools, a trail that could not be
- * read, a path that does not record one) carries no `decision`: never a guess. `by: 'operator'` is only ever a HUMAN
- * actor's line.
+ * `GET /proposals` (`Proposal.decision`). A row with none is UNKNOWN (estate's own tools, a crew path that records
+ * none, a trail that could not be read or written): never a guess. `by: 'operator'` is only ever a HUMAN actor's line
+ * (with auth off every caller is the local person, as for every other audit line).
  */
 
 import type { ProposalDecision, ProposalDecisionReason } from 'wicked-crew-api-types';

@@ -15,7 +15,9 @@
  *     the next waits for the running one's terminal frame.
  *   - Never the person's to answer (crew#1365): nobody started the chained capture, so when it stops at a gate (a
  *     small repository's first step has nothing to review, and its floor escalates) crew stops it and says why in
- *     one line, on its `run.cancelled` audit entry as the onboarding actor. Only a capture THIS daemon launched.
+ *     one line, on its `run.cancelled` audit entry as the onboarding actor. Only a capture the chain launched: this
+ *     daemon's (registered under its minted id before the launch, so a gate that comes first is not missed), or one
+ *     whose launch entry on the trail says so (after a restart). One already parked when the daemon starts stays.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -56,7 +58,9 @@ export class OnboardingCaptureChain {
   private readonly endedWhileLaunching = new Set<string>();
   /** crew#1365: the captures this chain launched and not yet seen end → their repository's name. */
   private readonly launched = new Map<string, string>();
-  /** crew#1365: the captures being stopped (one stop per capture). */
+  /** crew#1365: the chain's captures seen end (a stale gate frame after it stops nothing). One per capture. */
+  private readonly ended = new Set<string>();
+  /** crew#1365: the captures being stopped, or stopped and not yet seen end (one stop per capture). */
   private readonly stopping = new Set<string>();
 
   constructor(private readonly deps: OnboardingCaptureDeps) {}
@@ -69,8 +73,9 @@ export class OnboardingCaptureChain {
       if (!this.pending.includes(session) && session !== this.launchingFor) this.pending.push(session);
     }
     const terminal = event.type === 'sessionCompleted' || event.type === 'sessionFailed' || event.type === 'runCancelled';
-    if (event.type === 'awaitingHuman' && this.launched.has(session)) void this.stopParked(session, event);
-    if (terminal) this.launched.delete(session);
+    const owned = this.launched.has(session) || this.deps.runTimingIndex.isOnboardingCapture(session);
+    if (event.type === 'awaitingHuman' && owned && !this.ended.has(session)) void this.stopParked(session, event);
+    if (terminal && owned) { this.launched.delete(session); this.stopping.delete(session); this.ended.add(session); }
     if (terminal && session === this.active) this.active = null;
     if (terminal && this.launchingFor !== null) this.endedWhileLaunching.add(session);
     void this.next();
@@ -111,10 +116,11 @@ export class OnboardingCaptureChain {
       const status = await this.deps.adapter.cancelRun(runId);
       this.deps.audit.record('run.cancelled', ONBOARDING_CHAIN_ACTOR, { runId, detail: { status, reason } });
       this.deps.log(`[onboarding] ${reason}`);
+      // Stopped: a replayed gate frame before its end frame stops nothing more (the end frame clears it).
     } catch (err) {
-      this.deps.log(`[onboarding] capture-learnings ${runId} stopped at ${gate}; crew could not end it: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
+      // Not stopped: the next gate frame for it tries again.
       this.stopping.delete(runId);
+      this.deps.log(`[onboarding] capture-learnings ${runId} stopped at ${gate}; crew could not end it: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -137,14 +143,24 @@ export class OnboardingCaptureChain {
       return null;
     }
     const repoName = (await adapter.listRepos()).find((r) => r.id === repoRef)?.name ?? repoRef;
-    const runId = await adapter.launchRun({
-      problem: `Capture learnings from ${repoName}`,
-      sessionId: randomUUID(),
-      clisJson: JSON.stringify(await adapter.seatsForWorkflow(CAPTURE_LEARNINGS_WORKFLOW)),
-      workflow: CAPTURE_LEARNINGS_WORKFLOW,
-      repoRef,
-      ...(projectId !== undefined ? { projectId } : {}),
-    });
+    // Registered under its minted id BEFORE the launch: a gate it reaches before `launchRun` answers is still crew's.
+    const sessionId = randomUUID();
+    this.launched.set(sessionId, repoName);
+    let runId: string;
+    try {
+      runId = await adapter.launchRun({
+        problem: `Capture learnings from ${repoName}`,
+        sessionId,
+        clisJson: JSON.stringify(await adapter.seatsForWorkflow(CAPTURE_LEARNINGS_WORKFLOW)),
+        workflow: CAPTURE_LEARNINGS_WORKFLOW,
+        repoRef,
+        ...(projectId !== undefined ? { projectId } : {}),
+      });
+    } catch (err) {
+      this.launched.delete(sessionId);
+      throw err;
+    }
+    if (runId !== sessionId) this.launched.delete(sessionId);
     recordRunLaunched(this.deps.audit, runTimingIndex, ONBOARDING_CHAIN_ACTOR, runId, {
       workflow: CAPTURE_LEARNINGS_WORKFLOW,
       repoRef,

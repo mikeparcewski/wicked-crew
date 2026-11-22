@@ -12412,8 +12412,9 @@ export interface Proposal {
   state: ProposalState;
   /** Unix seconds. */
   created_at: number;
-  /** (crew#1261) Who rejected it and why, when crew made the decision: a `rejected` row with none was rejected outside
-   *  crew (estate's own tools) or before crew recorded decisions. Absent on pending and approved rows. */
+  /** (crew#1261) Who rejected it and why, as crew recorded it. Absent means UNKNOWN: no decision on record (rejected
+   *  outside crew, before crew recorded decisions, by a crew path that records none, or a trail that could not be read
+   *  or written). Never infer who rejected a row from its absence. Absent on pending and approved rows. */
   decision?: ProposalDecision;
 }
 
