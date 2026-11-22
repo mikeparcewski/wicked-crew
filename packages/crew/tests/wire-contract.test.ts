@@ -1603,6 +1603,15 @@ describe('wire contract (wicked-crew-api-types) drift guard', () => {
     expect(ENGINE_REPORT_WITH_COVERAGE.summary.total).toBe(ENGINE_REPORT_WITH_COVERAGE.results.length);
   });
 
+  it("(crew#1128) the engine's memory-axis fixture is internally consistent (coverage partitions the store; a caught row misses nothing)", () => {
+    const { coverage, summary } = ENGINE_MEMORY_AXIS;
+    expect(coverage.surfaced + coverage.unsurfaced.length).toBe(coverage.memories);
+    expect(summary.caught + summary.gaps + summary.false_positives).toBe(summary.total);
+    expect(ENGINE_MEMORY_RESULT.verdict).toBe('caught');
+    expect([ENGINE_MEMORY_RESULT.missing, ENGINE_MEMORY_RESULT.unexpected_surfaced]).toEqual([[], []]);
+    expect(ENGINE_MEMORY_RESULT.surfaced.length).toBeGreaterThan(0);
+  });
+
   it('the shipped built-in workflows are contract-shaped at runtime too', () => {
     // A cheap runtime cross-check on real data (not just types): every built-in workflow
     // the daemon serves from GET /workflows carries the contract's required keys.
