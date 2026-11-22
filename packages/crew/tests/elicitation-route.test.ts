@@ -2,7 +2,7 @@
 //
 // Tests use Fastify inject() with a minimal mock adapter so no real core-ts binary
 // or NAPI module is required. Covers:
-//   GET  — cache-hit 200, run-not-found 404, no-pending 404
+//   GET  — cache-hit 200, run-not-found 404, no-pending 200 null (studio#984)
 //   POST — validation 400, run-not-found 404, no-pending 409, stale-id 409,
 //          accept-missing-response 400, enum-mismatch 400, adapter-error 501/500,
 //          happy accept, happy decline, happy cancel, restore-on-error
@@ -115,11 +115,24 @@ describe('GET /api/v1/runs/:id/elicitation', () => {
     expect(res.json<{ error: string }>().error).toMatch(/not found/i);
   });
 
-  it('404 with "No pending elicitation" when run exists but cache is empty', async () => {
-    // sessions() returns RUN → run exists, but no entry in cache
+  it('200 with null when the run exists and nothing is open — not an error (studio#984)', async () => {
+    // sessions() returns RUN → run exists, but no entry in cache and no durable row. A parked run with
+    // nothing open is the normal answer a client polls for, so it must not log a 404 per run.
     const res = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/elicitation` });
-    expect(res.statusCode).toBe(404);
-    expect(res.json<{ error: string }>().error).toMatch(/no pending elicitation/i);
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toMatch(/^application\/json/);
+    expect(res.body).toBe('null');
+    expect(res.json()).toBeNull();
+  });
+
+  it('an unknown run stays a 404, distinct from a known run with nothing open', async () => {
+    mockAdapter.sessions.mockResolvedValue(['some-other-run']);
+    const unknown = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/elicitation` });
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json<{ error: string }>().error).toBe('Run not found');
+    const known = await app.inject({ method: 'GET', url: '/api/v1/runs/some-other-run/elicitation' });
+    expect(known.statusCode).toBe(200);
+    expect(known.json()).toBeNull();
   });
 });
 
