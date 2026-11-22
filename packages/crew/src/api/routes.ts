@@ -2060,6 +2060,7 @@ export function registerRoutes(
     runtime.deliveryCache ??
     new DeliveryDerivationCache({
       listViews: () => adapter.sessionsDetail(),
+      viewOf: (id) => adapter.runView(id),
       probes: vacuityProbes,
       isDelivered: (runId) => deliveryIndex.isDelivered(runId),
       canDeliver,
@@ -8604,11 +8605,11 @@ export function registerRoutes(
   // read it. A restart is routine: deploy, crash, laptop sleep.
   app.get(`${V}/runs/:id/gate`, async (req, reply) => {
     const { id } = req.params as { id: string };
-    // F35: this run's view only, never every run's (studio polls this route for every parked run, from
-    // every open tab). Each read is a copy of one run from the shared snapshot, so a read after an
-    // await sees a change the adapter learned of during it (a frame, or a write it made); any other
-    // change is at most the snapshot's age bound old.
-    const runOf = (): Promise<SessionView | undefined> => adapter.runView(id);
+    // F35, crew#1775: this run's view only, never every run's (studio reads this route for parked runs,
+    // from every open tab): one engine read of this run, off the actor, as the store is when it starts.
+    // Read once per request: the cached-but-not-servable path and the miss path share it (coord review C6).
+    let viewRead: Promise<SessionView | undefined> | undefined;
+    const runOf = (): Promise<SessionView | undefined> => (viewRead ??= adapter.runView(id));
     // (rejudge, api-types 0.134.0) A gate whose unit no judge could rule on says whether its judge
     // can be re-run now, and from which seats — the engine's own selection, read each time (a seat
     // signed in since the pause counts). Absent on every other gate and on an addon without the read.
@@ -8711,12 +8712,13 @@ export function registerRoutes(
     }
     const cached = gateCache.get(id);
     if (cached) {
+      const run = await runOf();
       const servable =
         recorded === null
         || (recorded.state === 'open' && cached.ord === recorded.ord)
-        || (recorded.state === 'none' && (await runOf())?.session.status === 'awaiting_human');
+        || (recorded.state === 'none' && run?.session.status === 'awaiting_human');
       if (servable) {
-        const offers = await offersAt(cached.ord, await runOf());
+        const offers = await offersAt(cached.ord, run);
         if (offers === null) return unavailable503();
         return { runId: id, ...cached, ...offers };
       }
@@ -8732,13 +8734,9 @@ export function registerRoutes(
     // cut of this assumed: it trades one read of the run's view for replaying an entire event history,
     // and it was that skipped check which made a completed run answer 503 on any build without the
     // binding (CI caught it) — an error where the honest, knowable answer was "no gate".
-    let run = await runOf();
-    // F35: the engine's gate record was read before the view and outranks it. A record showing a gate
-    // open beside no view of the run, or a view of it still moving, means the shared snapshot predates
-    // the pause (its frame has not landed yet): read the run from a fold that starts now.
-    if (recorded?.state === 'open' && run?.session.status !== 'awaiting_human') {
-      run = await adapter.runView(id, { fresh: true });
-    }
+    // The view is read after the record, from the store as it is now (crew#1775), so a gate row the
+    // record shows open is never beside an older view of its run: the engine writes both in one commit.
+    const run = await runOf();
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     if (run.session.status !== 'awaiting_human') {
       return reply.code(404).send({ error: 'No open gate for this run' });

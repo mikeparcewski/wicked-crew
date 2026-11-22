@@ -661,8 +661,8 @@ export function deliverUnitOf(view: SessionView): WorkUnit | null {
 
 /** What {@link DeliveryResolver} needs from the daemon — injected so the race is pinnable in a test. */
 export interface DeliveryResolverDeps {
-  /** The engine's run views (`adapter.sessionsDetail()`). */
-  listViews: () => Promise<SessionView[]>;
+  /** One run's view as the engine holds it now (`adapter.runView(runId)`; crew#1775: never a fold of the store). */
+  viewOf: (runId: string) => Promise<SessionView | undefined>;
   /** The deliver unit's stored transcript (`adapter.workOutput(coreUnitId(runId, unit))`). */
   workOutput: (unitId: string) => Promise<string | null>;
   /** Already on record — the durable `run.delivered` trail / {@link DeliveryIndex}. */
@@ -761,8 +761,7 @@ export class DeliveryResolver {
         this.settled.add(runId);
         return;
       }
-      const views = await this.deps.listViews();
-      const view = views.find((v) => v.session.id === runId);
+      const view = await this.deps.viewOf(runId);
       if (view === undefined) return;
       const unit = deliverUnitOf(view);
       // Only an APPROVED deliver unit carries a delivery claim: a rejected one's output (were

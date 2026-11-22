@@ -87,11 +87,11 @@ beforeAll(async () => {
   helper('clone', dir, String(RUNS));
 
   adapter = new CoreAdapter({ dbPath: join(dir, 'home', 'core.db'), stub: true });
-  // F35: a single-run read is `runView` (one run copied out of the shared views snapshot).
+  // F35, crew#1775: a single-run read is `runView` (the engine's one-run read, `sessionDetail`).
   const read = adapter.runView.bind(adapter);
-  adapter.runView = (id, opts) => {
+  adapter.runView = (id) => {
     readsEntered += 1;
-    return read(id, opts);
+    return read(id);
   };
   app = await createServer(adapter, { stallWatchdog: { enabled: false } });
   await app.listen({ port: 0, host: '127.0.0.1' });

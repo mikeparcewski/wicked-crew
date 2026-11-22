@@ -24,6 +24,7 @@ import { MembershipIndex } from '../src/projects/membership-index.js';
 import { AuditLog } from '../src/api/audit.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 function buildApp(adapter: Record<string, unknown>): FastifyInstance {
   const app = Fastify({ logger: false });
@@ -126,12 +127,12 @@ describe('GET /runs/:id/walkthrough — the recording view (WT-W1)', () => {
   beforeEach(async () => {
     roots = mkdtempSync(join(tmpdir(), 'walkthrough-roots-'));
     sessionsDetail = vi.fn().mockResolvedValue([]);
-    app = buildApp({
+    app = buildApp(withRunViews({
       sessionsDetail,
       workOutput: vi.fn().mockResolvedValue(null),
       listRepos: vi.fn().mockResolvedValue([]),
       projectMembers: vi.fn().mockResolvedValue([]),
-    });
+    }));
     await app.ready();
   });
 

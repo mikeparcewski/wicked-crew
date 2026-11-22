@@ -352,6 +352,7 @@ function fakeEngine(): FakeEngine {
           return () => listeners.delete(listener);
         },
         sessionsDetail: async () => state.views,
+        runView: async (id: string) => state.views.find((v) => v.session.id === id),
         workOutput: async (unitId: string) => state.outputs.get(unitId) ?? null,
       } as unknown as CoreAdapter;
     },

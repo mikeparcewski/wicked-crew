@@ -234,9 +234,11 @@ function harness(opts: { seats?: unknown[]; mode?: 'distill' | 'extract'; propos
   let refusals = opts.cancelFails ?? 0;
   let n = 0;
   const views: SessionView[] = [view];
+  const reads = { folds: 0, runs: 0 };
   const svc = new RunLearningsService({
     adapter: {
-      sessionsDetail: async () => views,
+      sessionsDetail: async () => { reads.folds++; return views; },
+      runView: async (id: string) => { reads.runs++; return views.find((v) => v.session.id === id); },
       runEvents: async () => events,
       seatsForWorkflow: async () => opts.seats ?? [{ key: 'claude' }, { key: 'codex', council_eligible: true }],
       launchRun: async (input) => {
@@ -267,10 +269,20 @@ function harness(opts: { seats?: unknown[]; mode?: 'distill' | 'extract'; propos
     newRunId: () => `distill-${++n}`,
     ...(opts.personContext !== undefined ? { personContext: opts.personContext } : {}),
   });
-  return { svc, dir, submitted, queue, launches, views, cancels };
+  return { svc, dir, submitted, queue, launches, views, cancels, reads };
 }
 
 describe('RunLearningsService: proposals, never writes', () => {
+  it('crew#1775: a checkpoint or end sweep reads its one run, never a fold of the store', async () => {
+    const h = harness({ mode: 'extract' });
+    h.svc.onEvent({ type: 'powerCheckpointReached', session: 'run-1' });
+    await settle();
+    h.svc.onEvent({ type: 'sessionCompleted', session: 'run-1' });
+    await settle();
+    expect(h.reads.folds).toBe(0);
+    expect(h.reads.runs).toBeGreaterThanOrEqual(2);
+  });
+
   it('does not propose flaky, load-sensitive or unstartable repo checks as learnings', async () => {
     const view = runView({ units: [{
       ord: 2,
@@ -485,7 +497,7 @@ describe('RunLearningsService under overlap, failure and restart (xreview on cre
     writeFileSync(join(h.dir, 'run-1', OUT_DIR, REPORT_FILE), JSON.stringify({ learnings: [{ kind: 'pattern', content: 'In acme-core, CHANGELOG.md is owned by the release tooling; a change never edits it by hand.' }] }));
     h.views.push({ session: { id: 'distill-1', status: 'completed', workflow_id: DISTILL_WORKFLOW, problem: 'p' }, units: [] } as unknown as SessionView);
     const again = harness();
-    const next = new RunLearningsService({ ...(again.svc as unknown as { deps: Record<string, unknown> }).deps, learningsDir: h.dir, adapter: { ...(again.svc as unknown as { deps: { adapter: Record<string, unknown> } }).deps.adapter, sessionsDetail: async () => h.views } } as never);
+    const next = new RunLearningsService({ ...(again.svc as unknown as { deps: Record<string, unknown> }).deps, learningsDir: h.dir, adapter: { ...(again.svc as unknown as { deps: { adapter: Record<string, unknown> } }).deps.adapter, sessionsDetail: async () => h.views, runView: async (id: string) => h.views.find((v) => v.session.id === id) } } as never);
     await next.recover();
     expect(again.submitted.map((x) => x.agent)).toEqual(['codex']);
     expect(existsSync(join(h.dir, 'run-1', FILED_FILE))).toBe(true);

@@ -165,7 +165,7 @@ import type { SearchService } from './search-routes.js';
 import { callEstateTool } from '../core/estate-mcp-client.js';
 import { seatParser } from '../standing-orders/parse.js';
 import { registerGateHistoryRoute, runBand, runPreset, runProject } from '../standing-orders/history.js';
-import { WorkingDocService, workingDocStep } from '../working-doc/service.js';
+import { WorkingDocService, workingDocStep, type RunFacts } from '../working-doc/service.js';
 import { PersonNotesIndex } from '../working-doc/notes-index.js';
 import { WorkingDocStore } from '../working-doc/store.js';
 import { isWorkingDoc as isWorkingDocAt } from '../interactive/chat-events.js';
@@ -1030,6 +1030,7 @@ export async function createServer(
   const canDeliver = canDeliverResolver(() => adapter.listWorkflows(), (m) => app.log.warn(m));
   const deliveryCache = new DeliveryDerivationCache({
     listViews: () => adapter.sessionsDetail(),
+    viewOf: (id) => adapter.runView(id),
     probes: vacuityProbes,
     isDelivered: (runId) => deliveryIndex.isDelivered(runId),
     canDeliver,
@@ -1060,7 +1061,7 @@ export async function createServer(
   // record — the routes await it for such a view, so the wire never serves `completed` +
   // `delivery: 'stranded'` for a run whose deliver unit already carries the PR URL.
   const deliveryResolver = new DeliveryResolver({
-    listViews: () => adapter.sessionsDetail(),
+    viewOf: (id) => adapter.runView(id),
     workOutput: (unitId) => adapter.workOutput(unitId),
     isDelivered: (runId) => deliveryIndex.isDelivered(runId),
     // The durable record first, then the read-side index — the same write order as
@@ -1094,7 +1095,7 @@ export async function createServer(
   const observedRuns = new Set<string>();
   const archiveRunCodebase = async (runId: string, trigger: 'deliver' | 'run_end', view?: SessionView, cancelled = false): Promise<void> => {
     try {
-      const v = view ?? (await adapter.sessionsDetail()).find((x) => x.session.id === runId);
+      const v = view ?? (await adapter.runView(runId));
       if (v === undefined || v.session.repo_ref == null) return;
       const repoRoot = (await adapter.listRepos()).find((r) => r.id === v.session.repo_ref)?.root_path ?? null;
       const before = codebaseArchives.get(runId);
@@ -1168,7 +1169,7 @@ export async function createServer(
   // G12: the run's own engine `draft_render` record (its latest unit of that step, read fresh: the floor runs as the run
   // ends), which the floor reuses when it measured these exact bytes with the floor's own print profile.
   const floorEngineRender = async (runId: string): Promise<Record<string, unknown> | null> =>
-    latestDraftRender((await adapter.runView(runId, { fresh: true }))?.units);
+    latestDraftRender((await adapter.runView(runId))?.units);
   const draftFloorIo = { chrome: floorChrome, engineRender: floorEngineRender };
   /**
    * A3 (§6.2): a proposal-bound attempt's outcome was recorded. A failure is said on the run (`run.landing_failed`, the
@@ -1409,7 +1410,7 @@ export async function createServer(
     audit,
     // crew#828: the run's own status (and, once it has ended, its recorded event count).
     runFacts: async (runId) => {
-      const view = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+      const view = await adapter.runView(runId);
       if (view === undefined) return null;
       const ended = ['completed', 'failed', 'cancelled'].includes(String(view.session.status));
       if (!ended) return { ended, events: null };
@@ -1525,6 +1526,7 @@ export async function createServer(
   const runLearnings = new RunLearningsService({
     adapter: {
       sessionsDetail: () => adapter.sessionsDetail(),
+      runView: (id) => adapter.runView(id),
       runEvents: (id) => adapter.runEvents(id),
       seatsForWorkflow: (id) => adapter.seatsForWorkflow(id),
       launchRun: (input) => adapter.launchRun(input),
@@ -1595,7 +1597,7 @@ export async function createServer(
       cancelRun: (id) => adapter.cancelRun(id),
     },
     replyOf: async (checkRunId) => {
-      const view = (await adapter.sessionsDetail()).find((v) => v.session.id === checkRunId);
+      const view = await adapter.runView(checkRunId);
       const unit = view?.units.find((u) => u.ord === 1) ?? view?.units[0];
       return view !== undefined && unit !== undefined ? adapter.workOutput(coreUnitId(checkRunId, unit)) : null;
     },
@@ -1689,7 +1691,7 @@ export async function createServer(
     sessionsDetail: () => adapter.sessionsDetail(),
     launch: launchScheduled,
     // crew#1578: a scheduled run that never got seats is its schedule's to end, on the run's own record.
-    runViewFresh: (runId) => adapter.runView(runId, { fresh: true }),
+    runViewFresh: (runId) => adapter.runView(runId),
     cancel: cancelOnItsRecord(
       (runId) => adapter.cancelRun(runId),
       (runId, detail) => audit.record('run.cancelled', SCHEDULE_ACTOR, { runId, detail }),
@@ -2155,7 +2157,7 @@ export async function createServer(
     turns: chatTurns,
     workOutput: (unitId) => adapter.workOutput(unitId),
     units: async (runId) => {
-      const view = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+      const view = await adapter.runView(runId);
       return (view?.units ?? []).map((u) => {
         const la = (u as { last_attempt?: unknown }).last_attempt;
         return {
@@ -2381,9 +2383,8 @@ export async function createServer(
       if (key !== undefined && (deliverDispatches.delete(key) || unseen)) {
         observedRuns.add(session);
         void adapter
-          .sessionsDetail()
-          .then((views) => {
-            const view = views.find((v) => v.session.id === session);
+          .runView(session)
+          .then((view) => {
             if (view === undefined) return undefined;
             if (unseen && deliverUnitOf(view)?.ord !== ord) return undefined;
             return archiveRunCodebase(session, 'deliver', view);
@@ -2455,8 +2456,7 @@ export async function createServer(
         .then(async () => {
           if (deliveryIndex.urlFor(session) !== undefined) {
             try {
-              const views = await adapter.sessionsDetail();
-              const repoRef = views.find((v) => v.session.id === session)?.session.repo_ref;
+              const repoRef = (await adapter.runView(session))?.session.repo_ref;
               if (repoRef !== null && repoRef !== undefined) {
                 const repos = await adapter.listRepos();
                 const repoRoot = repos.find((r) => r.id === repoRef)?.root_path;
@@ -2514,7 +2514,7 @@ export async function createServer(
     if (event.type === 'runBaseResolved' && session !== undefined) {
       // A lookup that fails or finds no view yet is tried again (codex r2: one miss lost the invalidation for good).
       const note = (tries: number): void => {
-        void adapter.runView(session, { fresh: tries > 0 }).then(
+        void adapter.runView(session).then(
           (v) => {
             const repo = v?.session.repo_ref;
             if (typeof repo === 'string' && repo !== '') { void repoWatcher.noteLaunch(repo); return; }
@@ -2547,8 +2547,7 @@ export async function createServer(
     if (event.type === 'sessionCompleted' && session !== undefined && projectId !== undefined) {
       void (async () => {
         try {
-          const views = await adapter.sessionsDetail();
-          const view = views.find((v) => v.session.id === session);
+          const view = await adapter.runView(session);
           const repoRef = view?.session.repo_ref ?? null;
           const repoRoot =
             repoRef !== null
@@ -3124,7 +3123,7 @@ export async function createServer(
     decideGate: registered.decideGate,
     audit,
     runFacts: async (runId) => {
-      const v = (await adapter.sessionsDetail()).find((x) => x.session.id === runId);
+      const v = await adapter.runView(runId);
       if (v === undefined) return undefined;
       return {
         projectId: runProject(v, runId, (id) => membershipIndex.projectOf(id)),
@@ -3167,8 +3166,8 @@ export async function createServer(
   // `phase-report` — and the steering notes a person's edits of it become. Steering rides the engine's operator
   // inject only; nothing here answers a gate.
   const workingDocNotes = new PersonNotesIndex();
-  // The working documents read the run views (the engine's whole-store fold) at most once per 2 s between them: the
-  // catch-up and a burst of syncs share one read instead of one each (crew#944: run reads must stay fast).
+  // The working documents' live-run enumeration reads the run views (the engine's whole-store fold) at most once per 2 s:
+  // the catch-up shares one read instead of one each (crew#944: run reads must stay fast). One run is read alone (`run`).
   let workingDocViewsRead: { at: number; views: Promise<SessionView[]> } | null = null;
   const workingDocViews = (): Promise<SessionView[]> => {
     if (workingDocViewsRead === null || Date.now() - workingDocViewsRead.at > 2_000) {
@@ -3198,20 +3197,7 @@ export async function createServer(
       // (context-doc-switch) The person's Goal, Approach and Constraints as the engine's context block.
       setRunContext: (runId, ctx) => adapter.setRunContext(runId, ctx),
     },
-    run: async (runId) => {
-      const v = (await workingDocViews()).find((x) => x.session.id === runId);
-      if (v === undefined) return null;
-      return {
-        title: workingDocTitle(v.session.problem),
-        problem: v.session.problem ?? '',
-        projectId: runProject(v, runId, (id) => membershipIndex.projectOf(id)) ?? WORKING_DOC_DEFAULT_PROJECT,
-        terminal: ['completed', 'cancelled', 'failed'].includes(v.session.status),
-        stepOf: (ord) => workingDocStep(v.units.find((x) => x.ord === ord)),
-        power: v.session.power != null,
-        // The run's current plan (the engine's unit list): what a phased run's Approach says once its plan settles.
-        steps: v.units.map((u) => ({ ord: u.ord, name: workingDocStep(u), seat: u.assigned_cli ?? null })),
-      };
-    },
+    run: (runId) => workingDocRunFacts(adapter, (id) => membershipIndex.projectOf(id), runId),
     // A person's answers with their words (crew's own trail: the engine's log does not say who, or why), from memory,
     // once the start-up read of the trail is in (so a line never lands ahead of an older one).
     notes: async (runId) => { await workingDocNotesRead; return workingDocNotes.of(runId); },
@@ -3377,6 +3363,30 @@ export interface StartedServer {
 }
 
 /** The URL a worker on this host reaches the daemon at: a wildcard bind is reached on loopback. */
+/**
+ * What a run's working document needs to know about the run. crew#1775: one run as the engine holds it now, never a
+ * search of a shared list of every run, which a run launched after the list was read is missing from (its document
+ * would then never be made) and which costs a fold of the whole store.
+ */
+export async function workingDocRunFacts(
+  adapter: Pick<CoreAdapter, 'runView'>,
+  projectOf: (id: string) => string | undefined,
+  runId: string,
+): Promise<RunFacts | null> {
+  const v = await adapter.runView(runId);
+  if (v === undefined) return null;
+  return {
+    title: workingDocTitle(v.session.problem),
+    problem: v.session.problem ?? '',
+    projectId: runProject(v, runId, projectOf) ?? WORKING_DOC_DEFAULT_PROJECT,
+    terminal: ['completed', 'cancelled', 'failed'].includes(v.session.status),
+    stepOf: (ord) => workingDocStep(v.units.find((x) => x.ord === ord)),
+    power: v.session.power != null,
+    // The run's current plan (the engine's unit list): what a phased run's Approach says once its plan settles.
+    steps: v.units.map((u) => ({ ord: u.ord, name: workingDocStep(u), seat: u.assigned_cli ?? null })),
+  };
+}
+
 export function brokerUrlFor(host: string, port: number): string {
   const h = host === '0.0.0.0' || host === '' ? '127.0.0.1' : host === '::' ? '::1' : host;
   return `http://${h.includes(':') ? `[${h}]` : h}:${port}`;
