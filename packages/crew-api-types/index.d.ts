@@ -16248,6 +16248,11 @@ export interface SourceUploadResponse {
   header: { detected: boolean; columns: string[] } | null;
   /** The first 20 rows, answered to a HUMAN actor only (an agent gets `[]`). */
   sample: string[][];
+  /**
+   * (crew#1731) A `.sqlite` file's virtual tables (a full-text index, an R-tree) that crew dropped from the snapshot,
+   * with their shadow tables: their rows are not in it. `[]` when there were none, and for a CSV/XLSX.
+   */
+  dropped: string[];
   catalog: SqlSourceCatalog;
 }
 
