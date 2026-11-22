@@ -72,6 +72,9 @@ export class RunTimingIndex {
   private readonly runToChainedFrom = new Map<string, string>();
   /** crew#552: onboarding run → the capture run chained from it (the idempotence key). */
   private readonly chainedRun = new Map<string, string>();
+  /** crew#1365: the capture-learnings runs the onboarding chain launched (its own `run.launched` entry, as the
+   *  `onboarding` system actor, with `chainedFrom`): crew's to end when one stops at a gate, across a restart. */
+  private readonly onboardingCaptures = new Set<string>();
   /** crew#552: onboarding runs launched with `autoCapture: false`. */
   private readonly autoCaptureOffRuns = new Set<string>();
   /** crew#762: the RESOLVED delivery decision the launch recorded (`detail.deliver`). */
@@ -122,6 +125,7 @@ export class RunTimingIndex {
     this.runToPrincipal.delete(runId);
     this.runToChatWorkflow.delete(runId);
     this.runToChainedFrom.delete(runId);
+    this.onboardingCaptures.delete(runId);
     this.autoCaptureOffRuns.delete(runId);
     this.runToLaunchDeliver.delete(runId);
     this.runToProposal.delete(runId);
@@ -152,6 +156,11 @@ export class RunTimingIndex {
     if (deliver === 'pr' || deliver === 'none') this.runToLaunchDeliver.set(runId, deliver);
     this.noteProposal(runId, detail);
     this.noteChain(runId, detail);
+    // (crew#1365) The literals are onboarding-capture.ts's ONBOARDING_CHAIN_ACTOR and CAPTURE_LEARNINGS_WORKFLOW (that
+    // module imports this one).
+    if (launcher?.kind === 'system' && launcher.id === 'onboarding' && detail?.['workflow'] === 'capture-learnings' && typeof detail['chainedFrom'] === 'string') {
+      this.onboardingCaptures.add(runId);
+    }
     this.noteLaunchFacts(runId, detail);
     this.noteTrackerFacts(runId, typeof entry.ts === 'number' ? entry.ts : 0, detail);
   }
@@ -371,6 +380,11 @@ export class RunTimingIndex {
   /** crew#552: the onboarding run a chained run was launched from (`AgentSession.chained_from`). */
   chainedFromOf(runId: string): string | undefined {
     return this.runToChainedFrom.get(runId);
+  }
+
+  /** crew#1365: whether the onboarding chain launched this capture-learnings run (its launch entry says so). */
+  isOnboardingCapture(runId: string): boolean {
+    return this.onboardingCaptures.has(runId);
   }
 
   /** crew#552: the capture run chained from an onboarding run, if one was launched. */

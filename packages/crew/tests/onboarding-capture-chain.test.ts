@@ -30,6 +30,8 @@ function harness(opts: { autoCapture?: boolean; audit?: AuditLog; index?: RunTim
   const launches: Array<Record<string, unknown>> = [];
   const filed: Array<[string, string]> = [];
   const frames: Array<Record<string, unknown>> = [];
+  const cancels: string[] = [];
+  const logs: string[] = [];
   const onboarded = new Map([['onb-1', 'repo-a'], ['onb-2', 'repo-b'], ['onb-3', 'repo-a']]);
   const adapter = {
     onboardedRepoOf: (runId: string) => onboarded.get(runId),
@@ -40,6 +42,11 @@ function harness(opts: { autoCapture?: boolean; audit?: AuditLog; index?: RunTim
     },
     getSettings: async () => ({ ...(opts.autoCapture !== undefined ? { onboardingAutoCapture: opts.autoCapture } : {}) }),
     listRepos: async () => [{ id: 'repo-a', name: 'alpha' }, { id: 'repo-b', name: 'beta' }],
+    cancelRun: async (runId: string) => {
+      cancels.push(runId);
+      if (runId === 'cap-refused') throw new Error('the engine refused the stop');
+      return 'cancelled';
+    },
   } as unknown as CoreAdapter;
   const chain = new OnboardingCaptureChain({
     adapter,
@@ -49,9 +56,9 @@ function harness(opts: { autoCapture?: boolean; audit?: AuditLog; index?: RunTim
     projectAutoCapture: (projectId) => (projectId === 'proj-1' ? opts.projectAutoCapture : undefined),
     fileRun: (runId, projectId) => filed.push([runId, projectId]),
     broadcast: (f) => frames.push(f as unknown as Record<string, unknown>),
-    log: () => undefined,
+    log: (m) => logs.push(m),
   });
-  return { chain, audit, runTimingIndex, launches, filed, frames };
+  return { chain, audit, runTimingIndex, launches, filed, frames, cancels, logs };
 }
 
 describe('crew#552 — onboarding → capture-learnings', () => {
@@ -157,5 +164,83 @@ describe('crew#552 — onboarding → capture-learnings', () => {
     await settle();
     // onb-1 launched once; the slot was free at once, so onb-2 launched next.
     expect(h.launches.map((l) => l['repoRef'])).toEqual(['repo-a', 'repo-b']);
+  });
+
+  it('crew#1365: a capture onboarding started that stops at a gate is ended by crew, saying why in one line; it never waits on the person', async () => {
+    const h = harness();
+    h.chain.onEvent(frame('sessionCompleted', 'onb-1'));
+    await settle();
+    expect(h.launches).toHaveLength(1);
+    // A run nobody chained, parked at a gate: the person's, as before.
+    h.chain.onEvent({ type: 'awaitingHuman', session: 'someone-elses', gateKind: 'escalation' } as unknown as CoreEvent);
+    // The small repository's first step had nothing to review; its floor escalated.
+    const parked = { type: 'awaitingHuman', session: 'cap-1', ord: 1, gateKind: 'escalation', prompt: 'phase produced no reviewable\nsubstance' } as unknown as CoreEvent;
+    h.chain.onEvent(parked);
+    h.chain.onEvent(parked); // the same frame again (a replay): one stop
+    await settle();
+    expect(h.cancels).toEqual(['cap-1']);
+    // A replay after the stop took, before its end frame: still one (review r1).
+    h.chain.onEvent(parked);
+    await settle();
+    expect(h.cancels).toEqual(['cap-1']);
+    await h.audit.flush();
+    const lines = await h.audit.readAll({ action: 'run.cancelled' });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      runId: 'cap-1',
+      actor: { id: 'onboarding', kind: 'system' },
+      detail: { status: 'cancelled', reason: 'Capture learnings from alpha stopped at escalation (phase produced no reviewable substance): onboarding started it, so crew ends it rather than ask you. Run Capture learnings yourself to try again.' },
+    });
+    // Its end frees the slot, and a later frame for it stops nothing more.
+    h.chain.onEvent(frame('runCancelled', 'cap-1'));
+    h.chain.onEvent(parked);
+    await settle();
+    expect(h.cancels).toEqual(['cap-1']);
+  });
+
+  it('crew#1365: a stop the engine refuses is logged and leaves no audit line', async () => {
+    const h = harness();
+    const adapter = (h.chain as unknown as { deps: { adapter: { launchRun: unknown } } }).deps.adapter;
+    adapter.launchRun = async (input: Record<string, unknown>) => { h.launches.push(input); return 'cap-refused'; };
+    h.chain.onEvent(frame('sessionCompleted', 'onb-2'));
+    await settle();
+    h.chain.onEvent({ type: 'awaitingHuman', session: 'cap-refused', gateKind: 'escalation' } as unknown as CoreEvent);
+    await settle();
+    expect(h.cancels).toEqual(['cap-refused']);
+    await h.audit.flush();
+    expect(await h.audit.readAll({ action: 'run.cancelled' })).toEqual([]);
+    expect(h.logs.some((l) => l.includes('cap-refused') && l.includes('the engine refused the stop'))).toBe(true);
+    // The next gate frame tries again.
+    h.chain.onEvent({ type: 'awaitingHuman', session: 'cap-refused', gateKind: 'escalation' } as unknown as CoreEvent);
+    await settle();
+    expect(h.cancels).toEqual(['cap-refused', 'cap-refused']);
+  });
+
+  it('crew#1365 review r1: after a restart the launch entry says the capture is the chain’s; a run a person launched never is', async () => {
+    const first = harness();
+    first.chain.onEvent(frame('sessionCompleted', 'onb-1'));
+    await settle();
+    recordRunLaunched(first.audit, first.runTimingIndex, { id: 'local', kind: 'human', trust: 'admin' } as never, 'by-hand', { workflow: CAPTURE_LEARNINGS_WORKFLOW, repoRef: 'repo-a', chainedFrom: 'onb-1' });
+    await first.audit.flush();
+    const index = new RunTimingIndex();
+    index.hydrateFromLaunchEntries(await first.audit.readAll({ action: 'run.launched' }));
+    const restarted = harness({ audit: first.audit, index });
+    restarted.chain.onEvent({ type: 'awaitingHuman', session: 'by-hand', gateKind: 'escalation' } as unknown as CoreEvent);
+    restarted.chain.onEvent({ type: 'awaitingHuman', session: 'cap-1', gateKind: 'escalation' } as unknown as CoreEvent);
+    await settle();
+    expect(restarted.cancels).toEqual(['cap-1']);
+  });
+
+  it('crew#1365 review r1: a gate the capture reaches before its launch answers is still the chain’s', async () => {
+    const h = harness();
+    const adapter = (h.chain as unknown as { deps: { adapter: { launchRun: unknown } } }).deps.adapter;
+    adapter.launchRun = async (input: Record<string, unknown>) => {
+      h.launches.push(input);
+      h.chain.onEvent({ type: 'awaitingHuman', session: input['sessionId'], gateKind: 'escalation' } as unknown as CoreEvent);
+      return String(input['sessionId']);
+    };
+    h.chain.onEvent(frame('sessionCompleted', 'onb-1'));
+    await settle();
+    expect(h.cancels).toEqual([String(h.launches[0]!['sessionId'])]);
   });
 });

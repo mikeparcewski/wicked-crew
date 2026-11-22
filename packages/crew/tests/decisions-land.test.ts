@@ -112,7 +112,7 @@ interface Harness {
 
 const harnesses: Harness[] = [];
 
-async function harness(opts: { authMode?: 'off' | 'required'; mode?: 'off' | 'ledger' | 'on'; dir?: string; inForce?: ConformanceRule[]; dropProject?: boolean } = {}): Promise<Harness> {
+async function harness(opts: { authMode?: 'off' | 'required'; mode?: 'off' | 'ledger' | 'on'; dir?: string; inForce?: ConformanceRule[]; dropProject?: boolean; audit?: AuditLog } = {}): Promise<Harness> {
   const dir = opts.dir ?? mkdtempSync(join(tmpdir(), 'crew-decisions-'));
   const rules = new Map<string, ConformanceRule>();
   for (const r of opts.inForce ?? []) rules.set(r.id, r);
@@ -167,7 +167,7 @@ async function harness(opts: { authMode?: 'off' | 'required'; mode?: 'off' | 'le
     new GateCache(),
     elicitations,
     { bus: null, index, log: () => undefined },
-    { audit: AuditLog.noop(), authMode: opts.authMode ?? 'required' },
+    { audit: opts.audit ?? AuditLog.noop(), authMode: opts.authMode ?? 'required' },
     {
       callEstateTool: estate.tool as (t: string, a: Record<string, unknown>) => Promise<unknown>,
       decisionLedger: ledger,
@@ -314,6 +314,26 @@ describe('DC-S4a structured hosts → ledger → one landing path', () => {
     expect(rej.statusCode, rej.body).toBe(200);
     const states = Object.fromEntries((await list(h)).map((d) => [d.origin.run_id, [d.state, d.how ?? null]]));
     expect(states).toEqual({ r1: ['remembered', 'needs-you'], r2: ['dismissed', null] });
+  });
+
+  it('crew#1261: a person rejecting a decision\'s proposal, or dismissing the decision, is on record as their rejection', async () => {
+    const auditDir = mkdtempSync(join(tmpdir(), 'crew-decisions-audit-'));
+    try {
+      const audit = new AuditLog(join(auditDir, 'audit.log'), () => undefined);
+      const h = await harness({ audit });
+      await gateNote(h, 'r1', 'rebase onto main before requesting review');
+      await gateNote(h, 'r2', 'prefer small focused PRs over large batches');
+      const [a, b] = await list(h);
+      expect((await h.app.inject({ method: 'POST', url: `/api/v1/proposals/${a!.proposal_id}/reject`, headers: HUMAN })).statusCode).toBe(200);
+      expect((await h.app.inject({ method: 'POST', url: `/api/v1/decisions/${b!.id}/dismiss`, headers: HUMAN, payload: { reason: 'one-off' } })).statusCode).toBe(200);
+      await audit.flush();
+      const lines = (await audit.readAll({ action: 'proposal.decided' })).map((e) => [e.detail?.['proposalId'], e.detail?.['by'], e.detail?.['reason'], e.actor.kind]);
+      expect(lines.sort()).toEqual([[a!.proposal_id, 'operator', 'rejected', 'human'], [b!.proposal_id, 'operator', 'rejected', 'human']].sort());
+      const rejected = ((await h.app.inject({ method: 'GET', url: '/api/v1/proposals?state=rejected', headers: HUMAN })).json() as { proposals: Array<{ id: string; decision?: unknown }> }).proposals;
+      expect(rejected.map((p) => p.decision)).toEqual([expect.objectContaining({ by: 'operator', reason: 'rejected' }), expect.objectContaining({ by: 'operator', reason: 'rejected' })]);
+    } finally {
+      rmSync(auditDir, { recursive: true, force: true });
+    }
   });
 
   it('a forged payload (a decision id the ledger does not know) lands as an ordinary policy, with no ORIGIN', async () => {

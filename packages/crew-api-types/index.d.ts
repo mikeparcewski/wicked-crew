@@ -12416,6 +12416,26 @@ export interface Proposal {
   state: ProposalState;
   /** Unix seconds. */
   created_at: number;
+  /** (crew#1261) Who rejected it and why, as crew recorded it. Absent means UNKNOWN: no decision on record (rejected
+   *  outside crew, before crew recorded decisions, by a crew path that records none, or a trail that could not be read
+   *  or written). Never infer who rejected a row from its absence. Absent on pending and approved rows. */
+  decision?: ProposalDecision;
+}
+
+/** (crew#1261) Why a proposal ended `rejected`. `rejected`: turned down (by a person when `by` is `operator`).
+ *  `replaced-by-edit`: an accept-with-edit approved an edited copy (`copy_id`) in its place. `withdrawn-copy`: an
+ *  accept-with-edit's copy whose approve failed, withdrawn so a retry leaves no duplicate. */
+export type ProposalDecisionReason = 'rejected' | 'replaced-by-edit' | 'withdrawn-copy';
+
+/** (crew#1261) A rejection crew recorded. `by: 'operator'` only for a person's own rejection; `crew` for crew's own
+ *  (an accept-with-edit) or a caller that is not a person. */
+export interface ProposalDecision {
+  by: 'operator' | 'crew';
+  reason: ProposalDecisionReason;
+  /** Unix seconds, like `created_at`. */
+  at: number;
+  /** `replaced-by-edit`: the approved copy that replaced it. */
+  copy_id?: string;
 }
 
 /** `GET /proposals` query filters — both optional; omitting a filter lists across that dimension. */
