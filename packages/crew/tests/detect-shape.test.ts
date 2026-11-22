@@ -394,7 +394,7 @@ describe('cost routing consults the seat (crew#1452)', () => {
     // The question itself about past spend is still Review recent work's (and a decimal or a dotted name is not a
     // sentence end; xreview r1).
     expect(costAsked('estimate our spend on bug fixes last month')).toBe(false);
-    for (const dotted of ['Estimate our spend on .NET bug fixes last month', 'Estimate our spend on Node.js upgrades last month', 'Estimate our spend on bug fixes for Acme Inc. last month.', 'Estimate our spend on U.S. bug fixes, e.g. last month']) {
+    for (const dotted of ['Estimate our spend on .NET bug fixes last month', 'Estimate our spend on Node.js upgrades last month', 'Estimate our spend on bug fixes for Acme Inc. last month.', 'Estimate our spend on U.S. bug fixes, e.g. last month', 'Estimate our spend on bug fixes for Dr. Smith last month', 'Estimate our spend on the Acme Inc. Platform last month']) {
       expect(costAsked(dotted), dotted).toBe(false);
       expect(chat(dotted, { card: 'review-recent-work', confidence: 0.9 }).card, dotted).toBe('review-recent-work');
       expect(classifyPathSync({ text: dotted, catalogRev: 'r' }, { card: 'review-recent-work', confidence: 0.9 }).guess.card, dotted).toBe('review-recent-work');

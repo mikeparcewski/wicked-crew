@@ -335,9 +335,11 @@ export const COST_CARDS: readonly string[] = ['run-cost', 'estimate-price'];
 /**
  * The opening sentence: the words up to the first sentence end. A `?`, `!` or `;` ends one when a space or the end
  * follows; a `.` only when a capital starts the next sentence (or nothing follows), so a decimal point, `.NET`,
- * `Node.js` or an abbreviation (`Acme Inc. last month`, `e.g.`) is not one (xreview r1, r2).
+ * `Node.js` or an abbreviation (`Acme Inc. last month`, `e.g.`) is not one (xreview r1, r2), nor is a common
+ * abbreviation's period before a capital (`Dr. Smith`, `Acme Inc. Platform`): a miss runs the opening on, which turns
+ * cost routing off as it was before crew#1452 (coord review).
  */
-const OPENING_SENTENCE = /^(?:[^.?!;]|[?!;](?!\s|$)|\.(?!\s+\p{Lu}|\s*$))*/u;
+const OPENING_SENTENCE = /^(?:[^.?!;]|[?!;](?!\s|$)|(?<=\b(?:Inc|Ltd|Co|Corp|LLC|Dr|Mr|Mrs|Ms|St|Jr|Sr|vs|etc|approx|e\.g|i\.e|U\.S))\.|\.(?!\s+\p{Lu}|\s*$))*/u;
 const openingOf = (text: string): string => OPENING_SENTENCE.exec(text)?.[0] ?? text;
 
 /**
