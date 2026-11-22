@@ -17,10 +17,16 @@ type Doc = Record<string, any>; // eslint-disable-line @typescript-eslint/no-exp
 const fixture = (name: string): Doc =>
   JSON.parse(readFileSync(new URL(`./fixtures/estate-0.35.10/${name}`, import.meta.url), 'utf8')) as Doc;
 
-/** A fake estate that prints `reply` for any query. */
+/** A fake estate that prints `reply` for any query; an array is pages, `pages[k]` for `--cursor c<k>`. */
 function estate(reply: unknown): NodeJS.ProcessEnv {
+  const pages = Array.isArray(reply) ? reply : [reply];
   const exe = join(dir, `estate-${Math.random().toString(36).slice(2)}.mjs`);
-  writeFileSync(exe, `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(JSON.stringify(reply))});\n`);
+  writeFileSync(exe, `#!/usr/bin/env node
+const argv = process.argv.slice(2);
+const at = argv.indexOf('--cursor');
+const pages = ${JSON.stringify(pages)};
+process.stdout.write(JSON.stringify(pages[at >= 0 ? Number(argv[at + 1].slice(1)) : 0]));
+`);
   chmodSync(exe, 0o755);
   return { ...process.env, WICKED_ESTATE_EXE: exe };
 }
@@ -55,6 +61,16 @@ describe.skipIf(process.platform === 'win32')('blast-radius freshness names curr
     const out = await projectBlastRadius(q, 'charge', estate(raw));
     expect(out.freshness?.stale_files_total).toBe(1);
   });
+
+  it('per page: a removed member\'s file on two pages leaves both pages\' totals (codex r1)', async () => {
+    // Each page counts its own files (crew#1556 sums them): `api` and `gone` are stale on both pages.
+    const first = { ...fixture('blast-radius-removed-member.json'), next_cursor: 'c1' };
+    const second = fixture('blast-radius-removed-member.json');
+    const out = await projectBlastRadius(q, 'charge', estate([first, second]));
+    // Raw sum 4 (2 + 2); each page drops `gone`: 1 + 1, the `api` file counted once per page as before.
+    expect(out.freshness?.stale_files_total).toBe(2);
+    expect(JSON.stringify(out.freshness)).not.toContain('gone');
+  });
 });
 
 describe.skipIf(process.platform === 'win32')('blast-radius rows carry estate\'s via edges (crew#1714)', () => {
@@ -80,6 +96,19 @@ describe.skipIf(process.platform === 'win32')('blast-radius rows carry estate\'s
       { id: 'ts-typescript . . . api/src/index/charge().', kind: 'calls' },
       { id: 'ts-typescript . . . api/src/index/charge().', kind: { other: 'reads' } },
     ]);
+  });
+
+  it('an edge to a removed member\'s end of a dropped crossing is dropped (it may be a start, not a row; codex r1)', async () => {
+    const raw = fixture('blast-radius-removed-member.json');
+    const linkEnd = 'file . gone/src/lib.ts:';
+    raw['crossings'].push({ ...raw['crossings'][0], id: 'xgone', to: { repo: 'gone', symbol: linkEnd } });
+    const bill = raw['dependents'].find((d: Doc) => d['id'] === 'ts-typescript . . . api/src/index/bill().');
+    bill['via'].push({ id: linkEnd, kind: 'imports' });
+    const out = await projectBlastRadius(q, 'charge', estate(raw));
+    expect(out.dependents.find((d) => d.id === bill['id'])?.via).toEqual([
+      { id: 'ts-typescript . . . api/src/index/charge().', kind: 'calls' },
+    ]);
+    expect(out.crossings?.map((c) => c.id)).toEqual(['xd844539cff04463e']);
   });
 
   it('an older estate (no via) adds none', async () => {
@@ -119,6 +148,29 @@ describe.skipIf(process.platform === 'win32')('project path carries this project
     expect(out).not.toHaveProperty('link_stale');
     expect(out).not.toHaveProperty('coverage');
     expect(out.note).not.toMatch(/earlier refresh/);
+  });
+
+  it('a removed member is never named as a moved member, and the link still reads stale (codex r1)', async () => {
+    for (const [labels, want] of [[['web', 'gone'], ['web']], [['gone'], []]] as const) {
+      const path = fixture('path-linked-stale.json');
+      path['link'][0]['stale_labels'] = labels;
+      const blast = fixture('blast-radius-removed-member.json');
+      blast['link'][0]['stale_labels'] = labels;
+      for (const out of [
+        await projectGraphPath(q, 'web/src/page.ts', 'api/src/index.ts', undefined, estate(path)),
+        await projectBlastRadius(q, 'charge', estate(blast)),
+      ]) expect(out).toMatchObject({ link_stale: true, link_stale_labels: want });
+    }
+  });
+
+  it('a malformed coverage is no coverage, never a failed answer (codex r1)', async () => {
+    for (const coverage of [{}, [null, 3], 'x']) {
+      const raw = fixture('path-linked-stale.json');
+      raw['link'] = [null, { ...raw['link'][0], coverage }];
+      const out = await projectGraphPath(q, 'web/src/page.ts', 'api/src/index.ts', undefined, estate(raw));
+      expect(out).toMatchObject({ found: true, link_stale: true, coverage: [{ repoId: 'repo-api', repo: 'api' }, { repoId: 'repo-web', repo: 'web' }] });
+      expect(out.coverage?.[0]).not.toHaveProperty('links_in');
+    }
   });
 
   it('blast-radius reads only this project\'s link state too', async () => {
