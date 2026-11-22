@@ -196,7 +196,7 @@ import type { GateAction, LaunchPreviewPosture, LaunchPreviewResponse, Maintenan
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
 import { registerDefaultEvalRoutes, runAndRecord, type DefaultEvalDeps } from '../evals/routes.js';
-import { prepareRunEvalsLaunch, RUN_EVALS_WORKFLOW } from '../evals/workflow.js';
+import { prepareRunEvalsLaunch, RUN_EVALS_WORKFLOW, runEvalsScopeOf, type RunEvalsScope } from '../evals/workflow.js';
 import { DOMAIN_MAPPING } from '../projects/repo-watch.js';
 import { defaultReplaySet } from '../evals/replay.js';
 import type { DefaultEvalStore } from '../evals/store.js';
@@ -1363,7 +1363,7 @@ export interface RegisteredRoutes {
    *  (DES-RUNS-REVIEW-001: the run review folds these, never the engine's bare record). */
   decorateRun: (view: SessionView) => SessionView;
   /** DES-DEFAULT-EVALS-001 §7: prepare a `run-evals` launch (run the evals in-process, write the report copy). */
-  runEvalsPrepare: (input: LaunchRunInput) => Promise<void>;
+  runEvalsPrepare: (input: LaunchRunInput, scope?: RunEvalsScope) => Promise<void>;
   /** DES-CHAT-ARTIFACTS-001 §4 (A2): proposals from a seat's `wicked-make` block (the reply fold feeds `onReply`). */
   chatProposals: ChatProposals;
   /** A3: the one launcher per run id (the draft seam's bus trigger and the boot reconcile go through it). */
@@ -4036,7 +4036,10 @@ export function registerRoutes(
     // the evals in-process and writes the report copy its Tool step reads; it delivers nothing.
     if (b.workflow === RUN_EVALS_WORKFLOW) {
       try {
-        await runEvalsPrepare(input);
+        // (crew#1375) A card launch scores what its card asks for: Evaluate rules the steering suite, and a card that takes
+        // a project input (Evaluate rules, Analyze runs) the project the launch is filed in. A launch with no shape (a
+        // schedule, `/workflow-run-evals`) scores every suite and project.
+        await runEvalsPrepare(input, runEvalsScopeOf(shapeChecked?.shape.card ?? null, b.projectId ?? null));
       } catch (err) {
         return reply.code(409).send({ error: `the default evals could not be prepared: ${message(err)}` });
       }
@@ -4049,6 +4052,12 @@ export function registerRoutes(
         return reply.code(409).send({ error: `the review could not be prepared: ${message(err)}` });
       }
     }
+    // (crew#1375) Every refusal from here to the engine call leaves a prepared review that never ran: it is recorded as
+    // refused, so a retry under the same run id (a chat job's Go) prepares it again instead of being refused.
+    const refuse = (code: number, body: { error: string; [k: string]: unknown }) => {
+      if (isReview) runtime.reviewLaunchRefused?.(input.sessionId, body.error);
+      return reply.code(code).send(body);
+    };
     if (b.workflow !== undefined && postureFacts.preparationDropsDelivery(b.workflow)) {
       deliver = 'none';
       delete input.deliver;
@@ -4057,7 +4066,7 @@ export function registerRoutes(
     // a chat whose proposal's document attempt has no outcome yet is refused, as Go is refused the other way round.
     if (b.chatId !== undefined && chatArtifactFlags.proposals) {
       const live = await chatProposals.liveJobOf(b.chatId).catch(() => null);
-      if (live !== null) return reply.code(409).send({ code: 'chat_busy', error: `This chat already has a job running (${live}). Wait, or stop that run.` });
+      if (live !== null) return refuse(409, { code: 'chat_busy', error: `This chat already has a job running (${live}). Wait, or stop that run.` });
     }
     // DES-CATALOG-002 §4.4 (codex r1): the effective resolution a shape was judged by is read again right before the
     // engine resolves the preset, so a preset saved during this launch's awaits refuses it rather than running a shape
@@ -4066,10 +4075,10 @@ export function registerRoutes(
       try {
         const again = checkLaunchShape(shapeChecked.shape, shapeChecked.target, await servedFor(shapeReads, b.projectId));
         if (!again.ok || again.resolved.resolved.resolution !== shapeChecked.resolution) {
-          return reply.code(409).send({ code: 'catalog_changed', error: 'the catalog changed while this was starting; check the job again' });
+          return refuse(409, { code: 'catalog_changed', error: 'the catalog changed while this was starting; check the job again' });
         }
       } catch (err) {
-        return reply.code(409).send({ code: 'catalog_unavailable', error: message(err) });
+        return refuse(409, { code: 'catalog_unavailable', error: message(err) });
       }
     }
     // (CS4) The pick is recorded before anything is staged and before the engine is called, so no unit of the run ever
@@ -4078,7 +4087,7 @@ export function registerRoutes(
       try {
         runtime.runSourcePicks!.set(input.sessionId, sourcePick);
       } catch (err) {
-        return reply.code(409).send({ code: 'sources_unavailable', error: `the source pick could not be recorded: ${message(err)}` });
+        return refuse(409, { code: 'sources_unavailable', error: `the source pick could not be recorded: ${message(err)}` });
       }
     }
     // (DES-CATALOG-002 §2.d piece 2, CS4) The documents: every token authorised again with the chat's own rules (this
@@ -4094,10 +4103,10 @@ export function registerRoutes(
     } else if (b.retryOf !== undefined && runtime.runDocumentsRoot !== undefined) {
       const earlier = stagedTokensOf(b.retryOf, runtime.runDocumentsRoot);
       if (earlier === 'removed') {
-        return reply.code(409).send({ code: 'documents_unavailable', error: `the documents of run ${b.retryOf} were removed when it was archived; start the job again from its chat` });
+        return refuse(409, { code: 'documents_unavailable', error: `the documents of run ${b.retryOf} were removed when it was archived; start the job again from its chat` });
       }
       if (earlier === 'unreadable') {
-        return reply.code(409).send({ code: 'documents_unavailable', error: `the documents of run ${b.retryOf} can't be read again; start the job again from its chat` });
+        return refuse(409, { code: 'documents_unavailable', error: `the documents of run ${b.retryOf} can't be read again; start the job again from its chat` });
       }
       if (earlier !== null) docTokens = earlier;
     }
@@ -4107,7 +4116,7 @@ export function registerRoutes(
       const runProject = b.projectId !== undefined && b.projectId !== DEFAULT_PROJECT_ID ? b.projectId : null;
       if ((chatProject ?? null) !== runProject) {
         // A bare retry sends no projectId: it is filed Unfiled, so it is told where its documents belong (fail closed).
-        return reply.code(400).send({
+        return refuse(400, {
           code: 'documents_refused',
           error: chatProject !== null && runProject === null
             ? `the documents belong to project ${chatProject}: file this run there (send projectId)`
@@ -4131,13 +4140,13 @@ export function registerRoutes(
         });
       } catch (err) {
         if (err instanceof DocumentsRefused) {
-          return reply.code(400).send({
+          return refuse(400, {
             code: 'documents_refused',
             error: `can't read ${err.refused.map((r) => `${r.token} (${r.reason})`).join(', ')}`,
             refused: err.refused,
           });
         }
-        return reply.code(409).send({ code: 'documents_unavailable', error: `the documents could not be staged: ${message(err)}` });
+        return refuse(409, { code: 'documents_unavailable', error: `the documents could not be staged: ${message(err)}` });
       }
     }
     if (staged !== null) {
@@ -4305,7 +4314,9 @@ export function registerRoutes(
     } catch (err) {
       if (!launched && staged?.published === true) freeStagedDocuments(input.sessionId, false);
       const msg = message(err);
-      if (isReview) runtime.reviewLaunchRefused?.(input.sessionId, msg);
+      // (crew#1375, xreview r1) Only a launch the engine never took is a refused review: a failure after launchRun
+      // resolved leaves the review running, so a retry under its run id can never clear a real review.
+      if (isReview && !launched) runtime.reviewLaunchRefused?.(input.sessionId, msg);
       if (err instanceof MaintenanceDrainError) return reply.code(503).send(maintenanceDrainBody(err));
       // DES-TEAMING-002 T3: a plan on an engine without the plan approval gate is an "upgrade the
       // engine" 501 — never a free-text run launched in its place.
@@ -12263,8 +12274,13 @@ export function registerRoutes(
   });
   registerSearchRoutes(app, search);
 
-  const runEvalsPrepare = async (input: LaunchRunInput): Promise<void> => {
-    await prepareRunEvalsLaunch(input, () => runAndRecord(defaultEvalDeps, { project: null, baseline: false, id: randomUUID(), now: new Date() }), runtime.evalRunsDir);
+  const runEvalsPrepare = async (input: LaunchRunInput, scope: RunEvalsScope = { project: null }): Promise<void> => {
+    await prepareRunEvalsLaunch(
+      input,
+      () => runAndRecord(defaultEvalDeps, { project: scope.project, baseline: false, ...(scope.suites !== undefined ? { suites: scope.suites } : {}), id: randomUUID(), now: new Date() }),
+      runtime.evalRunsDir,
+      scope,
+    );
   };
   return { exclusive: decideExclusively, decideGate, decisions, chatRecorder, considerations, search, decorateRun, runEvalsPrepare, chatProposals, proposalLaunchers };
 }

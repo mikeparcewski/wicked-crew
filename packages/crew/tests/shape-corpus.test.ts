@@ -12,6 +12,7 @@ import {
   exactRight,
   loadShapeCorpus,
   loadShapeFixture,
+  observedOf,
   scoreShapeCorpus,
   shapeCorpusCases,
   shapeCoverage,
@@ -35,7 +36,7 @@ describe('the shape corpus through the shipped detection (§9.2)', () => {
     for (const c of corpus.cases) expect(Object.hasOwn(fixture, c.id), c.id).toBe(true);
   });
 
-  it('release checks: card AND option right on ≥ 95 % of clear cases; 0 wrong at sure; 0 ambiguous decided onto an unacceptable shape', () => {
+  it('release checks: card AND option right on ≥ 95 % of clear cases; 0 wrong at sure; 0 ambiguous decided onto an unacceptable shape or asked with no acceptable choice', () => {
     console.log(JSON.stringify(shapeReport(m), null, 1));
     expect(m.right / m.clear).toBeGreaterThanOrEqual(0.95);
     expect(m.wrongAtSure).toEqual([]);
@@ -71,6 +72,28 @@ describe('the shape corpus through the shipped detection (§9.2)', () => {
     const c11 = corpus.cases.find((x) => x.id === 'c11')!;
     // A framing option is scored as exactly as a plan-changing one.
     expect(exactRight(c11, { card: 'communicate', option: 'message' })).toBe(false);
+  });
+
+  it('an ambiguous case\'s ask is right only when one of its choices is acceptable, in both scorers (crew#1446)', () => {
+    const x3 = corpus.cases.find((x) => x.id === 'x3')!;
+    expect(x3.expect.ask).toEqual(['refactor:polish', 'feature', 'critique']);
+    const offOnly: detectModule.RawGuess = { card: null, confidence: 0.3, ask: ['bug', 'release'], reason: 'not sure' };
+    const oneRight: detectModule.RawGuess = { ...offOnly, ask: ['bug', 'critique'] };
+    // A question offering only unsuitable jobs is an ask, and it is wrong.
+    const bad = scoreShapeCorpus({ cases: [x3] }, { x3: offOnly });
+    expect(bad.results[0]!.guess.band).toBe('ask');
+    expect(bad.results[0]!.right).toBe(false);
+    expect(bad.ambiguousUnacceptable).toEqual(['x3']);
+    expect(bad.results[0]!.note).toBe('asked with no acceptable choice (bug, release)');
+    // The same ask with an acceptable job among its choices stays right (an extra choice is fine: the person picks).
+    const good = scoreShapeCorpus({ cases: [x3] }, { x3: oneRight });
+    expect(good.results[0]!.guess.band).toBe('ask');
+    expect(good.results[0]!.right).toBe(true);
+    expect(good.ambiguousUnacceptable).toEqual([]);
+    // The replay suite's scorer agrees.
+    const acceptableShapes = shapeCorpusCases({ cases: [x3] }, { x3: offOnly })[0]!.input['acceptable'] as string[];
+    expect(observedOf(x3.text, offOnly, acceptableShapes).label).toBe('ask');
+    expect(observedOf(x3.text, oneRight, acceptableShapes).label).toBe('acceptable');
   });
 
   it('a hostile seat naming a wrong card at 1.0 is held as likely unless the words rank that card close (the cross-check)', () => {

@@ -21,7 +21,7 @@
  *    read-only, and the person answers the gate (re-check, or confirm or skip with a reason) or stops it (F22).
  */
 
-import type { AppSpec, AppTurnRecord, CoreEvent, KnowledgeSummaryResponse, LaunchRunInput, SessionView } from '../core/types.js';
+import type { AppSpec, AppTurnRecord, AppTurnRule, CoreEvent, KnowledgeSummaryResponse, LaunchRunInput, SessionView } from '../core/types.js';
 import { readRules } from '../sources/policy/rules.js';
 import type { GateSource } from '../knowledge/gate/sources.js';
 import { type KnowledgePackage, knowledgePackageFor, packageJson } from '../knowledge/package.js';
@@ -550,6 +550,79 @@ export function rulesHeldOrd(v: SessionView, events: ReadonlyArray<Record<string
   return at !== undefined && held(at) ? at.ord : null;
 }
 
+/**
+ * (crew#1379) The steering rules a refused step BROKE, from the engine's record of it, as core reads them
+ * (`actor.rs` `open_rule_ids`, BROKEN only): the ids its `rule_check` denials name, winning or behind the reviewer's
+ * (`denial`, `denials_behind`); when none does and the layers behind are not recorded, its last rule check's
+ * broken rows (a process rule's, `blocking: false`, never denies). Each carries the judge's cite (else its reason)
+ * from that check, as one line of text. These fields ride the runs wire; they are not in the api-types `WorkUnit`.
+ */
+export function brokenRulesOf(unit: unknown): AppTurnRule[] {
+  const isRecord = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null;
+  if (!isRecord(unit)) return [];
+  const behind = Array.isArray(unit['denials_behind']) ? unit['denials_behind'] : null;
+  // Core's rule layers: a BROKEN rule (`rule_check`) or an unchecked one (`rules_unchecked`); only the first names
+  // broken rules, but either is the record of this attempt's rule check.
+  const layers = [unit['denial'], ...(behind ?? [])].filter(isRecord).filter((d) => d['source'] === 'rule_check' || d['source'] === RULES_HOLD_SOURCE);
+  const denials = layers.filter((d) => d['source'] === 'rule_check');
+  const check = unit['rule_check'];
+  const rows = (isRecord(check) && Array.isArray(check['rows']) ? check['rows'] : []).filter(isRecord).filter((r) => typeof r['ruleId'] === 'string' && r['ruleId'] !== '');
+  const brokenRows = rows.filter((r) => r['status'] === 'broken' && r['blocking'] !== false);
+  // As core: a rule denial, named or not, is the record of THIS attempt (its ids, even none); the rows of the last
+  // rule check stand in only when no rule layer is recorded and the layers behind are unknown (an older engine).
+  const named = layers.length > 0
+    ? denials.flatMap((d) => (Array.isArray(d['rule_ids']) ? d['rule_ids'] : []).filter((x): x is string => typeof x === 'string' && x !== ''))
+    : unit['denials_behind'] == null ? brokenRows.map((r) => r['ruleId'] as string) : [];
+  const text = (x: unknown): string => (typeof x === 'string' ? x : '');
+  // The id is kept exactly as the engine wrote it (Steering finds the rule by it); only its reason is one-lined.
+  return [...new Set(named)].map((id) => {
+    const row = brokenRows.find((r) => r['ruleId'] === id) ?? rows.find((r) => r['ruleId'] === id);
+    const why = row === undefined ? '' : text(row['cite']) !== '' ? text(row['cite']) : text(row['reason']);
+    return { id, reason: oneLine(why, 300) };
+  });
+}
+
+/**
+ * Whether `text` names `id` as a whole identifier: set off by a space, a bracket, a quote or a stop on both sides
+ * (`learn-tests` is not named by `learn-tests-required`, `team:learn-tests` or `learn-testsé`).
+ */
+function namesId(text: string, id: string): boolean {
+  const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[\\s(\\[{"'“‘])${esc}(?=$|[\\s)\\]}"'”’.,;:!?—–])`, 'u').test(text);
+}
+
+/** At most this much of a refusal's reason names its rules; the rest of the ids are counted (all ride `rules`). */
+const RULE_NAMES_MAX = 800;
+
+/**
+ * (crew#1379) A refusal's reason that names every broken rule its words do not, within the turn record's 2000
+ * characters: the words are cut first (at a word, to a fixed budget), then the rules they no longer name are listed
+ * whole, as many as fit in {@link RULE_NAMES_MAX}, the others counted. No id is ever cut.
+ */
+export function reasonNamingRules(reason: string, rules: readonly AppTurnRule[], max = 2000): string {
+  const end = ' Nothing landed.';
+  let words = reason.replace(/\s*Nothing landed\.$/, '');
+  const unnamedIn = (w: string) => rules.map((r) => r.id).filter((id) => !namesId(w, id));
+  if (unnamedIn(words).length === 0) return reason;
+  const room = max - RULE_NAMES_MAX - end.length;
+  if (words.length > room) {
+    const cut = words.slice(0, room - 1);
+    const at = cut.lastIndexOf(' ');
+    words = `${at > room / 2 ? cut.slice(0, at) : cut}…`;
+  }
+  const unnamed = unnamedIn(words);
+  const listed: string[] = [];
+  let used = 40;
+  for (const id of unnamed) {
+    if (used + id.length + 2 > RULE_NAMES_MAX) break;
+    listed.push(id);
+    used += id.length + 2;
+  }
+  const more = unnamed.length - listed.length;
+  const names = listed.length === 0 ? `${more} steering rules (listed on the turn)` : `steering rule${unnamed.length === 1 ? '' : 's'} ${listed.join(', ')}${more > 0 ? ` and ${more} more` : ''}`;
+  return `${words} It breaks ${names}.${end}`;
+}
+
 export function parkedRefusal(v: SessionView, events: ReadonlyArray<Record<string, unknown>> | null = null): { phase: string; code: string; reason: string } | null {
   const runId = v.session.id;
   // (F22) A step held on steering rules is waiting for the person (re-check, or confirm or skip with a reason), not
@@ -759,7 +832,10 @@ export class AppTurnService implements AppTurnLauncher {
         reason = said !== '' ? `The builder made no change it could hand on. It said: “${said}” Nothing landed.` : 'The builder made no change it could hand on. Nothing landed.';
         code = 'no_change';
       }
-      return { kind: 'end', state: code === 'step_failed' || code === 'no_change' ? 'failed' : 'refused', code, reason };
+      // (crew#1379) A rule the step broke is named, so the person can find it in Steering (rescope or retire it).
+      const rules = code === 'no_change' ? [] : brokenRulesOf(v.units.find((x) => x.id === `${input.runId}:${refused.phase}`));
+      reason = reasonNamingRules(reason, rules);
+      return { kind: 'end', state: code === 'step_failed' || code === 'no_change' ? 'failed' : 'refused', code, reason, ...(rules.length > 0 ? { rules } : {}) };
     }
     if (status === 'failed') {
       const check = unit('check');

@@ -17,7 +17,9 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { LaunchRunInput, WorkflowDef } from '../core/types.js';
-import type { DefaultEvalReport } from './types.js';
+import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
+import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
+import { SUITE_IDS, type DefaultEvalReport, type SuiteId } from './types.js';
 
 export const RUN_EVALS_WORKFLOW = 'run-evals';
 export const RUN_EVALS_WORKFLOW_FILE = fileURLToPath(new URL('../../workflows/run-evals.json', import.meta.url));
@@ -61,6 +63,30 @@ export function loadRunEvalsWorkflow(tokens: RunEvalsTokens, file = RUN_EVALS_WO
   return fillRunEvalsWorkflow(JSON.parse(readFileSync(file, 'utf8')) as unknown, tokens);
 }
 
+/** What one `run-evals` launch scores: one project (`null` = every project), and only these suites (absent = all). */
+export interface RunEvalsScope {
+  project: string | null;
+  suites?: SuiteId[];
+}
+
+/**
+ * (crew#1375) What a card's `run-evals` launch scores. A card's `evalSuites` (Evaluate rules: `steering`) limit the
+ * suites, and a card that takes a project input scores the project the launch is filed in (none, or Unfiled, is every
+ * project). No card (a schedule, `/workflow-run-evals`) or an unknown one scores everything, as before. A card whose
+ * `evalSuites` names no known suite throws (its launch is refused), so a renamed suite never scores everything.
+ */
+export function runEvalsScopeOf(cardId: string | null, projectId: string | null): RunEvalsScope {
+  const card = cardId === null ? undefined : CATALOG_V2_CARDS.find((c) => c.id === cardId);
+  if (card === undefined) return { project: null };
+  const known: readonly string[] = SUITE_IDS;
+  const suites = (card.evalSuites ?? []).filter((s): s is SuiteId => known.includes(s));
+  // A card that names suites but no known one is refused, never widened to every suite (coord review).
+  if ((card.evalSuites ?? []).length > 0 && suites.length === 0) throw new Error(`${card.id} names no known eval suite (${card.evalSuites!.join(', ')})`);
+  const takesProject = (card.inputs ?? []).some((i) => i === 'project' || i === 'project?');
+  const project = takesProject && projectId !== null && projectId !== DEFAULT_PROJECT_ID ? projectId : null;
+  return { project, ...(suites.length > 0 ? { suites } : {}) };
+}
+
 /**
  * Prepare a `run-evals` launch: run the evals now (`run`, which also keeps the report), write the copy the Tool step
  * reads, and make the launch repo-less, delivering nothing, on no seat.
@@ -69,6 +95,7 @@ export async function prepareRunEvalsLaunch(
   input: LaunchRunInput,
   run: () => Promise<DefaultEvalReport>,
   runsDir: string = defaultEvalRunsDir(),
+  scope: RunEvalsScope = { project: null },
 ): Promise<DefaultEvalReport> {
   const report = await run();
   const dir = join(runsDir, input.sessionId);
@@ -78,6 +105,9 @@ export async function prepareRunEvalsLaunch(
   input.clisJson = '[]';
   delete (input as { repoRef?: string }).repoRef;
   delete input.deliver;
-  if (input.problem === undefined || input.problem.trim() === '') input.problem = 'Run the default evals across every project';
+  if (input.problem === undefined || input.problem.trim() === '') {
+    const where = scope.project === null ? 'across every project' : `for project ${scope.project}`;
+    input.problem = scope.suites === undefined ? `Run the default evals ${where}` : `Run the ${scope.suites.join(', ')} evals ${where}`;
+  }
   return report;
 }

@@ -36,6 +36,7 @@ import type {
   AppArchived,
   AppSummary,
   AppTurnRecord,
+  AppTurnRule,
   AppTurnState,
   AppVersion,
   AppPublishBody,
@@ -145,7 +146,8 @@ export const TURN_LOG_SHOWN = 20;
 /** How a turn whose run is no longer running ends: it lands, or it ends with a reason (DES §9.2). */
 export type AppTurnSettlement =
   | { kind: 'land'; builder: string; reviewer: string; summary: string; change: string }
-  | { kind: 'end'; state: 'refused' | 'failed' | 'cancelled'; code: string; reason: string }
+  /** `rules`: (crew#1379) the steering rules the refused step broke, when any did. */
+  | { kind: 'end'; state: 'refused' | 'failed' | 'cancelled'; code: string; reason: string; rules?: AppTurnRule[] }
   /** Not known yet (the engine did not answer, or would not stop a refused run): the turn stays in flight. */
   | { kind: 'pending'; why: string };
 
@@ -636,7 +638,7 @@ export class AppStore {
     if (cur.turn?.runId !== runId) return;
     this.transact(a.slug, () => {
       cur.turn = null;
-      this.patchTurnRecord(cur, runId, { state: ended.state, endedAt: this.now(), code: ended.code, reason: ended.reason.slice(0, 2000) });
+      this.patchTurnRecord(cur, runId, { state: ended.state, endedAt: this.now(), code: ended.code, reason: ended.reason.slice(0, 2000), ...(ended.rules !== undefined && ended.rules.length > 0 ? { rules: ended.rules } : {}) });
     });
     await this.git(a).dropRef(['wicked', 'apps-checked', runId]).catch(() => undefined);
   }
