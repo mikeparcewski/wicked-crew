@@ -33,8 +33,13 @@ const UNITS_PER_RUN = 6;
 const ATTEMPTS = 3;
 /** p95 of one run read on the 120-run home (the per-session fold: ~0.5 s). */
 const RUN_READ_P95_MS = 100;
-/** `/health` while 20 run reads are in flight (the per-session fold: many seconds). */
-const HEALTH_UNDER_LOAD_MS = 200;
+/**
+ * `/health` while 20 run reads are in flight. The fault this guards is the per-session fold: 20 reads of ~0.5 s each
+ * on the engine's actor, so `/health` waits many seconds. On the one-scan fold `/health` answers as the burst drains,
+ * ~20 x one read: 200-290 ms on loaded CI runners (crew#1780: 200.3, 224, 253, 261 ms), so 200 ms flaked. 1 s keeps a
+ * 10x margin under the fault and ~3.5x headroom over the worst run seen.
+ */
+const HEALTH_UNDER_LOAD_MS = 1_000;
 
 const HELPER = fileURLToPath(new URL('../setup/long-lived-home.mts', import.meta.url));
 
