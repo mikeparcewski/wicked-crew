@@ -109,10 +109,17 @@ export class RunTimingIndex {
     }
   }
 
-  /** A launch replaces all launch facts, including facts absent from this entry. */
+  /**
+   * A launch replaces all launch facts, including facts absent from this entry. crew#1742: except the source pick of an
+   * entry crew re-recorded at boot (`recoveredAtBoot`, from the document binding, which never holds a pick): it keeps
+   * the pick already read, and a run not read before stays of unknown pick (never a known launch with none).
+   */
   applyLaunchEntry(entry: Pick<AuditEntry, 'runId' | 'ts' | 'actor' | 'detail'>): void {
     const runId = entry.runId;
     if (typeof runId !== 'string') return;
+    const recovered = (entry.detail as Record<string, unknown> | undefined)?.['recoveredAtBoot'] === true;
+    const heldPick = recovered ? this.runToSourcePick.get(runId) : undefined;
+    const knownBefore = this.launchedRuns.has(runId);
     const previousFrom = this.runToChainedFrom.get(runId);
     if (previousFrom !== undefined && this.chainedRun.get(previousFrom) === runId) this.chainedRun.delete(previousFrom);
     this.runToCreatedAt.delete(runId);
@@ -132,7 +139,8 @@ export class RunTimingIndex {
     this.runToLaunchFacts.delete(runId);
     this.runToAddresses.delete(runId);
     this.runToSourcePick.delete(runId);
-    this.launchedRuns.add(runId);
+    if (heldPick !== undefined) this.runToSourcePick.set(runId, heldPick);
+    if (!recovered || knownBefore) this.launchedRuns.add(runId);
     if (typeof entry.ts === 'number' && entry.ts > 0) this.set(runId, entry.ts);
     const launcher = entry.actor;
     if (typeof launcher?.id === 'string' && launcher.kind !== 'system') this.setPrincipal(runId, launcher.id);

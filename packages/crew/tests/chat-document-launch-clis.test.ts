@@ -173,6 +173,8 @@ describe('chat document launch roster (production server, crew#1611)', () => {
     const roster = JSON.parse(documentLaunch!.clisJson!) as Array<{ key: string }>;
     const keys = roster.map((seat) => seat.key);
     expect(keys).toEqual(helpers);
+    // crew#1751: the card's writer (its first helper) leads the draft, so the other helper is the distinct checker.
+    expect(documentLaunch!.primary).toBe(helpers[0]);
     if (helpers.includes('opencode')) expect(keys).toContain('opencode');
     else expect(keys).not.toContain('opencode');
   });

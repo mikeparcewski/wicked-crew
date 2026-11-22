@@ -399,6 +399,29 @@ describe('document title from the person (#1537)', () => {
     expect(r.launcher.launched[0]!.resolution.helpers?.seats).toEqual(['codex', 'pi']);
   });
 
+  it('the first card keeps the writer and checker the person named in the same turn (crew#1737)', async () => {
+    const r = make();
+    await say(r, 't-named', 'Write a document titled Tiny math helper notes. Codex writes it and Pi checks it.');
+    await reply(r, 't-named', { entry: 'document', option: 'document', confidence: 0.99, lead: 'codex', seats: ['pi'] });
+    const p = open(r);
+    expect(p.helpers?.seats).toEqual(['codex', 'pi']);
+    expect(p.sentence?.tokens.find((t) => t.kind === 'seats')?.label).toBe('Codex writes, pi checks');
+    expect((await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    expect(r.launcher.launched[0]!.resolution.helpers?.seats).toEqual(['codex', 'pi']);
+  });
+
+  it('a seat the person never named is not taken from the block; a named writer alone gets a drawn checker (crew#1737)', async () => {
+    const r = make();
+    await say(r, 't-unnamed', 'Write a one-page note about the plugin.');
+    await reply(r, 't-unnamed', { entry: 'document', option: 'document', confidence: 0.99, lead: 'pi', seats: ['codex'] });
+    expect(open(r).helpers?.seats).toEqual(['claude', 'codex']);
+    const w = make();
+    await say(w, 't-writer', 'Write a one-page note about the plugin; Codex writes it.');
+    await reply(w, 't-writer', { entry: 'document', option: 'document', confidence: 0.99, lead: 'codex' });
+    expect(open(w).helpers?.seats).toEqual(['codex', 'claude']);
+    expect(open(w).blocked).toBeNull();
+  });
+
   it('a removal that leaves one document helper keeps both and explains why (#1538)', async () => {
     const r = make();
     await pick(r, 'document');

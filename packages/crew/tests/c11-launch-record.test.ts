@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { LOCAL_ACTOR } from '../src/api/auth.js';
 import { RunTimingIndex } from '../src/api/run-timing-index.js';
 import { RunSourcePicks } from '../src/api/run-sources.js';
+import { recoveredLaunchDetail } from '../src/interactive/proposal-create.js';
 import { composeDeliverWorkflow, DELIVER_PHASE_ID } from '../src/core/deliver.js';
 import type { AuditEntry } from '../src/core/types.js';
 import { upstreamFailure } from '../src/knowledge/trackers/gate-pm.js';
@@ -175,6 +176,30 @@ describe('RunSourcePicks: a lost store entry keeps the launch record\'s pick (cr
     expect(() => picks.set('run-fresh', ['web'])).not.toThrow();
     // With the history read, an unknown run is simply unpicked.
     expect(new RunTimingIndex().recordedPickOf('run-old')).toBeNull();
+  });
+
+  it('a launch re-recorded at boot keeps the pick already read and never reads as a known no-pick launch (crew#1742)', () => {
+    // The detail exactly as the boot recovery writes it (proposal-create.ts recoveredLaunchDetail).
+    const recovered = recoveredLaunchDetail(
+      { idOfInstance: (id) => id },
+      { chatId: 'c1', chatInstance: 'i1', owner: 'maria', ref: '_unfiled/notes' },
+      { pid: 'c1:t1', chatId: 'c1', chatInstance: 'i1' },
+    );
+    expect(recovered).toMatchObject({ recoveredAtBoot: true });
+    expect(recovered).not.toHaveProperty('sourcePick');
+    // The boot read failed: a run first seen through the recovery stays of unknown pick (fails closed).
+    const idx = new RunTimingIndex();
+    idx.markLaunchHistoryUnreadable();
+    idx.applyLaunchEntry(launchEntry('run-bound', 5, recovered));
+    expect(() => idx.recordedPickOf('run-bound')).toThrow(/unknown/);
+    // A run whose launch was read keeps its pick through a recovered re-record.
+    const read = new RunTimingIndex();
+    read.applyLaunchEntry(launchEntry('run-picked', 4, { sourcePick: ['support-pg'] }));
+    read.applyLaunchEntry(launchEntry('run-picked', 5, recovered));
+    expect(read.recordedPickOf('run-picked')).toEqual(['support-pg']);
+    // An ordinary launch entry still replaces every launch fact, its pick included.
+    read.applyLaunchEntry(launchEntry('run-picked', 6, {}));
+    expect(read.recordedPickOf('run-picked')).toBeNull();
   });
 
   it('the store stays the authority for a run it holds', () => {

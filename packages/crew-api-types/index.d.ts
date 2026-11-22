@@ -10304,6 +10304,21 @@ export interface ChatProposalDecisionResponse {
 }
 
 /**
+ * (crew#1695) A refused `POST /chats/:id/proposals/:pid` (see {@link ChatProposalDecisionResponse} for the codes).
+ * `acceptingAt` is on every refusal that follows THIS Go's `proposal_accepting` record (502 `launch_failed`, a typed
+ * launch refusal, and a `chat_gone` after it): that record's `at`, so a client marks only the Go it pressed as stopped,
+ * never a newer accepting record another tab wrote meanwhile. ABSENT on a refusal before anything was recorded.
+ */
+export interface ChatProposalDecisionRefusal {
+  code?: string;
+  error: string;
+  view?: ChatProposalView;
+  excluded?: unknown;
+  retryWith?: { reducedAssurance: true };
+  acceptingAt?: number;
+}
+
+/**
  * `/ws` (api-types 0.170.0): a proposal record was appended to chat `chat` (the same record the transcript holds).
  * `project_id`: the chat's project, when it has one. A `type` alias (like the daemon's other synthetic frames) so it
  * satisfies {@link CoreEvent}'s index signature.

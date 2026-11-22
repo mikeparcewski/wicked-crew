@@ -816,6 +816,8 @@ export function chatJobLines(mode: 'cards' | 'prose'): string[] {
     'ONE question naming them and send no block. One block per reply at most. A question about the code is answered,',
     'with no block.',
     'A document\'s `title` is included only when the person named one, in their words.',
+    '`lead` (who builds or writes) and `seats` (who else works on it, such as who checks) only when the person named',
+    'them in this message, as seat keys in their order: "Codex writes it and Pi checks it" is `"lead":"codex","seats":["pi"]`.',
     '',
     '**A change to the open proposal** ("make it a move", "use billing-api", "add pi too", "go deep"): answer in at most',
     'two sentences, then end with ONE revision block naming the open proposal (its id is in the message\'s job lines):',
