@@ -401,6 +401,42 @@ describe('buildTurnContext', () => {
     expect(ctx.block).toContain('The latest, version 2, was not copied: version 2 is over 2 MB; open it in studio.');
   });
 
+  it('studio#1140: an open demo cut is named as a video the chat cannot change, pointing to the editor\'s own controls', async () => {
+    const page = '<!doctype html><html><head><title>Sign-in demo</title></head><body><h1>Sign-in demo</h1><ol><li>Open the page</li><li>Sign in</li></ol></body></html>';
+    writeDoc('mikes', 'demo-8e0ffbece431', { 2: page }, { head: 2, kind: 'demo', versions: [{ version: 2, kind: 'demo' }] });
+    const ctx = await built({ text: 'change only the chapter caption to read exactly: Welcome', context: { artifact: { ref: 'mikes/demo-8e0ffbece431', version: 2 } } });
+    expect(ctx.binding?.refused).toEqual([]);
+    expect(ctx.binding?.artifact).toMatchObject({ ref: 'mikes/demo-8e0ffbece431', kind: 'demo video', viewed: 2, head: 2 });
+    expect(ctx.block).toContain('- demo video, `mikes/demo-8e0ffbece431`');
+    // Crew's note is an instruction, so it sits OUTSIDE the data section the seat is told never to take instructions from.
+    const note = ctx.block.indexOf("## Crew's note on the video they have open");
+    const data = ctx.block.indexOf('## What studio and crew give you for this turn');
+    expect(note).toBeGreaterThan(-1);
+    expect(note).toBeLessThan(data);
+    expect(ctx.block.slice(note, data)).toContain("`mikes/demo-8e0ffbece431` is a demo video's cut. This chat can't change this video");
+    expect(ctx.block.slice(note, data)).toContain('never say it changed');
+    expect(ctx.block.slice(note, data)).toContain('Chapters (rename, move, and the In and Out trims), Captions (on or off, position, size, burn-in) and Theme');
+    expect(ctx.block.slice(note, data)).toContain("caption words can't be edited there yet");
+    expect(ctx.block).toContain("Only the words above crew's note on the video are the person’s own.");
+    // A style sidecar never relabels a cut as a page the chat may change.
+    deps = { ...deps, docStyle: () => 'web' };
+    const styled = await built({ context: { artifact: { ref: 'mikes/demo-8e0ffbece431', version: 2 } } });
+    expect(styled.binding?.artifact?.kind).toBe('demo video');
+    expect(styled.block).toContain("This chat can't change this video");
+    // A cut whose storyboard page can't be copied is refused as data, and the note on it still holds.
+    rmSync(join(docs.mikes!, 'demo-8e0ffbece431', '_v2.html'));
+    const unread = await built({ context: { artifact: { ref: 'mikes/demo-8e0ffbece431', version: 2 } } });
+    expect(unread.binding?.artifact).toBeUndefined();
+    expect(unread.binding?.refused[0]?.token).toBe('doc:mikes/demo-8e0ffbece431');
+    expect(unread.block.indexOf("## Crew's note on the video they have open")).toBeGreaterThan(-1);
+    expect(unread.block).toContain("This chat can't change this video");
+    // Any other document carries no such line.
+    writeDoc('mikes', 'plain-page', { 1: '<h1>Plain</h1><p>x</p>' });
+    const plain = await built({ context: { artifact: { ref: 'mikes/plain-page', version: 1 } } });
+    expect(plain.block).not.toContain("can't change this video");
+    expect(plain.block).not.toContain("Crew's note");
+  });
+
   it.skipIf(process.platform === 'win32')('never blocks on a FIFO where a manifest or a version should be', async () => {
     const dir = join(docs.mikes!, 'fifo-doc');
     mkdirSync(dir);
