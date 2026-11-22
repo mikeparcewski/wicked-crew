@@ -13,6 +13,7 @@ import type { Actor } from '../core/types.js';
 import { API_PREFIX } from '../api/api-prefix.js';
 import { LOCAL_ACTOR } from '../api/auth.js';
 import type { AuditLog } from '../api/audit.js';
+import { recordProposalDecision } from '../api/proposal-decisions.js';
 import { isHumanOperator } from '../api/watch-routes.js';
 import { METRICS } from './analyze.js';
 import { MIN_SAMPLE } from './stats.js';
@@ -139,7 +140,8 @@ export function registerInsightsRoutes(app: FastifyInstance, deps: InsightsRoute
       if (!parsed.success) return reply.code(400).send({ error: 'body must be { reason: <why, 1 to 500 characters> }' });
       const { id } = req.params as { id: string };
       try {
-        const res = await deps.service.dismiss(id, parsed.data.reason);
+        // crew#1261: the person turned its proposal down.
+        const res = await deps.service.dismiss(id, parsed.data.reason, (pid) => recordProposalDecision(deps.audit, actor, pid, 'rejected'));
         deps.audit.record('insights.recommendation.dismissed', actor, { detail: { id, reason: parsed.data.reason } });
         return res;
       } catch (err) {

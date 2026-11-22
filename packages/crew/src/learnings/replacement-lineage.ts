@@ -30,16 +30,21 @@ export async function memoryIds(estateTool: EstateTool): Promise<Set<string>> {
 /**
  * Before a person's approve of pending proposal `id` (its `payload`, from the pending read the approve makes anyway):
  * when it is a memory replacement whose memory is gone, reject it and say why (the caller answers 409 with these
- * words). Null, with no estate call, when it is not a replacement; null when its memory is still there.
+ * words). Null, with no estate call, when it is not a replacement; null when its memory is still there. A rejection
+ * that happened is reported to `rejectedStale`.
  */
-export async function refuseStaleReplacement(estateTool: EstateTool, id: string, payload: unknown): Promise<string | null> {
+export async function refuseStaleReplacement(
+  estateTool: EstateTool,
+  id: string,
+  payload: unknown,
+  rejectedStale?: (id: string) => void,
+): Promise<string | null> {
   const replaces = replacesOf(payload);
   if (replaces === null) return null;
   if ((await memoryIds(estateTool)).has(replaces)) return null;
-  let rejected = true;
-  await estateTool('proposal.reject', { id }).catch(() => {
-    rejected = false;
-  });
+  const rejected = await estateTool('proposal.reject', { id }).then(() => true, () => false);
+  // crew#1261: crew rejected it as stale (the caller records the decision).
+  if (rejected) rejectedStale?.(id);
   return `proposal ${id} replaces the learning ${replaces}, which has since been edited or retired, so approving it would bring retired words back; ${
     rejected ? 'it was rejected as stale' : 'rejecting it failed, so reject it on the approve page'
   }`;
