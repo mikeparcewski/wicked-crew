@@ -100,6 +100,21 @@ describe('crew#1775: a gate read reads its one run, whatever the other runs are 
     expect(oneRunReads).toBe(20);
   });
 
+  it('a cached gate the record does not back reads the run once, not twice', async () => {
+    const gates = new GateCache();
+    gates.adopt('run-3', { ord: 4, prompt: 'an older gate', lifecycle: 'open', receivedAt: new Date(0).toISOString() });
+    app = Fastify({ logger: false });
+    registerRoutes(app, adapter, gates, new ElicitationCache(), undefined, {
+      audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog,
+      authMode: 'off',
+    });
+    await app.ready();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/runs/run-3/gate' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ runId: 'run-3', ord: 2, prompt: 'Approve step 2?' }); // the record's gate, not the cached one
+    expect(oneRunReads).toBe(1);
+  });
+
   it('runView answers from the engine as it is now: no snapshot age, frame or write stands between', async () => {
     expect((await adapter.runView('run-3'))!.session.status).toBe('awaiting_human');
     store[3] = parkedRun('run-3', 'executing'); // the engine moved it; no frame has landed yet

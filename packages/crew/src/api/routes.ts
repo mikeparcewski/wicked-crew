@@ -8607,7 +8607,9 @@ export function registerRoutes(
     const { id } = req.params as { id: string };
     // F35, crew#1775: this run's view only, never every run's (studio reads this route for parked runs,
     // from every open tab): one engine read of this run, off the actor, as the store is when it starts.
-    const runOf = (): Promise<SessionView | undefined> => adapter.runView(id);
+    // Read once per request: the cached-but-not-servable path and the miss path share it (coord review C6).
+    let viewRead: Promise<SessionView | undefined> | undefined;
+    const runOf = (): Promise<SessionView | undefined> => (viewRead ??= adapter.runView(id));
     // (rejudge, api-types 0.134.0) A gate whose unit no judge could rule on says whether its judge
     // can be re-run now, and from which seats — the engine's own selection, read each time (a seat
     // signed in since the pause counts). Absent on every other gate and on an addon without the read.
