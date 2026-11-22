@@ -283,7 +283,7 @@ function needsOf(facts: JobFacts, ctx: JobContext, r: ResolvedOption): ProposalN
     }
     if (i.id === 'repo') {
       const hit = ctx.chat.repos.find((x) => x.id === facts.repoRef);
-      const choices = ctx.chat.repos.slice(0, 8).map((x) => ({ label: x.name, value: x.id }));
+      const choices = repoChoicesFor(facts.words, ctx.chat.repos).map((x) => ({ label: x.name, value: x.id }));
       out.push({ id: i.id, label: i.label, kind: i.kind, required: i.required, status: hit !== undefined ? 'met' : 'missing', ...(hit !== undefined ? { value: hit.id } : {}), ...(choices.length > 0 ? { choices } : {}) });
       continue;
     }
@@ -304,6 +304,43 @@ function needsOf(facts: JobFacts, ctx: JobContext, r: ResolvedOption): ProposalN
     out.push({ id: i.id, label: i.label, kind: i.kind, required: i.required, status: v !== undefined ? 'met' : 'missing', ...(v !== undefined ? { value: inputValueLabel(v).slice(0, 200) } : {}) });
   }
   return out;
+}
+
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Whether `words` name `term` as a whole token (case-insensitive): not inside a longer name (`rg1` is not named by
+ *  `rg10` or `rg1-old`); a sentence's punctuation after it still ends it. studio's `names` (repoProjects.ts), the same
+ *  rule, so the chips studio offers and the repository crew picks agree. */
+function namesTerm(words: string, term: string): boolean {
+  if (term.trim() === '') return false;
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}_./-])${escapeRe(term)}(?=$|[^\\p{L}\\p{N}_./-]|\\.(?:$|[^\\p{L}\\p{N}_./-]))`, 'iu').test(words);
+}
+
+/** A name distinct enough to be read as a repository rather than a word (`tiny-math-rd`, `billing-api`): it carries
+ *  something other than letters. `domain` or `docs` never is (studio's `distinctName`). */
+function distinctName(name: string): boolean {
+  return name.length >= 3 && /[^\p{L}]/u.test(name);
+}
+
+/** The chat's repositories the words name, by name or id, in the chat's order. */
+export function reposNamedIn<R extends { id: string; name: string }>(words: string, repos: readonly R[]): R[] {
+  return repos.filter((r) => namesTerm(words, r.name) || (r.id !== r.name && namesTerm(words, r.id)));
+}
+
+/** (crew#1791) The one repository the words clearly name ("In tiny-math-rd, fix …"): named by a distinct name or id,
+ *  and no other named. `null` = none or several: the proposal asks. */
+export function repoNamedIn<R extends { id: string; name: string }>(words: string, repos: readonly R[]): R | null {
+  const named = reposNamedIn(words, repos);
+  if (named.length !== 1) return null;
+  const r = named[0]!;
+  return (distinctName(r.name) && namesTerm(words, r.name)) || (r.id !== r.name && distinctName(r.id) && namesTerm(words, r.id)) ? r : null;
+}
+
+/** (crew#1791) Every repository the person can pick, those the words name first: no cap, so the named one and every
+ *  other in the chat's scope are reachable from "Which repository?". */
+function repoChoicesFor<R extends { id: string; name: string }>(words: string, repos: readonly R[]): R[] {
+  const named = reposNamedIn(words, repos);
+  return [...named, ...repos.filter((r) => !named.includes(r))];
 }
 
 /** The repository a job runs on: the one named, else the chat's only one. */
@@ -424,7 +461,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
       question = {
         kind: 'missing',
         text: ctx.chat.repos.length === 0 ? 'Which repository? This chat has none in its scope: start a thread on one.' : 'Which repository?',
-        choices: ctx.chat.repos.slice(0, 4).map((x) => ({ label: x.name, edit: { repoRef: x.id } })),
+        choices: repoChoicesFor(facts.words, ctx.chat.repos).map((x) => ({ label: x.name, edit: { repoRef: x.id } })),
       };
     } else if (missing.kind === 'documents') {
       const why = ctx.documents?.find((s) => s.status === 'struck')?.reason;

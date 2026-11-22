@@ -17,6 +17,7 @@ import {
   CHAT_GROUNDING_COMMAND,
   chatScopeStatement,
   chatSearchLines,
+  chatStayLines,
   CHAT_FAILED_SEARCH_LINE,
   chatScratchBase,
   prepareChatScratch,
@@ -1129,6 +1130,17 @@ describe('crew#1569: the statement on the container seat floor', () => {
     // Under the container floor the run repo is the working directory: searched as `.`.
     const floor = chatScopeStatement('k5', scope, undefined, { containerFloor: true, runRepoId: 'r-alpha' });
     expect(floor).toContain("e.g. `grep -rn '<pattern>' . /srv/repos/beta`");
+  });
+
+  it('crew#1795: tells a seat outside its repositories to stay put and name the path, never cd into one', async () => {
+    const scope = await scopeOf({ chatId: 'k6', repoRefs: ['r-alpha'] });
+    const text = chatScopeStatement('k6', scope);
+    expect(text).toContain('Do NOT `cd` into a repository: run every command from where you start.');
+    expect(text).toContain('e.g. `git -C /srv/repos/alpha log -5` or `ls /srv/repos/alpha`.');
+    // The container floor's own checkout is the working directory: nothing to cd into, no line.
+    const floor = chatScopeStatement('k6', scope, undefined, { containerFloor: true, runRepoId: 'r-alpha' });
+    expect(floor).not.toContain('Do NOT `cd`');
+    expect(chatStayLines(['.', "/srv/it's"]).join(' ')).toContain(`git -C '/srv/it'\\''s' log -5`);
   });
 
   it('crew#1497: the search example quotes odd paths and caps how many it spells', () => {
