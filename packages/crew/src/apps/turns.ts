@@ -182,53 +182,56 @@ export function changeLine(before: { spec: AppSpec; queryText: Record<string, st
 
 // ── A seat's words for the person: its findings, never the protocol's bookkeeping (crew#1347, crew#1540) ──
 
-/**
- * Markdown a seat wraps words in, removed AROUND them only: a list, heading or quote marker (followed by a space) at
- * the start, `**bold**`, `__bold__` between word edges, and `code` ticks. An identifier or a glob keeps its own
- * characters (`sales__west.sql`, `queries/**`, `-1`, a lone `*`).
- */
-const unwrap = (l: string): string =>
-  l.trim()
-    .replace(/^(?:(?:#{1,6}|[-*+>])\s+)+/, '')
-    .replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, '$1')
-    .replace(/(^|[\s(])__(?=\S)(.+?)(?<=\S)__(?=$|[\s).,;:!?])/g, '$1$2')
-    .replace(/`([^`]+)`/g, '$1')
-    .trim();
-
-/**
- * The bookkeeping in a seat's text, each a bounded field (a line of its own, or run together into one line): the
- * engine's heads over an evaluator's words (core `validator.rs` `denial_reason`), the governed-worker skill's
- * Counts / Memories proposed / TREE / VERDICT / STACK-CHECK records, and the evaluator's note on its worktree. Words
- * after a field on the same line (`VERDICT: FAIL — why`, `Counts: … — why`) are kept.
- */
-const BOOKKEEPING: readonly RegExp[] = [
-  /^the evaluator's verdict is [A-Z]+\b[.:]?\s*/i,
-  /^the evaluator's verdict token \S+ is not PASS \(contract:[^)]*\)\s*/i,
-  /^the evaluator's VERDICT: line carries no token \(contract:[^)]*\)\s*/i,
-  /^no VERDICT: line in the evaluator's output \(contract:[^)]*\)\s*/i,
-  /^Reviewed as (?:the )?evaluator(?:[;,]\s*changed no files)?\.?\s*/i,
-  /[*_]*Counts[*_]*\s*[:—–-]\s*(?:(?:derived|submitted|failed)\s+\d+\s*[/,]?\s*)+[.;]?/gi,
-  /[*_]*Memories proposed[*_]*\s*:?\s*\d+\b(?:\s*[;:—–-][^.\n]*\.)?/gi,
-  /[*_]*TREE[*_]*\s*:\s*[0-9a-f]{7,64}\b…?/gi,
-  /[*_]*(?:VERDICT|Verdict)[*_]*\s*[:=]\s*[*_]*[A-Z]{3,}\b[*_]*[.:]?/g,
-  /[*_]*STACK-CHECK[*_]*\s*:.*?(?=\s+ITEM\s+\d+\s*:|$)/g,
-  /\bLocal HEAD is\b[^.]*?\brecorded tree\b[^.]*\.?/gi,
-];
+/** A code span's place while a line is parsed: what is quoted is never read as a record, nor unwrapped. */
+const SPAN = '\u0001';
+/** Where a bookkeeping record was cut out: the words before and after it are separate parts. */
+const CUT = '\u0000';
 
 /** An acceptance item's or a steering rule's verdict line, as the governed-worker skill writes them (E6, E7). */
 const ITEM_STATUS = String.raw`PASS(?:ED)?|FAIL(?:ED)?|NOT[ -]MET|MET|PARTIAL|KEPT|BROKEN|N\/A|NOT[ -]APPLICABLE|SKIP(?:PED)?|DEFERRED|UNASSESSED`;
+const ITEM_AT = String.raw`(?:ITEM\s+\d+|RULE\s+[^\s:]+)\s*:\s*(?:${ITEM_STATUS})(?![\w/])`;
 const ITEM_HEAD = new RegExp(String.raw`^(ITEM\s+\d+|RULE\s+[^\s:]+)\s*:\s*(${ITEM_STATUS})(?![\w/])\s*[—–:.\-]?\s*`, 'i');
-const ITEM_SPLIT = new RegExp(String.raw`\s+(?=(?:ITEM\s+\d+|RULE\s+[^\s:]+)\s*:\s*(?:${ITEM_STATUS})(?![\w/]))`, 'i');
+const ITEM_SPLIT = new RegExp(String.raw`\s+(?=${ITEM_AT})`, 'i');
 /** A verdict that is no reason for a refusal: it passed, did not apply, or waits for delivery (E6: never a FAIL). */
 const SETTLED = /^(?:PASS(?:ED)?|MET|KEPT|N\/A|NOT[ -]APPLICABLE|SKIP(?:PED)?|DEFERRED)$/i;
 
 /**
- * The lines of a seat's text that are words for the person (`''` marks a paragraph break): markdown unwrapped, code
- * fences and the bookkeeping left out, a settled item's line (PASS, KEPT, N/A, DEFERRED, …) dropped with its
- * indented continuation, a failing item's `ITEM n: FAIL —` head dropped from its words, and the list under a
- * `Memories proposed` record dropped. Everything else is kept, so no finding is lost to a pattern.
+ * The bookkeeping in a seat's text, each a bounded record (a line of its own, or run together into one line): the
+ * engine's heads over an evaluator's words (core `validator.rs` `denial_reason`), the governed-worker skill's
+ * Counts / Memories proposed / TREE / VERDICT / STACK-CHECK records, and the evaluator's note on its worktree. Words
+ * after a record (`VERDICT: FAIL — why`, `Counts: … — why`) are kept, as their own part.
  */
-function personLines(text: string): string[] {
+const BOOKKEEPING: readonly RegExp[] = [
+  /^the evaluator's verdict is [A-Z]+\b[.:]?/i,
+  /^the evaluator's verdict token \S+ is not PASS \(contract:[^)]*\)/i,
+  /^the evaluator's VERDICT: line carries no token \(contract:[^)]*\)/i,
+  /^no VERDICT: line in the evaluator's output \(contract:[^)]*\)/i,
+  /^Reviewed as (?:the )?evaluator(?:[;,]\s*changed no files)?\.?/i,
+  // A verdict record at the start of a line, in any case (as core reads it), bare or with its token.
+  /^[*_]*verdict[*_]*\s*[:=]\s*(?:[*_]*(?:PASS|FAIL|CONDITIONAL|APPROVE|REJECT|SKIP)\b[*_]*[.:]?)?/i,
+  // Run together into a line, only the record's own spelling.
+  /[*_]*VERDICT[*_]*\s*[:=]\s*[*_]*[A-Z]{3,}\b[*_]*[.:]?/g,
+  /[*_]*Counts[*_]*\s*[:—–-]\s*(?:(?:derived|submitted|failed)\s+\d+\s*[/,]?\s*)+[.;]?/gi,
+  new RegExp(String.raw`[*_]*Memories proposed[*_]*\s*:?\s*\d+\b(?:\s*[;:—–-](?:(?!\s+${ITEM_AT})[^.\n])*\.?)?`, 'gi'),
+  /[*_]*TREE[*_]*\s*:\s*[0-9a-f]{7,64}\b…?/gi,
+  new RegExp(String.raw`[*_]*STACK-CHECK[*_]*\s*:.*?(?=\s+${ITEM_AT}|$)`, 'gi'),
+  /\bLocal HEAD is\b[^.]*?\brecorded tree\b[^.]*\.?/gi,
+];
+
+/** A `Memories proposed: N` record that heads a list of the memories (N > 0): the list is bookkeeping too. */
+const MEMORIES_HEAD = /^[*_]*Memories proposed[*_]*\s*:?\s*[1-9]\d*\b\s*:?\s*$/i;
+/** A list entry: bulleted or numbered. */
+const LIST_ENTRY = /^\s*(?:[-*+]|\d+[.)])\s/;
+
+/**
+ * The lines of a seat's text that are words for the person (`''` marks a paragraph break): markdown unwrapped
+ * around words (a code span's contents are kept as they are, and never read as a record), the bookkeeping left
+ * out, a settled item's line (PASS, KEPT, N/A, DEFERRED, …) dropped with its indented continuation, a failing item's
+ * `ITEM n: FAIL —` head dropped from its words, and the list under a `Memories proposed` record dropped. A code
+ * fence's contents are kept as words (`fences: 'keep'`, a refusal's evidence) or left out (`'skip'`, a builder's
+ * closing words). Everything else is kept, so no finding is lost to a pattern.
+ */
+function personLines(text: string, fences: 'keep' | 'skip'): string[] {
   const out: string[] = [];
   let fence = false;
   let skipIndented = false;
@@ -239,32 +242,47 @@ function personLines(text: string): string[] {
       out.push('');
       continue;
     }
-    if (fence) continue;
+    if (fence) {
+      if (fences === 'keep' && raw.trim() !== '') out.push(raw.trim());
+      continue;
+    }
     if (raw.trim() === '') {
-      skipIndented = skipList = false;
+      skipIndented = false;
       out.push('');
       continue;
     }
-    if (skipIndented && /^\s/.test(raw)) continue;
-    if (skipList && (/^\s/.test(raw) || /^\s*[-*+]\s/.test(raw))) continue;
-    skipIndented = skipList = false;
-    const memories = /^[*_]*Memories proposed[*_]*\s*:?\s*[1-9]\d*\b\s*:?\s*$/i.test(unwrap(raw));
-    let line = unwrap(raw);
-    let cut = false;
-    for (const re of BOOKKEEPING) {
-      const next = line.replace(re, ' ').trimStart();
-      if (next !== line) cut = true;
-      line = next;
+    const indented = /^\s/.test(raw);
+    const spans: string[] = [];
+    let line = raw.trim()
+      .replace(/`([^`]+)`/g, (_m, c: string) => `${SPAN}${spans.push(c) - 1}${SPAN}`)
+      .replace(/^(?:(?:#{1,6}|[-*+>])\s+)+/, '')
+      .replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, '$1')
+      .replace(/(^|[\s(])__(?=\S)(.+?)(?<=\S)__(?=$|[\s).,;:!?])/g, '$1$2')
+      .trim();
+    const head = ITEM_HEAD.test(line);
+    if (skipList) {
+      if (!head && (indented || LIST_ENTRY.test(raw))) continue;
+      skipList = false;
     }
-    line = line.replace(/\s+/g, ' ').trim();
-    if (cut) line = line.replace(/^[—–:;,.\-]+\s*/, '').trim();
-    if (memories) skipList = true;
+    if (skipIndented && indented && !head) continue;
+    skipIndented = false;
+    if (MEMORIES_HEAD.test(line)) skipList = true;
+    // A record cut from the start leaves the line to the next one's anchor; the words after it are still a new part.
+    let lead = false;
+    for (const re of BOOKKEEPING) {
+      line = line.replace(re, CUT);
+      if (/^\s*\u0000/.test(line)) lead = true;
+      line = line.replace(/^[\s\u0000]+/, '');
+    }
+    const parts = line.split(CUT).flatMap((seg, i) => {
+      const t = (i > 0 || lead ? seg.replace(/^[\s—–:;,.\-]+/, '') : seg).trim();
+      return t === '' ? [] : t.split(ITEM_SPLIT);
+    });
     const kept: string[] = [];
-    const parts = line.split(ITEM_SPLIT);
     parts.forEach((part, i) => {
       const m = ITEM_HEAD.exec(part);
       if (m === null) {
-        if (part !== '') kept.push(part);
+        kept.push(part);
         return;
       }
       if (SETTLED.test(m[2]!.trim())) {
@@ -275,7 +293,8 @@ function personLines(text: string): string[] {
       const words = m[1]!.toUpperCase().startsWith('ITEM') ? part.slice(m[0].length).trim() : part;
       if (words !== '') kept.push(words);
     });
-    if (kept.length > 0) out.push(joinWords(kept));
+    const restored = kept.map((k) => k.replace(new RegExp(`${SPAN}(\\d+)${SPAN}`, 'g'), (_m, n: string) => spans[Number(n)] ?? '')).filter((k) => k.trim() !== '');
+    if (restored.length > 0) out.push(joinWords(restored));
   }
   return out;
 }
@@ -291,7 +310,7 @@ const joinWords = (parts: readonly string[]): string =>
  */
 export function refusalWords(text: string | null | undefined): string {
   if (text == null) return '';
-  return joinWords(personLines(text).filter((l) => l !== ''));
+  return joinWords(personLines(text, 'keep').filter((l) => l !== ''));
 }
 
 /** The last paragraph of a seat's answer (code fences and bookkeeping lines left out, markdown stripped), or ''. */
@@ -299,7 +318,7 @@ export function lastParagraph(output: string | null): string {
   if (output === null) return '';
   // The skill's own bookkeeping lines (counts, memories, verdict, tree, the stack-check footer) are not what it
   // said about the change (crew#1540: a `**STACK-CHECK:**` footer was quoted as the reason).
-  const lines = personLines(output);
+  const lines = personLines(output, 'skip');
   while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
   const tail: string[] = [];
   for (let i = lines.length - 1; i >= 0 && tail.length < 6; i--) {

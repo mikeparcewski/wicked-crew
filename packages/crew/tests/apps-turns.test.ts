@@ -572,7 +572,26 @@ describe('apps turns: check, land, refuse', () => {
       ['_STACK-CHECK:_ looked at x\n*Counts*: derived 3 / submitted 3 / failed 0\n*TREE*: e2e47a84c0', ''],
       // A check's and a rule check's own words are kept as they are.
       ['apps_check: refused: check_failed - read_policy queries/x.sql: pg_sleep is not allowed', 'apps_check: refused: check_failed - read_policy queries/x.sql: pg_sleep is not allowed'],
-      ['1 steering rule(s) broken: learn-tests-with-fixes - no test file is added or changed', '1 steering rule(s) broken: learn-tests-with-fixes - no test file is added or changed'],
+      ['1 steering rule(s) broken: learn-tests-with-fixes - no test file is added or changed', '1 steering rule(s) broken: learn-tests-with-fixes - no test file is added or changed'],      // (xreview r2) Sibling items at one indent are records, not a settled item's continuation.
+      ['  ITEM 1: PASS — ok\n  ITEM 2: FAIL — Missing tenant predicate.\n  RULE isolation: BROKEN — Unscoped reads.', 'Missing tenant predicate. RULE isolation: BROKEN — Unscoped reads.'],
+      // Words after a Counts or VERDICT record are their own part, never a settled item's.
+      ['ITEM 1: PASS — query exists. Counts: derived 1 / submitted 0 / failed 1 — QE registration remains blocked.', 'QE registration remains blocked.'],
+      ['ITEM 1: PASS — ok. VERDICT: FAIL — The query leaks rows.', 'The query leaks rows.'],
+      // A STACK-CHECK or Memories record ends at the next item or rule, in any case.
+      ['STACK-CHECK: looked at turns.ts :: offers native helpers RULE isolation: BROKEN — queries/count.sql:8 omits the tenant predicate.', 'RULE isolation: BROKEN — queries/count.sql:8 omits the tenant predicate.'],
+      ['STACK-CHECK: looked at x item 1: fail — The query leaks rows.', 'The query leaks rows.'],
+      ['Memories proposed 0; no captures ITEM 1: FAIL — The query leaks rows.', 'The query leaks rows.'],
+      ['Memories proposed 0; no resolved environment issue warranted capture', ''],
+      // What a code span quotes is never read as a record, and its characters stay (two globs on one line).
+      ['ITEM 1: FAIL — The banner still displays `VERDICT: FAIL`.', 'The banner still displays VERDICT: FAIL.'],
+      ['ITEM 1: FAIL — The report says `ITEM 2: PASS` even though tenant isolation fails.', 'The report says ITEM 2: PASS even though tenant isolation fails.'],
+      ['Both `queries/**/*.sql` and `views/**/*.sql` bypass the allowlist.', 'Both queries/**/*.sql and views/**/*.sql bypass the allowlist.'],
+      // A refusal's fenced evidence is kept as words.
+      ['ITEM 1: FAIL —\n```text\nERROR: relation "tickets" does not exist\n```', 'ERROR: relation "tickets" does not exist'],
+      // A verdict record in any case, bare or with its token.
+      ['verdict: fail', ''],
+      ['Verdict: Fail', ''],
+      ['VERDICT:', ''],
     ];
     for (const [text, want] of cases) expect(refusalWords(text), text).toBe(want);
     expect(refusalWords(null)).toBe('');
@@ -581,6 +600,10 @@ describe('apps turns: check, land, refuse', () => {
   it('lastParagraph: the builder\'s last words, past fences, Counts in any form and a memories list', () => {
     expect(lastParagraph("I could not read the app's files, so I changed nothing.\n\n```sql\nselect 1\n```\n\n**STACK-CHECK:** looked at nothing :: offers nothing.\n\nMemories proposed: 1\n- [gotcha] worktree path was unreadable")).toBe("I could not read the app's files, so I changed nothing.");
     expect(lastParagraph('I declined: no such table.\n\nCounts — derived 0 / submitted 0 / failed 0')).toBe('I declined: no such table.');
+    // (xreview r2) A memories list past a blank line, bulleted or numbered, and a bare verdict record.
+    expect(lastParagraph('I could not connect.\n\nMemories proposed: 1\n\n- [gotcha] Use the alternate socket')).toBe('I could not connect.');
+    expect(lastParagraph('I could not connect.\n\nMemories proposed: 2\n1. [gotcha] one\n2. [gotcha] two')).toBe('I could not connect.');
+    expect(lastParagraph('I declined.\n\nVERDICT:')).toBe('I declined.');
   });
 
   it('a build that made no change never quotes the STACK-CHECK footer or raw markdown (crew#1540)', async () => {
