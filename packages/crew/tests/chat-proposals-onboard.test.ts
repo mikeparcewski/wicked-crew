@@ -72,6 +72,8 @@ interface Rig {
   created: Array<{ name: string; actor: string }>;
   /** Another card's create of the same name lands first: the engine refuses this one (names are unique). */
   createLoses: boolean;
+  /** The create takes this long (another card's Go can run meanwhile). */
+  createDelayMs: number;
 }
 
 function rig(): Rig {
@@ -107,6 +109,7 @@ function rig(): Rig {
     daemonRefusal: null,
     created: [],
     createLoses: false,
+    createDelayMs: 0,
   };
   const registry = new LaunchOnceRegistry();
   for (const k of ['create', 'refine', 'demo'] as const) registry.register(k, r.launcher);
@@ -141,6 +144,7 @@ function rig(): Rig {
         r.projects.push({ id: 'proj_other', name });
         throw new Error(`a project named ${name} already exists`);
       }
+      if (r.createDelayMs > 0) await new Promise((res) => setTimeout(res, r.createDelayMs));
       r.created.push({ name, actor: actor.id });
       const p = { id: `proj_new${r.created.length}`, name };
       r.projects.push(p);
@@ -223,6 +227,7 @@ const kinds = (r: Rig, chatId: string): string[] => (r.records.get(chatId) ?? []
 
 
 const URL = 'https://github.com/mikeparcewski/wicked-studio.git';
+const URL2 = 'https://github.com/mikeparcewski/wicked-crew.git';
 const SENTENCE = 'Want to onboard https://github.com/mikeparcewski/wicked-studio.git into the wicked labs project';
 const repo = (id: string, o: Partial<RepoEntry> = {}): RepoEntry => ({ id, name: id, root_path: `/srv/${id}`, default_branch: 'main', registered_at: 1, ...o });
 
@@ -451,6 +456,25 @@ describe('onboard proposals', () => {
     r.createLoses = true;
     expect((await r.svc.decide('c4', s2.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
     expect(r.registered.at(-1)!.data['projectId']).toBe('proj_other');
+  });
+
+  it('two cards naming one new project in different spellings make it once, Go at the same time (crew#1694 r2)', async () => {
+    const r = rig();
+    r.createDelayMs = 20;
+    // Two chats, each its own instance (as in the daemon), so neither Go waits on the other's chat lock.
+    r.instances.set('c6', 'i6');
+    const a = (await propose(r, 'c5', chatWith(r, 'c5', { words: 'into a new project called Docs Team?' }), { onboard: { url: URL, project: 'Docs Team' } }))!;
+    const b = (await propose(r, 'c6', chatWith(r, 'c6', { words: 'put it in docs  team' }), { onboard: { url: URL2, project: 'docs  team' } }))!;
+    // A question mark after the name is the sentence's, not an address's.
+    expect(a).toMatchObject({ blocked: null, onboard: { createProject: { name: 'Docs Team' } } });
+    expect(b).toMatchObject({ blocked: null, onboard: { createProject: { name: 'docs  team' } } });
+    const [ga, gb] = await Promise.all([
+      r.svc.decide('c5', a.pid, { decision: 'go' }, ME, 'i1'),
+      r.svc.decide('c6', b.pid, { decision: 'go' }, ME, 'i6'),
+    ]);
+    expect([ga.code, gb.code]).toEqual([200, 200]);
+    expect(r.created).toHaveLength(1);
+    expect(new Set(r.registered.map((x) => x.data['projectId']))).toEqual(new Set(['proj_new1']));
   });
 
   it('a bad address or an unreadable repository blocks Go with the reason; nothing is probed for a bad address', async () => {

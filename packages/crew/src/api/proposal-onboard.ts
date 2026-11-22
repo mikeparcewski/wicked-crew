@@ -243,7 +243,8 @@ const ADDRESS_CHARS = /[@:/\\?#&=]/u;
 export function creatableName(name: string, words: string): string | null {
   if (!CreateProjectSchema.shape.name.safeParse(name).success || ADDRESS_CHARS.test(name)) return null;
   // xreview r1: a token inside an address the person pasted (`https://u:TOKEN@host/acme/x`) is not a name they said.
-  const plain = words.split(/\s+/u).map((w) => (ADDRESS_CHARS.test(w) ? '\u0000' : w)).join(' ');
+  // A word's own sentence punctuation (`Team?`, `Team:`) does not make it one.
+  const plain = words.split(/\s+/u).map((w) => (ADDRESS_CHARS.test(w.replace(/[?:.,;!)"'’”]+$/u, '')) ? '\u0000' : w)).join(' ');
   const escaped = norm(name).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
   return new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, 'u').test(norm(plain)) ? name : null;
 }
@@ -416,6 +417,9 @@ export interface OnboardLauncherDeps {
 export class OnboardLauncher implements ProposalDispatcher {
   /** (crew#1694) The project each card's Go created or adopted, by the card's run identity: a Go again resumes it by id. */
   private readonly madeFor = new Map<string, string>();
+  /** (crew#1694) One lookup-then-create at a time per name as {@link matchProject} compares names (case and spacing
+   *  aside): two cards naming `Docs Team` and `docs  team` make one project. */
+  private readonly creating = new Map<string, Promise<unknown>>();
 
   constructor(private readonly deps: OnboardLauncherDeps) {}
 
@@ -499,14 +503,26 @@ export class OnboardLauncher implements ProposalDispatcher {
       if ('many' in m) throw new Error(`more than one project is named ${want.name} now; ask again and say which`);
       return 'one' in m ? m.one : null;
     };
-    let project = await pick();
-    if (project === null) {
+    const lockKey = norm(want.name);
+    const before = this.creating.get(lockKey) ?? Promise.resolve();
+    const run = before.catch(() => undefined).then(async () => {
+      const found = await pick();
+      if (found !== null) return found;
       try {
-        project = await this.deps.createProject(want.name, actor);
+        return await this.deps.createProject(want.name, actor);
       } catch (err) {
-        project = await pick();
-        if (project === null) throw err;
+        // Another daemon's create (or one this process did not see) won the name: adopt it.
+        const again = await pick();
+        if (again === null) throw err;
+        return again;
       }
+    });
+    this.creating.set(lockKey, run);
+    let project: { id: string; name: string };
+    try {
+      project = await run;
+    } finally {
+      if (this.creating.get(lockKey) === run) this.creating.delete(lockKey);
     }
     this.madeFor.set(key, project.id);
     return { ...o, projectId: project.id, projectName: project.name, createProject: null };
