@@ -192,6 +192,27 @@ export function proposalOnly(steps: readonly ReadStep[], delivers: CatalogResolv
   return steps.slice(lastWrite).some((s) => unconditionalGate(s.gate));
 }
 
+/**
+ * What a plan promises beyond its instruments (crew#1445): each rubric check core serves on a step, consent before an
+ * install (`consent_before`), and a hold for a person (an unconditional human gate). Read the way crew reads a composed
+ * plan (each step laid over its phase-catalog entry), so a step that inherits its gate from the catalog counts.
+ */
+export function promisesOf(steps: readonly PresetStep[], entries: readonly CatalogEntry[]): string[] {
+  const out = new Set<string>();
+  for (const s of readSteps(steps, entries)) {
+    if (s.rubric !== null && RUBRICS.has(s.rubric as CatalogGateId)) out.add(`the ${s.rubric} check`);
+    if (s.gate === 'consent_before') out.add('consent before install');
+    else if (unconditionalGate(s.gate)) out.add('a hold for a person');
+  }
+  return [...out];
+}
+
+/** The built-in's promises a saved shadow of it lacks ({@link promisesOf}); empty when the shadow keeps them all. */
+export function shadowShortfall(builtinSteps: readonly PresetStep[], shadowSteps: readonly PresetStep[], entries: readonly CatalogEntry[]): string[] {
+  const kept = new Set(promisesOf(shadowSteps, entries));
+  return promisesOf(builtinSteps, entries).filter((p) => !kept.has(p));
+}
+
 /** Share the source-check decision with the launcher so a document's displayed gates match its run. */
 export function draftPresetFor(
   card: string | null | undefined,
@@ -338,7 +359,12 @@ export function resolveOption(cardId: string, optionId: string | null, served: S
     const builtinInstruments = builtin !== undefined && QE_PRESETS.has(workflow) ? BUILTIN_QE_INSTRUMENTS : (def?.required_instruments ?? []);
     if (shadow !== undefined && !coming) {
       const mine = instrumentsOf(shadow);
-      const missing = builtinInstruments.filter((i) => !mine.includes(i));
+      // (crew#1445) The built-in's instruments AND the steps its promise rests on (its rubric checks, consent and
+      // holds): a shadow without them would launch the standard card below what the card promises.
+      const missing = [
+        ...builtinInstruments.filter((i) => !mine.includes(i)),
+        ...shadowShortfall(builtin?.steps ?? (def !== undefined ? stepsOfDef(def) : []), shadow.steps, served.entries),
+      ];
       if (missing.length === 0) {
         source = 'saved';
         steps = shadow.steps;
@@ -369,6 +395,17 @@ export function resolveOption(cardId: string, optionId: string | null, served: S
     if (!coming && preset !== 'interactive-draft' && !served.builtins.has(preset)) {
       status = 'unavailable';
       statusNote = `This daemon's engine does not serve the \`${preset}\` workflow; update wicked-crew to get it.`;
+    }
+    // (crew#1445) A saved shadow of the draft preset is what the draft runs: without the built-in's checks the card is
+    // off (the draft launcher refuses it too, `interactive/draft-events.ts`).
+    const shadow = served.saved.get(preset);
+    const builtinDraft = served.builtins.get(preset);
+    if (!coming && status === 'available' && shadow !== undefined && builtinDraft !== undefined) {
+      const missing = shadowShortfall(builtinDraft.steps, shadow.steps, served.entries);
+      if (missing.length > 0) {
+        status = 'unavailable';
+        statusNote = `Your saved \`${preset}\` has fewer checks than the built-in (it lacks ${missing.join(', ')}), so this option is off.`;
+      }
     }
   }
   if (!coming && status === 'available' && Object.hasOwn(CREW_PENDING, card.id)) {

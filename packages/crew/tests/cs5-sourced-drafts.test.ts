@@ -50,7 +50,12 @@ async function waitFor(check: () => boolean): Promise<void> {
 }
 
 /** Existing draft-events harness: real temporary bus and subscriber, fake engine, real Go dispatcher. */
-async function world(presets: 'sourced' | 'missing' | 'unreadable' = 'sourced') {
+/** The built-in sourced draft's promise (core: `interactive-draft` plus a trailing fidelity-to-source `check`). */
+const SOURCED_STEPS = [{ catalog: 'produce', id: 'draft' }, { catalog: 'critique', id: 'check', rubric: 'fidelity-to-source' }];
+const SOURCED_BUILTIN = { name: 'interactive-draft-sourced', created_by: 'builtin', scope: 'global', steps: SOURCED_STEPS };
+const shadowOf = (steps: unknown[]) => ({ name: 'interactive-draft-sourced', created_by: 'me', scope: 'project:p1', steps });
+
+async function world(presets: 'sourced' | 'missing' | 'unreadable' | 'saved-only' | 'weak-shadow' | 'strong-shadow' = 'sourced') {
   const dir = mkdtempSync(join(tmpdir(), 'crew-cs5-'));
   scratch.push(dir);
   const docs = join(dir, 'docs');
@@ -64,10 +69,13 @@ async function world(presets: 'sourced' | 'missing' | 'unreadable' = 'sourced') 
   const launches: LaunchRunInput[] = [];
   const listPresets = vi.fn(async () => {
     if (presets === 'unreadable') throw new Error('old engine');
-    return (presets === 'sourced' ? [{ name: 'interactive-draft-sourced' }] : [{ name: 'interactive-draft' }]) as Preset[];
+    if (presets === 'saved-only') return [shadowOf(SOURCED_STEPS)] as unknown as Preset[];
+    if (presets === 'weak-shadow') return [SOURCED_BUILTIN, shadowOf([{ catalog: 'produce', id: 'draft' }])] as unknown as Preset[];
+    if (presets === 'strong-shadow') return [SOURCED_BUILTIN, shadowOf(SOURCED_STEPS)] as unknown as Preset[];
+    return (presets === 'sourced' ? [SOURCED_BUILTIN] : [{ name: 'interactive-draft', created_by: 'builtin', steps: [] }]) as unknown as Preset[];
   });
   const adapter = {
-    listPresets, listRepos: async () => [],
+    listPresets, listRepos: async () => [], catalog: async () => [],
     launchRun: async (input: LaunchRunInput) => { launches.push(input); return input.sessionId; },
     onEvent: (listener: (event: CoreEvent) => void) => { listeners.add(listener); return () => listeners.delete(listener); },
   } as unknown as CoreAdapter;
@@ -124,7 +132,17 @@ describe('CS5 proposal Go through the draft seam', () => {
     expect(w.launches[0]!.projectId).toBeUndefined();
     expect(w.listPresets).toHaveBeenCalledTimes(expected === 'interactive-draft-sourced' ? 1 : 0);
   });
-  it.each(['missing', 'unreadable'] as const)('refuses a sourced Go when the preset is %s', async (presets) => {
+  it('refuses a sourced Go when a saved shadow drops the fidelity check, and launches one that keeps it (crew#1445)', async () => {
+    const weak = await world('weak-shadow');
+    await expect(weak.go('respond', 'rfp')).rejects.toThrow(/saved `interactive-draft-sourced` has fewer checks than the built-in \(it lacks the fidelity-to-source check\)/u);
+    expect(weak.launches).toEqual([]);
+    expect(weak.sub.inFlightDocs()).toEqual([]);
+    expect(existsSync(join(weak.dir, 'drafts'))).toBe(false);
+    const strong = await world('strong-shadow');
+    await strong.go('respond', 'rfp');
+    expect(strong.launches[0]).toMatchObject({ workflow: 'interactive-draft-sourced' });
+  });
+  it.each(['missing', 'unreadable', 'saved-only'] as const)('refuses a sourced Go when the preset is %s', async (presets) => {
     const w = await world(presets);
     await expect(w.go('respond', 'rfp')).rejects.toThrow("this engine has no sourced draft yet; update wicked-crew's engine");
     expect(w.launches).toEqual([]);

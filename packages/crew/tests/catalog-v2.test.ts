@@ -8,13 +8,14 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { CoreAdapter } from '../src/core/adapter.js';
-import type { CatalogEntry, LaunchShape, Preset, WorkflowDef } from '../src/core/types.js';
+import type { CatalogEntry, LaunchShape, Preset, PresetStep, WorkflowDef } from '../src/core/types.js';
 import { QE_PRESETS } from '../src/core/qe-acceptance-setting.js';
 import {
   buildWorkflowCatalogV2,
   derivedGate,
   optionWordOf,
   parseCommand,
+  promisesOf,
   proposalOnly,
   resolveOption,
   servedState,
@@ -120,6 +121,50 @@ describe('the v2 wire', () => {
     const v2 = build({ presets: [...presets, strong] });
     expect(v2.cards.find((c) => c.id === 'bug')).toMatchObject({ status: 'available', source: 'saved', gate: ['qe-acceptance'] });
     expect(v2.rev).not.toBe(build().rev);
+  });
+
+  it("a saved shadow without the built-in's rubric, consent or hold steps turns the card off; one that keeps them is Your version (crew#1445)", () => {
+    const builtinSteps = (name: string): PresetStep[] => presets.find((p) => p.name === name && p.created_by === 'builtin')!.steps;
+    const shadow = (name: string, steps: PresetStep[], instruments: string[] = []): Preset =>
+      ({ name, steps, created_by: 'me', scope: 'global', required_instruments: instruments }) as unknown as Preset;
+    const offWith = (preset: Preset, card: string, option: string | null, lacks: RegExp): void => {
+      const r = resolveOption(card, option, servedState({ defs, presets: [...presets, preset], entries }))!;
+      expect(r.resolved, `${card}:${option}`).toMatchObject({ status: 'unavailable', statusNote: expect.stringMatching(/fewer checks/u) });
+      expect(r.resolved.statusNote, `${card}:${option}`).toMatch(lacks);
+      // The weaker shadow still runs from Yours.
+      const v = build({ presets: [...presets, preset] });
+      if (preset.name !== 'interactive-draft-sourced') {
+        expect(v.cards.find((c) => c.category === 'yours' && c.launch.kind === 'run' && c.launch.workflow === preset.name)).toMatchObject({ source: 'saved', status: 'available' });
+      }
+    };
+    // A sourced report without its fidelity check (the step keeps its place; only the rubric is gone).
+    const report = builtinSteps('sourced-report');
+    expect(promisesOf(report, entries)).toContain('the fidelity-to-source check');
+    offWith(shadow('sourced-report', report.map((s) => { const out = { ...s }; delete out.rubric; return out; })), 'competitive', null, /fidelity-to-source check/u);
+    // An editor plugin without its consent before install (the steps that carry it dropped), even with every instrument.
+    const plugin = builtinSteps('editor-plugin');
+    expect(promisesOf(plugin, entries)).toContain('consent before install');
+    const noConsent = plugin.filter((s) => !promisesOf([s], entries).includes('consent before install'));
+    offWith(shadow('editor-plugin', noConsent, ['distinct_evaluator', 'judge', 'qe_acceptance']), 'studio-plugin', 'editor', /consent before install/u);
+    // A migration without its unconditional cutover hold, parity kept.
+    const migration = builtinSteps('migration');
+    expect(promisesOf(migration, entries)).toContain('a hold for a person');
+    const noHold = migration.map((s) => (promisesOf([s], entries).includes('a hold for a person') ? { ...s, gate: null } : s));
+    expect(promisesOf(noHold, entries)).not.toContain('a hold for a person');
+    offWith(shadow('migration', noHold, ['distinct_evaluator', 'judge', 'qe_acceptance']), 'migrate', 'move', /a hold for a person/u);
+    // A sourced draft without its check: Respond is off.
+    const draft = builtinSteps('interactive-draft-sourced');
+    expect(promisesOf(draft, entries)).toContain('the fidelity-to-source check');
+    offWith(shadow('interactive-draft-sourced', draft.filter((s) => s.rubric === undefined)), 'respond', 'rfp', /fidelity-to-source check/u);
+    // Shadows that keep every promise resolve to them ("Your version"), the draft included.
+    const keeps = (preset: Preset, card: string, option: string | null): void => {
+      const r = resolveOption(card, option, servedState({ defs, presets: [...presets, preset], entries }))!;
+      expect(r.resolved.status, `${card}:${option}`).toBe('available');
+    };
+    keeps(shadow('sourced-report', report), 'competitive', null);
+    keeps(shadow('editor-plugin', plugin, ['distinct_evaluator', 'judge', 'qe_acceptance']), 'studio-plugin', 'editor');
+    keeps(shadow('interactive-draft-sourced', draft), 'respond', 'rfp');
+    expect(resolveOption('competitive', null, servedState({ defs, presets: [...presets, shadow('sourced-report', report)], entries }))!.resolved.source).toBe('saved');
   });
 
   it('a card whose preset the engine does not serve is unavailable, never dropped; an unseeded served def joins Yours', () => {

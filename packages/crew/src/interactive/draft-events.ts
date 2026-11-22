@@ -70,7 +70,7 @@ import {
   type GroundingRepo,
 } from './doc-grounding.js';
 import type { CoreAdapter } from '../core/adapter.js';
-import { draftPresetFor } from '../workflow-catalog/build-v2.js';
+import { draftPresetFor, servedState, shadowShortfall } from '../workflow-catalog/build-v2.js';
 import type { CoreEvent, ProposalShape } from '../core/types.js';
 import { awaitingHumanLine, describeStep, resyncRunUnits, ResyncGate, RunUnits } from './run-units.js';
 import {
@@ -1434,12 +1434,31 @@ export async function startInteractiveDraftSubscriber(
     const workflow = draftPresetFor(bound?.shape?.card, bound?.shape?.option);
     // Older engines can default an unknown workflow to plain drafting: refuse before any work or files start.
     if (workflow === 'interactive-draft-sourced') {
+      let reason: string | null = null;
       try {
         const presets = await adapter.listPresets(doc.projectId);
-        if (!presets.some((p) => p.name === workflow)) throw new Error('preset missing');
+        const served = servedState({ defs: [], presets, entries: [] });
+        const builtin = served.builtins.get(workflow);
+        if (builtin === undefined) throw new Error('preset missing');
+        // (crew#1445) A saved shadow of the sourced draft is what the engine runs: one without the built-in's checks
+        // (its fidelity-to-source `check`) would land a draft the card promised was checked against its sources.
+        const shadow = served.saved.get(workflow);
+        if (shadow !== undefined) {
+          let missing: string[];
+          try {
+            missing = shadowShortfall(builtin.steps, shadow.steps, await adapter.catalog());
+          } catch {
+            missing = ['a readable phase catalog to check it against'];
+          }
+          if (missing.length > 0) {
+            reason = `your saved \`${workflow}\` has fewer checks than the built-in (it lacks ${missing.join(', ')}); delete it or add them back`;
+          }
+        }
       } catch {
+        reason = "this engine has no sourced draft yet; update wicked-crew's engine";
+      }
+      if (reason !== null) {
         endFlight(runId);
-        const reason = "this engine has no sourced draft yet; update wicked-crew's engine";
         emitStatus({ ...docScope(doc.documentId, doc.projectId), state: 'error', message: reason });
         throw new Error(reason);
       }
