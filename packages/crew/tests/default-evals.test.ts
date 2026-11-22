@@ -70,7 +70,15 @@ function tmp(): string {
   dirs.push(d);
   return d;
 }
-afterEach(() => {
+/** An audit trail in a test dir. It appends after the route answers, so the cleanup awaits it before the rm (crew#1780). */
+const audits: AuditLog[] = [];
+function auditIn(dir: string): AuditLog {
+  const a = new AuditLog(join(dir, 'audit.log'), () => undefined);
+  audits.push(a);
+  return a;
+}
+afterEach(async () => {
+  await Promise.all(audits.splice(0).map((a) => a.flush()));
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
@@ -566,7 +574,7 @@ describe('review r1', () => {
     const views = [{ session: { id: 'live-1', workflow_id: 'bug', problem: 'Fix the login crash in the uploader when the file is empty', repo_ref: 'repo-a', status: 'completed', clis: ['claude'], units: [] }, units: [] }];
     const adapter = { sessionsDetail: vi.fn(async () => views), sessions: vi.fn(async () => ['live-1']), runEvents: vi.fn(async () => []) } as unknown as CoreAdapter;
     const app = Fastify({ logger: false });
-    registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: new AuditLog(join(dir, 'audit.log'), () => undefined), authMode: 'off' }, {});
+    registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: auditIn(dir), authMode: 'off' }, {});
     const res = await app.inject({ method: 'POST', url: '/api/v1/testing/default-evals/run', payload: { suites: ['archetype'] } });
     expect(res.statusCode).toBe(200);
     expect((res.json() as DefaultEvalReport).suites[0]!.real.cases).toBe(1);
@@ -627,7 +635,7 @@ describe('the run-evals workflow (data)', () => {
       launchRun: vi.fn(async (input: LaunchRunInput) => { launched.push(input); return input.sessionId; }),
     } as unknown as CoreAdapter;
     const app = Fastify({ logger: false });
-    registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: new AuditLog(join(dir, 'audit.log'), () => undefined), authMode: 'off' }, { evalRunsDir: dir });
+    registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: auditIn(dir), authMode: 'off' }, { evalRunsDir: dir });
     const res = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'Run the default evals', workflow: 'run-evals', deliver: 'pr' } });
     expect(res.statusCode).toBe(201);
     expect(launched[0]).toMatchObject({ workflow: 'run-evals', clisJson: '[]' });
@@ -689,7 +697,7 @@ describe('a card launch of run-evals scores what its card asks for (crew#1375)',
       launchRun: vi.fn(async (input: LaunchRunInput) => { launched.push(input); return input.sessionId; }),
     } as unknown as CoreAdapter;
     const app = Fastify({ logger: false });
-    registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: new AuditLog(join(dir, 'audit.log'), () => undefined), authMode: 'off' }, { evalRunsDir: dir });
+    registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: auditIn(dir), authMode: 'off' }, { evalRunsDir: dir });
     const reads = { defs: () => [def], presets: async () => [], entries: async () => [] };
     const launch = async (card: string, projectId?: string): Promise<DefaultEvalReport> => {
       const catalogRev = (await servedFor(reads, projectId)).rev;
