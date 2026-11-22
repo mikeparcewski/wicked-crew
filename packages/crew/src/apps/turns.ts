@@ -253,7 +253,7 @@ function personEntries(text: string, fences: 'keep' | 'skip'): PersonLine[] {
   const delimiters = rawLines.filter((l) => l.trim().startsWith('```'));
   let fence = delimiters.length % 2 === 1 && delimiters[0]!.trim() === '```';
   let skipIndented = false;
-  let findingIndented = false;
+  let findingIndented: boolean = false;
   let skipList = false;
   for (const raw of rawLines) {
     if (raw.trim().startsWith('```')) {
@@ -293,7 +293,7 @@ function personEntries(text: string, fences: 'keep' | 'skip'): PersonLine[] {
     }
     if (skipIndented && indented && !head) continue;
     skipIndented = false;
-    const continues = findingIndented && indented && !head;
+    const continues: boolean = findingIndented && indented && !head;
     findingIndented = continues;
     if (MEMORIES_HEAD.test(line)) skipList = true;
     if (fences === 'skip' && BUILDER_RECORD.test(line)) continue;
