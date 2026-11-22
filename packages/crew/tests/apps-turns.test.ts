@@ -758,6 +758,8 @@ describe('apps turns: a review held on steering rules waits for the person (F22)
     // (xreview r1) A rule denial that names no id is this attempt's record: an earlier attempt's row is never blamed.
     expect(brokenRulesOf({ denial: { source: 'rule_check', reason: 'x' }, denials_behind: [], rule_check: { rows } })).toEqual([]);
     expect(brokenRulesOf({ denial: { source: 'rule_check', reason: 'x', rule_ids: [] }, rule_check: { rows } })).toEqual([]);
+    // (xreview r2) An unchecked-rules hold is a rule layer too: it is this attempt's record, so no row stands in.
+    expect(brokenRulesOf({ denial: { source: 'rules_unchecked', reason: 'held' }, rule_check: { rows } })).toEqual([]);
     // Every id, exactly as the engine wrote it (Steering finds the rule by it): no cap, no trimming.
     const many = Array.from({ length: 25 }, (_, i) => `rule-${i}`);
     expect(brokenRulesOf({ denial: { source: 'rule_check', reason: 'x', rule_ids: many } }).map((r) => r.id)).toEqual(many);
@@ -773,6 +775,34 @@ describe('apps turns: a review held on steering rules waits for the person (F22)
     const long = reasonNamingRules(`The reviewer refused the change: ${'z'.repeat(1900)}. Nothing landed.`, ids.map(rule));
     expect(long.length).toBeLessThanOrEqual(2000);
     expect(long.endsWith(`It breaks steering rules ${ids.join(', ')}. Nothing landed.`)).toBe(true);
+    // (xreview r2) A mention the cut removes is listed; a namespaced or longer id is no mention.
+    const cutAway = reasonNamingRules(`The reviewer refused the change: ${'w '.repeat(650)}rule-A is broken. Nothing landed.`, [rule('rule-A'), ...ids.map(rule)]);
+    expect(cutAway.length).toBeLessThanOrEqual(2000);
+    expect(cutAway).toContain('It breaks steering rules rule-A, ');
+    expect(reasonNamingRules('See `team:learn-a` and learn-aé. Nothing landed.', [rule('learn-a')])).toBe('See `team:learn-a` and learn-aé. It breaks steering rule learn-a. Nothing landed.');
+    // More ids than fit: whole ids, the rest counted, within the limit.
+    const many = Array.from({ length: 40 }, (_, i) => `rule-${String(i).padStart(2, '0')}-${'q'.repeat(54)}`);
+    const over = reasonNamingRules('The reviewer refused the change: x. Nothing landed.', many.map(rule));
+    expect(over.length).toBeLessThanOrEqual(2000);
+    const listed = /It breaks steering rules (.*) and (\d+) more\. Nothing landed\.$/.exec(over);
+    expect(listed).not.toBeNull();
+    const names = listed![1]!.split(', ');
+    for (const n of names) expect(many).toContain(n);
+    expect(names.length + Number(listed![2])).toBe(40);
+  });
+
+  it('a refusal with more broken rules than its reason can list keeps every id on the record and a whole-id reason (xreview r2)', async () => {
+    const s = setup();
+    const runId = await startTurn(s);
+    const many = Array.from({ length: 40 }, (_, i) => `rule-${String(i).padStart(2, '0')}-${'q'.repeat(54)}`);
+    s.set(runId, 'awaiting_human', { build: { status: 'done' }, check: { status: 'done' }, review: {
+      status: 'rejected', denial_reason: `the evaluator's verdict is FAIL\n${'The query is wrong. '.repeat(90)}`,
+      denial: { source: 'evaluator', reason: 'FAIL' }, denials_behind: [{ source: 'rule_check', reason: 'broken', rule_ids: many }],
+    } });
+    const t = (await s.call('GET', '/apps/escalations')).body.app.turns![0]!;
+    expect(t.rules!.map((r) => r.id)).toEqual(many);
+    expect(t.reason!.length).toBeLessThanOrEqual(2000);
+    expect(t.reason).toMatch(/ and \d+ more\. Nothing landed\.$/);
   });
 
   it('a hold on the review does not hide a step that DID refuse at an open gate elsewhere (the open gate decides)', async () => {

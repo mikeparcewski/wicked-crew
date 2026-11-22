@@ -427,13 +427,16 @@ export function brokenRulesOf(unit: unknown): AppTurnRule[] {
   const isRecord = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null;
   if (!isRecord(unit)) return [];
   const behind = Array.isArray(unit['denials_behind']) ? unit['denials_behind'] : null;
-  const denials = [unit['denial'], ...(behind ?? [])].filter(isRecord).filter((d) => d['source'] === 'rule_check');
+  // Core's rule layers: a BROKEN rule (`rule_check`) or an unchecked one (`rules_unchecked`); only the first names
+  // broken rules, but either is the record of this attempt's rule check.
+  const layers = [unit['denial'], ...(behind ?? [])].filter(isRecord).filter((d) => d['source'] === 'rule_check' || d['source'] === RULES_HOLD_SOURCE);
+  const denials = layers.filter((d) => d['source'] === 'rule_check');
   const check = unit['rule_check'];
   const rows = (isRecord(check) && Array.isArray(check['rows']) ? check['rows'] : []).filter(isRecord).filter((r) => typeof r['ruleId'] === 'string' && r['ruleId'] !== '');
   const brokenRows = rows.filter((r) => r['status'] === 'broken' && r['blocking'] !== false);
   // As core: a rule denial, named or not, is the record of THIS attempt (its ids, even none); the rows of the last
   // rule check stand in only when no rule layer is recorded and the layers behind are unknown (an older engine).
-  const named = denials.length > 0
+  const named = layers.length > 0
     ? denials.flatMap((d) => (Array.isArray(d['rule_ids']) ? d['rule_ids'] : []).filter((x): x is string => typeof x === 'string' && x !== ''))
     : unit['denials_behind'] == null ? brokenRows.map((r) => r['ruleId'] as string) : [];
   const text = (x: unknown): string => (typeof x === 'string' ? x : '');
@@ -445,23 +448,45 @@ export function brokenRulesOf(unit: unknown): AppTurnRule[] {
   });
 }
 
-/** Whether `text` names `id` as a whole identifier (`learn-tests` is not named by `learn-tests-required`). */
+/**
+ * Whether `text` names `id` as a whole identifier: set off by a space, a bracket, a quote or a stop on both sides
+ * (`learn-tests` is not named by `learn-tests-required`, `team:learn-tests` or `learn-testsé`).
+ */
 function namesId(text: string, id: string): boolean {
   const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(?:^|[^\\w-])${esc}(?:$|[^\\w-])`).test(text);
+  return new RegExp(`(?:^|[\\s(\\[{"'“‘])${esc}(?=$|[\\s)\\]}"'”’.,;:!?—–])`, 'u').test(text);
 }
 
+/** At most this much of a refusal's reason names its rules; the rest of the ids are counted (all ride `rules`). */
+const RULE_NAMES_MAX = 800;
+
 /**
- * (crew#1379) A refusal's reason that names every broken rule it did not already name, kept whole within the turn
- * record's 2000 characters: the refusal's own words are shortened first, never the rule ids.
+ * (crew#1379) A refusal's reason that names every broken rule its words do not, within the turn record's 2000
+ * characters: the words are cut first (at a word, to a fixed budget), then the rules they no longer name are listed
+ * whole, as many as fit in {@link RULE_NAMES_MAX}, the others counted. No id is ever cut.
  */
 export function reasonNamingRules(reason: string, rules: readonly AppTurnRule[], max = 2000): string {
-  const unnamed = rules.map((r) => r.id).filter((id) => !namesId(reason, id));
-  if (unnamed.length === 0) return reason;
-  const suffix = ` It breaks steering rule${unnamed.length === 1 ? '' : 's'} ${unnamed.join(', ')}. Nothing landed.`;
-  const words = reason.replace(/\s*Nothing landed\.$/, '');
-  const room = Math.max(0, max - suffix.length);
-  return `${words.length > room ? `${words.slice(0, Math.max(0, room - 1))}…` : words}${suffix}`;
+  const end = ' Nothing landed.';
+  let words = reason.replace(/\s*Nothing landed\.$/, '');
+  const unnamedIn = (w: string) => rules.map((r) => r.id).filter((id) => !namesId(w, id));
+  if (unnamedIn(words).length === 0) return reason;
+  const room = max - RULE_NAMES_MAX - end.length;
+  if (words.length > room) {
+    const cut = words.slice(0, room - 1);
+    const at = cut.lastIndexOf(' ');
+    words = `${at > room / 2 ? cut.slice(0, at) : cut}…`;
+  }
+  const unnamed = unnamedIn(words);
+  const listed: string[] = [];
+  let used = 40;
+  for (const id of unnamed) {
+    if (used + id.length + 2 > RULE_NAMES_MAX) break;
+    listed.push(id);
+    used += id.length + 2;
+  }
+  const more = unnamed.length - listed.length;
+  const names = listed.length === 0 ? `${more} steering rules (listed on the turn)` : `steering rule${unnamed.length === 1 ? '' : 's'} ${listed.join(', ')}${more > 0 ? ` and ${more} more` : ''}`;
+  return `${words} It breaks ${names}.${end}`;
 }
 
 export function parkedRefusal(v: SessionView, events: ReadonlyArray<Record<string, unknown>> | null = null): { phase: string; code: string; reason: string } | null {
