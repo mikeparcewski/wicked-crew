@@ -209,6 +209,29 @@ export async function attachRepoToProject(
   return { member, created };
 }
 
+/**
+ * The one project create: `POST /projects`, and an onboard card's Go that creates the project it names (crew#1694).
+ * The engine row, then (post-commit, in order) `project.created` on the bus, the audit line, and the best-effort
+ * foundation charter.
+ */
+export async function createProjectRecorded(
+  adapter: CoreAdapter,
+  deps: Pick<ProjectRoutesDeps, 'bus' | 'log'>,
+  audit: AuditLog,
+  actor: Actor,
+  data: z.infer<typeof CreateProjectSchema>,
+): Promise<Project> {
+  const project = await adapter.projectCreate(data.name, data.description);
+  deps.bus?.emit(
+    PROJECT_CREATED,
+    { project_id: project.id, name: project.name, scope: project.scope, actor: actor.id },
+    projectCreatedKey(project.id),
+  );
+  audit.record('project.created', actor, { detail: { projectId: project.id, name: project.name } });
+  void writeCharter(adapter, project, 'created', deps.log);
+  return project;
+}
+
 export function registerProjectRoutes(
   app: FastifyInstance,
   adapter: CoreAdapter,
@@ -299,15 +322,7 @@ export function registerProjectRoutes(
       return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
     }
     try {
-      const project = await adapter.projectCreate(parsed.data.name, parsed.data.description);
-      // Post-commit, in order: bus event, then the (best-effort) foundation charter.
-      bus?.emit(
-        PROJECT_CREATED,
-        { project_id: project.id, name: project.name, scope: project.scope, actor: actorOf(req).id },
-        projectCreatedKey(project.id),
-      );
-      audit.record('project.created', actorOf(req), { detail: { projectId: project.id, name: project.name } });
-      void writeCharter(adapter, project, 'created', log);
+      const project = await createProjectRecorded(adapter, { bus, log }, audit, actorOf(req), parsed.data);
       return reply.code(201).send({ project });
     } catch (err) {
       return reply.code(engineErrorStatus(err)).send({ error: message(err) });

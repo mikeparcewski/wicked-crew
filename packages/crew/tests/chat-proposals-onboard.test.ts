@@ -69,6 +69,11 @@ interface Rig {
   occupants: Map<string, string>;
   filed: Array<{ projectId: string; runId: string }>;
   daemonRefusal: string | null;
+  created: Array<{ name: string; actor: string }>;
+  /** Another card's create of the same name lands first: the engine refuses this one (names are unique). */
+  createLoses: boolean;
+  /** The create takes this long (another card's Go can run meanwhile). */
+  createDelayMs: number;
 }
 
 function rig(): Rig {
@@ -102,6 +107,9 @@ function rig(): Rig {
     occupants: new Map(),
     filed: [],
     daemonRefusal: null,
+    created: [],
+    createLoses: false,
+    createDelayMs: 0,
   };
   const registry = new LaunchOnceRegistry();
   for (const k of ['create', 'refine', 'demo'] as const) registry.register(k, r.launcher);
@@ -130,6 +138,18 @@ function rig(): Rig {
       r.members.set(projectId, [...(r.members.get(projectId) ?? []), repoId]);
     },
     fileRun: async (projectId, runId) => { r.filed.push({ projectId, runId }); },
+    projects: async () => r.projects,
+    createProject: async (name, actor) => {
+      if (r.createLoses) {
+        r.projects.push({ id: 'proj_other', name });
+        throw new Error(`a project named ${name} already exists`);
+      }
+      if (r.createDelayMs > 0) await new Promise((res) => setTimeout(res, r.createDelayMs));
+      r.created.push({ name, actor: actor.id });
+      const p = { id: `proj_new${r.created.length}`, name };
+      r.projects.push(p);
+      return p;
+    },
   }));
   const deps: ChatProposalDeps = {
     flags: () => ({ context: true, instructions: true, proposals: true, create: true, refine: true, theme: true, demo: true, onboard: r.onboardOn }),
@@ -207,6 +227,7 @@ const kinds = (r: Rig, chatId: string): string[] => (r.records.get(chatId) ?? []
 
 
 const URL = 'https://github.com/mikeparcewski/wicked-studio.git';
+const URL2 = 'https://github.com/mikeparcewski/wicked-crew.git';
 const SENTENCE = 'Want to onboard https://github.com/mikeparcewski/wicked-studio.git into the wicked labs project';
 const repo = (id: string, o: Partial<RepoEntry> = {}): RepoEntry => ({ id, name: id, root_path: `/srv/${id}`, default_branch: 'main', registered_at: 1, ...o });
 
@@ -357,16 +378,103 @@ describe('onboard proposals', () => {
     const r = rig();
     const t1 = chatWith(r, 'c1', { projectId: 'proj_ops' });
     expect(await propose(r, 'c1', t1, { onboard: { url: URL } })).toMatchObject({ blocked: null, onboard: { projectId: 'proj_ops' } });
-    const t2 = chatWith(r, 'c2');
-    expect(await propose(r, 'c2', t2, { onboard: { url: URL, project: 'labs' } })).toMatchObject({
-      blocked: expect.stringMatching(/no project has the name given \(projects here: Wicked Labs, Ops\)\. Create it on Projects → New project/),
-    });
     r.projects.push({ id: 'proj_labs2', name: 'WICKED LABS' });
     const t3 = chatWith(r, 'c3');
     expect(await propose(r, 'c3', t3, block)).toMatchObject({ blocked: expect.stringMatching(/more than one project has the name given/) });
     const blocked = (await propose(r, 'c3', chatWith(r, 'c3'), block))!;
     expect((await r.svc.decide('c3', blocked.pid, { decision: 'go' }, ME, 'i1')).code).toBe(409);
     expect(r.registered).toHaveLength(0);
+  });
+
+  it('a project name that matches none offers to create it; only Go creates it, once (crew#1694)', async () => {
+    const r = rig();
+    const p = (await propose(r, 'c2', chatWith(r, 'c2', { words: `Onboard ${URL} into a new project, docs  team` }), { onboard: { url: URL, project: '  Docs Team ' } }))!;
+    expect(p).toMatchObject({
+      blocked: null,
+      onboard: { projectId: null, projectName: null, createProject: { name: 'Docs Team' } },
+      filedIn: { projectId: null, label: 'Creates the project Docs Team' },
+      what: { outcome: expect.stringContaining('added to the new project Docs Team') },
+    });
+    expect(r.created).toEqual([]);
+    // The first Go creates it, then its registration fails: Go again reuses the project it made, never a second.
+    r.registerAnswer = { status: 500, body: { error: 'clone failed' } };
+    expect((await r.svc.decide('c2', p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(502);
+    r.registerAnswer = { status: 201, body: { onboardRunId: 'x', projectAttached: true } };
+    expect((await r.svc.decide('c2', p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    expect(r.created).toEqual([{ name: 'Docs Team', actor: 'maria' }]);
+    expect(r.registered.map((x) => x.data['projectId'])).toEqual(['proj_new1', 'proj_new1']);
+    // Not now creates nothing; a name POST /projects would refuse blocks with why.
+    const q = (await propose(r, 'c3', chatWith(r, 'c3', { words: 'add it to Another Team' }), { onboard: { url: URL, project: 'Another Team' } }))!;
+    expect(q.onboard?.createProject).toEqual({ name: 'Another Team' });
+    expect((await r.svc.decide('c3', q.pid, { decision: 'not_now' }, ME, 'i1')).code).toBe(200);
+    expect(r.created).toHaveLength(1);
+    // Never created: a name POST /projects would refuse, one the person never said, or one that could carry an address
+    // (none of them is repeated on the card).
+    for (const [i, [words, project]] of ([
+      ['x'.repeat(121), 'x'.repeat(121)],
+      ['add it to my team', 'Invented Team'],
+      ['add it to https://me:tok@host.example/team', 'https://me:tok@host.example/team'],
+      // xreview r1: a token or a path part of an address the person pasted is not a name they said; nor is part of a word.
+      ['add https://alice:ghp_SECRET123@github.com/acme/repo.git', 'ghp_SECRET123'],
+      ['add https://github.com/acme/repo.git', 'acme'],
+      ['add it to docsteam', 'docs'],
+    ] as const).entries()) {
+      const c = (await propose(r, `n${i}`, chatWith(r, `n${i}`, { words }), { onboard: { url: URL, project } }))!;
+      expect(c).toMatchObject({ blocked: expect.stringMatching(/^no project has the name given \(projects here: /u), onboard: { projectId: null } });
+      expect(c.onboard?.createProject ?? null).toBeNull();
+      expect(JSON.stringify(c)).not.toContain(project);
+    }
+  });
+
+  it('a Go again resumes the project its first Go made, by id: renamed since, archived since, or lost to another card (crew#1694 r1)', async () => {
+    const card = async (r: ReturnType<typeof rig>, chat: string) => (await propose(r, chat, chatWith(r, chat, { words: 'put it in Docs Team' }), { onboard: { url: URL, project: 'Docs Team' } }))!;
+    let r = rig();
+    // Renamed between a failed Go and its Go again: the same project, never a second one under the old name.
+    const p = await card(r, 'c2');
+    r.registerAnswer = { status: 500, body: { error: 'clone failed' } };
+    expect((await r.svc.decide('c2', p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(502);
+    r.projects.find((x) => x.id === 'proj_new1')!.name = 'Docs';
+    r.registerAnswer = { status: 201, body: { onboardRunId: 'x', projectAttached: true } };
+    expect((await r.svc.decide('c2', p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    expect(r.created).toHaveLength(1);
+    expect(r.registered.map((x) => x.data['projectId'])).toEqual(['proj_new1', 'proj_new1']);
+    // Archived (or deleted) between a failed Go and its Go again: refused with why, nothing made again.
+    r = rig();
+    const q = await card(r, 'c3');
+    r.registerAnswer = { status: 500, body: { error: 'clone failed' } };
+    expect((await r.svc.decide('c3', q.pid, { decision: 'go' }, ME, 'i1')).code).toBe(502);
+    expect(r.created).toHaveLength(1);
+    r.projects = r.projects.filter((x) => x.id !== 'proj_new1');
+    r.registerAnswer = { status: 201, body: { onboardRunId: 'x', projectAttached: true } };
+    const refused = await r.svc.decide('c3', q.pid, { decision: 'go' }, ME, 'i1');
+    expect(refused.code).toBe(502);
+    expect(JSON.stringify(refused.body)).toContain('archived or gone');
+    expect(r.created).toHaveLength(1);
+    // Two cards' Go race on one new name: the one whose create the engine refuses adopts the project the other made.
+    r = rig();
+    const s2 = await card(r, 'c4');
+    r.createLoses = true;
+    expect((await r.svc.decide('c4', s2.pid, { decision: 'go' }, ME, 'i1')).code).toBe(200);
+    expect(r.registered.at(-1)!.data['projectId']).toBe('proj_other');
+  });
+
+  it('two cards naming one new project in different spellings make it once, Go at the same time (crew#1694 r2)', async () => {
+    const r = rig();
+    r.createDelayMs = 20;
+    // Two chats, each its own instance (as in the daemon), so neither Go waits on the other's chat lock.
+    r.instances.set('c6', 'i6');
+    const a = (await propose(r, 'c5', chatWith(r, 'c5', { words: 'into a new project called Docs Team?' }), { onboard: { url: URL, project: 'Docs Team' } }))!;
+    const b = (await propose(r, 'c6', chatWith(r, 'c6', { words: 'put it in docs  team' }), { onboard: { url: URL2, project: 'docs  team' } }))!;
+    // A question mark after the name is the sentence's, not an address's.
+    expect(a).toMatchObject({ blocked: null, onboard: { createProject: { name: 'Docs Team' } } });
+    expect(b).toMatchObject({ blocked: null, onboard: { createProject: { name: 'docs  team' } } });
+    const [ga, gb] = await Promise.all([
+      r.svc.decide('c5', a.pid, { decision: 'go' }, ME, 'i1'),
+      r.svc.decide('c6', b.pid, { decision: 'go' }, ME, 'i6'),
+    ]);
+    expect([ga.code, gb.code]).toEqual([200, 200]);
+    expect(r.created).toHaveLength(1);
+    expect(new Set(r.registered.map((x) => x.data['projectId']))).toEqual(new Set(['proj_new1']));
   });
 
   it('a bad address or an unreadable repository blocks Go with the reason; nothing is probed for a bad address', async () => {

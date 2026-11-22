@@ -10010,10 +10010,17 @@ export interface ProposalOnboard {
   name: string;
   /** Where it is cloned, home-relative (`~/.wicked/repos/<name>`); `null` for an existing registration. */
   checkout: string | null;
-  /** The project it joins; `null` = none (registered unfiled). */
+  /** The project it joins; `null` = none (registered unfiled), or a project Go creates first (`createProject`). */
   projectId: string | null;
   projectName: string | null;
   existing: { id: string; name: string } | null;
+  /**
+   * (crew#1694) The project Go creates first, when the name given matches no project (ignoring case and spacing) and
+   * `POST /projects` would take it: the trimmed name. `projectId` and `projectName` are then `null`, and `filedIn.label`
+   * says "Creates the project <name>". Nothing is created before Go; a Go again after the create landed reuses that
+   * project. ABSENT (or `null`) when the card joins an existing project or none.
+   */
+  createProject?: { name: string } | null;
 }
 
 /** One "From" chip: a source the block named, as crew resolved and authorized it. */
