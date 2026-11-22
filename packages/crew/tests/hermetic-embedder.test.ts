@@ -3,12 +3,12 @@
 // Un-armed, an engine booted under a fresh HOME downloads the Model2Vec model from Hugging Face into
 // `$HOME/.cache/huggingface` while its actor boots, and every route that waits on the actor waits on that
 // download (the v0.18.20 Release's `/health` timed out at 30 s). This file does not set the variable itself:
-// what it reads is what tests/setup/hermetic-home.ts armed.
+// what the engine reads is what tests/setup/hermetic-home.ts armed.
 import { existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CoreAdapter } from '../src/core/adapter.js';
 import { removeScratch } from './setup/scratch.js';
@@ -27,7 +27,12 @@ describe('the memory embedder in tests (crew#1763)', () => {
     removeScratch(dir);
   });
 
-  it('is armed lexical by the setup file', () => {
+  it('is armed lexical by the setup file, whatever the environment it inherits', async () => {
+    // CI's workflow exports the variable too (ci.yml), and the Release's test job does not: the setup file is what
+    // holds it on every path. Re-evaluated over another value, it puts `hash` back.
+    process.env['WICKED_MEMORY_EMBEDDER'] = 'model2vec';
+    vi.resetModules();
+    await import('./setup/hermetic-home.js');
     expect(process.env['WICKED_MEMORY_EMBEDDER']).toBe('hash');
   });
 
