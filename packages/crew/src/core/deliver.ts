@@ -428,8 +428,8 @@ export const defaultGhExec: GhExec = (args, opts) =>
  *    `GH_ACCOUNT`, {@link pushIdentityOf}) reads with that account's own token from gh's keyring
  *    (`gh auth token --user`), passed to this one call only;
  *  - an origin read as absent or not github.com: the identity does not apply, gh runs as it is;
- *  - with an identity configured, an origin that cannot be read, or gh holding no token for the account, is a failed
- *    read that says so, never a silent read as the active login.
+ *  - with a pin to apply (an exported token or an identity), an origin that cannot be read, or gh holding no token for
+ *    the account, is a failed read that says so, never a silent unpinned read.
  * `identity` is read per call (settings change at run time); so is the registered checkout's origin.
  */
 export function pinnedGhExec(
@@ -443,8 +443,8 @@ export function pinnedGhExec(
     if (!exported && login === null) return exec(args, opts);
     if (login !== null && !isGitHubLogin(login)) return { stdout: '', stderr: `the deliver identity ${JSON.stringify(login.slice(0, 60))} is not a GitHub login`, code: 1 };
     const origin = await readDeliverOriginUrl(opts.cwd).catch(() => null);
-    if (origin === null && login !== null) {
-      return { stdout: '', stderr: `could not read the repository's origin, so the read cannot be pinned to the deliver identity ${login}`, code: 1 };
+    if (origin === null) {
+      return { stdout: '', stderr: `could not read the repository's origin, so the read cannot be pinned to it${login === null ? '' : ` as the deliver identity ${login}`}`, code: 1 };
     }
     const repo = githubRepoOf(origin);
     if (repo === null) return exec(args, opts);

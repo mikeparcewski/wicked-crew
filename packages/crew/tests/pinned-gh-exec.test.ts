@@ -88,13 +88,17 @@ describe('pinnedGhExec (crew#1792)', () => {
     expect(calls).toEqual([{ args: ['pr', 'view', '33'], env: { GH_HOST: 'github.com', GH_REPO: 'github.com/acme/private-app' } }]);
   });
 
-  it('fails by name, reading nothing, when the origin cannot be read and an identity is configured', async () => {
+  it('fails by name, reading nothing, when the origin cannot be read and a pin applies', async () => {
     const notACheckout = mkdtempSync(join(tmpdir(), 'crew-1792-bare-'));
     dirs.push(notACheckout);
     const { exec, calls } = fakeGh({ deliverbot: 'gho_deliverbot' });
     const out = await pinnedGhExec(async () => 'deliverbot', exec, {})(['pr', 'view', '33'], { cwd: notACheckout, timeoutMs: 5000 });
     expect(out.code).toBe(1);
     expect(out.stderr).toContain("could not read the repository's origin");
+    expect(calls).toEqual([]);
+    // An exported token is pinned to the origin too: unreadable, gh is never asked (an inherited GH_REPO could answer).
+    const exported = await pinnedGhExec(async () => null, exec, { GH_TOKEN: 'exported', GH_REPO: 'github.com/other/repo' })(['pr', 'view', '33'], { cwd: notACheckout, timeoutMs: 5000 });
+    expect(exported.code).toBe(1);
     expect(calls).toEqual([]);
   });
 
