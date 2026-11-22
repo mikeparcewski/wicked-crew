@@ -20,7 +20,7 @@ import { McpBroker, type McpBrokerDeps } from '../src/mcp/broker.js';
 import type { McpCallResponse } from '../src/core/types.js';
 import { registerAppRoutes } from '../src/apps/routes.js';
 import { AppStore, type AppRepoRegistry } from '../src/apps/store.js';
-import { APPS_SELF_CHECK_COMMAND, AppTurnService, PackageKnowledge, SPEC_SHAPE_GUIDE, appsUnitResolver, brokenRulesOf, builderLines, changeLine, packageJson, turnProblem, type KnowledgePackage, type TurnEngine } from '../src/apps/turns.js';
+import { APPS_SELF_CHECK_COMMAND, AppTurnService, PackageKnowledge, SPEC_SHAPE_GUIDE, appsUnitResolver, brokenRulesOf, builderLines, changeLine, packageJson, reasonNamingRules, turnProblem, type KnowledgePackage, type TurnEngine } from '../src/apps/turns.js';
 import { readRules } from '../src/sources/policy/rules.js';
 import { builderCatalog } from './fixtures/apps-sources/builder-catalog.js';
 import { chatKnowledgeFor } from '../src/api/chat-mcp.js';
@@ -755,6 +755,24 @@ describe('apps turns: a review held on steering rules waits for the person (F22)
     // A rule the denial names with no row of its own is still named.
     expect(brokenRulesOf({ denial: { source: 'rule_check', reason: 'x', rule_ids: ['gone', 'gone'] } })).toEqual([{ id: 'gone', reason: '' }]);
     expect(brokenRulesOf(undefined)).toEqual([]);
+    // (xreview r1) A rule denial that names no id is this attempt's record: an earlier attempt's row is never blamed.
+    expect(brokenRulesOf({ denial: { source: 'rule_check', reason: 'x' }, denials_behind: [], rule_check: { rows } })).toEqual([]);
+    expect(brokenRulesOf({ denial: { source: 'rule_check', reason: 'x', rule_ids: [] }, rule_check: { rows } })).toEqual([]);
+    // Every id, exactly as the engine wrote it (Steering finds the rule by it): no cap, no trimming.
+    const many = Array.from({ length: 25 }, (_, i) => `rule-${i}`);
+    expect(brokenRulesOf({ denial: { source: 'rule_check', reason: 'x', rule_ids: many } }).map((r) => r.id)).toEqual(many);
+    const odd = `custom  rule ${'x'.repeat(240)}`;
+    expect(brokenRulesOf({ denial: { source: 'rule_check', reason: 'x', rule_ids: [odd] } })).toEqual([{ id: odd, reason: '' }]);
+  });
+
+  it('reasonNamingRules names each rule the reason does not, as a whole id, and keeps the ids whole within 2000 characters', () => {
+    const rule = (id: string) => ({ id, reason: '' });
+    expect(reasonNamingRules('The reviewer refused the change: see learn-tests-required. Nothing landed.', [rule('learn-tests')])).toBe('The reviewer refused the change: see learn-tests-required. It breaks steering rule learn-tests. Nothing landed.');
+    expect(reasonNamingRules('1 steering rule(s) broken: learn-tests — no test. Nothing landed.', [rule('learn-tests')])).toBe('1 steering rule(s) broken: learn-tests — no test. Nothing landed.');
+    const ids = Array.from({ length: 10 }, (_, i) => `rule-${i}-${'y'.repeat(50)}`);
+    const long = reasonNamingRules(`The reviewer refused the change: ${'z'.repeat(1900)}. Nothing landed.`, ids.map(rule));
+    expect(long.length).toBeLessThanOrEqual(2000);
+    expect(long.endsWith(`It breaks steering rules ${ids.join(', ')}. Nothing landed.`)).toBe(true);
   });
 
   it('a hold on the review does not hide a step that DID refuse at an open gate elsewhere (the open gate decides)', async () => {

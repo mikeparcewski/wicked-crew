@@ -431,14 +431,37 @@ export function brokenRulesOf(unit: unknown): AppTurnRule[] {
   const check = unit['rule_check'];
   const rows = (isRecord(check) && Array.isArray(check['rows']) ? check['rows'] : []).filter(isRecord).filter((r) => typeof r['ruleId'] === 'string' && r['ruleId'] !== '');
   const brokenRows = rows.filter((r) => r['status'] === 'broken' && r['blocking'] !== false);
-  let ids = denials.flatMap((d) => (Array.isArray(d['rule_ids']) ? d['rule_ids'] : []).filter((x): x is string => typeof x === 'string' && x !== ''));
-  if (ids.length === 0 && (denials.length > 0 || unit['denials_behind'] == null)) ids = brokenRows.map((r) => r['ruleId'] as string);
+  // As core: a rule denial, named or not, is the record of THIS attempt (its ids, even none); the rows of the last
+  // rule check stand in only when no rule layer is recorded and the layers behind are unknown (an older engine).
+  const named = denials.length > 0
+    ? denials.flatMap((d) => (Array.isArray(d['rule_ids']) ? d['rule_ids'] : []).filter((x): x is string => typeof x === 'string' && x !== ''))
+    : unit['denials_behind'] == null ? brokenRows.map((r) => r['ruleId'] as string) : [];
   const text = (x: unknown): string => (typeof x === 'string' ? x : '');
-  return [...new Set(ids)].slice(0, 20).map((id) => {
+  // The id is kept exactly as the engine wrote it (Steering finds the rule by it); only its reason is one-lined.
+  return [...new Set(named)].map((id) => {
     const row = brokenRows.find((r) => r['ruleId'] === id) ?? rows.find((r) => r['ruleId'] === id);
     const why = row === undefined ? '' : text(row['cite']) !== '' ? text(row['cite']) : text(row['reason']);
-    return { id: oneLine(id, 200), reason: oneLine(why, 300) };
+    return { id, reason: oneLine(why, 300) };
   });
+}
+
+/** Whether `text` names `id` as a whole identifier (`learn-tests` is not named by `learn-tests-required`). */
+function namesId(text: string, id: string): boolean {
+  const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[^\\w-])${esc}(?:$|[^\\w-])`).test(text);
+}
+
+/**
+ * (crew#1379) A refusal's reason that names every broken rule it did not already name, kept whole within the turn
+ * record's 2000 characters: the refusal's own words are shortened first, never the rule ids.
+ */
+export function reasonNamingRules(reason: string, rules: readonly AppTurnRule[], max = 2000): string {
+  const unnamed = rules.map((r) => r.id).filter((id) => !namesId(reason, id));
+  if (unnamed.length === 0) return reason;
+  const suffix = ` It breaks steering rule${unnamed.length === 1 ? '' : 's'} ${unnamed.join(', ')}. Nothing landed.`;
+  const words = reason.replace(/\s*Nothing landed\.$/, '');
+  const room = Math.max(0, max - suffix.length);
+  return `${words.length > room ? `${words.slice(0, Math.max(0, room - 1))}…` : words}${suffix}`;
 }
 
 export function parkedRefusal(v: SessionView, events: ReadonlyArray<Record<string, unknown>> | null = null): { phase: string; code: string; reason: string } | null {
@@ -651,8 +674,7 @@ export class AppTurnService implements AppTurnLauncher {
       }
       // (crew#1379) A rule the step broke is named, so the person can find it in Steering (rescope or retire it).
       const rules = code === 'no_change' ? [] : brokenRulesOf(v.units.find((x) => x.id === `${input.runId}:${refused.phase}`));
-      const unnamed = rules.filter((r) => !reason.includes(r.id)).map((r) => r.id);
-      if (unnamed.length > 0) reason = `${reason.replace(/\s*Nothing landed\.$/, '')} It breaks steering rule${unnamed.length === 1 ? '' : 's'} ${unnamed.join(', ')}. Nothing landed.`;
+      reason = reasonNamingRules(reason, rules);
       return { kind: 'end', state: code === 'step_failed' || code === 'no_change' ? 'failed' : 'refused', code, reason, ...(rules.length > 0 ? { rules } : {}) };
     }
     if (status === 'failed') {
