@@ -10,9 +10,9 @@ import { publishCheck } from '../src/apps/publish/check.js';
 import { appsRuntime, appsServerArtifact } from '../src/apps/publish/artifacts.js';
 import { buildImage } from '../src/apps/publish/image.js';
 import { writeImageContext } from '../src/apps/publish/pack.js';
-import { publishEndpoints } from '../src/apps/publish/run.js';
+import { publishDiscovery, publishEndpoints } from '../src/apps/publish/run.js';
 import { runAppsProduce } from '../src/cli/apps-produce.js';
-import { dialFetch } from '../src/sources/dialer.js';
+import { dialFetch, resolveTarget } from '../src/sources/dialer.js';
 import type { AppPublishBody, LaunchRunInput, SessionView } from '../src/core/types.js';
 import { appsHarness, PRIYA, specWith, type Harness } from './support/apps-harness.js';
 import { updateAction } from './support/apps-writes.js';
@@ -325,6 +325,29 @@ describe('publish discovery and produce CLI', () => {
     vi.mocked(dialFetch).mockResolvedValueOnce(new Response('x'.repeat(1024 * 1024 + 1)));
     expect(await publishEndpoints(identity)).toBeNull();
     expect(await publishEndpoints(null)).toBeNull();
+  });
+
+  it('(crew#1457) an issuer on a private network is refused with why, and the range that would allow it', async () => {
+    const identity = { profile: 'oidc' as const, issuer: 'https://dex.corp.test', clientId: 'desk' };
+    // The dialer's own refusal of an unconfirmed private address (the real resolver path, a stand-in DNS answer).
+    const refusal = await resolveTarget('dex.corp.test', { allow: [], plaintext: false }, async () => ['10.1.2.3']).then(() => null, (e: unknown) => e);
+    expect(refusal).not.toBeNull();
+    vi.mocked(dialFetch).mockRejectedValueOnce(refusal);
+    const d = await publishDiscovery(identity);
+    expect(d.endpoints).toBeNull();
+    expect(d.why).toBe('dex.corp.test resolves to a private-network address (10.1.2.3), which crew reaches only when the sign-in allows its range (identity.allowRanges, e.g. 10.1.2.3/32)');
+    // A loopback issuer says so.
+    const loop = await resolveTarget('dex.corp.test', { allow: [], plaintext: false }, async () => ['127.0.0.1']).then(() => null, (e: unknown) => e);
+    vi.mocked(dialFetch).mockRejectedValueOnce(loop);
+    expect((await publishDiscovery(identity)).why).toContain('a loopback address on this machine (127.0.0.1)');
+    // An issuer that answers an error status says which; any other failure says nothing it does not know.
+    vi.mocked(dialFetch).mockResolvedValueOnce(new Response('nope', { status: 404 }));
+    expect(await publishDiscovery(identity)).toEqual({ endpoints: null, why: 'it answered HTTP 404' });
+    vi.mocked(dialFetch).mockRejectedValueOnce(new Error('offline'));
+    expect(await publishDiscovery(identity)).toEqual({ endpoints: null, why: null });
+    // The allowed range rides the dialer's policy (nothing is allowed that the sign-in does not allow).
+    await publishDiscovery({ ...identity, allowRanges: ['10.0.0.0/8'] });
+    expect(dialFetch).toHaveBeenLastCalledWith('https://dex.corp.test/.well-known/openid-configuration', expect.anything(), { allow: ['10.0.0.0/8'], plaintext: false });
   });
 
   it('posts only the unit token and prints the produced image and share link', async () => {

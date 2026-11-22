@@ -53,6 +53,8 @@ export interface ManifestInput {
    * signing algorithms it says it uses (the page checks the ID token's `alg` against them).
    */
   endpoints: { authorization: string; token: string; idTokenAlgs?: string[] } | null;
+  /** (crew#1457) Why discovery read nothing, when the caller knows (e.g. the issuer is on a private network its allowed ranges do not cover). */
+  endpointsWhy?: string;
 }
 
 export type ManifestOutcome = { ok: true; manifest: AppPublishManifest; sources: ImageSources; digest: string } | { ok: false; findings: PublishFinding[] };
@@ -160,7 +162,7 @@ export async function buildManifest(input: ManifestInput): Promise<ManifestOutco
     } else if (!body.audience.kind.startsWith('oidc-')) {
       find('audience', 'OIDC sign-in judges group values or email domains');
     }
-    if (input.endpoints === null) find('identity', "The issuer's discovery document could not be read");
+    if (input.endpoints === null) find('identity', `The issuer's discovery document could not be read${input.endpointsWhy !== undefined && input.endpointsWhy !== '' ? `: ${input.endpointsWhy}` : ''}`);
     // The page checks the sign-in's nonce, which needs the ID token: the scope always asks for `openid`.
     if (id.scope !== undefined && !id.scope.split(/\s+/).includes('openid')) find('identity', 'The sign-in scope must include openid');
   }
