@@ -420,17 +420,20 @@ describe('document title from the person (#1537)', () => {
     await reply(w, 't-writer', { entry: 'document', option: 'document', confidence: 0.99, lead: 'codex' });
     expect(open(w).helpers?.seats).toEqual(['codex', 'claude']);
     expect(open(w).blocked).toBeNull();
-    // A seat named only to check checks; the writer is the one the card would draw (xreview r1).
+    // A seat named only to check never becomes the writer: with no writer named, the card draws its own (xreview r1-r2).
     const c = make();
     await say(c, 't-checker', 'Write a one-page note about the plugin; Pi checks it.');
     await reply(c, 't-checker', { entry: 'document', option: 'document', confidence: 0.99, seats: ['pi'] });
-    expect(open(c).helpers?.seats).toEqual(['claude', 'pi']);
+    expect(open(c).helpers?.seats).toEqual(['claude', 'codex']);
   });
 
   it.each([
     ['a quote line', 'Write a note on this excerpt:\n> Codex writes the output and pi checks it'],
     ['quotation marks', 'Write a note explaining the phrase "Codex writes, pi checks".'],
     ['code', 'Write a note about `codex --pi` usage.\n```\ncodex pi\n```'],
+    ['a tilde fence', 'Write a note about this config.\n~~~\nlead: codex\nchecker: pi\n~~~'],
+    ['a double-backtick span', 'Write a note on ``codex writes, pi checks`` from the docs.'],
+    ['a quotation over two lines', 'Write a note on this: "Codex writes it\nand pi checks it" was the old rule.'],
   ])('a seat named only in what the person quoted is not their choice (xreview r1): %s', async (_name, words) => {
     const r = make();
     await say(r, 't-quoted', words);

@@ -537,6 +537,8 @@ describe('the accept flow', () => {
     const second = r.records.get('c1')!.filter((x) => x.kind === 'proposal_accepting');
     expect(second).toHaveLength(2);
     expect(refused).toMatchObject({ code: 409, body: { code: 'power_unavailable', acceptingAt: second[1]!.at } });
+    // The rig's clock never moves: each Go's record is still told apart (xreview r2).
+    expect(second[1]!.at).toBeGreaterThan(second[0]!.at);
   });
 
   it('a chat that ended is refused without its id (crew#1745)', async () => {

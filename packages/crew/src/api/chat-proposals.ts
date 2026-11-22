@@ -868,12 +868,12 @@ function ownWordsTitle(block: ParsedMake, records: readonly ChatTranscriptRecord
  */
 export function ownRequestWords(words: string): string {
   return words
-    .replace(/```[\s\S]*?(?:```|$)/gu, ' ')
-    .replace(/`[^`\n]*`/gu, ' ')
+    .replace(/(`{3,}|~{3,})[\s\S]*?(?:\1|$)/gu, ' ')
+    .replace(/(`+)[\s\S]*?\1/gu, ' ')
     .split(/\r?\n/u)
     .filter((line) => !/^\s*>/u.test(line))
     .join('\n')
-    .replace(/"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’/gu, ' ');
+    .replace(/"[^"]*"|“[^”]*”|‘[^’]*’/gu, ' ');
 }
 
 /** (crew#1737) Whether the person's words name a seat, by its key or its roster name, as a whole word, outside what
@@ -897,7 +897,9 @@ function namedSeats(block: { lead?: string | undefined; seats?: string[] | undef
   const ok = (k: string): boolean => roster.some((s) => s.key === k) && seatNamedIn(k, roster.find((s) => s.key === k)?.name, words);
   const lead = block.lead !== undefined && ok(block.lead) ? block.lead : null;
   const others = [...new Set(block.seats ?? [])].filter((k) => k !== lead && ok(k));
-  return { lead, seats: others.length > 0 ? [...(lead !== null ? [lead] : []), ...others] : null };
+  // Seats ride only beside a named lead: a list without one would read as the whole roster (its first seat building),
+  // so a seat named only to check is left to the card's own draw, which the person can swap (xreview r2).
+  return { lead, seats: lead !== null && others.length > 0 ? [lead, ...others] : null };
 }
 
 /**
@@ -1823,7 +1825,9 @@ export class ChatProposals {
       if (!this.write(chatId, { at: this.now(), turnId: folded.turnId, kind: 'proposal', proposal: { ...(now.accepting?.resolution ?? now.proposal), heldRejected: true } }, instance)) return this.gone(chatId);
     }
     // Recorded before anything starts.
-    const accepting: ProposalRecord = { at: this.now(), turnId: folded.turnId, kind: 'proposal_accepting', pid, actor: actor.id, edits, resolution, identity };
+    // crew#1695: `at` names this Go (its refusals carry it), so it is never the same as an earlier accepting record's.
+    const lastAt = Math.max(-1, ...this.deps.records(chatId).flatMap((r) => (r.kind === 'proposal_accepting' && r.pid === pid ? [r.at] : [])));
+    const accepting: ProposalRecord = { at: Math.max(this.now(), lastAt + 1), turnId: folded.turnId, kind: 'proposal_accepting', pid, actor: actor.id, edits, resolution, identity };
     if (!this.write(chatId, accepting, instance)) return this.gone(chatId);
     let result: ProposalResult;
     try {
