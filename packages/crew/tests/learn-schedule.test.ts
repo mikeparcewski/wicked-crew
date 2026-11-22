@@ -56,10 +56,11 @@ function rig(opts: { runs?: Record<string, Status>; launch?: () => Promise<strin
     if (cmd === 'git') return opts.tree === undefined ? { code: 128, stdout: '', stderr: 'no path' } : { code: 0, stdout: `${opts.tree}\n`, stderr: '' };
     return { code: opts.indexCode ?? 0, stdout: '{"ok":true}', stderr: '' };
   };
+  const audit = new AuditLog(join(dir, 'audit.log'), () => undefined);
   const scheduler = new LearnScheduler({
     store,
     adapter,
-    audit: new AuditLog(join(dir, 'audit.log'), () => undefined),
+    audit,
     runTimingIndex: new RunTimingIndex(),
     fileRun: () => undefined,
     broadcast: (f) => frames.push(f),
@@ -69,7 +70,7 @@ function rig(opts: { runs?: Record<string, Status>; launch?: () => Promise<strin
     env: { WICKED_GARDEN_ROOT: '/garden', WICKED_RUN_ID: 'leak', WICKED_ESTATE_READONLY: '1', CLAUDE_PLUGIN_ROOT: '/old-checkout', PATH: '/bin' },
     gardenRoot: () => '/live-plugin',
   });
-  return { dir, store, runs, launches, frames, execs, scheduler, advance: (ms: number) => (clock = new Date(clock.getTime() + ms)) };
+  return { dir, store, runs, launches, frames, execs, scheduler, audit, advance: (ms: number) => (clock = new Date(clock.getTime() + ms)) };
 }
 
 const put = (store: LearnScheduleStore, slug = 'sqlite-wal', everyHours = 24) =>
@@ -190,6 +191,10 @@ describe('LearnScheduler.sweep', () => {
     let row = r.store.get('r1:sqlite-wal')!;
     expect([row.failures, row.lastOutcome, row.lastError]).toEqual([1, 'refused', 'preset_unknown']);
     expect(Date.parse(row.nextDueAt) - (T0.getTime() + 25 * H)).toBe(2 * H);
+    // (crew#1656) The refusal is told on the activity trail too, in the generic scheduler's words.
+    const told = await r.audit.read({ action: 'schedule.launch_refused' });
+    expect(told).toHaveLength(1);
+    expect(told[0]!.detail).toEqual({ id: 'r1:sqlite-wal', workflow: 'learn', trigger: 'schedule', reason: 'preset_unknown' });
     r.store.update(row.id, { failures: 9, nextDueAt: new Date(T0.getTime() + 25 * H).toISOString() }, T0);
     await r.scheduler.sweep();
     row = r.store.get('r1:sqlite-wal')!;

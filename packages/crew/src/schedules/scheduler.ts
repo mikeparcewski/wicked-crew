@@ -6,7 +6,8 @@
  *  3. LAUNCH: at most ONE due schedule launches. A schedule whose last run is still open is SKIPPED (it never runs
  *     twice at once; its due time stays, so it fires once that run ends); one parked on a person says so and
  *     names the run. Other runs on the daemon never block a launch: it runs several at once, each under its
- *     own budget (crew#1544). A refused launch backs off 2^n hours, at most a day. Missed intervals coalesce into one run.
+ *     own budget (crew#1544). A refused launch backs off 2^n hours, at most a day, and a scheduled refusal is also told
+ *     to {@link SchedulerDeps.onScheduledRefusal} (the activity trail, crew#1656). Missed intervals coalesce into one run.
  *     (crew#1578) A last run that never got seats (still planning or distributing with none,
  *     {@link STUCK_UNSEATED_MS} after its scheduled launch) never started work: the schedule cancels it, on the run's
  *     own record too, and launches. A last run waiting on a person is never cancelled for them: the row says it is
@@ -66,6 +67,12 @@ export interface SchedulerDeps {
   runViewFresh?: (runId: string) => Promise<SessionView | undefined>;
   /** Called every sweep with the run statuses (the review ingest). Errors are logged, never thrown. */
   onTick?: Array<(status: ReadonlyMap<string, string>) => Promise<void>>;
+  /**
+   * (crew#1656) Called once per refused SCHEDULED launch (never for Run it now: the person who asked gets the refusal as
+   * the answer), after the row recorded it and backed off, so an unattended refusal can be told off the schedule row
+   * (the server writes it to the activity trail). Errors are logged, never thrown: the refusal is already recorded.
+   */
+  onScheduledRefusal?: (row: WorkflowSchedule, reason: string) => void;
   log: (msg: string) => void;
   now?: () => Date;
 }
@@ -355,6 +362,13 @@ export class WorkflowScheduler {
         now,
       );
       this.deps.log(`[schedules] ${row.id} launch refused (${failures}): ${message}`);
+      if (trigger === 'schedule') {
+        try {
+          this.deps.onScheduledRefusal?.(row, message);
+        } catch (hookErr) {
+          this.deps.log(`[schedules] ${row.id}: telling its refusal failed: ${hookErr instanceof Error ? hookErr.message : String(hookErr)}`);
+        }
+      }
       throw err;
     }
     // Recorded FIRST: the next due time and the slot are durable before anything else can fail.

@@ -1690,6 +1690,13 @@ export async function createServer(
       (runId, detail) => audit.record('run.cancelled', SCHEDULE_ACTOR, { runId, detail }),
     ),
     onTick: [(status) => reviewService.reconcile(status)],
+    // (crew#1656) An unattended refusal is told on the activity trail too, not only on its schedule row: one entry per
+    // refused attempt, for every scheduled workflow (the review also keeps its failed review record, crew#1608).
+    onScheduledRefusal: (row, reason) => {
+      audit.record('schedule.launch_refused', SCHEDULE_ACTOR, {
+        detail: { id: row.id, workflow: row.workflow, trigger: 'schedule', reason: reason.slice(0, 500) },
+      });
+    },
     log: (m) => app.log.info(m),
   });
   registerScheduleRoutes(app, {
