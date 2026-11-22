@@ -1030,6 +1030,7 @@ export async function createServer(
   const canDeliver = canDeliverResolver(() => adapter.listWorkflows(), (m) => app.log.warn(m));
   const deliveryCache = new DeliveryDerivationCache({
     listViews: () => adapter.sessionsDetail(),
+    viewOf: (id) => adapter.runView(id),
     probes: vacuityProbes,
     isDelivered: (runId) => deliveryIndex.isDelivered(runId),
     canDeliver,
@@ -1060,7 +1061,7 @@ export async function createServer(
   // record — the routes await it for such a view, so the wire never serves `completed` +
   // `delivery: 'stranded'` for a run whose deliver unit already carries the PR URL.
   const deliveryResolver = new DeliveryResolver({
-    listViews: () => adapter.sessionsDetail(),
+    viewOf: (id) => adapter.runView(id),
     workOutput: (unitId) => adapter.workOutput(unitId),
     isDelivered: (runId) => deliveryIndex.isDelivered(runId),
     // The durable record first, then the read-side index — the same write order as

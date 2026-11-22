@@ -2060,6 +2060,7 @@ export function registerRoutes(
     runtime.deliveryCache ??
     new DeliveryDerivationCache({
       listViews: () => adapter.sessionsDetail(),
+      viewOf: (id) => adapter.runView(id),
       probes: vacuityProbes,
       isDelivered: (runId) => deliveryIndex.isDelivered(runId),
       canDeliver,

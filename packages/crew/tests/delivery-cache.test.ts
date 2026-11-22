@@ -99,6 +99,7 @@ function build(
   };
   const cache = new DeliveryDerivationCache({
     listViews: () => adapter.sessionsDetail() as Promise<SessionView[]>,
+    viewOf: async (id: string) => ((await adapter.sessionsDetail()) as SessionView[]).find((v) => v.session.id === id),
     probes: full,
     isDelivered: (runId) => deliveryIndex.urlFor(runId) !== undefined,
     ...(retryBaseMs !== undefined ? { retryBaseMs } : {}),
@@ -423,6 +424,7 @@ describe('the background pool — capped, in-flight-guarded, candidates only', (
     const views = [view('run-bug', { repo_ref: 'r', workdir: '/wt' })];
     const cache = new DeliveryDerivationCache({
       listViews: async () => views,
+      viewOf: async (id: string) => views.find((v) => v.session.id === id),
       probes: { worktreeExists: () => true, worktreeIsClean, runBranchIsEmpty: async () => false },
       isDelivered: () => false,
       retryBaseMs: 5,

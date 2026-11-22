@@ -101,7 +101,7 @@ function harness(
     workOutput: workOutputSpy,
   };
   const resolver = new DeliveryResolver({
-    listViews: () => adapter.sessionsDetail(),
+    viewOf: async (id: string) => ((await adapter.sessionsDetail()) as SessionView[]).find((v) => v.session.id === id),
     workOutput: (unitId) => adapter.workOutput(unitId),
     isDelivered: (runId) => index.isDelivered(runId),
     record: (runId, record) => {

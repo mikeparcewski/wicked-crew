@@ -107,6 +107,7 @@ function buildApp(
   };
   const cache = new DeliveryDerivationCache({
     listViews: () => mockAdapter.sessionsDetail() as Promise<SessionView[]>,
+    viewOf: async (id: string) => ((await mockAdapter.sessionsDetail()) as SessionView[]).find((v) => v.session.id === id),
     probes,
     isDelivered: (runId) => deliveryIndex.urlFor(runId) !== undefined,
   });

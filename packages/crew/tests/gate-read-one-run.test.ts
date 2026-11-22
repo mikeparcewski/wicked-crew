@@ -13,6 +13,7 @@ import { join } from 'node:path';
 
 import { CoreAdapter } from '../src/core/adapter.js';
 import { registerDemoRoutes } from '../src/api/recording.js';
+import { DeliveryResolver } from '../src/api/delivery-index.js';
 import { workingDocRunFacts } from '../src/api/server.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
@@ -164,4 +165,18 @@ describe('crew#1775 review: the demo view and the working document read their on
     expect(await workingDocRunFacts(adapter, () => undefined, 'no-such-run')).toBeNull();
     expect(folds).toBe(1);
   });
+
+  it("a run end's delivery read reads that run alone", async () => {
+    const resolver = new DeliveryResolver({
+      viewOf: (id) => adapter.runView(id),
+      workOutput: async () => null,
+      isDelivered: () => false,
+      record: () => undefined,
+    });
+    frame({ type: 'sessionCompleted', session: 'run-120' });
+    await resolver.resolve('run-3');
+    expect(folds).toBe(0);
+    expect(oneRunReads).toBe(1);
+  });
 });
+

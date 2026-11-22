@@ -251,6 +251,7 @@ function build(
   const canDeliver = (v: SessionView) => runCanDeliver(v, runWorkflowDef(v, adapter.listWorkflows()));
   const cache = new DeliveryDerivationCache({
     listViews: () => adapter.sessionsDetail() as Promise<SessionView[]>,
+    viewOf: async (id: string) => ((await adapter.sessionsDetail()) as SessionView[]).find((v) => v.session.id === id),
     probes: full,
     isDelivered: (runId) => deliveryIndex.urlFor(runId) !== undefined,
     canDeliver,
