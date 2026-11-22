@@ -7,7 +7,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import Fastify from 'fastify';
 import type { SessionView } from 'wicked-crew-api-types';
 import { extractLearnings, creatorSeats } from '../src/learnings/extract.js';
@@ -905,5 +905,8 @@ describe('crew#1800: the learnings dir follows WICKED_HOME', () => {
     expect(defaultLearningsDir({ WICKED_HOME: '' })).toBe(join(homedir(), '.wicked', 'learnings'));
     // An empty override is unset (it used to name a relative '' dir, so handoffs landed in the daemon's cwd).
     expect(defaultLearningsDir({ WICKED_HOME: scratch, WICKED_CREW_LEARNINGS_DIR: '' })).toBe(join(scratch, 'learnings'));
+    // A relative spelling is resolved: the dir becomes the distil seat's roots, which the engine takes only absolute.
+    expect(defaultLearningsDir({ WICKED_HOME: 'scratch-wicked' })).toBe(resolve('scratch-wicked', 'learnings'));
+    expect(defaultLearningsDir({ WICKED_CREW_LEARNINGS_DIR: 'rel/learnings' })).toBe(resolve('rel/learnings'));
   });
 });
