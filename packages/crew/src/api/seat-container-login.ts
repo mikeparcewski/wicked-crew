@@ -176,7 +176,8 @@ export const SIGNIN_MAX_AGE_MS = 15 * 60_000;
  *  clears what is left. The caller holds the seat's serial queue, so this can never end a newer sign-in. */
 export async function endSignIn(cli: string, deps: SeatLoginDeps, log: (line: string) => void): Promise<void> {
   const out = await runSeatLogin('abandon', cli, deps);
-  if (out.rc !== 0) log(`Sign-in cleanup for ${cli} did not finish: ${loginDetail(out.stderr) || 'seat-login abandon failed'}`);
+  // Credential-shaped text (a kubectl auth diagnostic) is redacted before the line is cut (codex r1).
+  if (out.rc !== 0) log(`Sign-in cleanup for ${cli} did not finish: ${loginDetail(publicText(out.stderr)) || 'seat-login abandon failed'}`);
 }
 
 /** A daemon start owns no sign-in: one a previous process opened (its terminal died with it) is ended through the
@@ -487,6 +488,10 @@ export function registerSeatContainerLoginRoutes(app: FastifyInstance, input: Se
         if (outcome.ok) {
           seatHealth.clearAuthFailureBefore(cli, cutoff);
           seatHealth.clearRecentBench(cli);
+        } else if (loginGeneration.get(cli) === generation) {
+          // A failed ingest leaves its login store for a retry crew never makes: end it now, still on this
+          // generation's serial operation, so it can never reach a newer sign-in (codex r1).
+          await endSignIn(cli, seatLoginDeps, (line) => app.log.info(line));
         }
         // A sign-out (or a newer sign-in) while this ingest ran owns the outcome now.
         if (loginGeneration.get(cli) === generation) containerLoginOutcomes.set(cli, outcome);
@@ -564,7 +569,9 @@ export function registerSeatContainerLoginRoutes(app: FastifyInstance, input: Se
       const { cli } = req.params as { cli: string };
       if (!containerSeat(cli)) return reply.code(404).send({ error: `container logout unavailable for seat: ${cli}` });
       bump(cli);
-      await abandonLogin(cli);
+      // Both queued before yielding (codex r1): a sign-in opened while this runs queues its argv AFTER the sign-out,
+      // so the sign-out can never end it.
+      void abandonLogin(cli);
       const out = await serial(cli, async () => {
         containerLoginOutcomes.delete(cli);
         return runSeatLogin('sign-out', cli, seatLoginDeps);

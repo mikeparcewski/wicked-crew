@@ -172,9 +172,17 @@ describe('background runtime reader', () => {
 describe('daemon start ends orphaned sign-ins (crew#1523)', () => {
   it('asks the engine to abandon each seat\'s sign-in before listening, on the container floor only, never a runtime rm', async () => {
     vi.stubEnv('WICKED_SEAT_FLOOR', 'container');
-    const exec = vi.fn<ExecLike>(async () => ({ stdout: '{"abandoned":false}', stderr: '' })); const app = Fastify();
+    // Each engine call is held open: the daemon is not ready (so takes no sign-in) until every one has finished.
+    const pending: Array<() => void> = [];
+    const exec = vi.fn<ExecLike>(() => new Promise((resolve) => { pending.push(() => resolve({ stdout: '{"abandoned":false}', stderr: '' })); }));
+    const app = Fastify();
     registerLoginCleanup(app, { gatewayDir: join(home, 'gateway'), exec });
-    await app.ready();
+    let ready = false; const readying = app.ready().then(() => { ready = true; });
+    await vi.waitFor(() => expect(pending).toHaveLength(CONTAINER_LOGIN_CLIS.length));
+    for (const finish of pending.slice(0, -1)) finish();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(ready).toBe(false);
+    pending.at(-1)!(); await readying; expect(ready).toBe(true);
     expect(exec.mock.calls.map(([file, args]) => [file, args])).toEqual(CONTAINER_LOGIN_CLIS.map((cli) => ['/fixture/core', ['seat-login', 'abandon', cli]]));
     expect(exec.mock.calls.every(([, , opts]) => opts.env['WICKED_SEAT_GATEWAY_DIR'] === gatewayDirOf(join(home, 'gateway')))).toBe(true);
     await app.close(); expect(exec).toHaveBeenCalledTimes(CONTAINER_LOGIN_CLIS.length);
