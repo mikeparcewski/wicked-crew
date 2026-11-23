@@ -45,6 +45,7 @@ import { existsSync, lstatSync, readdirSync, realpathSync } from 'node:fs';
 import { lstat, readdir } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
+import { wickedHome, wickedHomeDir } from '../core/wicked-home.js';
 import { SKILLS_ROOT_NAMES } from '../skills/root-names.js';
 import { SKILLS_DIRNAME, SNAPSHOTS_DIRNAME } from '../skills/store.js';
 import { isOsMetadataEntry, isRegisteredStateHomeEntry } from './state-home-registry.js';
@@ -69,8 +70,8 @@ export const STATE_HOME_BLOCKER_CODE = 'state_home_unregistered';
  * placement is fenced, and this module refuses to boot into one.
  *
  * `home` (crew#1802): the dir the variable defaults to under `${WICKED_HOME:-~/.wicked}` (`core/wicked-home.ts`). With
- * the variable unset, a `WICKED_HOME` that puts that dir inside the state home is refused the same way, naming
- * `WICKED_HOME`.
+ * the variable unset, a wicked home (set, or the default) that puts that dir inside the state home is refused the same
+ * way, naming `WICKED_HOME`.
  *
  * `WICKED_INTERACTIVE_ROOT` is deliberately NOT listed since crew 0.7.35 (D-L7-1 / BC-49): the
  * interactive default now lives INSIDE the state home (`interactive/`, a registered join entry the
@@ -181,9 +182,16 @@ export function assertWickedRootsOutsideStateHome(env: NodeJS.ProcessEnv, stateH
     const value = env[variable];
     let placed: { by: string; value: string; target: string } | null = null;
     if (value !== undefined && value !== '') placed = { by: variable, value, target: value };
-    // crew#1802: the variable unset, its dir is `<WICKED_HOME>/<home>` (core/wicked-home.ts). The default `~/.wicked`
-    // is not checked, like every other unset variable's default.
-    else if (home !== undefined && wickedHomeVar !== undefined && wickedHomeVar !== '') placed = { by: 'WICKED_HOME', value: wickedHomeVar, target: join(wickedHomeVar, home) };
+    // crew#1802: the variable unset, its dir is `${WICKED_HOME:-~/.wicked}/<home>`, resolved by the same helper the dir's
+    // readers use (core/wicked-home.ts), so the check and the dir agree (a Windows drive-relative WICKED_HOME included).
+    // An unset or empty WICKED_HOME is named with the default it stands for (xreview r1).
+    else if (home !== undefined) {
+      placed = {
+        by: 'WICKED_HOME',
+        value: wickedHomeVar !== undefined && wickedHomeVar !== '' ? wickedHomeVar : `(unset: ${wickedHome(env)})`,
+        target: wickedHomeDir(variable, home, env),
+      };
+    }
     if (placed === null || !isInside(placed.target, stateHome)) continue;
     const entry = topLevelUnder(placed.target, stateHome);
     throw new StateHomePlacementError(placed.by, placed.value, stateHome, entry === '' ? '(the state home itself)' : entry, placed.by === variable ? creates : `${creates}, under WICKED_HOME/${home} while ${variable} is unset`);

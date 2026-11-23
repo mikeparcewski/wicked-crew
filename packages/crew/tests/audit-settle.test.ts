@@ -6,10 +6,11 @@
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AuditLog } from '../src/api/audit.js';
 import { LOCAL_ACTOR } from '../src/api/auth.js';
+import { settleAuditLogs } from './setup/audit-settle.js';
 import { removeScratch } from './setup/scratch.js';
 
 const N = 300;
@@ -46,5 +47,33 @@ describe('audit appends settle before cleanup (crew#1813)', () => {
     const logs = paths.map((p) => new AuditLog(p, () => undefined));
     for (let i = 0; i < N; i++) for (const l of logs) l.record('test.settle', LOCAL_ACTOR);
     await Promise.resolve();
+  });
+
+  it('a log of an audit module imported fresh after vi.resetModules() is settled too (xreview r1)', async () => {
+    vi.resetModules();
+    // Patching only the class the setup file imported would miss a re-evaluated module's class; the setup's module mock
+    // covers every evaluation.
+    const { AuditLog: Fresh } = await import('../src/api/audit.js');
+    dir = mkdtempSync(join(tmpdir(), 'crew-audit-settle-'));
+    paths = [join(dir, 'fresh.log')];
+    const log = new Fresh(paths[0]!, () => undefined);
+    for (let i = 0; i < N; i++) log.record('test.settle', LOCAL_ACTOR);
+  });
+});
+
+describe('settleAuditLogs (crew#1813)', () => {
+  it('an overlapping settle still waits for the logs another settle is draining (concurrent tests; xreview r1)', async () => {
+    const own = mkdtempSync(join(tmpdir(), 'crew-audit-settle-'));
+    try {
+      const files = [join(own, 'a.log'), join(own, 'b.log')];
+      const logs = files.map((p) => new AuditLog(p, () => undefined));
+      for (let i = 0; i < N; i++) for (const l of logs) l.record('test.settle', LOCAL_ACTOR);
+      const first = settleAuditLogs();
+      await settleAuditLogs();
+      expect(files.map(lines)).toEqual([N, N]);
+      await first;
+    } finally {
+      removeScratch(own);
+    }
   });
 });

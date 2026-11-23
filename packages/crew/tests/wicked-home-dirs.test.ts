@@ -105,6 +105,28 @@ describe('the boot refuses a WICKED_HOME that puts one of those dirs inside the 
     expect(() => assertWickedRootsOutsideStateHome({ WICKED_HOME: join(base, 'wicked-home') }, stateHome)).not.toThrow();
   });
 
+  it('an unset or empty WICKED_HOME is checked too: its default ~/.wicked inside the state home is refused, named (xreview r1)', () => {
+    const stateHome = join(homedir(), '.wicked');
+    for (const env of [{}, { WICKED_HOME: '' }]) {
+      let thrown: unknown;
+      try {
+        assertWickedRootsOutsideStateHome(env, stateHome);
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(StateHomePlacementError);
+      expect((thrown as StateHomePlacementError).variable).toBe('WICKED_HOME');
+      expect((thrown as StateHomePlacementError).value).toBe(`(unset: ${join(homedir(), '.wicked')})`);
+    }
+    // The default state home (a sibling, ~/.wicked-crew) is not.
+    expect(() => assertWickedRootsOutsideStateHome({}, join(homedir(), '.wicked-crew'))).not.toThrow();
+  });
+
+  it('a relative WICKED_HOME is checked where the dirs resolve (the same helper)', () => {
+    const rel = join('rel-wicked-home-check');
+    expect(() => assertWickedRootsOutsideStateHome({ WICKED_HOME: rel }, resolve(rel))).toThrow(/^WICKED_HOME=rel-wicked-home-check /u);
+  });
+
   it('each dir is refused under a WICKED_HOME inside the state home unless its own variable points elsewhere', () => {
     const stateHome = join(base, 'crew-state');
     const inside = join(stateHome, 'wh');
