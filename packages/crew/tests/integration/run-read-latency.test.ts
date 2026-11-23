@@ -1,16 +1,18 @@
 // crew#944 — on a long-lived state home a single run read must stay cheap, and `/health` must keep
 // answering while run reads are in flight.
 //
-// Every `GET /runs/:id` (and `GET /runs`) is the engine's sessions-detail fold. That fold used to
-// re-read and re-parse every work unit on the store once PER SESSION (wicked-core `list_projects`
-// → `session_units`), O(runs × units): ~3 s per read on a ~120-run home. The reads serialize on the
-// engine's actor and each holds a libuv worker thread while it waits, so a burst of them starved
-// `/health` past 10 s. wicked-core#869 made the fold one unit scan.
+// `GET /runs` is the engine's whole-store fold (`sessionsDetail`); `GET /runs/:id` is its one-run read
+// (`sessionDetail`, F35 / crew#1775). The fold used to re-read and re-parse every work unit on the
+// store once PER SESSION (wicked-core `list_projects` → `session_units`), O(runs × units): ~3 s per
+// read on a ~120-run home. The reads serialize on the engine's actor and each holds a libuv worker
+// thread while it waits, so a burst of them starved `/health` past 10 s. wicked-core#869 made the fold
+// one unit scan. Both reads are measured (crew#1812: the fold could regress while the one-run read
+// stays cheap); a list read is measured cold, past the adapter's snapshot, so it is a real fold.
 //
 // The home here is the REAL stub engine's: two template runs on a 6-phase tool-only def (one
 // completed, one parked at a gate), cloned row for row to 120 runs (tests/setup/long-lived-home.mts),
 // then opened ONCE by this process. On the per-session fold a read costs ~120 × 720 unit parses
-// (~0.5 s) and both budgets below fail by far more than the tolerance.
+// (~0.5 s) and every budget below fails by far more than the tolerance.
 //
 // Tolerance: CI runs this beside the rest of the suite, so a measurement may take up to ATTEMPTS
 // tries and passes on its best one; every attempt is reported. The per-session fold fails all of
@@ -24,7 +26,7 @@ import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CoreAdapter } from '../../src/core/adapter.js';
+import { CoreAdapter, VIEWS_SNAPSHOT_MAX_AGE_MS } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import { removeScratch } from '../setup/scratch.js';
 
@@ -41,6 +43,18 @@ const RUN_READ_P95_MS = 100;
  * more (20 of them in the burst), and leaves ~3.5x headroom over the worst run seen.
  */
 const HEALTH_UNDER_LOAD_MS = 1_000;
+/** Cold `GET /runs` reads per attempt (each one past the snapshot's age bound, so each is a fresh fold). */
+const COLD_LIST_SAMPLES = 8;
+/**
+ * crew#1812: median of a cold `GET /runs` on the 120-run home: the engine's whole-store fold
+ * (`sessionsDetail`), its parse, identity pass and freeze, and the route's copy and reply. The fault this
+ * guards is the per-session fold (crew#944, wicked-core#869) coming back in `sessionsDetail` while the
+ * one-run read stays cheap. Measured at host 1-min load ~30 on 14 cores: the fold as it is, p50 29-36 ms;
+ * the fold with one unit read per session added (that fault's shape), p50 460-523 ms on every attempt.
+ * On CI runners the fold as it is took p50 63 ms (Linux) and 104 ms (macOS). 300 ms leaves ~3x over the
+ * slowest runner seen and still fails the fault's shape on the fastest host.
+ */
+const COLD_LIST_P50_MS = 300;
 
 const HELPER = fileURLToPath(new URL('../setup/long-lived-home.mts', import.meta.url));
 
@@ -51,6 +65,8 @@ let baseUrl: string;
 let runIds: string[];
 /** Callers that have entered `adapter.runView()` — proves the reads reached the adapter's run read. */
 let readsEntered = 0;
+/** The engine's whole-store folds (`sessionsDetail`) — proves each cold list read paid for its own. */
+let folds = 0;
 const savedEnv: Record<string, string | undefined> = {};
 
 function scratchBase(): string {
@@ -99,6 +115,13 @@ beforeAll(async () => {
     readsEntered += 1;
     return read(id);
   };
+  // crew#1812: count the engine's whole-store folds under the adapter's snapshot and single-flight.
+  const engine = (adapter as unknown as { core: Record<string, (...a: unknown[]) => Promise<string>> }).core;
+  const fold = engine['sessionsDetail']!;
+  engine['sessionsDetail'] = (...a: unknown[]) => {
+    folds += 1;
+    return fold(...a);
+  };
   app = await createServer(adapter, { stallWatchdog: { enabled: false } });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();
@@ -142,6 +165,36 @@ describe('crew#944 — run reads on a long-lived home', () => {
     }
     console.info(`[crew#944] run reads: ${report.join('; ')}`);
     expect(best, report.join('; ')).toBeLessThan(RUN_READ_P95_MS);
+  }, 240_000);
+
+  it(`a cold GET /runs (a fresh whole-store fold) answers within a median of ${COLD_LIST_P50_MS} ms over ${RUNS} runs`, async () => {
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const report: string[] = [];
+    let best = Infinity;
+    for (let attempt = 1; attempt <= ATTEMPTS && best >= COLD_LIST_P50_MS; attempt++) {
+      const samples: number[] = [];
+      let warm = 0;
+      while (samples.length < COLD_LIST_SAMPLES) {
+        // Past the snapshot's age bound, so the read needs a fold of its own. The daemon's own pollers
+        // (the schedulers) read the run list too: a read their fold served started no fold, is not a
+        // cold read, and is not counted.
+        await sleep(VIEWS_SNAPSHOT_MAX_AGE_MS + 50);
+        const before = folds;
+        const { ms, status } = await timed('/runs');
+        expect(status).toBe(200);
+        if (folds - before !== 1) {
+          warm += 1;
+          expect(warm, 'a list read past the age bound almost always folds the store itself').toBeLessThan(COLD_LIST_SAMPLES);
+          continue;
+        }
+        samples.push(ms);
+      }
+      const median = [...samples].sort((a, b) => a - b)[Math.floor(samples.length / 2)]!;
+      best = Math.min(best, median);
+      report.push(`attempt ${attempt}: p50 ${median.toFixed(1)} ms (${samples.map((x) => x.toFixed(0)).join(' ')}; ${warm} warm skipped)`);
+    }
+    console.info(`[crew#1812] cold run list: ${report.join('; ')}`);
+    expect(best, report.join('; ')).toBeLessThan(COLD_LIST_P50_MS);
   }, 240_000);
 
   it(`/health answers within ${HEALTH_UNDER_LOAD_MS} ms while 20 run reads are in flight`, async () => {
