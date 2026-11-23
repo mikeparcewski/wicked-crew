@@ -405,10 +405,6 @@ export class TtsService {
   }
 
   /**
-   * Install the engine if missing, then the named voices. Resolves at once; `status().install` reports it. Only
-   * manifest voices are accepted (400 `voice_unknown`); an unsupported machine is 409 `voice_tts_unsupported`.
-   */
-  /**
    * crew#1559 (5): the Python this machine will use, never the "being removed" or aborted answer a removal in flight
    * gives: a read waits for the removal and probes again (status reports what is there, not the transient).
    */
@@ -421,10 +417,21 @@ export class TtsService {
     }
   }
 
+  /**
+   * Install the engine if missing, then the named voices. Resolves at once; `status().install` reports it. Only
+   * manifest voices are accepted (400 `voice_unknown`); an unsupported machine is 409 `voice_tts_unsupported`.
+   */
   async startInstall(ids: readonly string[]): Promise<{ started: boolean }> {
     // crew#1559 (4): one admission at a time, so a double click waits for the first's probe and then reads its outcome
-    // (an install running, or nothing to install) instead of probing beside it.
-    const turn = this.admitting.then(() => this.admit(ids));
+    // (an install running, or nothing to install) instead of probing beside it. A removal fences the queue too: a request
+    // received before or during a DELETE is refused when its turn comes, never installed after the removal.
+    for (const id of ids) this.voiceById(id);
+    if (this.removing > 0) throw new VoiceError(409, 'voice_tts_missing', 'The speech engine is being removed.');
+    const received = this.epoch;
+    const turn = this.admitting.then(() => {
+      if (this.epoch !== received) throw new VoiceError(409, 'voice_tts_missing', 'The speech engine was removed while this install waited.');
+      return this.admit(ids);
+    });
     this.admitting = turn.catch(() => undefined);
     return turn;
   }

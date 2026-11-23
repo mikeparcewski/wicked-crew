@@ -18,6 +18,7 @@ import { defaultReviewsDir } from '../src/insights/workflow.js';
 import { defaultInspectionsDir } from '../src/inspect/service.js';
 import { defaultLearningsDir } from '../src/learnings/service.js';
 import { assertWickedRootsOutsideStateHome, StateHomePlacementError, STATE_HOME_ROOT_ENVS } from '../src/projects/state-home-preflight.js';
+import { defaultStateHome } from '../src/projects/state-home.js';
 import { removeScratch } from './setup/scratch.js';
 
 /** Every dir under the wicked home, with the variable that overrides it and how to read it. */
@@ -115,6 +116,36 @@ describe('the boot refuses a WICKED_HOME that puts one of those dirs inside the 
       process.env['HOME'] = join(stateHome, 'home');
       process.env['USERPROFILE'] = join(stateHome, 'home');
       for (const env of [{}, { WICKED_HOME: '' }]) expect(() => assertWickedRootsOutsideStateHome(env, stateHome)).not.toThrow();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
+  it('on the default state home the work roots are checked too: they follow WICKED_HOME with no variable of their own (crew#1823)', () => {
+    const saved = { HOME: process.env['HOME'], USERPROFILE: process.env['USERPROFILE'] };
+    try {
+      process.env['HOME'] = join(base, 'home');
+      process.env['USERPROFILE'] = join(base, 'home');
+      const stateHome = defaultStateHome(homedir());
+      const inside = join(stateHome, 'work');
+      // Every dir with a variable points outside, so only the work roots (repos, scripts) land inside.
+      const elsewhere = Object.fromEntries(DIRS.map((d) => [d.variable, join(base, 'out', d.name)]));
+      let thrown: unknown;
+      try {
+        assertWickedRootsOutsideStateHome({ ...elsewhere, WICKED_HOME: inside }, stateHome);
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(StateHomePlacementError);
+      expect((thrown as StateHomePlacementError).variable).toBe('WICKED_HOME');
+      expect((thrown as StateHomePlacementError).entry).toBe('work');
+      expect((thrown as StateHomePlacementError).message).toContain('under WICKED_HOME/repos');
+      // Any other state home keeps its work roots as `<state home>-<name>` siblings: nothing lands inside it.
+      const other = join(base, 'crew-state');
+      expect(() => assertWickedRootsOutsideStateHome({ ...elsewhere, WICKED_HOME: join(other, 'work') }, other)).not.toThrow();
     } finally {
       for (const [k, v] of Object.entries(saved)) {
         if (v === undefined) delete process.env[k];

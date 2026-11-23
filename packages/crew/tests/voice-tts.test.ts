@@ -847,6 +847,27 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
     await s.installDone();
   });
 
+  it('a DELETE during the first install probe refuses the installs queued behind it too: nothing installs after it (crew#1559)', async () => {
+    // The first probe hangs until the removal aborts it, as a real probe child is killed.
+    const probe = vi.fn().mockImplementationOnce((_name: string, _dir: string, signal?: AbortSignal) => new Promise<PythonInfo | null>((r) => {
+      signal?.addEventListener('abort', () => r(null));
+    })).mockImplementation(() => PY);
+    const sp = installSpawn();
+    const s = service({ spawn: sp.spawn, probe });
+    const first = s.startInstall([VOICE_A.id]).catch((e: unknown) => e);
+    const second = s.startInstall([VOICE_A.id]).catch((e: unknown) => e);
+    await new Promise((r) => setTimeout(r, 20));
+    await s.remove();
+    expect(await first).toMatchObject({ status: 409, code: 'voice_tts_missing' });
+    // Before the fence the queued request reached its turn after the removal and installed again.
+    expect(await second).toMatchObject({ status: 409, code: 'voice_tts_missing' });
+    expect(sp.calls).toEqual([]);
+    expect(existsSync(join(dir, 'tts', 'engine'))).toBe(false);
+    // A request made after the removal is a new ask and installs.
+    expect(await s.startInstall([VOICE_A.id])).toEqual({ started: true });
+    await s.installDone();
+  });
+
   it('status during a removal waits for it and reports the machine, not "being removed" (crew#1559)', async () => {
     const st = stubbornSpawn();
     try {
