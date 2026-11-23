@@ -14,7 +14,7 @@ import { readNewWorkSeats } from '../src/core/adapter.js';
 import type { Actor, LaunchRunInput } from '../src/core/types.js';
 import { isSystemWorkflow } from '../src/core/run-identity.js';
 import { FACTS_FILE, REPORT_FILE, runAnalyze } from '../src/insights/analyze-cli.js';
-import { OUT_DIR, ReviewPreparationRefused, ReviewService, githubNewIssueUrl, neverReachedEngine, pickSeat } from '../src/insights/review-service.js';
+import { NoIndependentReviewer, OUT_DIR, ReviewPreparationRefused, ReviewService, githubNewIssueUrl, neverReachedEngine, pickSeat, seatsThatRan } from '../src/insights/review-service.js';
 import { registerInsightsRoutes } from '../src/insights/routes.js';
 import { InsightsStore } from '../src/insights/store.js';
 import { REVIEW_WORKFLOW, loadReviewWorkflow } from '../src/insights/workflow.js';
@@ -34,11 +34,19 @@ const H = 3_600_000;
 const NOW = new Date('2026-10-27T00:00:00Z');
 const sec = (h: number): number => Math.floor((NOW.getTime() - h * H) / 1000);
 
-/** A run store: 6 unresolved failures on core, each overriding a "scope_drift" escalation, plus healthy history. */
-function views() {
+/** One run's work unit as the engine's `WorkUnit` carries it (crew-api-types `WorkUnit`): an agent step on `cli`. */
+const unitOn = (id: string, cli: string) => ({
+  id: `${id}:build`, session_id: id, ord: 1, description: 'build', stage: 'build', assigned_cli: cli, assigned_invocation: null,
+  council_task_ref: null, routing: { method: 'primary' }, denial_reason: null, phase_ref: 'build', conformance_ref: null,
+  phase_status: 'complete', collection_scope: null, status: 'done', role: 'creator',
+});
+
+/** A run store: 6 unresolved failures on core, each overriding a "scope_drift" escalation, plus healthy history. The
+ *  work ran on `agy`, a seat the review roster does not carry, unless a test says who ran it (crew#1375). */
+function views(ranBy: (id: string) => string = () => 'agy') {
   const out: unknown[] = [];
   const add = (id: string, hoursAgo: number, status: string, over: Record<string, unknown> = {}) =>
-    out.push({ session: { id, status, created_at: sec(hoursAgo), deliver_requested: false, delivery: 'none', archived_at: null, workflow_id: 'bug', repo_ref: 'core', title: `run ${id}`, project_id: 'p1', ...over }, units: [{ assigned_cli: 'claude' }] });
+    out.push({ session: { id, status, created_at: sec(hoursAgo), deliver_requested: false, delivery: 'none', archived_at: null, workflow_id: 'bug', repo_ref: 'core', title: `run ${id}`, project_id: 'p1', ...over }, units: [unitOn(id, ranBy(id))] });
   for (let i = 0; i < 6; i += 1) add(`bad-${i}`, 4 + i * 5, 'failed');
   for (let i = 0; i < 12; i += 1) add(`ok-${i}`, 60 + i * 10, 'completed');
   add('older', 24 * 30, 'completed'); // outside every window
@@ -169,6 +177,58 @@ describe('the review seat and the seats new work may use (crew#1592, F1/F2)', ()
     await expect(r.service.prepareLaunch(launchInput(), { trigger: 'manual' })).rejects.toBeInstanceOf(ReviewPreparationRefused);
     expect(r.store.get('rev-1')).toBeUndefined();
     expect(existsSync(join(r.root, 'reviews', 'rev-1'))).toBe(false);
+  });
+});
+
+describe('the review seat ran none of the work it reviews (crew#1375, R≠)', () => {
+  const seatOf = (input: LaunchRunInput) => (JSON.parse(input.clisJson) as Array<{ key: string }>).map((s) => s.key);
+  // `ok-*` launched 60–170 h ago (the baseline only); every other run in the 48 h window or outside every window.
+  const ranBy = (inWindow: string, baseline = 'agy') => () => views((id) => (id.startsWith('ok-') ? baseline : inWindow));
+
+  it('seatsThatRan: every seat that ran a unit, as cli keys (a seat instance counts as its cli)', () => {
+    expect(seatsThatRan([{ agents: ['claude#2', 'codex'] }, { agents: ['claude'] }, { agents: [] }])).toEqual(['claude', 'codex']);
+  });
+
+  it('a seat that ran a run in the window never interprets it: the next eligible seat does', async () => {
+    const r = rig({ views: ranBy('claude') });
+    const input = await r.service.prepareLaunch(launchInput(), { trigger: 'manual' });
+    expect(seatOf(input)).toEqual(['codex']);
+    expect(input.primary).toBe('codex');
+    expect(input.problem).not.toMatch(/Reduced assurance/u);
+  });
+
+  it('a run in the baseline only (reviewed before) does not exclude its seat', async () => {
+    const r = rig({ views: ranBy('agy', 'claude') });
+    expect(seatOf(await r.service.prepareLaunch(launchInput(), { trigger: 'manual' }))).toEqual(['claude']);
+  });
+
+  it('every eligible seat ran the work: refused as no_independent_reviewer naming them; nothing written or recorded', async () => {
+    const r = rig({ views: () => views((id) => (id === 'bad-0' ? 'codex' : 'claude#2')) });
+    const refused = await r.service.prepareLaunch(launchInput(), { trigger: 'manual' }).then(() => null, (e: unknown) => e);
+    expect(refused).toBeInstanceOf(NoIndependentReviewer);
+    expect(refused).toBeInstanceOf(ReviewPreparationRefused); // a schedule and Run it now answer it as a refusal (409)
+    expect((refused as NoIndependentReviewer).code).toBe('no_independent_reviewer');
+    expect((refused as NoIndependentReviewer).excluded).toEqual(['claude', 'codex']);
+    expect((refused as Error).message).toMatch(/\(claude, codex\) ran some of the work it reviews.*reduced assurance/u);
+    expect(r.store.get('rev-1')).toBeUndefined();
+    expect(existsSync(join(r.root, 'reviews', 'rev-1'))).toBe(false);
+  });
+
+  it("the person's reduced assurance lets a seat that ran the work interpret it, said in the brief", async () => {
+    const r = rig({ views: ranBy('claude', 'codex'), seats: [{ key: 'claude' }] });
+    await expect(r.service.prepareLaunch(launchInput(), { trigger: 'manual' })).rejects.toBeInstanceOf(NoIndependentReviewer);
+    const input = await r.service.prepareLaunch({ ...launchInput(), reducedAssurance: true }, { trigger: 'manual' });
+    expect(seatOf(input)).toEqual(['claude']);
+    expect(input.problem).toMatch(/Reduced assurance: every seat that could interpret this review ran some of the work it reviews/u);
+    expect(r.store.get('rev-1')?.status).toBe('running');
+  });
+
+  it('with no eligible seat at all the refusal is the plain one, never no_independent_reviewer', async () => {
+    const r = rig({ views: ranBy('pi'), seats: [{ key: 'pi', council_eligible: false }] });
+    const refused = await r.service.prepareLaunch(launchInput(), { trigger: 'manual' }).then(() => null, (e: unknown) => e);
+    expect(refused).toBeInstanceOf(ReviewPreparationRefused);
+    expect(refused).not.toBeInstanceOf(NoIndependentReviewer);
+    expect((refused as Error).message).toMatch(/no signed-in, eligible agent seat/u);
   });
 });
 

@@ -124,13 +124,13 @@ function eventsOf(id: string): unknown[] {
   return out;
 }
 
-function service(): ReviewService {
+function service(v: () => unknown[] = views): ReviewService {
   const root = mkdtempSync(join(tmpdir(), 'insights-cost-'));
   dirs.push(root);
   return new ReviewService({
     store: new InsightsStore(join(root, 'daemon-insights.json')),
     adapter: {
-      sessionsDetail: async () => views() as never,
+      sessionsDetail: async () => v() as never,
       runEvents: async (id) => eventsOf(id) as never,
       seatsForWorkflow: async () => [],
     },
@@ -196,13 +196,13 @@ describe('POST /insights/facts', () => {
     otherWorkflow: { runId: 'bug-x', ord: 1 },
     shadowAgent: { runId: 'rc-shadow', ord: 1 },
   };
-  function rig(withFacts = true): FastifyInstance {
+  function rig(withFacts = true, v: () => unknown[] = views): FastifyInstance {
     const app = Fastify({ logger: false });
     apps.push(app);
     // The real hooks, required mode: an operator route needs a bearer; the unit-token route never takes one.
     const human: Actor = { id: 'h', kind: 'human', trust: 'admin' } as Actor;
     registerAuthHooks(app, { mode: 'required', verifiers: [{ name: 'test', verify: async (t) => (t === 'human' ? human : null) }], allowedOrigins: null });
-    const s = service();
+    const s = service(v);
     registerInsightsRoutes(app, {
       store: new InsightsStore(join(dirs[dirs.length - 1] as string, 'other.json')),
       service: s,
@@ -214,7 +214,7 @@ describe('POST /insights/facts', () => {
                 const u = unitTokens[(JSON.parse(req) as { token: string }).token];
                 if (u === undefined) throw new Error('invalid_token: no such unit');
                 return JSON.stringify({ unit: { ...u, attempt: 0, phase: 'x', seat: 'tool' } });
-              }, async () => views() as never),
+              }, async () => v() as never),
               collect: (opts, nowMs) => s.collect(opts, nowMs),
               now: () => NOW,
             },
@@ -244,6 +244,24 @@ describe('POST /insights/facts', () => {
     expect(body.window).toEqual({ startMs: NOW - 90 * DAY, endMs: NOW, days: 90 });
     expect(body.excluded.self).toBe(1);
     expect(body.groups[0]).toMatchObject({ workflow: 'bug', runs: 5, wall: { p50: 75 }, spend: { n: 3, p50: 2 } });
+  });
+
+  it('(crew#1416) a run-cost run filed in a project models that project\'s runs only, and says so; the default project is daemon-wide', async () => {
+    const filed = (project: string) => () => views().map((v) => {
+      const s = (v as { session: Record<string, unknown> }).session;
+      return ['rc-1', 'bug-1', 'bug-4', 'feature-1'].includes(String(s['id'])) ? { ...(v as object), session: { ...s, project_id: project } } : v;
+    });
+    const res = await post(rig(true, filed('p1')), { token: 'facts' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as CostFacts;
+    expect(body.scope).toBe("the runs filed in this run's project (p1), every repository; other projects' runs are left out");
+    expect(body.rows.map((r) => r.run).sort()).toEqual(['bug-1', 'bug-4', 'feature-1']);
+    expect(body.groups.map((g) => [g.workflow, g.runs])).toEqual([['bug', 2], ['feature', 1]]);
+    expect(body.excluded.self).toBe(1);
+    // Filed in the default project: every run on the daemon, as before.
+    const all = (await post(rig(true, filed('default')), { token: 'facts' })).json() as CostFacts;
+    expect(all.scope).toBe('every run on this daemon, all projects and repositories');
+    expect(all.groups[0]).toMatchObject({ workflow: 'bug', runs: 5 });
   });
 
   it('refuses every other unit: a bad token, another step, another workflow, an agent step named facts', async () => {

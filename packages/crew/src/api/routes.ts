@@ -3,6 +3,7 @@ import { registerRedeliverRoutes, type CheckRunTree, type RedeliverExec } from '
 import type { GhExec } from '../core/deliver.js';
 import { REVIEW_WORKFLOW } from '../insights/workflow.js';
 import { runUsageCost, type LooseEvent, type RunUsageCost } from '../insights/run-facts.js';
+import { NoIndependentReviewer } from '../insights/review-service.js';
 import { appsRuntimeDir, appsServerArtifact, containerEngineKnown } from '../apps/publish/artifacts.js';
 import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { busSeamsOffWarning, busUnavailableWarning } from '../core/bus-notice.js';
@@ -4106,6 +4107,11 @@ export function registerRoutes(
       try {
         await (runtime.reviewLaunch as NonNullable<RuntimeDeps['reviewLaunch']>)(input);
       } catch (err) {
+        // (crew#1375) No seat that ran none of the reviewed work: the review-change refusal's shape, so a chat job's Start
+        // offers reduced assurance.
+        if (err instanceof NoIndependentReviewer) {
+          return reply.code(409).send({ code: err.code, error: `the review could not be prepared: ${err.message}`, excluded: err.excluded, retryWith: { reducedAssurance: true } });
+        }
         return reply.code(409).send({ error: `the review could not be prepared: ${message(err)}` });
       }
     }

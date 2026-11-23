@@ -4,7 +4,8 @@
  *
  * (DES-CATALOG-002 CS6) `POST /insights/facts {token}` is WORKER-FACING: the `run-cost` workflow's `facts` Tool
  * (`wicked-crew insights-facts`) asks it with its unit's capability token, which is its only credential (it is a
- * unit-token route in `api/auth.ts`). It answers the cost facts of the last 90 days ({@link costFacts}).
+ * unit-token route in `api/auth.ts`). It answers the cost facts of the last 90 days ({@link costFacts}): the runs of the
+ * asking run's project when it is filed in one (crew#1416), else every run on the daemon.
  */
 
 import type { FastifyInstance, FastifyReply } from 'fastify';
@@ -21,6 +22,7 @@ import { RecommendationError, type ReviewService } from './review-service.js';
 import type { InsightsStore } from './store.js';
 import type { SessionView } from 'wicked-crew-api-types';
 import { runNameOf } from '../core/run-identity.js';
+import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import { RUN_COST_FACTS_CMD, RUN_COST_FACTS_STEP, RUN_COST_WORKFLOW, costFacts, costWindow } from './cost.js';
 import type { CollectOptions } from './review-service.js';
 import type { RunFact } from './run-facts.js';
@@ -29,12 +31,14 @@ const V = API_PREFIX;
 const DismissSchema = z.strictObject({ reason: z.string().trim().min(1).max(500) });
 const FactsSchema = z.strictObject({ token: z.string().min(1).max(512) });
 
-/** What a unit token resolves to: its run, its step id, the run's workflow name and the unit's Tool command. */
+/** What a unit token resolves to: its run, its step id, the run's workflow name, the unit's Tool command and the
+ *  project the run is filed in (`null`: none on its record). */
 export interface FactsUnit {
   runId: string;
   phase: string;
   workflow: string | null;
   toolCmd: string[] | null;
+  projectId: string | null;
 }
 
 export interface InsightsFactsDeps {
@@ -67,11 +71,13 @@ export function factsUnitResolver(
     const view = (await sessions()).find((v) => v.session.id === runId);
     const u = view?.units.find((x) => x.ord === ord);
     const cmd = (u as { tool_cmd?: unknown } | undefined)?.tool_cmd;
+    const project = (view?.session as { project_id?: unknown } | undefined)?.project_id;
     return {
       runId,
       phase: u !== undefined && u.id.startsWith(`${runId}:`) ? u.id.slice(runId.length + 1) : '(unknown)',
       workflow: view === undefined ? null : runNameOf(view),
       toolCmd: Array.isArray(cmd) && cmd.every((c) => typeof c === 'string') ? (cmd as string[]) : null,
+      projectId: typeof project === 'string' && project !== '' ? project : null,
     };
   };
 }
@@ -173,8 +179,16 @@ export function registerInsightsRoutes(app: FastifyInstance, deps: InsightsRoute
       }
       const now = (facts.now ?? Date.now)();
       const window = costWindow(now);
-      const runs = await facts.collect({ startMs: window.startMs, endMs: window.endMs }, now);
-      return costFacts(runs, { window, generatedAtMs: now, excludeRunId: unit.runId });
+      // (crew#1416) The run-cost card takes a project: a run filed in one models that project's runs (the question was
+      // about them); a run in the default project models every run on the daemon, and the facts say which.
+      const project = unit.projectId !== null && unit.projectId !== DEFAULT_PROJECT_ID ? unit.projectId : null;
+      const runs = await facts.collect({ startMs: window.startMs, endMs: window.endMs, ...(project !== null ? { projectIds: [project] } : {}) }, now);
+      return costFacts(runs, {
+        window,
+        generatedAtMs: now,
+        excludeRunId: unit.runId,
+        ...(project !== null ? { scope: `the runs filed in this run's project (${project}), every repository; other projects' runs are left out` } : {}),
+      });
     },
   );
 }
