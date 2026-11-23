@@ -8,13 +8,10 @@
 // One mechanism, no per-file `flush()`: this setup file (run before every test file) notes each AuditLog that records,
 // and the suite's runner (`audit-flush-runner.ts`) awaits all of them when a test's body ends: before any `afterEach`
 // runs, so before any cleanup a test file registers. A test may still call `audit.flush()` itself (the same chain).
-import { vi } from 'vitest';
-
-import type { AuditLog } from '../../src/api/audit.js';
+import { AuditLog } from '../../src/api/audit.js';
 
 /** The logs that recorded and are not known settled, shared with the runner through the worker's global. */
 const KEY = '__crewPendingAuditLogs';
-const PATCHED = Symbol.for('crew.auditSettle.patched');
 type Holder = { [KEY]?: Set<AuditLog> };
 
 function pending(): Set<AuditLog> {
@@ -23,21 +20,15 @@ function pending(): Set<AuditLog> {
   return g[KEY];
 }
 
-// Every evaluation of the audit module gets the tracking `record`, including a fresh one a test imports after
-// `vi.resetModules()` (the mock factory runs again for it; xreview r1). The module itself is returned unchanged.
-vi.mock('../../src/api/audit.js', async (importOriginal) => {
-  const mod = await importOriginal<typeof import('../../src/api/audit.js')>();
-  const proto = mod.AuditLog.prototype as AuditLog & { [PATCHED]?: true };
-  if (proto[PATCHED] !== true) {
-    const record = proto.record;
-    proto.record = function trackedRecord(this: AuditLog, ...args: Parameters<AuditLog['record']>): number {
-      pending().add(this);
-      return record.apply(this, args);
-    };
-    proto[PATCHED] = true;
-  }
-  return mod;
-});
+// The class this test file's module graph uses. A test that re-imports the audit module after `vi.resetModules()` would
+// get an untracked class; none does (the suite's resetModules users re-import publish/artifacts, hermetic-home and
+// voice/tts). A module mock would cover that case but keeps the audit module, and the state home it read, across every
+// reset, which changes what such a test sees (xreview r1, r2).
+const record = AuditLog.prototype.record;
+AuditLog.prototype.record = function trackedRecord(this: AuditLog, ...args: Parameters<AuditLog['record']>): number {
+  pending().add(this);
+  return record.apply(this, args);
+};
 
 /**
  * Await every append any AuditLog issued so far (each log's own `flush()`). A log leaves the set only when nothing was
