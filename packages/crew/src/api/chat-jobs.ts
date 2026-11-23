@@ -237,11 +237,11 @@ const NEW_ADJ = String.raw`(?:new|second|separate|another|fresh)`;
  *  change one ("do not update PR #4", "don't add tests to PR #4"): no existing pull request is attached. A negated
  *  new-PR ask ("do not open a new PR", "don't open a PR") is not one. */
 const NEW_PR_ASK = new RegExp(
-  String.raw`\b(?:(?:open|opening|create|creating|raise|raising|make|making|start|starting|file|filing)\s+(?:(?:a|an)\s+(?:${NEW_ADJ}\s+)?|${NEW_ADJ}\s+)|(?:in|as|into|with)\s+(?:a\s+|an\s+)?${NEW_ADJ}\s+)${PR_WORD}\b`,
+  String.raw`\b(?:(?:open|opening|create|creating|raise|raising|make|making|start|starting|file|filing)\s+(?:(?:a|an)\s+(?:${NEW_ADJ}\s+)?|${NEW_ADJ}\s+|(?=(?:PRs|pull[ -]?requests)\b))|(?:in|as|into|with)\s+(?:a\s+|an\s+)?${NEW_ADJ}\s+)${PR_WORD}\b`,
   'gi',
 );
 const NEW_PR_NEGATED = /(?:\b(?:not|never|without|no need to|dont)|n't|n’t)\s+(?:\w+\s+)?$/i;
-const KEEP_PR_ASK = new RegExp(String.raw`(?:\b(?:do not|dont|never|without)|n't|n’t)\s+${CHANGE_VERBS}\b[^!?\n]{0,40}?\b${PR_WORD}\b`, 'i');
+const KEEP_PR_ASK = new RegExp(String.raw`(?:\b(?:do not|dont|never|without)|n't|n’t)\s+${CHANGE_VERBS}\b[^!?\n.;,]{0,40}?\b${PR_WORD}\b`, 'i');
 
 function asksForNewPr(words: string): boolean {
   if (KEEP_PR_ASK.test(words)) return true;
@@ -250,7 +250,7 @@ function asksForNewPr(words: string): boolean {
 
 /** Whether `words` name a pull request at all (the cheap gate before the chat's runs are read). */
 export function mentionsPullRequest(words: string): boolean {
-  return /\b(?:PR|pull[ -]?requests?)\b|\/(?:pull|pullrequest)\/\d+/i.test(words);
+  return /\b(?:PRs?|pull[ -]?requests?)\b|\/(?:pull|pullrequest)\/\d+/i.test(words);
 }
 
 /** Why a job asked to change a pull request does not update one (the card's note says it). */
@@ -279,9 +279,15 @@ export function prRevisionOf(
   }
   // Numbers outside the URLs: "PR #4", "pull request 4", a list ("PRs #4 and #9") and a repository's ("PR o/r#9").
   const rest = words.replace(PR_URL_IN_WORDS, ' ');
-  const list = new RegExp(String.raw`\b(?:PRs?|pull[ -]?requests?)\s*((?:[\w.-]+\/[\w.-]+)?#?\d+(?:\s*(?:,|and|&|or)\s*(?:[\w.-]+\/[\w.-]+)?#\d+)*)`, 'gi');
+  // After a singular head a list member needs its `#` ("PR #4 and 5 more tests" names one PR); after a plural one it may
+  // be bare ("pull requests 4 and 9").
+  const target = String.raw`(?:[\w.-]+\/[\w.-]+)?#?\d+`;
+  const list = new RegExp(
+    String.raw`\b(?:(?:PR|pull[ -]?request)\s*(${target}(?:\s*(?:,|and|&|or)\s*(?:[\w.-]+\/[\w.-]+)?#\d+)*)|(?:PRs|pull[ -]?requests)\s*(${target}(?:\s*(?:,|and|&|or)\s*${target})*))`,
+    'gi',
+  );
   for (const m of rest.matchAll(list)) {
-    for (const t of m[1]!.matchAll(/(?:([\w.-]+\/[\w.-]+)#)?#?(\d+)/g)) {
+    for (const t of (m[1] ?? m[2]!).matchAll(/(?:([\w.-]+\/[\w.-]+)#)?#?(\d+)/g)) {
       const n = Number(t[2]);
       const repo = t[1];
       const hit = mine.find((d) => d.number === n && (repo === undefined || new RegExp(String.raw`/${repo.replace(/[.]/g, '\\.')}/pull/${n}$`, 'i').test(d.url)));

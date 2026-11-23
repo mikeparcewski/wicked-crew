@@ -138,6 +138,17 @@ describe('crew#1840 a chat job that changes a pull request this chat delivered',
     );
   });
 
+  it('naming two PRs this chat delivered (plural words) reads the chat\'s runs and asks for a choice', async () => {
+    const second = { ...DELIVERED, session: { ...DELIVERED.session, id: 'r-2', deliverUrl: PR_URL.replace(/1$/, '2') } } as unknown as SessionView;
+    const r = rig([DELIVERED, second], () => CHAT);
+    const p = await turn(r, 'Update PRs #1 and #2 with a test that sum([0, 2, 3]) is 5');
+    expect(r.runsRead).toBe(1);
+    expect(p.revisesPr).toBeUndefined();
+    expect(p.sentence!.notes).toContain(
+      "This job won't update an existing pull request: you named more than one pull request this chat delivered on wicked. To change a delivered pull request, use Revise this PR on the job that delivered it.",
+    );
+  });
+
   it('a request that names no pull request reads no runs and changes nothing', async () => {
     const r = rig([DELIVERED], () => CHAT);
     const p = await turn(r, 'add a test in test/math.test.js that sum([0, 2, 3]) is 5');
@@ -179,6 +190,9 @@ describe('prRevisionOf', () => {
     expect(prRevisionOf("Add the test on the same PR, don’t open a PR", [gh], 'tiny')).toEqual({ pr: gh, named: null });
     expect(prRevisionOf('Update README and open a PR', [gh], 'tiny')).toBeNull();
     expect(prRevisionOf('Fix it and create a pull request', [gh], 'tiny')).toBeNull();
+    expect(prRevisionOf('Open pull requests for these changes', [gh], 'tiny')).toBeNull();
+    // A negation binds within its clause: an unrelated "don't add dependencies" leaves "update PR #4" a revision.
+    expect(prRevisionOf("Don't add dependencies; update PR #4 with the fix.", [gh], 'tiny')).toEqual({ pr: gh, named: null });
     expect(prRevisionOf("Don't add tests to PR #4; just reproduce the failure locally", [gh], 'tiny')).toBeNull();
     expect(prRevisionOf('Never commit to PR #4', [gh], 'tiny')).toBeNull();
     expect(prRevisionOf("Don't apply the patch to the PR", [gh], 'tiny')).toBeNull();
@@ -204,6 +218,8 @@ describe('prRevisionOf', () => {
     expect(prRevisionOf('Update PR o/tiny-math#9', [gh], 'tiny')).toEqual({ pr: null, named: 'o/tiny-math#9', miss: 'not-delivered' });
     expect(prRevisionOf('Update PR other/repo#4', [gh], 'tiny')).toEqual({ pr: null, named: 'other/repo#4', miss: 'not-delivered' });
     expect(prRevisionOf('Update PR o/tiny-math#4', [gh], 'tiny')).toEqual({ pr: gh, named: null });
+    expect(prRevisionOf('Update pull requests 4 and 5', [gh, gh5], 'tiny')).toEqual({ pr: null, named: null, miss: 'several' });
+    expect(prRevisionOf('Update pull requests 4 and 9', [gh], 'tiny')).toEqual({ pr: null, named: 'pull request #9', miss: 'not-delivered' });
     // A count after a PR is not another PR.
     expect(prRevisionOf('Update PR #4 and 5 more tests', [gh], 'tiny')).toEqual({ pr: gh, named: null });
     // The same PR by URL and by number is one target.
