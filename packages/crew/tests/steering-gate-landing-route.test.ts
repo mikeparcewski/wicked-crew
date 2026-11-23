@@ -29,7 +29,7 @@ import { CoreAdapter } from '../src/core/adapter.js';
 import { RuleChangedError, ruleRevision } from '../src/governance/rule-revision.js';
 import { createServer } from '../src/api/server.js';
 import { steeringInboxDir } from '../src/api/governance-steering.js';
-import { steeringLandedMarkerPath, steeringProposalPath } from '../src/api/steering-landing.js';
+import { steeringLandedRecordPath, steeringProposalPath } from '../src/api/steering-landing.js';
 import type { ConformanceRule, SessionView } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
 import { withRunViews } from './support/run-views.js';
@@ -314,10 +314,10 @@ describe('POST /runs/:id/gate on a steering-author propose gate (crew#388)', () 
   it('a marker from before M8 (no digest) does not stop a revised proposal from landing', async () => {
     const RUN = 'land-legacy-marker-1';
     views = [steeringRun(RUN)];
-    mkdirSync(dirname(steeringLandedMarkerPath(RUN)), { recursive: true });
+    mkdirSync(dirname(steeringLandedRecordPath()), { recursive: true });
     writeFileSync(
-      steeringLandedMarkerPath(RUN),
-      JSON.stringify({ ruleIds: ['POL-0001'], source: 'deliverable', at: '2026-10-01T00:00:00Z' }),
+      steeringLandedRecordPath(),
+      JSON.stringify({ [RUN]: { ruleIds: ['POL-0001'], source: 'deliverable', at: '2026-10-01T00:00:00Z' } }),
       'utf8',
     );
     writeProposalFile(RUN, JSON.stringify([{ ...PROPOSAL[0]!, statement: 'revised after the upgrade' }]));
@@ -651,7 +651,7 @@ describe('a drafted id already in force (crew#1846)', () => {
     const { body } = await send('POST', `/runs/${RUN}/gate`, { approve: true });
     expect(body['landing']).toMatchObject({ outcome: 'landed', ruleIds: ['PAT-NEW'] });
     expect(upserted.filter((r) => r.id === 'PAT-001').map((r) => r.statement)).toEqual(['every handler validates its input with zod']);
-    expect(steeringLandedMarkerPath(RUN).startsWith(steeringInboxDir(RUN))).toBe(false);
+    expect(steeringLandedRecordPath().startsWith(dirname(steeringInboxDir(RUN)))).toBe(false);
   });
 
   it("this run's rule edited by someone since it landed is left as they made it; the revision lands as a new rule", async () => {

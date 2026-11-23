@@ -26,7 +26,7 @@
  *  - AUDITABLE — every landed rule records `governance.rule.upserted` with the chat provenance
  *    and the run id, exactly as the doctrine documents; a landing that could not happen records
  *    `governance.steering.landing_failed` with the reason.
- *  - IDEMPOTENT — a durable marker (`landed.json` in the daemon's state home) is written after a full
+ *  - IDEMPOTENT — a durable marker (the run's entry in the state home's `daemon-steering-landed.json`) is written after a full
  *    landing; a replayed approve (daemon restart mid-request, double-driven gate) finds it and
  *    re-lands nothing.
  *  - NEVER OVER ANOTHER RULE (crew#1846) — the store write is an upsert keyed by rule id, so a
@@ -64,19 +64,44 @@ import type { AuditLog } from './audit.js';
 /** The workflow whose propose gate this landing serves. */
 export const STEERING_AUTHOR_WORKFLOW = 'steering-author';
 
-/** Durable idempotency marker written beside the proposal after a full landing. */
-export const STEERING_LANDED_MARKER_FILENAME = 'landed.json';
+/** (crew#1846) Every steering-author run's landing record, one JSON map keyed by run id, in the daemon's state home
+ *  (a `daemon-` file, which the state-home fence already classifies and denies to workers). */
+export const STEERING_LANDED_FILENAME = 'daemon-steering-landed.json';
 
 /** Where the propose phase is told to write its machine-readable proposal. */
 export function steeringProposalPath(runId: string): string {
   return join(steeringInboxDir(runId), STEERING_PROPOSAL_FILENAME);
 }
 
-/** Where a landing records what it landed (replay dedupe, and the rules this run owns). In the daemon's state home
- *  (crew#1846), never the run's steering inbox: the inbox is the run's write root, and a worker that could write this
+/** Where landings record what they landed (replay dedupe, and the rules each run owns). In the daemon's state home
+ *  (crew#1846), never a run's steering inbox: the inbox is the run's write root, and a worker that could write this
  *  record could claim another author's rule as its own. */
-export function steeringLandedMarkerPath(runId: string): string {
-  return join(crewStateHome(), 'steering-landed', runId, STEERING_LANDED_MARKER_FILENAME);
+export function steeringLandedRecordPath(): string {
+  return join(crewStateHome(), STEERING_LANDED_FILENAME);
+}
+
+/** Every run's record; a missing file is empty. Any other read or parse failure throws. */
+async function readLandedRecords(): Promise<Record<string, unknown>> {
+  const text = await readIfExists(steeringLandedRecordPath());
+  if (text === null) return {};
+  const parsed = JSON.parse(text) as unknown;
+  return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+}
+
+/** Replace one run's record, atomically (temp file + rename). Landings are serialized, so read-modify-write is safe. */
+async function writeLandedRecord(runId: string, marker: LandedMarker): Promise<void> {
+  let all: Record<string, unknown>;
+  try {
+    all = await readLandedRecords();
+  } catch {
+    all = {};
+  }
+  all[runId] = marker;
+  const path = steeringLandedRecordPath();
+  await fsp.mkdir(dirname(path), { recursive: true });
+  const tmp = `${path}.tmp-${process.pid}`;
+  await fsp.writeFile(tmp, JSON.stringify(all, null, 2), 'utf8');
+  await fsp.rename(tmp, path);
 }
 
 /**
@@ -593,21 +618,13 @@ async function landOnce(
   const digest = keep === undefined
     ? proposalDigest(rawRules)
     : createHash('sha256').update(`${proposalDigest(rawRules)}\nkeep:${canonicalJson([...new Set(keep)].sort())}`).digest('hex');
-  let markerText: string | null = null;
-  try {
-    markerText = await readIfExists(steeringLandedMarkerPath(runId));
-  } catch {
-    /* an unreadable marker (not just missing) is treated as absent: a replay then lands the rules
-       again under new ids (crew#1846), a duplicate the person can retire, never a lost rule */
-  }
   let prior: LandedMarker | null = null;
-  if (markerText !== null) {
-    try {
-      const marker = JSON.parse(markerText) as LandedMarker;
-      if (Array.isArray(marker.ruleIds)) prior = marker;
-    } catch {
-      /* a corrupt marker is treated as absent */
-    }
+  try {
+    const marker = (await readLandedRecords())[runId] as LandedMarker | undefined;
+    if (typeof marker === 'object' && marker !== null && Array.isArray(marker.ruleIds)) prior = marker;
+  } catch {
+    /* an unreadable record is treated as absent: a replay then lands the rules again under new ids
+       (crew#1846), a duplicate the person can retire, never a lost or overwritten rule */
   }
   if (prior !== null && prior.digest === digest) {
     return {
@@ -775,8 +792,6 @@ async function landOnce(
       } catch {
         for (const id of landedIds) nextRevisions.delete(id);
       }
-      const path = steeringLandedMarkerPath(runId);
-      await fsp.mkdir(dirname(path), { recursive: true });
       const marker: LandedMarker = {
         ruleIds: landedIds,
         source,
@@ -787,7 +802,7 @@ async function landOnce(
         ...declined,
         ...changes,
       };
-      await fsp.writeFile(path, JSON.stringify(marker, null, 2), 'utf8');
+      await writeLandedRecord(runId, marker);
     } catch {
       /* a missing marker degrades to copies on a later approve, never an overwrite of another rule */
     }
