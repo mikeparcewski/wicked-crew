@@ -505,7 +505,9 @@ describe('the seat parse', () => {
       [
         { key: 'codex', binary: 'codex', chat_admission: { unscoped: { ok: true } } },
         { key: 'agy', binary: 'agy', chat_admission: { unscoped: { ok: true } } },
-        { key: 'my-sonnet', binary: '/opt/bin/claude', chat_admission: { unscoped: { ok: true } } },
+        // The engine runs the invocation's executable, not the binary field (codex r1 on #1817).
+        { key: 'mislabelled', binary: 'claude', headless_invocation: 'codex exec {PROMPT}', chat_admission: { unscoped: { ok: true } } },
+        { key: 'my-sonnet', binary: 'node', headless_invocation: '"/opt/bin/claude.cmd" -p {PROMPT}', chat_admission: { unscoped: { ok: true } } },
       ] as unknown as RosterSeat[];
     try {
       // The container floor (the default) keeps the roster's first admitted seat.
@@ -519,20 +521,30 @@ describe('the seat parse', () => {
       expect(onHost.calls).toEqual(['launch my-sonnet with-projects']);
       // A claude the engine benches on the host floor (its managed settings silence the gate hook,
       // core#1744) and a benched pi are never seated: no launch, a 409 that names the floor that works.
+      // Their admissions are what the daemon serves for a benched, signed-in seat (seat-standing.ts):
+      // refused, source `engine` — the only signed-in seats there (codex r1 on #1817).
+      const refusedHere = { ok: false, reason: 'agents on this computer run on the host…', source: 'engine' };
       const benched = (): RosterSeat[] =>
         [
-          { key: 'codex', binary: 'codex', chat_admission: { unscoped: { ok: true } } },
-          { key: 'claude', binary: 'claude', chat_admission: { unscoped: { ok: true } }, host_floor_bench: "claude can't be governed on the wrapped path on this machine: …" },
-          { key: 'pi', binary: 'pi', chat_admission: { unscoped: { ok: true } }, host_floor_bench: 'runs only on the container floor: …' },
+          { key: 'claude', binary: 'claude', chat_admission: { unscoped: refusedHere }, host_floor_bench: "claude can't be governed on the wrapped path on this machine: …" },
+          { key: 'pi', binary: 'pi', chat_admission: { unscoped: refusedHere }, host_floor_bench: 'runs only on the container floor: …' },
         ] as unknown as RosterSeat[];
       const none = fakeAdapter(JSON.stringify(gateRule('intake', 'approve', 'p-a')));
       const out = await seatParser({ adapter: none.adapter, roster: benched })('x');
       expect(out).toEqual({ ok: false, code: 409, error: HOST_FLOOR_NO_ANSWER_SEAT });
       expect(HOST_FLOOR_NO_ANSWER_SEAT).toContain('WICKED_SEAT_FLOOR=container');
       expect(none.calls).toEqual([]);
-      // No seat signed in at all is still the caller's own sentence.
-      expect(await seatParser({ adapter: none.adapter, roster: () => [] })('x')).toMatchObject({ ok: false, code: 409, error: 'no seat can take a turn to read the order — sign a seat in from the Helpers page' });
-      expect(chatSeat(benched(), false)?.key).toBe('codex');
+      // An admitted codex beside them is signed in too, and refused here as well.
+      const withCodex = (): RosterSeat[] => [{ key: 'codex', binary: 'codex', chat_admission: { unscoped: { ok: true } } }, ...benched()] as unknown as RosterSeat[];
+      expect(await seatParser({ adapter: none.adapter, roster: withCodex })('x')).toEqual({ ok: false, code: 409, error: HOST_FLOOR_NO_ANSWER_SEAT });
+      expect(none.calls).toEqual([]);
+      // No seat signed in at all (a benched seat signed out reads `auth`) is still the caller's own sentence.
+      const signedOut = (): RosterSeat[] =>
+        [{ key: 'claude', binary: 'claude', chat_admission: { unscoped: { ok: false, reason: 'signed out', source: 'auth' } }, host_floor_bench: '…' }] as unknown as RosterSeat[];
+      for (const r of [() => [] as RosterSeat[], signedOut]) {
+        expect(await seatParser({ adapter: none.adapter, roster: r })('x')).toMatchObject({ ok: false, code: 409, error: 'no seat can take a turn to read the order — sign a seat in from the Helpers page' });
+      }
+      expect(chatSeat(withCodex(), false)?.key).toBe('codex');
     } finally {
       if (prev === undefined) delete process.env['WICKED_SEAT_FLOOR'];
       else process.env['WICKED_SEAT_FLOOR'] = prev;

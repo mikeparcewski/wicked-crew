@@ -22,7 +22,7 @@ import type { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent, RosterSeat } from '../core/types.js';
 import { parsePrompt, ruleFromAnswer, type ParseOutcome } from './routes.js';
 import { isHostSeatFloor } from '../api/seat-container-login.js';
-import { cliFamily } from '../skills/usage.js';
+import { runRoot, type GovernanceSeatInput } from '../api/seat-governance.js';
 
 export interface SeatParserDeps {
   adapter: Pick<CoreAdapter, 'launchRun' | 'cancelRun' | 'workOutput' | 'onEvent' | 'projectsSupported' | 'projectList'>;
@@ -37,13 +37,6 @@ export const PARSE_STEP_ID = 'parse-1';
 /** Whether the daemon admits `s` to an unscoped turn. */
 function unscopedOk(s: RosterSeat): boolean {
   return (s as { chat_admission?: { unscoped?: { ok?: boolean } } }).chat_admission?.unscoped?.ok === true;
-}
-
-/** The seat's CLI: its binary's base name (`/opt/bin/claude` → `claude`), else its key's family. */
-function seatCli(s: RosterSeat): string {
-  const binary = typeof (s as { binary?: unknown }).binary === 'string' ? String((s as { binary: string }).binary) : '';
-  const base = binary.split(/[\\/]/).pop() ?? '';
-  return cliFamily(base !== '' ? base.replace(/\.exe$/i, '') : String(s.key));
 }
 
 /**
@@ -61,16 +54,35 @@ export const HOST_FLOOR_NO_ANSWER_SEAT =
   'only a Claude Code seat whose checks are not turned off by policy can answer — run agents in containers ' +
   '(WICKED_SEAT_FLOOR=container)';
 
+/** The engine benches `s` from governed work on the host floor (`host_floor_bench`, wicked-core#976/#1744). */
+function hostBenched(s: RosterSeat): boolean {
+  const bench = (s as { host_floor_bench?: unknown }).host_floor_bench;
+  return typeof bench === 'string' && bench !== '';
+}
+
 /**
  * The first seat the daemon would seat for an unscoped turn. On the interim host floor
- * (`isHostSeatFloor`), only a claude or pi seat the engine does not bench there (crew#1704).
+ * (`isHostSeatFloor`), only a seat whose CLI, as the engine resolves it from the invocation it
+ * launches (`runRoot`), is claude or pi, and which the engine does not bench there (crew#1704).
  */
 export function chatSeat(roster: RosterSeat[], hostFloor: boolean = isHostSeatFloor()): RosterSeat | undefined {
   if (!hostFloor) return roster.find(unscopedOk);
-  return roster.find((s) => {
-    if (!unscopedOk(s) || !HOST_FLOOR_ANSWER_CLIS.has(seatCli(s))) return false;
-    const bench = (s as { host_floor_bench?: unknown }).host_floor_bench;
-    return !(typeof bench === 'string' && bench !== '');
+  return roster.find(
+    (s) => unscopedOk(s) && !hostBenched(s) && HOST_FLOOR_ANSWER_CLIS.has(runRoot(s as unknown as GovernanceSeatInput)),
+  );
+}
+
+/**
+ * (crew#1704) Whether some seat is signed in but cannot answer here because of the host floor: one
+ * the daemon admits that is not claude or pi, or one the engine benches there. The admission itself
+ * refuses a benched seat (`chatSeatAdmission`, source `engine`), so a signed-in but benched seat is
+ * read off the bench and an admission that is not an auth refusal.
+ */
+function signedInButHostRefused(roster: RosterSeat[]): boolean {
+  return roster.some((s) => {
+    if (unscopedOk(s)) return true;
+    const source = (s as { chat_admission?: { unscoped?: { source?: unknown } } }).chat_admission?.unscoped?.source;
+    return hostBenched(s) && source !== 'auth';
   });
 }
 
@@ -125,7 +137,7 @@ export function seatTurn(deps: SeatTurnDeps): (input: SeatTurnInput) => Promise<
     if (entry === undefined) {
       // (crew#1704) On the host floor a seat may be signed in and still unable to answer here: say
       // so, and name the floor that can (never a 502 from a seat the engine refuses).
-      const hostOnly = deps.pickSeat === undefined && isHostSeatFloor() && chatSeat(roster, false) !== undefined;
+      const hostOnly = deps.pickSeat === undefined && isHostSeatFloor() && signedInButHostRefused(roster);
       return { ok: false, code: 409, error: hostOnly ? HOST_FLOOR_NO_ANSWER_SEAT : input.noSeat };
     }
     const seat = String(entry.key);
