@@ -59,6 +59,44 @@ const CITES: Partial<Record<SystemInfraKey, RegExp>> = {
   cluster: /\b(?:no_cluster|cluster_unreachable|controller_missing|pids_unlimited|policy_refused|admission_pending|image_unavailable|exec_stream_lost)\b/,
 };
 
+/** crew#1845: a gateway pod still not serving this long after it first read `starting` is not starting: it is
+ *  crash-looping or cannot pull its image (the engine reads both as `starting` for ever). A first pull on a slow
+ *  network fits inside it. */
+export const GATEWAY_START_BOUND_MS = 10 * 60_000;
+const GATEWAY_REINSTALL = 'Reinstall it: run `wicked-core cluster install --admin-context <your cluster context> --home <this daemon\'s state home>`, then re-check. If it still does not serve, its pod log in the cluster says why (often a gateway image that fails to start).';
+
+/**
+ * crew#1845: since when the model gateway has read `starting`, across this daemon's reads. A read that says the
+ * gateway serves, is stopped or is not started yet ends the run of `starting` reads; a read that could not see the
+ * gateway (the cluster did not answer) neither starts nor ends it.
+ */
+export class GatewayStartWatch {
+  private since: number | null = null;
+
+  /** The time the gateway first read `starting` in this run of reads, or null when it does not read `starting` now. */
+  observe(row: SystemInfraRow | undefined, now: number): number | null {
+    const seen = row?.key === 'gateway' ? (row.details as { gateway?: unknown } | undefined)?.gateway : undefined;
+    if (seen === 'starting') {
+      if (this.since === null || now < this.since) this.since = now;
+      return this.since;
+    }
+    if (seen === 'serving' || seen === 'stopped' || seen === 'absent' || row?.state === 'off' || row?.state === 'ok') this.since = null;
+    return null;
+  }
+}
+/** This daemon's watch (one gateway per daemon). */
+const DAEMON_GATEWAY_WATCH = new GatewayStartWatch();
+
+/** crew#1845: the CLIs whose broker credential refresh is failing (the broker row's per-CLI readings). */
+export function brokerRefreshFailing(row: SystemInfraRow): string[] {
+  if (row.key !== 'broker' || row.state !== 'degraded') return [];
+  const byCli = (row.details as { byCli?: unknown } | undefined)?.byCli;
+  if (byCli === null || typeof byCli !== 'object') return [];
+  return Object.entries(byCli as Record<string, unknown>)
+    .filter(([, r]) => (r as { state?: unknown } | null)?.state === 'refresh_failing')
+    .map(([cli]) => cli);
+}
+
 /** A floor denial whose base fails the same check: the red-base evidence. */
 const BASE_RED = /base_red_unseparated|the run base [0-9a-f]{6,40} fails this check too|base fails (this check )?too/i;
 /** The first failing check a floor denial names (`test: exit 101`). */
@@ -106,6 +144,8 @@ export interface NeedsInput {
   infraHoldsLive: (key: SystemInfraKey) => boolean;
   /** Per-run cost, when its log was read; absent ⇒ unknown. */
   costOf?: (runId: string) => RunCost | undefined;
+  /** How long the gateway has read `starting` (crew#1845); this daemon's own watch when absent. */
+  gatewayWatch?: GatewayStartWatch;
 }
 
 export interface Needs {
@@ -420,8 +460,32 @@ export function buildNeeds(input: NeedsInput): Needs {
   };
 
   // Down (or silent) components first: a held run whose denial names one joins it.
-  const infraItems: Array<{ row: SystemInfraRow; kind: 'prevents' | 'slows' }> = [];
+  const infraItems: Array<{ row: SystemInfraRow; kind: 'prevents' | 'slows'; word?: string; cli?: string }> = [];
+  const gatewayRow = input.infra.find((r) => r.key === 'gateway');
+  const startingSince = (input.gatewayWatch ?? DAEMON_GATEWAY_WATCH).observe(gatewayRow, now);
   for (const row of input.infra) {
+    // crew#1845: a gateway still `starting` past its bound never serves: it is down for every seat, and it claims the
+    // stalled runs behind it. A fresh install's gateway (`absent`, started before the first seat) stays quiet.
+    if (row.key === 'gateway' && row.state === 'degraded' && startingSince !== null && now - startingSince >= GATEWAY_START_BOUND_MS) {
+      infraItems.push({
+        row: {
+          ...row,
+          state: 'down',
+          reason: `its pod has been starting for ${Math.round((now - startingSince) / 60_000)} min and is still not serving, so seats have no route to their models: it is crash-looping or cannot pull its image`,
+          remedy: GATEWAY_REINSTALL,
+        },
+        kind: 'prevents',
+        word: 'not starting',
+      });
+      continue;
+    }
+    // crew#1845: a failing credential refresh is a slowdown ahead of the work: the credential is served until it
+    // expires, then the CLI can take no work. It names the CLI, and signing it in again is the fix.
+    const failing = brokerRefreshFailing(row);
+    if (failing.length > 0) {
+      infraItems.push({ row, kind: 'slows', word: `can't refresh ${failing.join(' and ')}'s sign-in`, cli: failing[0]! });
+      continue;
+    }
     if (row.state === 'down') infraItems.push({ row, kind: 'prevents' });
     else if (row.state === 'degraded' && (row.key === 'load' || row.key === 'daemon' || row.key === 'seat_images' || (row.key === 'skills' && /launches wait/i.test(row.reason)))) infraItems.push({ row, kind: 'slows' });
     else if (row.state === 'unknown' && WORK_PATH.has(row.key)) infraItems.push({ row, kind: 'slows' });
@@ -616,7 +680,7 @@ export function buildNeeds(input: NeedsInput): Needs {
   // Components: a down one holds the runs whose denial names it (and every live run when it is on
   // their path); host load slows the held runs whose next step is real work, and every new run.
   const heldMembers = members.filter((m) => m.run !== undefined);
-  for (const { row, kind } of infraItems) {
+  for (const { row, kind, word, cli } of infraItems) {
     const held: Member[] = [];
     const add = (m: Member): void => {
       if (!held.some((x) => x.runId === m.runId)) held.push(m);
@@ -624,7 +688,7 @@ export function buildNeeds(input: NeedsInput): Needs {
     if (row.key === 'load') {
       for (const m of heldMembers) if (m.run!.gate?.kind === 'escalation' && m.view !== undefined && !isAskRun(m.view)) add(m);
       for (const r of input.runs) if ((r.liveness === 'working' || r.liveness === 'quiet' || r.liveness === 'stalled') && eligible(r.runId)) add({ runId: r.runId, view: byId.get(r.runId), run: r, severity: 'yellow', waitedMs: null });
-    } else {
+    } else if (cli === undefined) {
       for (const m of heldMembers) if (claimed.has(`${row.key}\u0000${m.runId}`)) add(m);
       if (input.infraHoldsLive(row.key)) {
         for (const r of input.runs) if ((r.liveness === 'working' || r.liveness === 'quiet' || r.liveness === 'stalled') && eligible(r.runId)) add({ runId: r.runId, view: byId.get(r.runId), run: r, severity: 'red', waitedMs: null });
@@ -634,7 +698,8 @@ export function buildNeeds(input: NeedsInput): Needs {
     // The one exception: a run list that could not be read, so nothing proves there is no work.
     // The seat images warn ahead of the work: a missing image costs the next unit a build, and a
     // filling runtime disk is said before a kubelet's image cleanup runs.
-    if (kind === 'slows' && held.length === 0 && !(row.key === 'daemon' && row.state === 'degraded') && row.key !== 'seat_images') continue;
+    // A failing credential refresh (`cli`) warns before the credential expires and every seat of that CLI stops.
+    if (kind === 'slows' && held.length === 0 && !(row.key === 'daemon' && row.state === 'degraded') && row.key !== 'seat_images' && cli === undefined) continue;
     const down = row.state === 'down';
     finish(
       { members: held },
@@ -643,11 +708,11 @@ export function buildNeeds(input: NeedsInput): Needs {
         severity: down ? 'red' : 'yellow',
         source: 'infra',
         kind,
-        title: `${row.label}: ${row.state === 'unknown' ? 'not answering' : down ? (DOWN_WORD[row.key] ?? 'down') : 'degraded'}`,
+        title: `${row.label}: ${word ?? (row.state === 'unknown' ? 'not answering' : down ? (DOWN_WORD[row.key] ?? 'down') : 'degraded')}`,
         reason: `${row.reason}${held.length > 0 ? `; it ${kind === 'slows' ? 'slows the next step of' : 'holds'} ${plural(held.length, 'job')}${row.key === 'load' ? ' and every new one' : ''}` : ''}`,
         remedy: row.remedy ?? 'Re-check.',
-        target: { kind: 'infra', key: row.key },
-        action: seatImagesRebuildFixes(row) ? { kind: 'rebuild_seat_images', label: 'Rebuild seat images' } : { kind: 'recheck', label: 'Re-check' },
+        target: cli !== undefined ? { kind: 'cli', cli } : { kind: 'infra', key: row.key },
+        action: cli !== undefined ? { kind: 'sign_in', label: 'Sign in' } : seatImagesRebuildFixes(row) ? { kind: 'rebuild_seat_images', label: 'Rebuild seat images' } : { kind: 'recheck', label: 'Re-check' },
       },
     );
   }

@@ -11,8 +11,9 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { SessionView, SystemCli, SystemInfraRow, SystemRun } from 'wicked-crew-api-types';
 
-import { buildNeeds, foldRunCost, isAnsweredAsk, needsLevel, RunCostCache, supersession } from '../src/api/needs.js';
-import { judgeGaps, runLiveness } from '../src/api/system-snapshot.js';
+import { buildNeeds, foldRunCost, GATEWAY_START_BOUND_MS, GatewayStartWatch, isAnsweredAsk, needsLevel, RunCostCache, supersession } from '../src/api/needs.js';
+import { judgeGaps, probeBroker, runLiveness } from '../src/api/system-snapshot.js';
+import { clusterRows, type ClusterStatus } from '../src/api/cluster-status.js';
 
 interface DumpRun {
   id: string;
@@ -470,5 +471,71 @@ describe('a power run paused at a checkpoint', () => {
     const run = runLiveness({ view, now: NOW, evidence: null, gate: null, quietAfterMs: 5 * 60_000, stallAfterMs: 15 * 60_000 });
     const needs = buildNeeds({ now: NOW, views: [view], runs: [run], infra, clis, gaps: [], infraHoldsLive: () => false });
     expect(JSON.stringify(needs)).toContain('pw-paused');
+  });
+});
+
+// crew#1845: Nerve Center said "All clear" while the model gateway never became ready (the engine reads a crash loop
+// as `starting` for ever) or the broker's credential refresh was failing. Rows come from their real writers
+// (`clusterRows` in cluster-status.ts, `probeBroker` in system-snapshot.ts).
+describe('a gateway that never serves and a failing credential refresh (crew#1845)', () => {
+  const MIN = 60_000;
+  const status = (gateway: 'serving' | 'starting' | 'stopped' | 'absent'): ClusterStatus => ({
+    configured: true, reachable: true, kind: null, context: 'rancher-desktop', controller: { ready: true, detail: null },
+    controllerVersion: '0.1.0', gateway, runNamespaces: 1, pendingPods: 0, detail: null,
+  });
+  const gatewayRow = (gateway: 'serving' | 'starting' | 'stopped' | 'absent'): SystemInfraRow =>
+    clusterRows({ kind: 'ok', value: status(gateway), ms: 5 }, true, NOW).gateway;
+  const signedIn = clis.map((c) => ({ ...c, state: 'signed_in', workEligible: true, councilEligible: true }) as SystemCli);
+  const executing = (id: string, quietMin: number): { view: SessionView; run: SystemRun } => {
+    const view = viewOf({ id, title: `job ${id}`, status: 'executing', repo: 'wicked-crew', workflow: 'bug', created_h_ago: 1, delivery: 'pr', retry_of: null, ask_turn: null, archived: false, units_total: 2, units_done: 1 });
+    const run = runLiveness({ view, now: NOW, evidence: { at: NOW - quietMin * MIN, source: 'event_log' } as never, gate: null, quietAfterMs: 5 * MIN, stallAfterMs: 15 * MIN });
+    return { view, run };
+  };
+  const needsAt = (now: number, infraRows: SystemInfraRow[], watch: GatewayStartWatch, runs: Array<{ view: SessionView; run: SystemRun }> = []) =>
+    buildNeeds({ now, views: runs.map((r) => r.view), runs: runs.map((r) => r.run), infra: infraRows, clis: signedIn, gaps: [], infraHoldsLive: (k) => k === 'gateway' || k === 'broker' || k === 'cluster', gatewayWatch: watch });
+
+  it('a gateway still starting past the bound is a work-path item with its fix, and claims the stalled run behind it', () => {
+    const watch = new GatewayStartWatch();
+    const stalled = executing('st', 20);
+    // First read: a gateway that has only just started is not yet a need.
+    expect(needsAt(NOW, [gatewayRow('starting')], watch, [stalled]).attention.find((a) => a.id === 'infra:gateway')).toBeUndefined();
+    // Still starting on every read past the bound: crash-looping, or its image does not pull.
+    const later = needsAt(NOW + GATEWAY_START_BOUND_MS + MIN, [gatewayRow('starting')], watch, [stalled]);
+    const item = later.attention.find((a) => a.id === 'infra:gateway');
+    expect(item).toMatchObject({ kind: 'prevents', severity: 'red', source: 'infra', title: 'Model gateway: not starting', blockedRunIds: ['st'] });
+    expect(item!.reason).toMatch(/starting for 11 min and is still not serving/);
+    expect(item!.remedy).toMatch(/wicked-core cluster install/);
+    // The stalled run is the gateway's, not an item of its own.
+    expect(later.attention.find((a) => a.id === 'run:st')).toBeUndefined();
+    expect(needsLevel(later.attention)).not.toBe('green');
+  });
+
+  it('a read that could not see the gateway keeps the clock; a serving gateway resets it', () => {
+    const watch = new GatewayStartWatch();
+    needsAt(NOW, [gatewayRow('starting')], watch);
+    const unread = clusterRows({ kind: 'timeout', ms: 6000 }, true, NOW).gateway;
+    needsAt(NOW + 5 * MIN, [unread], watch);
+    expect(needsAt(NOW + GATEWAY_START_BOUND_MS, [gatewayRow('starting')], watch).attention.map((a) => a.id)).toContain('infra:gateway');
+    needsAt(NOW + GATEWAY_START_BOUND_MS + MIN, [gatewayRow('serving')], watch);
+    expect(needsAt(NOW + GATEWAY_START_BOUND_MS + 2 * MIN, [gatewayRow('starting')], watch).attention.map((a) => a.id)).not.toContain('infra:gateway');
+  });
+
+  it("a fresh install's gateway (not started yet) stays quiet however long", () => {
+    const watch = new GatewayStartWatch();
+    needsAt(NOW, [gatewayRow('absent')], watch);
+    expect(needsAt(NOW + 60 * MIN, [gatewayRow('absent')], watch).attention).toEqual([]);
+  });
+
+  it('a failing broker refresh is a slows item that names the CLI and offers its sign-in', async () => {
+    const broker = await probeBroker({ containerFloor: true, clis: ['claude', 'codex'], status: async (c) => (c === 'codex' ? { state: 'refresh_failing', reason: 'token revoked' } : { state: 'signed_in' }) });
+    expect(broker.state).toBe('degraded');
+    const needs = needsAt(NOW, [broker], new GatewayStartWatch());
+    const item = needs.attention.find((a) => a.id === 'infra:broker');
+    expect(item).toMatchObject({ kind: 'slows', severity: 'yellow', title: "Credential broker: can't refresh codex's sign-in", target: { kind: 'cli', cli: 'codex' }, action: { kind: 'sign_in', label: 'Sign in' } });
+    expect(item!.reason).toMatch(/codex \(token revoked\)/);
+    expect(item!.remedy).toBe('Sign codex in again on the Helpers page before its credential expires.');
+    // A broker with no CLI signed in is not a refresh failure: the seat items say that.
+    const none = await probeBroker({ containerFloor: true, clis: ['claude'], status: async () => ({ state: 'signed_out' }) });
+    expect(needsAt(NOW, [none], new GatewayStartWatch()).attention.find((a) => a.id === 'infra:broker')).toBeUndefined();
   });
 });
