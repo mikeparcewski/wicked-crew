@@ -12,6 +12,8 @@ export interface JudgeCoverage {
   authors: Array<{
     seat: string;
     judges: Array<{ seat: string; seenSharing?: string }>;
+    /** (core#1594) The one judge not seen sharing this author's provider, when exactly one is left. */
+    soleJudge?: string | null;
     notJudges: Array<{ seat: string; reason: string; detail?: string }>;
   }>;
   benched: Array<{ seat: string; reason: string; detail?: string }>;
@@ -34,6 +36,7 @@ export function readJudgeCoverage(
       !Array.isArray(value['authors']) || !Array.isArray(value['benched']) || !value['benched'].every(reason)) return null;
     for (const author of value['authors']) {
       if (!seat(author) || !Array.isArray(author['judges']) || !Array.isArray(author['notJudges']) ||
+        !(author['soleJudge'] === undefined || author['soleJudge'] === null || typeof author['soleJudge'] === 'string') ||
         !author['notJudges'].every(reason) || !author['judges'].every((j: unknown) => seat(j) && (j['seenSharing'] === undefined || typeof j['seenSharing'] === 'string'))) return null;
     }
     return value as unknown as JudgeCoverage;
@@ -71,6 +74,27 @@ export function coverageNote(coverage: JudgeCoverage | null, nameOf: (key: strin
     }
   }
   return `These seats cannot independently check one another's work${reasons.size > 0 ? `: ${[...reasons].join('; ')}` : ''}; the run may wait for a person at a gate.`;
+}
+
+/**
+ * (crew#1673, core#1594) What a COVERED launch still says before it starts: for each author with a judge seen calling
+ * the author's provider, who that is and who is left to check its work independently, from the engine's own fields
+ * (`seenSharing`, `soleJudge`), with display names. This is the engine's `notes` sentence, which names seat keys,
+ * worded as the card names seats. Empty when nothing was seen (always, on a cold daemon). An uncovered launch says
+ * this in {@link coverageNote} instead.
+ */
+export function sharingNotes(coverage: JudgeCoverage | null, nameOf: (key: string) => string = (key) => key): string[] {
+  if (coverage === null || !coverage.covered) return [];
+  return coverage.authors.flatMap((author) => {
+    const seen = author.judges.filter((j) => j.seenSharing !== undefined);
+    if (seen.length === 0) return [];
+    const who = nameOf(author.seat);
+    const left = author.judges.filter((j) => j.seenSharing === undefined).map((j) => nameOf(j.seat));
+    const so = typeof author.soleJudge === 'string' ? `only ${nameOf(author.soleJudge)} can check ${who}'s work independently`
+      : left.length > 0 ? `${left.join(' and ')} can check ${who}'s work independently`
+      : `no seat can check ${who}'s work independently`;
+    return [`${seen.map((j) => `${nameOf(j.seat)} was seen calling ${j.seenSharing}, as was ${who}`).join('; ')}, so ${so}.`];
+  });
 }
 
 export function launchAssuranceNotice(opts: {
