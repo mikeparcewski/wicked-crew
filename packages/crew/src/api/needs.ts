@@ -59,25 +59,31 @@ const CITES: Partial<Record<SystemInfraKey, RegExp>> = {
   cluster: /\b(?:no_cluster|cluster_unreachable|controller_missing|pids_unlimited|policy_refused|admission_pending|image_unavailable|exec_stream_lost)\b/,
 };
 
-/** crew#1845: a gateway pod still not serving this long after it first read `starting` is not starting: it is
- *  crash-looping or cannot pull its image (the engine reads both as `starting` for ever). A first pull on a slow
- *  network fits inside it. */
+/** crew#1845: a gateway pod still not serving this long after it first read `starting` is not starting normally: the
+ *  engine reads a pod that keeps crashing, or one whose image cannot be pulled, as `starting` for ever. A first image
+ *  pull on a slow network fits inside it. */
 export const GATEWAY_START_BOUND_MS = 10 * 60_000;
-const GATEWAY_REINSTALL = 'Reinstall it: run `wicked-core cluster install --admin-context <your cluster context> --home <this daemon\'s state home>`, then re-check. If it still does not serve, its pod log in the cluster says why (often a gateway image that fails to start).';
+const GATEWAY_FIX = 'See why in the cluster: the gateway pod\'s events and log say what stops it. If its image is broken or missing, reinstall the cluster pieces with `wicked-core cluster install --admin-context <your cluster context> --home <this daemon\'s state home>`, then re-check.';
 
 /**
  * crew#1845: since when the model gateway has read `starting`, across this daemon's reads. A read that says the
  * gateway serves, is stopped or is not started yet ends the run of `starting` reads; a read that could not see the
- * gateway (the cluster did not answer) neither starts nor ends it.
+ * gateway (the cluster did not answer) neither starts nor ends it. A read older than one already seen (a slow
+ * snapshot's second needs pass) changes nothing.
  */
 export class GatewayStartWatch {
   private since: number | null = null;
+  private seenAt = -Infinity;
 
   /** The time the gateway first read `starting` in this run of reads, or null when it does not read `starting` now. */
   observe(row: SystemInfraRow | undefined, now: number): number | null {
+    // A snapshot's `now` is taken once, before its reads: both of its needs passes carry it.
+    const readAt = now;
     const seen = row?.key === 'gateway' ? (row.details as { gateway?: unknown } | undefined)?.gateway : undefined;
+    if (readAt < this.seenAt) return seen === 'starting' ? this.since : null;
+    this.seenAt = readAt;
     if (seen === 'starting') {
-      if (this.since === null || now < this.since) this.since = now;
+      if (this.since === null || readAt < this.since) this.since = readAt;
       return this.since;
     }
     if (seen === 'serving' || seen === 'stopped' || seen === 'absent' || row?.state === 'off' || row?.state === 'ok') this.since = null;
@@ -464,20 +470,26 @@ export function buildNeeds(input: NeedsInput): Needs {
   const gatewayRow = input.infra.find((r) => r.key === 'gateway');
   const startingSince = (input.gatewayWatch ?? DAEMON_GATEWAY_WATCH).observe(gatewayRow, now);
   for (const row of input.infra) {
-    // crew#1845: a gateway still `starting` past its bound never serves: it is down for every seat, and it claims the
-    // stalled runs behind it. A fresh install's gateway (`absent`, started before the first seat) stays quiet.
-    if (row.key === 'gateway' && row.state === 'degraded' && startingSince !== null && now - startingSince >= GATEWAY_START_BOUND_MS) {
-      infraItems.push({
-        row: {
-          ...row,
-          state: 'down',
-          reason: `its pod has been starting for ${Math.round((now - startingSince) / 60_000)} min and is still not serving, so seats have no route to their models: it is crash-looping or cannot pull its image`,
-          remedy: GATEWAY_REINSTALL,
-        },
-        kind: 'prevents',
-        word: 'not starting',
-      });
-      continue;
+    // crew#1845: a gateway still `starting` past its bound, or with a live run already stalled behind it, does not
+    // serve: it is down for every seat and claims the stalled runs behind it. A fresh install's gateway (`absent`,
+    // started before the first seat) stays quiet.
+    if (row.key === 'gateway' && row.state === 'degraded' && startingSince !== null) {
+      const startingFor = Math.max(0, now - startingSince);
+      const stalledBehind = input.infraHoldsLive('gateway') && input.runs.some((r) => r.liveness === 'stalled' && eligible(r.runId));
+      if (startingFor >= GATEWAY_START_BOUND_MS || stalledBehind) {
+        const minutes = Math.round(startingFor / 60_000);
+        infraItems.push({
+          row: {
+            ...row,
+            state: 'down',
+            reason: `Its pod has not become ready${minutes > 0 ? ` in ${minutes} min` : ''}, so seats have no route to their models (a pod that keeps crashing, or an image the cluster cannot pull, stays like this)`,
+            remedy: GATEWAY_FIX,
+          },
+          kind: 'prevents',
+          word: 'not ready',
+        });
+        continue;
+      }
     }
     // crew#1845: a failing credential refresh is a slowdown ahead of the work: the credential is served until it
     // expires, then the CLI can take no work. It names the CLI, and signing it in again is the fix.

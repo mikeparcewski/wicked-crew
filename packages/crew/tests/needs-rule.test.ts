@@ -496,25 +496,35 @@ describe('a gateway that never serves and a failing credential refresh (crew#184
 
   it('a gateway still starting past the bound is a work-path item with its fix, and claims the stalled run behind it', () => {
     const watch = new GatewayStartWatch();
+    const working = executing('wk', 1);
+    // First read: a gateway that has only just started, with nothing stalled behind it, is not yet a need.
+    expect(needsAt(NOW, [gatewayRow('starting')], watch, [working]).attention.find((a) => a.id === 'infra:gateway')).toBeUndefined();
+    // Still starting on every read past the bound: a pod that keeps crashing, or an image that does not pull.
     const stalled = executing('st', 20);
-    // First read: a gateway that has only just started is not yet a need.
-    expect(needsAt(NOW, [gatewayRow('starting')], watch, [stalled]).attention.find((a) => a.id === 'infra:gateway')).toBeUndefined();
-    // Still starting on every read past the bound: crash-looping, or its image does not pull.
     const later = needsAt(NOW + GATEWAY_START_BOUND_MS + MIN, [gatewayRow('starting')], watch, [stalled]);
     const item = later.attention.find((a) => a.id === 'infra:gateway');
-    expect(item).toMatchObject({ kind: 'prevents', severity: 'red', source: 'infra', title: 'Model gateway: not starting', blockedRunIds: ['st'] });
-    expect(item!.reason).toMatch(/starting for 11 min and is still not serving/);
+    expect(item).toMatchObject({ kind: 'prevents', severity: 'red', source: 'infra', title: 'Model gateway: not ready', blockedRunIds: ['st'] });
+    expect(item!.reason).toMatch(/^Its pod has not become ready in 11 min, so seats have no route to their models/);
+    expect(item!.remedy).toMatch(/gateway pod's events and log/);
     expect(item!.remedy).toMatch(/wicked-core cluster install/);
     // The stalled run is the gateway's, not an item of its own.
     expect(later.attention.find((a) => a.id === 'run:st')).toBeUndefined();
     expect(needsLevel(later.attention)).not.toBe('green');
   });
 
-  it('a read that could not see the gateway keeps the clock; a serving gateway resets it', () => {
+  it('a run already stalled behind a starting gateway makes it a need on the first read (Nerve Center opened late)', () => {
+    const needs = needsAt(NOW, [gatewayRow('starting')], new GatewayStartWatch(), [executing('st', 20)]);
+    expect(needs.attention.find((a) => a.id === 'infra:gateway')).toMatchObject({ title: 'Model gateway: not ready', blockedRunIds: ['st'] });
+    expect(needs.attention.find((a) => a.id === 'infra:gateway')!.reason).toMatch(/^Its pod has not become ready, so seats/);
+  });
+
+  it('a read that could not see the gateway keeps the clock; a serving gateway resets it; an older snapshot changes nothing', () => {
     const watch = new GatewayStartWatch();
     needsAt(NOW, [gatewayRow('starting')], watch);
     const unread = clusterRows({ kind: 'timeout', ms: 6000 }, true, NOW).gateway;
     needsAt(NOW + 5 * MIN, [unread], watch);
+    // A slower snapshot taken earlier replays its `serving` read in its second pass: the clock stands.
+    needsAt(NOW + 4 * MIN, [gatewayRow('serving')], watch);
     expect(needsAt(NOW + GATEWAY_START_BOUND_MS, [gatewayRow('starting')], watch).attention.map((a) => a.id)).toContain('infra:gateway');
     needsAt(NOW + GATEWAY_START_BOUND_MS + MIN, [gatewayRow('serving')], watch);
     expect(needsAt(NOW + GATEWAY_START_BOUND_MS + 2 * MIN, [gatewayRow('starting')], watch).attention.map((a) => a.id)).not.toContain('infra:gateway');
