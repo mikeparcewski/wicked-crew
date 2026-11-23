@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { buildNeeds } from '../src/api/needs.js';
-import { HOST_FLOOR_BENCH_COPY, HOST_FLOOR_UNKNOWN_COPY } from '../src/api/seat-standing.js';
+import { HOST_FLOOR_BENCH_COPY, HOST_FLOOR_POLICY_COPY, HOST_FLOOR_SYSTEM_POLICY_COPY, HOST_FLOOR_UNKNOWN_COPY } from '../src/api/seat-standing.js';
 import { buildClis, judgeGaps, type RosterSeatLike } from '../src/api/system-snapshot.js';
 
 const NOW = Date.parse('2026-11-15T12:00:00Z');
@@ -191,5 +191,35 @@ describe('crew#1564 review r7: a quota-benched seat still counts toward a second
   it('the same roster with codex host-benched instead does give the second-agent item', () => {
     const a = attention([signedIn('claude'), signedIn('codex', { ...BENCH, council_eligible: false })]);
     expect(a.map((i) => i.id)).toEqual(['cli:one-reviewer']);
+  });
+});
+
+// crew#1818: wicked-core `managed_hooks_only_refusal_reason` (src/execute_wrapped.rs), both remedies as the engine words them.
+const POLICY = (remedy: string) =>
+  `claude can't be governed on the wrapped path on this machine: settings in /etc/claude-code/managed-settings.json silence the engine's gate hook (\`allowManagedHooksOnly: true\` or \`disableAllHooks: true\`); refusing the governed unit rather than running it ungoverned. ${remedy} (core#653, C5)`;
+const SIGN_IN = POLICY("It is organization policy that came with the seat's sign-in: run governed work on the container floor (WICKED_SEAT_FLOOR=container), whose claude seat does not carry it, or route it to another seat");
+const SYSTEM = POLICY("It is this machine's system policy for Claude Code: route governed work to another seat, or ask whoever manages this machine to change it");
+
+describe('crew#1818: a policy-silenced claude on the host floor', () => {
+  const clisOf = (roster: RosterSeatLike[]) => buildClis({ roster, acp: {}, seatGovernance: [], containerFloor: false, hostBoundary: null, week: null });
+
+  it('reads its own reason, by where the policy lives, never the generic host-floor sentence', () => {
+    const [signIn, system] = clisOf([signedIn('claude', { host_floor_bench: SIGN_IN }), signedIn('claude', { host_floor_bench: SYSTEM })]);
+    expect(signIn).toMatchObject({ state: 'signed_in', stateReason: HOST_FLOOR_POLICY_COPY, workEligible: false });
+    expect(system).toMatchObject({ state: 'signed_in', stateReason: HOST_FLOOR_SYSTEM_POLICY_COPY, workEligible: false });
+    expect(HOST_FLOOR_POLICY_COPY).toContain('WICKED_SEAT_FLOOR=container');
+    // A system policy binds claude in a container too: no container remedy.
+    expect(HOST_FLOOR_SYSTEM_POLICY_COPY).not.toContain('WICKED_SEAT_FLOOR=container');
+  });
+
+  it('the needs list counts it as not taking work and says why, not "only Claude Code and Codex get work"', () => {
+    const a = attention([signedIn('claude', { host_floor_bench: SIGN_IN }), out('codex')]);
+    expect(a[0]).toMatchObject({ id: 'cli:none', target: { kind: 'cli', cli: 'codex' } });
+    expect(a[0]!.reason).toContain('claude not taking work');
+    expect(a[0]!.reason).toContain(HOST_FLOOR_POLICY_COPY);
+    expect(a[0]!.reason).not.toContain('only Claude Code and Codex');
+    // A signed-out policy-silenced claude is no sign-in target: signing in does not lift the policy.
+    const b = attention([out('claude', { host_floor_bench: SIGN_IN }), signedIn('opencode', BENCH)]);
+    expect(b[0]).toMatchObject({ id: 'cli:none', action: null });
   });
 });
