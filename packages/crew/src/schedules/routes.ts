@@ -10,7 +10,7 @@ import { API_PREFIX } from '../api/api-prefix.js';
 import { LOCAL_ACTOR } from '../api/auth.js';
 import type { AuditLog } from '../api/audit.js';
 import { isHumanOperator } from '../api/watch-routes.js';
-import { ReviewPreparationRefused } from '../insights/review-service.js';
+import { NoIndependentReviewer, ReviewPreparationRefused, isNoIndependentReviewerNote } from '../insights/review-service.js';
 import { ScheduleBusyError, type WorkflowScheduler } from './scheduler.js';
 import { MAX_EVERY_HOURS, MIN_EVERY_HOURS, SCHEDULE_ID, type ScheduleStore, type WorkflowSchedule } from './store.js';
 
@@ -23,7 +23,17 @@ export const SchedulePutSchema = z.strictObject({
   projectIds: z.array(z.string().min(1).max(128)).max(64).optional(),
   repoRef: z.string().min(1).max(256).nullable().optional(),
   problem: z.string().trim().min(1).max(4000).nullable().optional(),
+  /** (crew#1837) Accept (or withdraw) reduced assurance for this schedule's runs. */
+  reducedAssurance: z.boolean().optional(),
 });
+
+/** (crew#1837) `POST /schedules/:id/run`: `reducedAssurance: true` is the person accepting it, kept on the schedule. */
+export const ScheduleRunSchema = z.strictObject({
+  reducedAssurance: z.literal(true).optional(),
+});
+
+/** The answer to a run every eligible seat took part in: the shape a hand launch of the review answers with. */
+const RETRY_REDUCED = { reducedAssurance: true } as const;
 
 export interface ScheduleRouteDeps {
   store: ScheduleStore;
@@ -41,8 +51,14 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: ScheduleRoute
   const now = (): Date => deps.now?.() ?? new Date();
   const refuse = (reply: FastifyReply): FastifyReply =>
     reply.code(403).send({ error: 'Only a person can change a schedule (a worker or system actor cannot)' });
-  const view = (row: WorkflowSchedule): WorkflowSchedule & { lastReview?: ReturnType<NonNullable<ScheduleRouteDeps['lastReview']>> } =>
-    row.workflow === 'review-recent-work' && deps.lastReview !== undefined ? { ...row, lastReview: deps.lastReview() } : row;
+  type View = WorkflowSchedule & { lastReview?: ReturnType<NonNullable<ScheduleRouteDeps['lastReview']>>; retryWith?: typeof RETRY_REDUCED };
+  const view = (row: WorkflowSchedule): View => {
+    const out: View = row.workflow === 'review-recent-work' && deps.lastReview !== undefined ? { ...row, lastReview: deps.lastReview() } : { ...row };
+    // (crew#1837) The last start was refused because every seat that could review the work ran some of it: the
+    // person's one accept (PUT or Run it now with reducedAssurance) lets it run.
+    if (row.lastOutcome === 'refused' && !row.reducedAssurance && isNoIndependentReviewerNote(row.lastNote)) out.retryWith = RETRY_REDUCED;
+    return out;
+  };
 
   app.get(
     `${V}/schedules`,
@@ -62,7 +78,7 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: ScheduleRoute
       if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; ') });
       if (!deps.knowsWorkflow(parsed.data.workflow)) return reply.code(404).send({ error: `no workflow ${parsed.data.workflow}` });
       const row = deps.store.put(id, parsed.data, now());
-      deps.audit.record('schedule.saved', actor, { detail: { id, workflow: row.workflow, everyHours: row.everyHours, enabled: row.enabled } });
+      deps.audit.record('schedule.saved', actor, { detail: { id, workflow: row.workflow, everyHours: row.everyHours, enabled: row.enabled, reducedAssurance: row.reducedAssurance } });
       return view(row);
     },
   );
@@ -82,12 +98,20 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: ScheduleRoute
 
   app.post(
     `${V}/schedules/:id/run`,
-    { config: { manifest: { responseType: 'ScheduleRunResponse', statusCodes: [200, 403, 404, 409, 502] } } },
+    { config: { manifest: { requestType: 'ScheduleRunBody', responseType: 'ScheduleRunResponse', statusCodes: [200, 400, 403, 404, 409, 502] } } },
     async (req, reply) => {
       const actor = actorOf(req);
       if (!isHumanOperator(actor)) return refuse(reply);
       const { id } = req.params as { id: string };
-      if (deps.store.get(id) === undefined) return reply.code(404).send({ error: `no schedule ${id}` });
+      const parsed = ScheduleRunSchema.safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; ') });
+      const row = deps.store.get(id);
+      if (row === undefined) return reply.code(404).send({ error: `no schedule ${id}` });
+      // (crew#1837) The person's accept is kept: the schedule's own runs take it from here, not only this one.
+      if (parsed.data.reducedAssurance === true && !row.reducedAssurance) {
+        deps.store.update(id, { reducedAssurance: true }, now());
+        deps.audit.record('schedule.saved', actor, { detail: { id, workflow: row.workflow, reducedAssurance: true, via: 'run_now' } });
+      }
       try {
         const runId = await deps.scheduler.runNow(id);
         deps.audit.record('schedule.run_now', actor, { runId, detail: { id } });
@@ -96,6 +120,9 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: ScheduleRoute
         const message = err instanceof Error ? err.message : String(err);
         // A review that can't be prepared (crew#1592: its seat, the `newWorkSeats` setting) is the person's to fix: 409 with
         // the same words as a hand launch, never a 502.
+        if (err instanceof NoIndependentReviewer) {
+          return reply.code(409).send({ code: err.code, error: `the review could not be prepared: ${message}`, excluded: err.excluded, retryWith: RETRY_REDUCED });
+        }
         if (err instanceof ReviewPreparationRefused) return reply.code(409).send({ error: `the review could not be prepared: ${message}` });
         return reply.code(err instanceof ScheduleBusyError ? 409 : 502).send({ error: message });
       }
