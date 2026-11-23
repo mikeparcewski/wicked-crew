@@ -183,7 +183,7 @@ describe('daemon start ends orphaned sign-ins (crew#1523)', () => {
   });
   it('logs one scrubbed line per seat when the engine cannot end a sign-in, and still starts', async () => {
     vi.stubEnv('WICKED_SEAT_FLOOR', 'container');
-    const exec = vi.fn<ExecLike>().mockRejectedValue(Object.assign(new Error('x'), { code: 1, stderr: 'wicked-core seat-login: cannot reach /Users/fixture/cluster\nsecond line' }));
+    const exec = vi.fn<ExecLike>().mockRejectedValue(Object.assign(new Error('x'), { code: 1, stderr: 'wicked-core seat-login: cannot reach /home/fixture/cluster\nsecond line' }));
     const app = Fastify(); const info = vi.fn(); vi.spyOn(app.log, 'info').mockImplementation(info);
     registerLoginCleanup(app, { gatewayDir: join(home, 'gateway'), exec }, ['claude']);
     await app.ready(); await app.close();
