@@ -521,13 +521,17 @@ export function pinnedGitExec(
     return git(
       [
         '-c', 'credential.helper=', '-c', `credential.https://github.com.helper=${GITHUB_TOKEN_HELPER}`,
-        // No hook, maintenance or submodule fetch runs with the token in its environment (xreview r1).
-        '-c', `core.hooksPath=${devNull}`, '-c', 'maintenance.auto=false', '-c', 'gc.auto=0',
+        // No hook, alternate-refs command, askpass, maintenance or submodule fetch runs with the token in its
+        // environment (xreview r1, r2; the same keys apps/git.ts pins off).
+        '-c', `core.hooksPath=${devNull}`, '-c', 'core.alternateRefsCommand=', '-c', 'core.askPass=', '-c', 'credential.interactive=false',
+        '-c', 'maintenance.auto=false', '-c', 'gc.auto=0',
         'fetch', '-q', '--no-recurse-submodules', url, refspec,
       ],
       cwd,
       {
         ...extra,
+        // An inherited GIT_CONFIG_PARAMETERS is read after GIT_CONFIG_COUNT and could restore another login's header.
+        GIT_CONFIG_PARAMETERS: '',
         GIT_CONFIG_COUNT: '4',
         GIT_CONFIG_KEY_0: 'http.extraHeader', GIT_CONFIG_VALUE_0: '',
         GIT_CONFIG_KEY_1: `http.${url}.extraHeader`, GIT_CONFIG_VALUE_1: '',
@@ -535,6 +539,8 @@ export function pinnedGitExec(
         GIT_CONFIG_KEY_3: `http.${url}.followRedirects`, GIT_CONFIG_VALUE_3: 'false',
         GIT_ALLOW_PROTOCOL: 'https',
         GIT_TERMINAL_PROMPT: '0',
+        // An empty GIT_ASKPASS is no askpass at all (git's prompt.c), so no prompt program sees the token either.
+        GIT_ASKPASS: '',
         GH_TOKEN: token,
       },
     );

@@ -133,7 +133,8 @@ describe('pinnedGitExec (crew#1804)', () => {
     const [call] = calls;
     expect(call!.args.slice(-5)).toEqual(['fetch', '-q', '--no-recurse-submodules', 'https://github.com/acme/private-app.git', '+refs/heads/feature/min:refs/remotes/origin/feature/min']);
     expect(call!.args.slice(0, 2)).toEqual(['-c', 'credential.helper=']);
-    expect(call!.args).toEqual(expect.arrayContaining(['maintenance.auto=false', 'gc.auto=0', '--no-recurse-submodules']));
+    expect(call!.args).toEqual(expect.arrayContaining(['maintenance.auto=false', 'gc.auto=0', '--no-recurse-submodules', 'core.alternateRefsCommand=', 'core.askPass=', 'credential.interactive=false']));
+    expect(call!.env).toMatchObject({ GIT_CONFIG_PARAMETERS: '', GIT_ASKPASS: '' });
     expect(call!.args.join(' ')).not.toContain('gho_deliverbot');
     expect(call!.env).toMatchObject({
       GH_TOKEN: 'gho_deliverbot', GIT_ALLOW_PROTOCOL: 'https', GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_COUNT: '4',
@@ -179,12 +180,12 @@ describe('pinnedGitExec (crew#1804)', () => {
   });
 
   it('runs no repository hook with the token in its environment (real git, xreview r1)', async () => {
-    // A repository whose core.hooksPath holds a reference-transaction hook that would record its environment.
+    // A repository whose core.hooksPath holds a reference-transaction hook that leaves a mark when it runs.
     const root = checkout('https://github.com/acme/private-app.git');
     const hooks = join(root, 'hooks');
     mkdirSync(hooks);
     const ran = join(root, 'hook-ran');
-    writeFileSync(join(hooks, 'reference-transaction'), `#!/bin/sh\nenv > '${ran}'\n`);
+    writeFileSync(join(hooks, 'reference-transaction'), `#!/bin/sh\necho ran > '${ran}'\n`);
     chmodSync(join(hooks, 'reference-transaction'), 0o755);
     execFileSync('git', ['config', 'core.hooksPath', hooks], { cwd: root });
     const { git, calls } = fakeGit();
