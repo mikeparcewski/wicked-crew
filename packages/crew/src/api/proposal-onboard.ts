@@ -235,6 +235,64 @@ export interface OnboardTurn {
  *  is never where a project name comes from. */
 const ADDRESS_CHARS = /[@:/\\?#&=]/u;
 
+/** A quoted string to its closing quote (or the end of the line when it has none); a backslash escapes the next char. */
+const QUOTED = String.raw`(?:"(?:[^"\\\n]|\\.)*"?|'(?:[^'\\\n]|\\.)*'?|“[^”\n]*”?)`;
+/** A credential's value: a quoted string or one word. */
+const SECRET_VALUE = String.raw`(?:${QUOTED}|\S+)`;
+/** One `key=value` parameter of an Authorization header (`username="Alice Smith"`, `nonce = abc`). */
+const AUTH_PARAM = String.raw`[\w-]+[ \t]*=[ \t]*(?:${QUOTED}|[^\s,]+)`;
+
+/**
+ * (crew#1790) Spans of the person's words that carry a credential even though no single word in them holds an address
+ * character. Each is set aside whole before the name is looked for: an `Authorization:` header's value (one token, or
+ * its whole parameter list), a `Bearer` value, a named secret and its value (`token: x`, `"password": "x y"`,
+ * `password = 'x y'`), and a word shaped like a known token. Every pattern is anchored on a keyword or a prefix and has no
+ * nested open-ended repetition, so a long paste costs linear time.
+ */
+const CREDENTIAL_SPANS: readonly RegExp[] = [
+  new RegExp(String.raw`\bauthorization\b["']?\s*:\s*(?:(?:bearer|basic|digest|token|negotiate|ntlm|aws4-hmac-sha256)\s+)?(?:${AUTH_PARAM}(?:\s*,\s*${AUTH_PARAM})*|${SECRET_VALUE})`, 'giu'),
+  new RegExp(String.raw`\bbearer\s+${SECRET_VALUE}`, 'giu'),
+  new RegExp(String.raw`\b(?:access[ _-]?token|auth[ _-]?token|token|api[ _-]?key|apikey|password|passwd|pwd|passphrase|secret|client[ _-]?secret|credentials?)\b["']?\s*[:=]\s*${SECRET_VALUE}`, 'giu'),
+  /(?<![\p{L}\p{N}_])(?:gh[pousr]_|github_pat_|glpat-|xox[abeprs]-|sk-|sk_live_|rk_live_|AKIA|ASIA|AIza|eyJ)[\p{L}\p{N}_.-]*/gu,
+];
+
+const QUOTES: ReadonlyArray<readonly [string, string]> = [['"', '"'], ["'", "'"], ['“', '”'], ['‘', '’'], ['`', '`']];
+const WORD_CHAR = /[\p{L}\p{N}]/u;
+
+/**
+ * (crew#1790) The person's words with every quoted string that holds a path separator (a path with spaces) set aside
+ * whole. A quote opens only where no word char precedes it and closes only where none follows it, so an apostrophe
+ * (`Mike's`, `don’t`, `‘/a/Mike’s Files/x’`) neither opens nor closes one. One pass per quote kind, linear in the text:
+ * an opening quote pairs with the first valid closing quote after it.
+ */
+function withoutQuotedPaths(words: string): string {
+  const cut: Array<[number, number]> = [];
+  const isWord = (i: number): boolean => i >= 0 && i < words.length && WORD_CHAR.test(words[i]!);
+  for (const [open, close] of QUOTES) {
+    const closes: number[] = [];
+    for (let i = 0; i < words.length; i++) if (words[i] === close && !isWord(i + 1)) closes.push(i);
+    let c = 0;
+    for (let i = 0; i < words.length; i++) {
+      if (words[i] !== open || isWord(i - 1)) continue;
+      while (c < closes.length && closes[c]! <= i) c++;
+      if (c === closes.length) break;
+      const end = closes[c]!;
+      if (/[/\\]/u.test(words.slice(i + 1, end))) cut.push([i, end]);
+      i = end;
+    }
+  }
+  if (cut.length === 0) return words;
+  cut.sort((a, b) => a[0] - b[0]);
+  let out = '';
+  let at = 0;
+  for (const [from, to] of cut) {
+    if (to < at) continue;
+    out += `${words.slice(at, Math.max(from, at))} \u0000 `;
+    at = to + 1;
+  }
+  return out + words.slice(at);
+}
+
 /**
  * (crew#1694) The name a card may create a project under: one the person's own words say as whole words (ignoring case
  * and spacing), outside any address, path or credential they wrote; that `POST /projects` would take; and that holds
@@ -242,9 +300,12 @@ const ADDRESS_CHARS = /[@:/\\?#&=]/u;
  */
 export function creatableName(name: string, words: string): string | null {
   if (!CreateProjectSchema.shape.name.safeParse(name).success || ADDRESS_CHARS.test(name)) return null;
+  // crew#1790: a credential or a quoted path pasted as several words is set aside whole first.
+  // Quoted paths first, on the words as written, so a credential keyword inside a path cannot eat its closing quote.
+  const said = CREDENTIAL_SPANS.reduce((text, span) => text.replace(span, ' \u0000 '), withoutQuotedPaths(words));
   // xreview r1: a token inside an address the person pasted (`https://u:TOKEN@host/acme/x`) is not a name they said.
   // A word's own sentence punctuation (`Team?`, `Team:`) does not make it one.
-  const plain = words.split(/\s+/u).map((w) => (ADDRESS_CHARS.test(w.replace(/[?:.,;!)"'’”]+$/u, '')) ? '\u0000' : w)).join(' ');
+  const plain = said.split(/\s+/u).map((w) => (ADDRESS_CHARS.test(w.replace(/[?:.,;!)"'’”]+$/u, '')) ? '\u0000' : w)).join(' ');
   const escaped = norm(name).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
   return new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, 'u').test(norm(plain)) ? name : null;
 }
