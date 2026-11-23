@@ -102,6 +102,8 @@ export const STATE_HOME_ROOT_ENVS: ReadonlyArray<{ variable: string; creates: st
   { variable: 'WICKED_CREW_REVIEWS_DIR', creates: 'the run directory a review run writes its analysis to', fenced: false, home: 'reviews' },
   { variable: 'WICKED_CREW_EVAL_RUNS_DIR', creates: 'the report copy an eval run writes', fenced: false, home: 'evals' },
   { variable: 'WICKED_CREW_INSPECTIONS_DIR', creates: 'the inspection records an inspect run writes', fenced: false, home: 'inspections' },
+  // (crew#1823) The app repositories an app turn's run reads and writes: the same refusal, refuse-only.
+  { variable: 'WICKED_CREW_APPS_ROOT', creates: 'the app repositories an app turn reads and writes', fenced: false, home: 'apps' },
 ];
 
 /**

@@ -9,6 +9,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { captureInboxDir } from '../src/api/capture.js';
+import { defaultAppsRoot } from '../src/apps/store.js';
 import { steeringInboxDir } from '../src/api/governance-steering.js';
 import { walkthroughRootDir } from '../src/core/walkthrough-root.js';
 import { wickedHome, wickedHomeDir } from '../src/core/wicked-home.js';
@@ -25,6 +26,8 @@ const DIRS: Array<{ variable: string; name: string; read: (env: NodeJS.ProcessEn
   { variable: 'WICKED_CREW_EVAL_RUNS_DIR', name: 'evals', read: (env) => defaultEvalRunsDir(env) },
   { variable: 'WICKED_CREW_INSPECTIONS_DIR', name: 'inspections', read: (env) => defaultInspectionsDir(env) },
   { variable: 'WICKED_CREW_LEARNINGS_DIR', name: 'learnings', read: (env) => defaultLearningsDir(env) },
+  // crew#1823: the apps root follows the same resolver.
+  { variable: 'WICKED_CREW_APPS_ROOT', name: 'apps', read: (env) => defaultAppsRoot(env) },
   // These three read process.env (their callers pass a run id only): the test sets it for the call.
   { variable: 'WICKED_WALKTHROUGH_DIR', name: 'walkthroughs', read: (env) => withEnv(env, () => walkthroughRootDir('run-1')).replace(/[\\/]run-1$/u, '') },
   { variable: 'WICKED_CAPTURE_INBOX_DIR', name: 'capture-inbox', read: (env) => withEnv(env, () => captureInboxDir('run-1')).replace(/[\\/]run-1$/u, '') },

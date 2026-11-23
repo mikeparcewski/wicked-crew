@@ -375,6 +375,25 @@ describe('tts text and synthesis', () => {
     expect(ttsWavProblem(wav())).toBeNull();
   });
 
+  it('refuses a truncated chunk header at the tail and an odd-sized chunk missing its pad byte (crew#1559)', () => {
+    // An extra chunk after the audio, as a writer appends a LIST chunk; the RIFF size always matches the length.
+    const withTail = (tail: Buffer): Buffer => {
+      const b = Buffer.concat([wav(), tail]);
+      b.writeUInt32LE(b.length - 8, 4);
+      return b;
+    };
+    const chunk = (id: string, body: Buffer, pad: boolean): Buffer => {
+      const h = Buffer.alloc(8);
+      h.write(id, 0, 'ascii');
+      h.writeUInt32LE(body.length, 4);
+      return Buffer.concat([h, body, pad && body.length % 2 === 1 ? Buffer.alloc(1) : Buffer.alloc(0)]);
+    };
+    expect(ttsWavProblem(withTail(Buffer.from('LIS')))).toBe('the file ends inside a chunk header');
+    expect(ttsWavProblem(withTail(chunk('LIST', Buffer.from('abc'), false)))).toBe('the last chunk is missing its pad byte');
+    expect(ttsWavProblem(withTail(chunk('LIST', Buffer.from('abc'), true)))).toBeNull();
+    expect(ttsWavProblem(withTail(chunk('LIST', Buffer.from('ab'), true)))).toBeNull();
+  });
+
   it('caps what piper may print in bytes, not characters', async () => {
     // a child that writes 30,000 three-byte characters on stderr (90,000 bytes)
     const spawn = vi.fn(() => {
@@ -812,6 +831,44 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
     await s.installDone();
   });
 
+  it('a double click on install probes once: the second waits for the first and reads its outcome (crew#1559)', async () => {
+    let release!: (p: PythonInfo) => void;
+    const gate = new Promise<PythonInfo>((r) => { release = r; });
+    const probe = vi.fn(() => gate);
+    const s = service({ spawn: installSpawn().spawn, probe });
+    const first = s.startInstall([VOICE_A.id]);
+    const second = s.startInstall([VOICE_A.id]).catch((e: unknown) => e);
+    await new Promise((r) => setTimeout(r, 20));
+    release(PY);
+    expect(await first).toEqual({ started: true });
+    expect(await second).toMatchObject({ status: 409, code: 'voice_install_running' });
+    // Each admission probes fresh (`pickPython(true)`): before the fix both probed, side by side.
+    expect(probe).toHaveBeenCalledTimes(1);
+    await s.installDone();
+  });
+
+  it('status during a removal waits for it and reports the machine, not "being removed" (crew#1559)', async () => {
+    const st = stubbornSpawn();
+    try {
+      const s = service({ spawn: st.spawn });
+      installed(s);
+      const speaking = s.speak('hello', VOICE_A.id).catch(() => undefined);
+      await new Promise((r) => setTimeout(r, 60));
+      const removal = s.remove();
+      let settled = false;
+      const status = s.status().then((b) => { settled = true; return b; });
+      await new Promise((r) => setTimeout(r, 40));
+      // The removal still waits for its synthesis child: status does not answer the transient.
+      expect(settled).toBe(false);
+      st.release();
+      await Promise.all([speaking, removal]);
+      const body = await status;
+      expect(body.supported).toEqual({ ok: true, reason: null });
+      expect(body.python.found).toBe(true);
+      expect(body.engine.found).toBe(false);
+    } finally { st.release(); st.killSpy.mockRestore(); }
+  });
+
   it('revision 2: DELETE invalidates a pending probe and status starts a new round', async () => {
     let release!: (p: PythonInfo) => void;
     const gate = new Promise<PythonInfo>((r) => { release = r; });
@@ -894,8 +951,18 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
       expect(st.killed).toContainEqual([-777, 'SIGKILL']);
       expect(removed).toBe(false);
       st.release();
-      await Promise.all([pending, removal]);
-      expect(st.started()).toBe(1);
+      await removal;
+      // crew#1559 (5): the status read that the removal cut short probes again once it is done, rather than answer
+      // the aborted probe as "no Python".
+      let answered = false;
+      void pending.then(() => { answered = true; });
+      // Each name it tries is another stubborn child: close them one by one until the read answers.
+      for (let i = 0; i < 40 && !answered; i += 1) {
+        await new Promise((r) => setTimeout(r, 5));
+        st.release();
+      }
+      await pending;
+      expect(st.started()).toBeGreaterThan(1);
     } finally { st.release(); st.killSpy.mockRestore(); }
   });
 
