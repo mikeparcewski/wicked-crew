@@ -2891,6 +2891,15 @@
     },
     {
       "method": "GET",
+      "path": "/api/v1/settings/start-on-login",
+      "requestType": null,
+      "responseType": "StartOnLoginStatus",
+      "statusCodes": [
+        200
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/api/v1/setup/known",
       "requestType": null,
       "responseType": "SetupKnown",
