@@ -5202,6 +5202,12 @@ export interface SteeringLandingResult {
   error?: string;
   /** (api-types 0.160.0) The drafted rules the approve's `keepRules` left out: never landed. */
   declinedIds?: string[];
+  /** (api-types 0.224.0, crew#1846) Drafted ids already used on the store, landed under a new id (`from` → `to`) so
+   *  the rule that held the id is untouched. Each is audited on its `governance.rule.upserted` entry (`draftedId`). */
+  reminted?: Array<{ from: string; to: string }>;
+  /** (api-types 0.224.0, crew#1846) Rules this run landed at an earlier approve and this approve updated in place (a
+   *  send-back re-approve), audited with `replaced: true`. A landing never replaces a rule another author wrote. */
+  replacedIds?: string[];
 }
 
 /**
@@ -17207,6 +17213,13 @@ export interface WorkflowSchedule {
   /** (api-types 0.215.0, crew#1578) Set while the last run waits on a person and due times are being skipped: the
    *  schedule never cancels it, and says so. `null` (or absent, before 0.215.0) when nothing blocks it. */
   blocked?: ScheduleBlocked | null;
+  /** (api-types 0.224.0, crew#1837) The person accepted reduced assurance for this schedule: when every seat that could
+   *  review the work ran some of it (a one-seat daemon), one of them does, said in its brief and on the run. Absent
+   *  before 0.224.0 (= false). */
+  reducedAssurance?: boolean;
+  /** (api-types 0.224.0, crew#1837) Present when the last start was refused because every seat that could review the
+   *  work ran some of it: accepting reduced assurance (`PUT` with it, or Run it now with this body) lets it run. */
+  retryWith?: { reducedAssurance: true };
 }
 
 /** (api-types 0.215.0, crew#1578) A schedule held by its last run waiting on a person. */
@@ -17235,9 +17248,19 @@ export interface SchedulePutBody {
   projectIds?: string[];
   repoRef?: string | null;
   problem?: string | null;
+  /** (api-types 0.224.0, crew#1837) Accept (true) or withdraw (false) reduced assurance; absent keeps it. */
+  reducedAssurance?: boolean;
 }
 
-/** `POST /schedules/:id/run` ("Run it now", human-only): 409 when its last run is still going or another run works. */
+/** (api-types 0.224.0, crew#1837) `POST /schedules/:id/run` body, optional. `reducedAssurance: true` is the person
+ *  accepting it: kept on the schedule (audited `schedule.saved`), so its own runs take it too. */
+export interface ScheduleRunBody {
+  reducedAssurance?: true;
+}
+
+/** `POST /schedules/:id/run` ("Run it now", human-only): 409 when its last run is still going or another run works.
+ *  A review every eligible seat took part in answers 409 `code: "no_independent_reviewer"` with `excluded` (the seats)
+ *  and `retryWith: { reducedAssurance: true }` (api-types 0.224.0, crew#1837). */
 export interface ScheduleRunResponse {
   runId: string;
   schedule: WorkflowSchedule;

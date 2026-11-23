@@ -244,3 +244,14 @@ describe('normalizeProposedRule — live worker shapes (run 3234c023)', () => {
     expect(coercions.length).toBe(2);
   });
 });
+
+describe('nextFreeRuleId (crew#1846)', () => {
+  it('takes the highest number of the prefix plus one, at the drafted width', async () => {
+    const { nextFreeRuleId } = await import('../src/api/steering-landing.js');
+    expect(nextFreeRuleId('PAT-001', new Set(['PAT-001']))).toBe('PAT-002');
+    expect(nextFreeRuleId('PAT-001', new Set(['PAT-001', 'PAT-013', 'POL-040']))).toBe('PAT-014');
+    expect(nextFreeRuleId('POL-0001', new Set(['POL-0001', 'POL-0002']))).toBe('POL-0003');
+    expect(nextFreeRuleId('PAT-9', new Set(['PAT-9']))).toBe('PAT-10');
+    expect(nextFreeRuleId('no-number', new Set(['no-number', 'no-number-2']))).toBe('no-number-3');
+  });
+});
