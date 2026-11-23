@@ -12,7 +12,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 
 import type { Actor, ArtifactProposal, AuditEntry, ChatTranscriptRecord, CoreEvent, SessionView } from '../src/core/types.js';
 import { CATALOG_SEEDS } from '../src/workflow-catalog/catalog-data.js';
-import { ChatProposals, foldProposals, LaunchOnceRegistry, proposalRunId, type ChatProposalDeps, type ProposalChat } from '../src/api/chat-proposals.js';
+import { CHAT_ENDED, ChatProposals, foldProposals, LaunchOnceRegistry, proposalRunId, type ChatProposalDeps, type ProposalChat } from '../src/api/chat-proposals.js';
 import { DocBindingError, DocBindingStore } from '../src/interactive/doc-binding.js';
 import { buildSourcePacket, packetClause, PACKET_FILE_MAX_BYTES, PACKET_MAX_BYTES, type PacketDeps } from '../src/interactive/source-packet.js';
 import { boundAttemptKey, isAnotherProjectsDraftKey, packetChanged, removeAttemptDirs, removePacketCopy, writePacketCopy, type BoundDraft } from '../src/interactive/draft-events.js';
@@ -552,7 +552,8 @@ describe('Go creates one grounded document and one run, exactly once (A3, §4.3)
     expect(retryPid).toBe(`c1:retry:${first.runId}`);
     expect(await w.svc.appendRetry('c1', 'c1:t2', first.runId, first.artifactRef, 'the run was stopped')).toBe(retryPid); // once
     const retry = foldProposals(w.records.get('c1')!).get(retryPid!)!;
-    expect(retry.proposal).toMatchObject({ turnId: null, sourceRunId: first.runId, artifactRef: first.artifactRef, kind: 'create' });
+    expect(retry.proposal).toMatchObject({ turnId: null, sourceRunId: first.runId, artifactRef: first.artifactRef, kind: 'create', blocked: null });
+    expect(retry.proposal.reason).toBe('The last attempt ended without a draft: the run was stopped. Try again fills the same document.');
     expect(retry.proposal.sources).toEqual(proposal('c1:t2').sources); // the failed attempt's effective choices
     const out = await w.svc.decide('c1', retryPid!, { decision: 'go' }, ME, 'i1');
     expect(out.code).toBe(200);
@@ -563,6 +564,26 @@ describe('Go creates one grounded document and one run, exactly once (A3, §4.3)
     // The retry reuses the first attempt's conversation snapshot (cut at the first proposal's turn).
     expect(w.launches[1]!.packet.files.map((f) => f.name)).toContain('conversation-c1-to-t2.md');
     expect(w.bindings.get(first.artifactRef)?.attempts.map((a) => a.pid)).toEqual(['c1:t2', retryPid]);
+  });
+
+  it('a restart that ended the chat appends the card without a Try again that could only answer chat_gone (crew#1745)', async () => {
+    const w = world();
+    withChat(w, 'c1');
+    await w.svc.decide('c1', 'c1:t2', { decision: 'go' }, ME, 'i1');
+    const first = w.launches[0]!;
+    // The daemon restarted: the chat ended (its kept records stay), and boot released the attempt.
+    w.chats.delete('c1');
+    w.bindings.setOutcome(first.artifactRef, first.runId, { kind: 'failed', reason: 'interrupted by a restart' });
+    const retryPid = await w.svc.appendRetry('c1', 'c1:t2', first.runId, first.artifactRef, 'interrupted by a restart');
+    const retry = foldProposals(w.records.get('c1')!).get(retryPid!)!;
+    expect(retry.proposal.blocked).toBe(CHAT_ENDED);
+    expect(retry.proposal.reason).toBe('The last attempt ended without a draft: interrupted by a restart.');
+    expect(CHAT_ENDED).toContain('Start it again in a new chat');
+    // A Go sent anyway (an old client) is refused with the same words, never a launch.
+    const out = await w.svc.decide('c1', retryPid!, { decision: 'go' }, ME, 'i1');
+    expect(out.code).toBe(409);
+    expect(out.body).toMatchObject({ error: CHAT_ENDED });
+    expect(w.launches).toHaveLength(1);
   });
 
   it('one live job per document: a retry is refused while another attempt at the same document has no outcome', async () => {
