@@ -815,7 +815,8 @@ export function packetClause(inboxDir: string, packet: SourcePacket, notesWhere:
     `with data-source="<file>:<line>", the file's name as it is in records/ without the folder ` +
     (opts.recordsRepo === false
       ? `(sources/ cannot be cited; your own self-check runs without folders, but when the revision lands crew checks every ` +
-        `citation against records/ and the document's repositories, and refuses it when the cited line does not carry the figure). `
+        `citation against records/ and the document's repositories, and refuses a cited file that is not there or a cited ` +
+        `line that does not carry the text). `
       : `(records/ is one of the self-check's --repo folders; sources/ is not, so nothing there can be cited). `) +
     `Leave out any claim nothing in ` +
     `the packet supports, and list it ${notesWhere}. ` +

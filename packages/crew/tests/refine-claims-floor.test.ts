@@ -1,7 +1,7 @@
 // crew#1727: a chat refine's landing check runs garden's REAL claims scan with the refine's records and the document's
 // grounded repositories as its folders, so a records citation is checked by line. Runs where CI checks out
 // wicked-garden (WICKED_GARDEN_ROOT; required on Linux CI, like draft-claims-floor.test.ts).
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
@@ -12,6 +12,10 @@ import type { ArtifactProposal, SessionView } from '../src/core/types.js';
 const garden = process.env['WICKED_GARDEN_ROOT'];
 const REQUIRED = process.env['WICKED_CLAIMS_FLOOR'] === 'required';
 const RUN = '5e5e5e5e-1111-4000-8000-00000000000b';
+const gardenConfines = (root: string): boolean => {
+  const scan = join(root, 'scripts', 'draft', 'claims_scan.py');
+  return existsSync(scan) && readFileSync(scan, 'utf8').includes('escaped-source');
+};
 
 it.skipIf(!REQUIRED && !garden)('the refine floor refuses a wrong or made-up records citation and lands a correct one beside a repository citation', async () => {
   if (!garden) throw new Error('WICKED_CLAIMS_FLOOR=required but WICKED_GARDEN_ROOT is missing (expected a wicked-garden checkout)');
@@ -65,6 +69,15 @@ it.skipIf(!REQUIRED && !garden)('the refine floor refuses a wrong or made-up rec
     expect(wrongLine).toMatchObject({ ok: false, reason: expect.stringContaining('cite-off') });
     const madeUp = await guard('run-invented-x.md:1');
     expect(madeUp).toMatchObject({ ok: false, reason: expect.stringContaining('dangling-source') });
+    // garden#1530 (garden#1550): a citation that leaves the folders is refused even when the file it names carries the
+    // text word for word. Checked once the garden in use has that fix (the claims scan names `escaped-source`).
+    if (gardenConfines(garden)) {
+      const forged = join(dir, 'forged.md');
+      writeFileSync(forged, 'Coverage reached 80%.\n');
+      for (const cite of [`${forged}:1`, '../forged.md:1']) {
+        expect(await guard(cite), cite).toMatchObject({ ok: false, reason: expect.stringContaining('escaped-source') });
+      }
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

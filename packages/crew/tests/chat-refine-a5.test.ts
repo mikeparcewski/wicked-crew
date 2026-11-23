@@ -5,9 +5,9 @@
 // announces, and that every refusal (or a check that cannot run) lands nothing.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { ArtifactProposal, ChatTranscriptRecord, CoreEvent, LaunchRunInput } from '../src/core/types.js';
@@ -291,7 +291,9 @@ describe('A5: a refine of the open document', () => {
       claims: { ...NO_CLAIMS, repos: [{ name: 'widgets', rootPath: join(dir, 'gone') }] } };
     const r = await guardRefine(input, { floor: dangling, garden: gardenIo({ keep: 'kept', argv: [] }) });
     expect(r).toMatchObject({ ok: false, reason: expect.stringContaining('dangling-source') });
-    expect(r.ok ? '' : r.reason).toContain('The repository widgets this document is grounded on could not be read on this host');
+    expect(r.ok ? '' : r.reason).toContain('The repository widgets this document is grounded on is no longer readable at its folder on this host');
+    const big = await guardRefine(input, { floor: dangling, garden: gardenIo({ keep: 'kept', argv: [] }), snapshot: async () => ({ ok: false, reason: 'too-large' }) });
+    expect(big.ok ? '' : big.reason).toContain('The repository widgets is larger than the 200 MB crew copies to check citations');
     // A record whose bytes no longer match the launch's is refused before any floor runs.
     let floorRan = false;
     const bad = await guardRefine(
@@ -300,6 +302,30 @@ describe('A5: a refine of the open document', () => {
     );
     expect(bad).toMatchObject({ ok: false, reason: expect.stringContaining('could not read the records this document cites') });
     expect(floorRan).toBe(false);
+  });
+
+  it('crew#1727: a snapshot that kept read-only folders never fails a passing revision, and is removed', async () => {
+    const out = join(dir, 'revised.html');
+    writeFileSync(out, '<h2 data-wid="h">Release 0.17</h2>');
+    const roots: string[] = [];
+    const r = await guardRefine(
+      { outPath: out, notesPath: join(dir, 'notes.json'), runId: RUN, docsRoot, doc: 'deck', base: 3, allow: [], allowOf: () => [],
+        claims: { ...NO_CLAIMS, repos: [{ name: 'widgets', rootPath: join(dir, 'widgets') }] } },
+      {
+        // snapshot.ts's copy fallback keeps a directory's mode: a read-only folder with files in it.
+        snapshot: async (_from, dest) => {
+          mkdirSync(join(dest, 'locked'), { recursive: true });
+          writeFileSync(join(dest, 'locked', 'a.md'), 'a');
+          chmodSync(join(dest, 'locked'), 0o555);
+          return { ok: true };
+        },
+        floor: { ...floorIo, run: async (argv) => { roots.push(dirname(repoDirs(argv)[0]!)); return floorIo.run(); } },
+        garden: gardenIo({ keep: 'kept', argv: [] }),
+      },
+    );
+    expect(r).toMatchObject({ ok: true });
+    expect(roots).toHaveLength(1);
+    expect(existsSync(roots[0]!)).toBe(false);
   });
 
   it('changes the open document as a new version on its head, keeping the person\'s edits: the derived run, the two helpers, the keep list, and the checked bytes announced with run_id + expect_head', async () => {

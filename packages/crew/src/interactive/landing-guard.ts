@@ -19,7 +19,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -27,7 +27,7 @@ import type { DraftFloorIo, DraftFloorVerdict } from './draft-skill.js';
 import { oneLine } from './draft-events.js';
 import { runDraftFloor } from './draft-skill.js';
 import { keepCheck, lineageSteps, protectedEdits, type GardenIo } from './protected-edits.js';
-import { snapshotRepo, type SnapshotResult } from './repo-snapshot.js';
+import { REPO_SNAPSHOT_MAX_BYTES, snapshotRepo, type SnapshotFailureReason, type SnapshotResult } from './repo-snapshot.js';
 import { packetDirOf } from './source-packet.js';
 
 /** What the claims scan checks a refine's citations against (crew#1727). */
@@ -66,14 +66,14 @@ export interface RefineGuardIo {
 /**
  * The floor's `--repo` folders for a refine, made in a fresh crew-owned folder: `records/` holds crew's own copy of the
  * packet's records (each checked against the hash recorded at launch), `repos/<n>` a snapshot of each repository the
- * document is grounded on. Returns the folders and the repositories that could not be snapshotted. The caller removes
- * `root`.
+ * document is grounded on. Returns the folders and the repositories that could not be snapshotted (and why). The caller
+ * removes `root`.
  */
 async function claimsFolders(
   root: string,
   claims: RefineClaimsInput,
   snapshot: NonNullable<RefineGuardIo['snapshot']>,
-): Promise<{ dirs: string[]; missing: string[] }> {
+): Promise<{ dirs: string[]; missing: MissingRepo[] }> {
   const records = join(root, 'records');
   mkdirSync(records, { mode: 0o700 });
   for (const f of claims.files) {
@@ -85,24 +85,38 @@ async function claimsFolders(
     writeFileSync(join(records, f.name), bytes, { mode: 0o600, flag: 'wx' });
   }
   const dirs = [records];
-  const missing: string[] = [];
+  const missing: MissingRepo[] = [];
   for (const [i, repo] of claims.repos.entries()) {
     const dest = join(root, 'repos', String(i));
-    if ((await snapshot(repo.rootPath, dest)).ok) dirs.push(dest);
-    else missing.push(repo.name);
+    const snap = await snapshot(repo.rootPath, dest);
+    if (snap.ok) dirs.push(dest);
+    else missing.push({ name: repo.name, reason: snap.reason });
   }
   return { dirs, missing };
 }
 
-/** The sentence a refused floor adds when a grounded repository could not be read: what happened and what to do. */
-function missingReposNote(missing: readonly string[]): string {
-  if (missing.length === 0) return '';
-  const one = missing.length === 1;
-  return (
-    ` The ${one ? 'repository' : 'repositories'} ${missing.join(', ')} this document is grounded on could not be read on ` +
-    `this host, so citations of ${one ? 'it' : 'them'} could not be found: check that ${one ? 'it is' : 'they are'} still ` +
-    `attached to the project at ${one ? 'its' : 'their'} folder, then ask again.`
-  );
+/** A grounded repository the check could not copy, and why. */
+interface MissingRepo {
+  name: string;
+  reason: SnapshotFailureReason;
+}
+
+/** The sentences a refused floor adds when a grounded repository could not be copied for the check: why, and what to
+ *  do. Citations of it then read as missing files. */
+function missingReposNote(missing: readonly MissingRepo[]): string {
+  return missing
+    .map(({ name, reason }) =>
+      reason === 'too-large'
+        ? ` The repository ${name} is larger than the ${Math.round(REPO_SNAPSHOT_MAX_BYTES / (1024 * 1024))} MB crew copies ` +
+          `to check citations, so citations of it could not be checked: ask for the change without citing it, or ground ` +
+          `the document on a smaller repository.`
+        : reason === 'root-unreadable'
+          ? ` The repository ${name} this document is grounded on is no longer readable at its folder on this host, so ` +
+            `citations of it could not be checked: check that it is still there and attached to the project, then ask again.`
+          : ` The repository ${name} this document is grounded on could not be copied for the check on this host, so ` +
+            `citations of it could not be checked: ask again, and if it keeps failing, check the crew daemon log.`,
+    )
+    .join('');
 }
 
 export type RefineGuardResult =
@@ -110,10 +124,10 @@ export type RefineGuardResult =
   | { ok: false; reason: string; floor?: DraftFloorVerdict };
 
 /** The floor on the revision, with its claims folders made and removed around it; `refused` when they cannot be made. */
-async function refineFloor(input: RefineGuardInput, io: RefineGuardIo): Promise<{ floor: DraftFloorVerdict; missing: string[] } | { refused: string }> {
+async function refineFloor(input: RefineGuardInput, io: RefineGuardIo): Promise<{ floor: DraftFloorVerdict; missing: MissingRepo[] } | { refused: string }> {
   const root = mkdtempSync(join(tmpdir(), 'crew-refine-floor-'));
   try {
-    let folders: { dirs: string[]; missing: string[] };
+    let folders: { dirs: string[]; missing: MissingRepo[] };
     try {
       folders = await claimsFolders(root, input.claims, io.snapshot ?? ((from, dest) => snapshotRepo(from, dest)));
     } catch (err) {
@@ -126,7 +140,28 @@ async function refineFloor(input: RefineGuardInput, io: RefineGuardIo): Promise<
     const floor = await runDraftFloor(input.outPath, { pages: null, exact: false, source: 'unknown' }, folders.dirs, { notes: input.notesPath, runId: input.runId }, io.floor ?? {});
     return { floor, missing: folders.missing };
   } finally {
+    removeFolder(root);
+  }
+}
+
+/** Remove the check's temp folder, read-only directories a copied snapshot kept included. Never throws: a leftover
+ *  temp folder is a disk wart, never a refused revision. */
+function removeFolder(root: string): void {
+  try {
     rmSync(root, { recursive: true, force: true });
+    return;
+  } catch {
+    /* a read-only directory: made writable below, then removed */
+  }
+  try {
+    const open = (dir: string): void => {
+      chmodSync(dir, 0o700);
+      for (const e of readdirSync(dir, { withFileTypes: true })) if (e.isDirectory() && !e.isSymbolicLink()) open(join(dir, e.name));
+    };
+    open(root);
+    rmSync(root, { recursive: true, force: true });
+  } catch {
+    /* left behind in the OS temp folder */
   }
 }
 
