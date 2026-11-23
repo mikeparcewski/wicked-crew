@@ -1,5 +1,5 @@
 import type { SessionView } from '../core/types.js';
-import { deliverRunBranch, isSafeRefName, type GhExec } from '../core/deliver.js';
+import { deliverRunBranch, isSafeRefName, type GhExec, type GitExec } from '../core/deliver.js';
 import { seatKey } from '../interactive/review-events.js';
 
 export const REVIEW_CHANGE_WORKFLOW = 'review-change';
@@ -42,7 +42,8 @@ export interface ReviewChangeDeps {
   deliveredCommit: (runId: string) => string | undefined;
   revisesPr: (runId: string) => { number: number; headRef: string; url: string } | undefined;
   gh: GhExec;
-  git: (args: string[], cwd: string) => Promise<{ code: number | null; stdout: string; stderr: string }>;
+  /** (crew#1804) The daemon pins its `fetch origin` to the deliver identity (`pinnedGitExec`). */
+  git: GitExec;
   now?: () => number;
 }
 
@@ -59,6 +60,8 @@ export type ReviewExclusion =
       /** Only a same-repository origin branch is suitable as the review run's base. */
       baseRef?: string;
       label: string;
+      /** (crew#1803) Why the provenance could not be read; present only when `provenance` is `unknown`. */
+      why?: string;
       briefLines: string[];
     }
   | { ok: false; code: 'review_authors_unknown'; error: string };
@@ -256,7 +259,7 @@ export async function reviewChangeExclusion(words: string, deps: ReviewChangeDep
   const named = target === null ? 'unspecified' : target.kind === 'pr' ? `PR #${target.number}` : target.kind === 'branch' ? `branch ${target.name}` : `commit ${target.sha}`;
   return {
     ok: true, target, provenance, runs, excludeSeats, headSha,
-    ...(baseRef === undefined ? {} : { baseRef }), label,
+    ...(baseRef === undefined ? {} : { baseRef }), label, ...(why === undefined ? {} : { why }),
     briefLines: [`Review target: ${named}`, `Head SHA: ${headSha ?? 'unknown'}`, label, 'Post nothing to the pull request.'],
   };
 }

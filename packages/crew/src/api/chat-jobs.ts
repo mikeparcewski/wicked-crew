@@ -173,6 +173,9 @@ export interface JobContext {
   revises: string | null;
   lineage: string | null;
   notes: string[];
+  /** (crew#1803) A review of a change names the seats it left off and why. Kept apart from `notes`, which a seat edit
+   *  reads as its refusal. */
+  reviewNote?: string;
   /** Authorised in the chat layer before this pure resolution; absent admits no document. */
   documents?: ProposalSource[];
   /** Sources in display order; a reason means the source cannot be picked. Absent = no list. */
@@ -451,7 +454,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
   if (card.depth === true && facts.depth === null) facts = { ...facts, depth: 'standard' };
   const kind = proposalKindOf(r);
   if (kind !== 'job') throw new JobRefusal('not_a_job', `${card.title} makes a document: it is proposed as one`);
-  const notes = [...ctx.notes];
+  const notes = [...ctx.notes, ...(ctx.reviewNote !== undefined ? [ctx.reviewNote] : [])];
   const takesDocuments = r.resolved.inputs.some((i) => i.id === 'documents');
   const takesSources = r.resolved.inputs.some((i) => i.id === 'sources');
   if (takesSources) {

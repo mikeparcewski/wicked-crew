@@ -145,6 +145,23 @@ describe('wicked-core#976: the host-floor bench', () => {
     expect((claude['work_admission'] as Record<string, unknown>)['unscoped']).toEqual({ ok: true });
   });
 
+  // crew#1818: the engine's #653 refusal for a claude whose managed settings silence its gate hook, exactly as
+  // wicked-core `managed_hooks_only_refusal_reason` (src/execute_wrapped.rs) formats it with the sign-in remedy.
+  const POLICY_ENGINE =
+    "claude can't be governed on the wrapped path on this machine: settings in /home/p/.wicked-worker/claude/remote-settings.json silence the engine's gate hook (`allowManagedHooksOnly: true` or `disableAllHooks: true`); refusing the governed unit rather than running it ungoverned. It is organization policy that came with the seat's sign-in: run governed work on the container floor (WICKED_SEAT_FLOOR=container), whose claude seat does not carry it, or route it to another seat (core#653, C5)";
+  it('a policy-silenced claude is told its own reason, not the generic host-floor sentence (crew#1818)', () => {
+    const s = seat(rosterOver({ hostFloor: new Map([['claude', POLICY_ENGINE]]) })(), 'claude');
+    const work = s['work_admission'] as Record<string, { ok: boolean; reason_code?: string; reason?: string }>;
+    const chat = s['chat_admission'] as Record<string, { ok: boolean; reason?: string }>;
+    const warning = (s['issues'] as Array<{ code: string; message?: string; text?: string }>).find((i) => i.code === 'host_floor')!;
+    for (const reason of [work['unscoped']!.reason!, chat['unscoped']!.reason!, JSON.stringify(warning)]) {
+      expect(reason).toContain("Claude Code policy turns off the checks wicked uses");
+      expect(reason).toContain('WICKED_SEAT_FLOOR=container');
+      expect(reason).not.toMatch(/only claude and codex can have each action checked/);
+    }
+    expect(work['unscoped']).toMatchObject({ ok: false, reason_code: 'host_floor_bench' });
+  });
+
   it('off the host floor (an empty bench) or with an addon that cannot answer, nothing changes', () => {
     for (const hostFloor of [new Map<string, string>(), null]) {
       const copilot = seat(rosterOver({ hostFloor })(), 'copilot');

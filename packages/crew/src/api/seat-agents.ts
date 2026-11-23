@@ -25,7 +25,7 @@ import { isContainerSeatFloor } from './seat-container-login.js';
 import type { SeatRecentBench } from './seat-health.js';
 import type { GovernanceScopeKind, SeatGovernanceMode } from './seat-governance.js';
 import type { SeatAccount } from './seat-scrub.js';
-import { HOST_FLOOR_BENCH_COPY, homeless, type ChatAdmission, type SeatStanding } from './seat-standing.js';
+import { hostFloorBenchCopy, homeless, type ChatAdmission, type SeatStanding } from './seat-standing.js';
 import type { SeatVersion } from './seat-version.js';
 
 // ── A3 ──────────────────────────────────────────────────────────────────────────────────────────
@@ -149,7 +149,7 @@ function seatImageRefusal(i: WorkInputs): Refusal | null {
 /** The host-floor refusal (wicked-core#976), when the engine benches the seat there. */
 function hostFloorRefusal(i: WorkInputs): Refusal | null {
   if (typeof i.hostFloorBench !== 'string' || i.hostFloorBench === '') return null;
-  return { ok: false, reason_code: 'host_floor_bench', source: 'launcher', reason: HOST_FLOOR_BENCH_COPY };
+  return { ok: false, reason_code: 'host_floor_bench', source: 'launcher', reason: hostFloorBenchCopy(i.hostFloorBench) };
 }
 
 type Refusal = { ok: false; reason_code: WorkReasonCode; source: WorkRefusalSource; reason: string };
@@ -306,7 +306,7 @@ export function seatIssues(i: IssueInputs): SeatIssue[] {
 
   // wicked-core#976: from the bench reading itself — whatever refusal leads the admissions.
   if (typeof i.hostFloorBench === 'string' && i.hostFloorBench !== '') {
-    add('host_floor', 'warning', `${name} gets no work here: ${HOST_FLOOR_BENCH_COPY}`);
+    add('host_floor', 'warning', `${name} gets no work here: ${hostFloorBenchCopy(i.hostFloorBench)}`);
   } else if (typeof i.hostFloorUnknown === 'string' && i.hostFloorUnknown !== '') {
     add('host_floor_unknown', 'warning', `${name}: ${i.hostFloorUnknown}`);
   }

@@ -43,11 +43,13 @@
 
 import { existsSync, lstatSync, readdirSync, realpathSync } from 'node:fs';
 import { lstat, readdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import { wickedHomeDir } from '../core/wicked-home.js';
 import { SKILLS_ROOT_NAMES } from '../skills/root-names.js';
 import { SKILLS_DIRNAME, SNAPSHOTS_DIRNAME } from '../skills/store.js';
+import { defaultStateHome } from './state-home.js';
 import { isOsMetadataEntry, isRegisteredStateHomeEntry } from './state-home-registry.js';
 
 /** The remedy every message ends with — spelled once, operator terms, no repository paths. */
@@ -102,6 +104,8 @@ export const STATE_HOME_ROOT_ENVS: ReadonlyArray<{ variable: string; creates: st
   { variable: 'WICKED_CREW_REVIEWS_DIR', creates: 'the run directory a review run writes its analysis to', fenced: false, home: 'reviews' },
   { variable: 'WICKED_CREW_EVAL_RUNS_DIR', creates: 'the report copy an eval run writes', fenced: false, home: 'evals' },
   { variable: 'WICKED_CREW_INSPECTIONS_DIR', creates: 'the inspection records an inspect run writes', fenced: false, home: 'inspections' },
+  // (crew#1823) The app repositories an app turn's run reads and writes: the same refusal, refuse-only.
+  { variable: 'WICKED_CREW_APPS_ROOT', creates: 'the app repositories an app turn reads and writes', fenced: false, home: 'apps' },
 ];
 
 /**
@@ -193,7 +197,23 @@ export function assertWickedRootsOutsideStateHome(env: NodeJS.ProcessEnv, stateH
     const entry = topLevelUnder(placed.target, stateHome);
     throw new StateHomePlacementError(placed.by, placed.value, stateHome, entry === '' ? '(the state home itself)' : entry, placed.by === variable ? creates : `${creates}, under WICKED_HOME/${home} while ${variable} is unset`);
   }
+  // crew#1823: on the default state home the work roots are `<WICKED_HOME>/<name>` (`wickedWorkRoot`), with no variable
+  // of their own, so a WICKED_HOME inside the state home would put the clones and saved scripts there. Any other state
+  // home keeps them as its `<state home>-<name>` siblings, outside it.
+  if (wickedHomeVar === undefined || wickedHomeVar === '' || canonicalize(stateHome) !== canonicalize(defaultStateHome(homedir()))) return;
+  for (const { name, creates } of WORK_ROOTS) {
+    const target = resolve(wickedHomeVar, name);
+    if (!isInside(target, stateHome)) continue;
+    const entry = topLevelUnder(target, stateHome);
+    throw new StateHomePlacementError('WICKED_HOME', wickedHomeVar, stateHome, entry === '' ? '(the state home itself)' : entry, `${creates}, under WICKED_HOME/${name}`);
+  }
 }
+
+/** The work roots a default state home keeps under the wicked home (`wickedWorkRoot`, crew#1823). */
+const WORK_ROOTS: ReadonlyArray<{ name: string; creates: string }> = [
+  { name: 'repos', creates: 'the clones of the repositories crew registers' },
+  { name: 'scripts', creates: 'the scripts a job saves for its phases' },
+];
 
 /** One entry the registry cannot classify (mirrors core's `UnregisteredEntry`). */
 export interface UnregisteredStateHomeEntry {
