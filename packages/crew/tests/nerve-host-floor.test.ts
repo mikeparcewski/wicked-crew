@@ -230,9 +230,13 @@ describe('crew#1818: a policy-silenced claude on the host floor', () => {
       expect(a[0]!.id).toBe('cli:none');
       expect(a[0]!.reason).not.toContain('only Claude Code and Codex');
       expect(a[0]!.reason).toContain('on this computer only Codex gets work');
-      // codex can be signed in: the sign-in remedy stands.
-      expect(a[0]!.remedy).toBe('Sign a CLI in, or wait for a bench to lift.');
+      // codex can be signed in; no bench here lifts by itself (fold check).
+      expect(a[0]!.remedy).toBe('Sign a CLI in.');
     }
+    // A quota bench lifts by itself: waiting is offered, a sign-in is not (nothing to sign in).
+    const quota = { kind: 'quota_exhausted', reason: 'usage limit', lifts_at: '2099-11-15T14:00:00Z', last_at: '2026-11-15T11:00:00Z', runs: 1, source: 'engine' };
+    const waiting = attention([signedIn('claude', { host_floor_bench: SYSTEM }), signedIn('codex', { recent_bench: quota })]);
+    expect(waiting[0]).toMatchObject({ id: 'cli:none', remedy: 'Wait for a bench to lift.' });
     const alone = attention([signedIn('claude', { host_floor_bench: SYSTEM })]);
     expect(alone[0]).toMatchObject({ id: 'cli:none', action: null });
     expect(alone[0]!.remedy).not.toMatch(/Sign a CLI in|wait for a bench/);

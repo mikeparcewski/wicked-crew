@@ -252,6 +252,20 @@ function noneReason(clis: readonly SystemCli[]): string {
   return `No helper is free to take work (${words.join(', ')})${onHost}${policy}${unread}`;
 }
 
+/**
+ * crew#1818: what can bring a helper back when none can take work: a sign-in (a signable seat), a bench that lifts by
+ * itself (any bench but the host floor's), both, or neither: then the reason above is the remedy. A roster with no
+ * host-floor reason keeps the one sentence it always had.
+ */
+function noneRemedy(clis: readonly SystemCli[], signable: boolean): string {
+  const hostFloor = clis.some((c) => isHostFloorBenchCopy(c.stateReason) || c.stateReason === HOST_FLOOR_UNKNOWN_COPY);
+  const lifts = clis.some((c) => c.state === 'benched' && !isHostFloorBenchCopy(c.stateReason) && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY);
+  if (!hostFloor || (signable && lifts)) return 'Sign a CLI in, or wait for a bench to lift.';
+  if (signable) return 'Sign a CLI in.';
+  if (lifts) return 'Wait for a bench to lift.';
+  return 'Do what the reason says for each helper, or set up another helper on the Helpers page.';
+}
+
 /** Why a held run is held, in a person's words (the denial's category, never its raw text). */
 function heldWords(denial: string, dead: boolean, noFailover: boolean): string {
   if (dead) return noFailover ? 'No other helper can take over' : 'Its helper stopped unexpectedly';
@@ -510,11 +524,7 @@ export function buildNeeds(input: NeedsInput): Needs {
         kind: 'prevents',
         title: 'No helper can take work',
         reason: noneReason(input.clis),
-        // crew#1818: with no seat a sign-in or a lifting bench returns, the reason above is the remedy.
-        remedy: signable !== undefined || input.clis.some((c) => c.state === 'benched' && !isHostFloorBenchCopy(c.stateReason) && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY)
-          || !input.clis.some((c) => isHostFloorBenchCopy(c.stateReason))
-          ? 'Sign a CLI in, or wait for a bench to lift.'
-          : 'Do what the reason says for each helper, or set up another helper on the Helpers page.',
+        remedy: noneRemedy(input.clis, signable !== undefined),
         target: { kind: 'cli', cli: (signable ?? input.clis[0]!).cli },
         action: signable !== undefined ? { kind: 'sign_in', label: 'Sign in' } : null,
       }),
