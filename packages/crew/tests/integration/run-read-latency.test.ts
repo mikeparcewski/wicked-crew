@@ -49,11 +49,12 @@ const COLD_LIST_SAMPLES = 8;
  * crew#1812: median of a cold `GET /runs` on the 120-run home: the engine's whole-store fold
  * (`sessionsDetail`), its parse, identity pass and freeze, and the route's copy and reply. The fault this
  * guards is the per-session fold (crew#944, wicked-core#869) coming back in `sessionsDetail` while the
- * one-run read stays cheap. Measured at host 1-min load ~30 on 14 cores: the fold as it is, p50 29-34 ms;
+ * one-run read stays cheap. Measured at host 1-min load ~30 on 14 cores: the fold as it is, p50 29-36 ms;
  * the fold with one unit read per session added (that fault's shape), p50 460-523 ms on every attempt.
- * 200 ms leaves ~6x over the first and fails the second by ~2x.
+ * On CI runners the fold as it is took p50 63 ms (Linux) and 104 ms (macOS). 300 ms leaves ~3x over the
+ * slowest runner seen and still fails the fault's shape on the fastest host.
  */
-const COLD_LIST_P50_MS = 200;
+const COLD_LIST_P50_MS = 300;
 
 const HELPER = fileURLToPath(new URL('../setup/long-lived-home.mts', import.meta.url));
 
