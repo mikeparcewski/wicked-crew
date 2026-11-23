@@ -474,9 +474,10 @@ export async function collectRunFacts(
   return runs;
 }
 
-/** (crew#1375) The seats that ran any of `runs` (each run's {@link RunFact.agents}), as cli keys, sorted. */
-export function seatsThatRan(runs: readonly Pick<RunFact, 'agents'>[]): string[] {
-  return [...new Set(runs.flatMap((r) => r.agents.map(cliOf)))].sort();
+/** (crew#1375) The seats that ran any of `runs` (each run's {@link RunFact.agents} and {@link RunFact.ranBy}: a seat a
+ *  unit moved away from ran it too), as cli keys, sorted. */
+export function seatsThatRan(runs: readonly Pick<RunFact, 'agents' | 'ranBy'>[]): string[] {
+  return [...new Set(runs.flatMap((r) => [...r.agents, ...(r.ranBy ?? [])].map(cliOf)))].sort();
 }
 
 /** The scope a review covers, as one comparable key (its projects, sorted; `''` = every run). */

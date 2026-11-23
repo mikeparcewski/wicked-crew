@@ -27,6 +27,11 @@ export interface RunFact {
   projectId: string | null;
   /** Every CLI that was assigned a unit. */
   agents: string[];
+  /** (crew#1375) Every seat that ran any of the run, as recorded: {@link agents} plus the seats a unit was distributed
+   *  to or reassigned from or to (`unitDistributed.cli`, `unitReassigned.previousCli`/`newCli`) and each unit's
+   *  `authored_by`, sorted. A review never lets one of these interpret the run. Absent on a fact not made by
+   *  {@link runFactOf}. */
+  ranBy?: string[];
   createdAtMs: number;
   endedAtMs: number | null;
   status: string;
@@ -244,6 +249,7 @@ export function runFactOf(view: SessionView, events: readonly LooseEvent[], nowM
   let stalls = 0;
   const overrides: RunOverride[] = [];
   const benched = new Map<string, { cli: string; reason: string }>();
+  const ran = new Set<string>();
   // A unit parked on a person: when it parked, and the escalation (if any) a later allow overrides.
   const parked = new Map<number, number>();
   const escalated = new Map<number, { condition: string; source: string | null }>();
@@ -287,6 +293,10 @@ export function runFactOf(view: SessionView, events: readonly LooseEvent[], nowM
     // An agent attempt that reported no usage at all (`cliUsageUnreported`): its cost is missing from the sum.
     if (e.type === 'cliUsageUnreported') unpricedFrames += 1;
     if (e.type === 'unitReassigned') retries += 1;
+    for (const k of e.type === 'unitDistributed' ? ['cli'] : e.type === 'unitReassigned' ? ['previousCli', 'newCli'] : []) {
+      const cli = str(e[k]);
+      if (cli !== null) ran.add(cli);
+    }
     if (e.type === 'stepFailed') {
       retries += 1;
       lastStepFailure = str(e['failureKind']);
@@ -312,6 +322,11 @@ export function runFactOf(view: SessionView, events: readonly LooseEvent[], nowM
     const cli = str(unit['assigned_cli']);
     return cli === null ? [] : [cli];
   }))].sort();
+  for (const u of view.units) {
+    const authored = (u as unknown as Record<string, unknown>)['authored_by'];
+    for (const a of Array.isArray(authored) ? authored : []) if (typeof a === 'string' && a !== '') ran.add(a);
+  }
+  for (const a of agents) ran.add(a);
   let failureSignature: string | null = null;
   if (outcome === 'failed') {
     if (status === 'completed') failureSignature = 'deliver did not land';
@@ -325,6 +340,7 @@ export function runFactOf(view: SessionView, events: readonly LooseEvent[], nowM
     repo: str(s['repo_ref']),
     projectId: str(s['project_id']),
     agents,
+    ranBy: [...ran].sort(),
     createdAtMs,
     endedAtMs,
     status,

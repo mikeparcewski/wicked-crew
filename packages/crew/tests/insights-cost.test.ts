@@ -196,6 +196,8 @@ describe('POST /insights/facts', () => {
     otherWorkflow: { runId: 'bug-x', ord: 1 },
     shadowAgent: { runId: 'rc-shadow', ord: 1 },
   };
+  /** `v`: the views the collector reads (the daemon's served, decorated ones); the token resolver reads the engine's
+   *  raw views, which carry no project (the membership join is crew's, `decorateRun`). */
   function rig(withFacts = true, v: () => unknown[] = views): FastifyInstance {
     const app = Fastify({ logger: false });
     apps.push(app);
@@ -214,7 +216,7 @@ describe('POST /insights/facts', () => {
                 const u = unitTokens[(JSON.parse(req) as { token: string }).token];
                 if (u === undefined) throw new Error('invalid_token: no such unit');
                 return JSON.stringify({ unit: { ...u, attempt: 0, phase: 'x', seat: 'tool' } });
-              }, async () => v() as never),
+              }, async () => views() as never),
               collect: (opts, nowMs) => s.collect(opts, nowMs),
               now: () => NOW,
             },
@@ -247,6 +249,8 @@ describe('POST /insights/facts', () => {
   });
 
   it('(crew#1416) a run-cost run filed in a project models that project\'s runs only, and says so; the default project is daemon-wide', async () => {
+    // The project is the served view's (crew's membership join), never the engine's raw record: the resolver's views
+    // here carry project_id null for every run.
     const filed = (project: string) => () => views().map((v) => {
       const s = (v as { session: Record<string, unknown> }).session;
       return ['rc-1', 'bug-1', 'bug-4', 'feature-1'].includes(String(s['id'])) ? { ...(v as object), session: { ...s, project_id: project } } : v;

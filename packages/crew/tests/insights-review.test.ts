@@ -197,6 +197,29 @@ describe('the review seat ran none of the work it reviews (crew#1375, R≠)', ()
     expect(input.problem).not.toMatch(/Reduced assurance/u);
   });
 
+  it('a seat a unit was reassigned away from ran it too: neither it nor the seat it moved to interprets the review', async () => {
+    // bad-0's build unit ran on claude#2, was reassigned to codex (the engine's frames), and its row now names codex.
+    const r = rig({ views: () => views((id) => (id === 'bad-0' ? 'codex' : 'agy')), seats: [{ key: 'claude' }, { key: 'codex' }, { key: 'pi' }] });
+    const t = NOW.getTime() - 4 * H;
+    (r.service as unknown as { deps: { adapter: { runEvents: unknown } } }).deps.adapter.runEvents = async (id: string) => (id === 'bad-0'
+      ? [
+          { type: 'unitDistributed', ts: t + 1000, ord: 1, cli: 'claude#2' },
+          { type: 'unitReassigned', ts: t + 2000, ord: 1, attempt: 1, previousCli: 'claude#2', newCli: 'codex' },
+          { type: 'sessionFailed', ts: t + 3000 },
+        ]
+      : eventsOf(id));
+    expect(seatOf(await r.service.prepareLaunch(launchInput(), { trigger: 'manual' }))).toEqual(['pi']);
+  });
+
+  it("a unit's recorded authors ran it too (authored_by)", async () => {
+    const authored = () => views().map((v) => {
+      const view = v as { session: { id: string }; units: Array<Record<string, unknown>> };
+      return view.session.id === 'bad-1' ? { ...view, units: view.units.map((u) => ({ ...u, authored_by: ['claude'] })) } : view;
+    });
+    const r = rig({ views: authored });
+    expect(seatOf(await r.service.prepareLaunch(launchInput(), { trigger: 'manual' }))).toEqual(['codex']);
+  });
+
   it('a run in the baseline only (reviewed before) does not exclude its seat', async () => {
     const r = rig({ views: ranBy('agy', 'claude') });
     expect(seatOf(await r.service.prepareLaunch(launchInput(), { trigger: 'manual' }))).toEqual(['claude']);

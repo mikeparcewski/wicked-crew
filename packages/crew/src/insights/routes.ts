@@ -31,14 +31,12 @@ const V = API_PREFIX;
 const DismissSchema = z.strictObject({ reason: z.string().trim().min(1).max(500) });
 const FactsSchema = z.strictObject({ token: z.string().min(1).max(512) });
 
-/** What a unit token resolves to: its run, its step id, the run's workflow name, the unit's Tool command and the
- *  project the run is filed in (`null`: none on its record). */
+/** What a unit token resolves to: its run, its step id, the run's workflow name and the unit's Tool command. */
 export interface FactsUnit {
   runId: string;
   phase: string;
   workflow: string | null;
   toolCmd: string[] | null;
-  projectId: string | null;
 }
 
 export interface InsightsFactsDeps {
@@ -71,13 +69,11 @@ export function factsUnitResolver(
     const view = (await sessions()).find((v) => v.session.id === runId);
     const u = view?.units.find((x) => x.ord === ord);
     const cmd = (u as { tool_cmd?: unknown } | undefined)?.tool_cmd;
-    const project = (view?.session as { project_id?: unknown } | undefined)?.project_id;
     return {
       runId,
       phase: u !== undefined && u.id.startsWith(`${runId}:`) ? u.id.slice(runId.length + 1) : '(unknown)',
       workflow: view === undefined ? null : runNameOf(view),
       toolCmd: Array.isArray(cmd) && cmd.every((c) => typeof c === 'string') ? (cmd as string[]) : null,
-      projectId: typeof project === 'string' && project !== '' ? project : null,
     };
   };
 }
@@ -179,10 +175,13 @@ export function registerInsightsRoutes(app: FastifyInstance, deps: InsightsRoute
       }
       const now = (facts.now ?? Date.now)();
       const window = costWindow(now);
+      const all = await facts.collect({ startMs: window.startMs, endMs: window.endMs }, now);
       // (crew#1416) The run-cost card takes a project: a run filed in one models that project's runs (the question was
-      // about them); a run in the default project models every run on the daemon, and the facts say which.
-      const project = unit.projectId !== null && unit.projectId !== DEFAULT_PROJECT_ID ? unit.projectId : null;
-      const runs = await facts.collect({ startMs: window.startMs, endMs: window.endMs, ...(project !== null ? { projectIds: [project] } : {}) }, now);
+      // about them); a run in the default project, or in none, models every run on the daemon, and the facts say which.
+      // The asking run's project is read from the same served views as every other run's (the project membership join).
+      const asked = all.find((r) => r.id === unit.runId)?.projectId ?? null;
+      const project = asked !== null && asked !== '' && asked !== DEFAULT_PROJECT_ID ? asked : null;
+      const runs = project === null ? all : all.filter((r) => r.projectId === project || r.id === unit.runId);
       return costFacts(runs, {
         window,
         generatedAtMs: now,
