@@ -8,8 +8,9 @@
 // `target` seam (the rest of `adoRepoOf`'s answer, the canonical shape, is kept).
 
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer as createTcpServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -297,13 +298,21 @@ describe('crew#1839 From a URL on Azure DevOps', () => {
   it('the clone environment pins the header, redirects and hooks, and carries none of the raw credential variables', () => {
     const url = 'https://dev.azure.com/org/proj/_git/repo';
     const env = adoCloneEnv(
-      { PATH: '/bin', AZURE_DEVOPS_EXT_PAT: PAT, CREW_ADO_TENANT_ID: 't', CREW_ADO_CLIENT_ID: 'c', CREW_ADO_CLIENT_SECRET: 'sp-secret', GIT_CONFIG_KEY_7: 'http.extraHeader', GIT_CONFIG_VALUE_7: 'x', GIT_CONFIG_PARAMETERS: "'http.extraheader'='y'" }, // ggignore: made-up test values
+      {
+        PATH: '/bin', AZURE_DEVOPS_EXT_PAT: PAT, CREW_ADO_TENANT_ID: 't', CREW_ADO_CLIENT_ID: 'c', CREW_ADO_CLIENT_SECRET: 'sp-secret', // ggignore: made-up test values
+        GIT_CONFIG_KEY_17: 'http.extraHeader', GIT_CONFIG_VALUE_17: 'x', GIT_CONFIG_PARAMETERS: "'http.extraheader'='y'",
+        // (coord F1) A daemon started while someone debugged git over HTTP.
+        GIT_TRACE_CURL: '/tmp/curl.log', GIT_TRACE_REDACT: '0', GIT_CURL_VERBOSE: '1', GIT_SSL_NO_VERIFY: '1', GIT_TRACE: '1', GIT_TRACE2_EVENT: '/tmp/t2', GIT_TRACE_PACKET: '1',
+      },
       url,
       BASIC,
     );
     for (const n of ENV) expect(env[n]).toBeUndefined();
-    expect(env['GIT_CONFIG_KEY_7']).toBeUndefined();
+    expect(env['GIT_CONFIG_KEY_17']).toBeUndefined();
+    expect(env['GIT_CONFIG_VALUE_17']).toBeUndefined();
     expect(env['GIT_CONFIG_PARAMETERS']).toBe('');
+    for (const n of ['GIT_TRACE_CURL', 'GIT_CURL_VERBOSE', 'GIT_SSL_NO_VERIFY', 'GIT_TRACE', 'GIT_TRACE2_EVENT', 'GIT_TRACE_PACKET']) expect(env[n], n).toBeUndefined();
+    expect(env['GIT_TRACE_REDACT']).toBe('1');
     const pairs = Array.from({ length: Number(env['GIT_CONFIG_COUNT']) }, (_, i) => [env[`GIT_CONFIG_KEY_${i}`], env[`GIT_CONFIG_VALUE_${i}`]]);
     expect(pairs).toEqual([
       ['http.extraHeader', ''],
@@ -312,10 +321,80 @@ describe('crew#1839 From a URL on Azure DevOps', () => {
       ['http.followRedirects', 'false'],
       [`http.${url}.followRedirects`, 'false'],
       ['core.hooksPath', process.platform === 'win32' ? 'NUL' : '/dev/null'],
+      [`http.${url}.sslVerify`, 'true'],
+      ['http.lowSpeedLimit', '1000'],
+      ['http.lowSpeedTime', '60'],
     ]);
     expect(env['GIT_ALLOW_PROTOCOL']).toBe('https');
     expect(env['PATH']).toBe('/bin');
   });
+
+  it('a daemon tracing git over HTTP writes no header anywhere: the clone gets no trace or TLS-off setting (coord F1)', async () => {
+    const fx = await fixture();
+    const trace = join(fx.root, 'curl.log');
+    const s = seam(fx);
+    const dir = join(fx.root, 'clone');
+    await cloneRepository('https://dev.azure.com/org/proj/_git/repo', dir, {
+      // (GIT_CURL_VERBOSE would send the same trace to stderr instead of the file; the env test covers it.)
+      ado: { ...s, env: { ...s.env, GIT_TRACE_CURL: trace, GIT_TRACE_REDACT: '0', GIT_SSL_NO_VERIFY: '1' } },
+    });
+    expect(readFileSync(join(dir, 'README.md'), 'utf8')).toBe('tiny-math\n');
+    // No trace at all: the clone's git was never asked for one.
+    expect(existsSync(trace)).toBe(false);
+    expect(fx.auths.every((a) => a === BASIC)).toBe(true);
+  }, 60_000);
+
+  it('a plain clone on a daemon holding the PAT runs no filter with it (coord F4)', async () => {
+    const fx = await fixture();
+    const leaked = join(fx.root, 'filter-saw-env.txt');
+    const filter = join(fx.root, 'leak.sh');
+    writeFileSync(filter, `#!/bin/sh\n${RECORD(leaked)}cat\n`);
+    chmodSync(filter, 0o755);
+    writeFileSync(join(fx.env['HOME']!, '.gitconfig'), `[filter "leak"]\n\tsmudge = ${filter}\n`);
+    const dir = join(fx.root, 'plain');
+    // A local path: not Azure DevOps, so the plain clone path.
+    await cloneRepository(join(fx.root, 'srv', 'org', 'proj', '_git', 'repo'), dir, { ado: { env: { ...fx.env, AZURE_DEVOPS_EXT_PAT: PAT, CREW_ADO_CLIENT_SECRET: 'sp-secret' } } }); // ggignore: made-up test values
+    const seen = readFileSync(leaked, 'utf8');
+    expect(seen).toContain('ran');
+    expectNoSecret(seen);
+    for (const n of ENV) expect(seen).not.toContain(`${n}=`);
+  }, 60_000);
+
+  it.skipIf(process.platform === 'win32')('a clone that stalls past its deadline is stopped with every git it started: nothing carrying the header outlives it (coord F2)', async () => {
+    const fx = await fixture();
+    // Accepts, reads, never answers.
+    const held: Socket[] = [];
+    const stall = createTcpServer((sock) => {
+      held.push(sock);
+      sock.on('data', () => undefined);
+    });
+    await new Promise<void>((r) => stall.listen(0, '127.0.0.1', () => r()));
+    const at = `http://127.0.0.1:${(stall.address() as { port: number }).port}`;
+    try {
+      const s = seam(fx);
+      const err = await cloneRepository('https://dev.azure.com/org/proj/_git/repo', join(fx.root, 'clone'), {
+        ado: { ...s, timeoutMs: 1500, target: (u) => ({ ...adoRepoOf(u)!, gitUrl: `${at}/org/proj/_git/repo`, loginBase: fx.url }) },
+      }).catch((e: unknown) => e as Error);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain('timed out');
+      expectNoSecret((err as Error).message);
+      // git's remote helpers carry the URL in their argv: none of them is left.
+      // (pgrep matches the full command line and prints only pids; exit 1 = none.)
+      const survivors = (): string[] => {
+        try {
+          return execFileSync('pgrep', ['-f', at], { encoding: 'utf8' }).split('\n').filter((l) => l.trim() !== '');
+        } catch (e) {
+          if ((e as { status?: number }).status === 1) return [];
+          throw new Error(`pgrep failed: ${String((e as { status?: number }).status)}`);
+        }
+      };
+      for (let i = 0; i < 20 && survivors().length > 0; i += 1) await new Promise((r) => setTimeout(r, 100));
+      expect(survivors()).toEqual([]);
+    } finally {
+      for (const sock of held) sock.destroy();
+      await new Promise<void>((r) => stall.close(() => r()));
+    }
+  }, 60_000);
 
   it('a GitHub URL is cloned as before, with no Azure DevOps step', async () => {
     const minted: string[][] = [];
