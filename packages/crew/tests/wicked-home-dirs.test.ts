@@ -105,21 +105,19 @@ describe('the boot refuses a WICKED_HOME that puts one of those dirs inside the 
     expect(() => assertWickedRootsOutsideStateHome({ WICKED_HOME: join(base, 'wicked-home') }, stateHome)).not.toThrow();
   });
 
-  it('an unset or empty WICKED_HOME is checked too: its default ~/.wicked inside the state home is refused, named (xreview r1)', () => {
-    const stateHome = join(homedir(), '.wicked');
-    for (const env of [{}, { WICKED_HOME: '' }]) {
-      let thrown: unknown;
-      try {
-        assertWickedRootsOutsideStateHome(env, stateHome);
-      } catch (err) {
-        thrown = err;
+  it('an unset or empty WICKED_HOME is not checked, like every unset default: a HOME under the state home still boots', () => {
+    const stateHome = join(base, 'crew-state');
+    const saved = { HOME: process.env['HOME'], USERPROFILE: process.env['USERPROFILE'] };
+    try {
+      process.env['HOME'] = join(stateHome, 'home');
+      process.env['USERPROFILE'] = join(stateHome, 'home');
+      for (const env of [{}, { WICKED_HOME: '' }]) expect(() => assertWickedRootsOutsideStateHome(env, stateHome)).not.toThrow();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
       }
-      expect(thrown).toBeInstanceOf(StateHomePlacementError);
-      expect((thrown as StateHomePlacementError).variable).toBe('WICKED_HOME');
-      expect((thrown as StateHomePlacementError).value).toBe(`(unset: ${join(homedir(), '.wicked')})`);
     }
-    // The default state home (a sibling, ~/.wicked-crew) is not.
-    expect(() => assertWickedRootsOutsideStateHome({}, join(homedir(), '.wicked-crew'))).not.toThrow();
   });
 
   it('a relative WICKED_HOME is checked where the dirs resolve (the same helper)', () => {
