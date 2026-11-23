@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { pinnedGhExec, resolvePullRequest, type GhExec } from '../src/core/deliver.js';
+import { pinnedGhExec, pinnedGitExec, resolvePullRequest, type GhExec, type GitExec } from '../src/core/deliver.js';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -108,6 +108,73 @@ describe('pinnedGhExec (crew#1792)', () => {
     const { exec, calls } = fakeGh({});
     const out = await pinnedGhExec(async () => '--user=x', exec, {})(['pr', 'view', '33'], { cwd: root, timeoutMs: 5000 });
     expect(out.code).toBe(1);
+    expect(calls).toEqual([]);
+  });
+});
+
+type GitCall = { args: string[]; cwd: string; env: Readonly<Record<string, string>> | undefined };
+function fakeGit(): { git: GitExec; calls: GitCall[] } {
+  const calls: GitCall[] = [];
+  return { calls, git: async (args, cwd, env) => { calls.push({ args, cwd, env }); return { code: 0, stdout: '', stderr: '' }; } };
+}
+
+describe('pinnedGitExec (crew#1804)', () => {
+  it('fetches a branch from the canonical URL with the deliver identity\'s token in the environment, never argv', async () => {
+    const root = checkout('git@github.com:acme/private-app.git');
+    const { exec } = fakeGh({ deliverbot: 'gho_deliverbot' });
+    const { git, calls } = fakeGit();
+    await pinnedGitExec(async () => 'deliverbot', git, exec, {})(['fetch', 'origin', 'feature/min'], root);
+    expect(calls).toHaveLength(1);
+    const [call] = calls;
+    expect(call!.args.slice(-4)).toEqual(['fetch', '-q', 'https://github.com/acme/private-app.git', '+refs/heads/feature/min:refs/remotes/origin/feature/min']);
+    expect(call!.args.slice(0, 2)).toEqual(['-c', 'credential.helper=']);
+    expect(call!.args.join(' ')).not.toContain('gho_deliverbot');
+    expect(call!.env).toMatchObject({
+      GH_TOKEN: 'gho_deliverbot', GIT_ALLOW_PROTOCOL: 'https', GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_COUNT: '4',
+      GIT_CONFIG_KEY_0: 'http.extraHeader', GIT_CONFIG_VALUE_0: '', GIT_CONFIG_KEY_2: 'http.followRedirects', GIT_CONFIG_VALUE_2: 'false',
+    });
+    // A commit target fetches every branch, as `git fetch origin` does.
+    await pinnedGitExec(async () => 'deliverbot', git, exec, {})(['fetch', 'origin'], root);
+    expect(calls[1]!.args.slice(-2)).toEqual(['https://github.com/acme/private-app.git', '+refs/heads/*:refs/remotes/origin/*']);
+  });
+
+  it('hands real git the token through its one-command helper only, whatever helper the host configured', () => {
+    const root = checkout('https://github.com/acme/private-app.git');
+    execFileSync('git', ['config', 'credential.helper', '!echo password=host-login-token; :'], { cwd: root });
+    const { git, calls } = fakeGit();
+    return pinnedGitExec(async () => null, git, fakeGh({}).exec, { GH_TOKEN: 'exported' })(['fetch', 'origin', 'main'], root).then(() => {
+      const [call] = calls;
+      // The same -c options and environment, asked for the credential a fetch of github.com would use.
+      const opts = call!.args.slice(0, call!.args.indexOf('fetch'));
+      const out = execFileSync('git', [...opts, 'credential', 'fill'], {
+        cwd: root, encoding: 'utf8', input: 'protocol=https\nhost=github.com\npath=acme/private-app.git\n\n', env: { ...process.env, ...call!.env },
+      });
+      expect(out).toContain('username=x-access-token');
+      expect(out).toContain('password=exported');
+      expect(out).not.toContain('host-login-token');
+    });
+  });
+
+  it('runs every other git command, and a fetch with nothing to pin, as it is', async () => {
+    const github = checkout('https://github.com/acme/private-app.git');
+    for (const [root, identity, args] of [
+      [github, 'deliverbot', ['rev-parse', '--verify', '-q', 'origin/main^{commit}']],
+      [github, null, ['fetch', 'origin', 'main']],
+      [checkout('https://gitlab.com/acme/private-app.git'), 'deliverbot', ['fetch', 'origin']],
+      [github, 'deliverbot', ['fetch', 'origin', '-bad']],
+    ] as const) {
+      const { git, calls } = fakeGit();
+      await pinnedGitExec(async () => identity, git, fakeGh({ deliverbot: 'gho_deliverbot' }).exec, {})([...args], root);
+      expect(calls).toEqual([{ args: [...args], cwd: root, env: undefined }]);
+    }
+  });
+
+  it('fails the fetch by name, running nothing, when the identity has no token', async () => {
+    const root = checkout('https://github.com/acme/private-app.git');
+    const { git, calls } = fakeGit();
+    const out = await pinnedGitExec(async () => 'deliverbot', git, fakeGh({}).exec, {})(['fetch', 'origin'], root);
+    expect(out.code).toBe(1);
+    expect(out.stderr).toContain('gh holds no token for deliverbot');
     expect(calls).toEqual([]);
   });
 });

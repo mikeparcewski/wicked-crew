@@ -75,7 +75,14 @@ import type { CatalogSeed } from '../workflow-catalog/catalog-data.js';
 import type { ServedState } from '../workflow-catalog/build-v2.js';
 import { parseCommand, resolveOption } from '../workflow-catalog/build-v2.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
-import { REVIEW_CHANGE_WORKFLOW } from './review-change.js';
+import { REVIEW_CHANGE_WORKFLOW, REVIEW_PROVENANCE_WINDOW_DAYS } from './review-change.js';
+
+/** (CJ13, crew#1803) Who a review of a change leaves off: its authors, or, with `unknown`, every seat that worked in the
+ *  repository lately because crew could not read who made it (`unknown` says why). */
+export interface ReviewAuthors {
+  seats: readonly string[];
+  unknown?: string;
+}
 import {
   checksLabel,
   ownWords,
@@ -724,8 +731,9 @@ export interface ChatProposalDeps {
    *  in `projectId` accepts (a job's Start then chooses how it runs); else `null`. Absent = none. */
   powerPresets?(projectId: string | null): Promise<ReadonlySet<string> | null>;
   /** (CJ13) The seats that wrote the change a review-change job's words name, in `repoRef` (the launch's own
-   *  exclusion); `null` when it cannot be read (the launch then decides). Absent = none excluded. */
-  reviewAuthors?(repoRef: string, words: string): Promise<readonly string[] | null>;
+   *  exclusion); `null` when it cannot be read (the launch then decides). Absent = none excluded. `unknown` (crew#1803)
+   *  is why crew could not read who made the change, when the seats are every recent seat in the repository instead. */
+  reviewAuthors?(repoRef: string, words: string): Promise<ReviewAuthors | null>;
   /** Whether the chat's client renders job proposals (`accepts: ['job']`, its newest declaration). Absent = no. */
   acceptsJobs?(chatId: string): boolean;
   /** (crew-0182) Whether the chat's client draws onboard cards (`accepts: ['onboard']`, its newest declaration). */
@@ -2644,7 +2652,7 @@ export class ChatProposals {
 
   /** (CJ13) The last authors read per repository and words, for a short while: a revision and its rebuild, and a run
    *  of swaps, read the change once (a failed read is never kept). */
-  private readonly reviewAuthorsSeen = new Map<string, { at: number; authors: readonly string[] }>();
+  private readonly reviewAuthorsSeen = new Map<string, { at: number; authors: ReviewAuthors }>();
 
   /**
    * (CJ13) A review of a change is never led or checked by a seat that wrote it: the launch drops the change's authors
@@ -2669,9 +2677,15 @@ export class ChatProposals {
       for (const [k, v] of this.reviewAuthorsSeen) if (now - v.at > 30_000) this.reviewAuthorsSeen.delete(k);
       this.reviewAuthorsSeen.set(key, authors);
     }
-    const roster = ctx.roster.filter((s) => !authors.authors.includes(s.key));
+    const { seats, unknown } = authors.authors;
+    const roster = ctx.roster.filter((s) => !seats.includes(s.key));
     if (roster.length === 0 || roster.length === ctx.roster.length) return ctx;
-    return { ...ctx, roster, ...(ctx.pool !== undefined ? { pool: ctx.pool.filter((s) => !authors.authors.includes(s.key)) } : {}) };
+    // crew#1803: the card names the seats it left off and why, in a note of its own (`notes` refuses a seat edit).
+    const off = ctx.roster.filter((s) => seats.includes(s.key)).map((s) => s.name).join(', ');
+    const reviewNote = unknown === undefined
+      ? `${off} left off: authors of this change don't review it`
+      : `${off} left off: crew could not read who made this change (${unknown}), so seats that worked in this repository in the last ${REVIEW_PROVENANCE_WINDOW_DAYS} days don't review it`;
+    return { ...ctx, roster, reviewNote, ...(ctx.pool !== undefined ? { pool: ctx.pool.filter((s) => !seats.includes(s.key)) } : {}) };
   }
 
   /** Resolve the revision's shape first, then load only the choices that its input checks need. */

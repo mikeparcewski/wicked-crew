@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execCapped } from '../core/exec.js';
-import { defaultGhExec, githubRepoOf, isSafeRefName, readDeliverOriginUrl, type GhExec } from '../core/deliver.js';
+import { defaultGhExec, githubRepoOf, isSafeRefName, pinnedGhExec, pushIdentityOf, readDeliverOriginUrl, type GhExec } from '../core/deliver.js';
 import { refreshPushScript, refreshRebaseScript, type RefreshOptions } from '../core/redeliver.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { Actor } from '../core/types.js';
@@ -96,9 +96,11 @@ export function registerRedeliverRoutes(app: FastifyInstance, d: Deps): void {
       throw new Refusal('re-delivery supports GitHub PRs only: delivered PR does not match origin');
     return { run, url, ref, root, repo };
   }
-  async function readPr(root: string, url: string, fork = false) {
+  async function readPr(root: string, ref: string, url: string, fork = false) {
     const fields = 'number,url,state,mergeable,mergeStateStatus,baseRefName,headRefName,headRefOid,statusCheckRollup';
-    const out = await (d.ghExec ?? defaultGhExec)(['pr', 'view', url, '--json', fields + (fork ? ',isCrossRepository' : '')], { cwd: root, timeoutMs: 5000 });
+    // crew#1804: the PR is read as the deliver identity the push uses (its pin or the setting, else GH_ACCOUNT).
+    const gh = pinnedGhExec(async () => pushIdentityOf(await d.identityFor(ref)), d.ghExec ?? defaultGhExec);
+    const out = await gh(['pr', 'view', url, '--json', fields + (fork ? ',isCrossRepository' : '')], { cwd: root, timeoutMs: 5000 });
     if (out.code !== 0)
       throw new Refusal(`gh could not read delivered PR: ${(out.stderr || out.stdout).slice(-1000)}`);
     let pr: Record<string, unknown>;
@@ -121,7 +123,7 @@ export function registerRedeliverRoutes(app: FastifyInstance, d: Deps): void {
         id: string;
       };
       const c = await context(id);
-      const pr = await readPr(c.root, c.url);
+      const pr = await readPr(c.root, c.ref, c.url);
       const headSha = pr.headRefOid as string;
       const deliveredHead = d.index.commitFor(id);
       return { number: pr.number, url: pr.url, state: pr.state, mergeable: pr.mergeable, mergeStateStatus: pr.mergeStateStatus, baseRefName: pr.baseRefName, headRefName: pr.headRefName, headSha, ...(deliveredHead === undefined ? {} : { deliveredHead }), headMoved: deliveredHead !== undefined && headSha !== deliveredHead,
@@ -153,7 +155,7 @@ export function registerRedeliverRoutes(app: FastifyInstance, d: Deps): void {
         const old = d.index.commitFor(id);
         if (old === undefined)
           throw new Refusal(`run ${id} has no recorded delivered head`);
-        const pr = await readPr(c.root, c.url, true);
+        const pr = await readPr(c.root, c.ref, c.url, true);
         if (pr.state !== 'OPEN')
           throw new Refusal('only an OPEN PR can be re-delivered');
         if (pr.isCrossRepository === true)

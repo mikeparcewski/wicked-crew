@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
-import type { GhExec } from '../src/core/deliver.js';
+import type { GhExec, GitExec } from '../src/core/deliver.js';
 import { registerRoutes, type RuntimeDeps } from '../src/api/routes.js';
 import { AuditLog } from '../src/api/audit.js';
 import { DeliveryIndex } from '../src/api/delivery-index.js';
@@ -35,7 +35,7 @@ afterEach(async () => {
 });
 
 /** Reuse the revision route's fake adapter seam: inspect exactly what the engine would receive. */
-function buildApp(opts: { roster?: unknown[]; views?: SessionView[]; ghFails?: boolean; deliverOutput?: string; root?: string; settings?: Record<string, unknown>; gh?: Mock<GhExec> } = {}) {
+function buildApp(opts: { roster?: unknown[]; views?: SessionView[]; ghFails?: boolean; deliverOutput?: string; root?: string; settings?: Record<string, unknown>; gh?: Mock<GhExec>; git?: Mock<GitExec> } = {}) {
   const launched: LaunchRunInput[] = [];
   const roster = opts.roster ?? [AUTHOR, REVIEWER];
   const views = opts.views ?? [{
@@ -58,7 +58,7 @@ function buildApp(opts: { roster?: unknown[]; views?: SessionView[]; ghFails?: b
     code: opts.ghFails ? 1 : 0, stderr: opts.ghFails ? 'lookup failed' : '',
     stdout: JSON.stringify({ headRefName: 'wicked/A', headRefOid: HEAD, url: 'https://github.com/org/repo/pull/12', state: 'OPEN', isCrossRepository: false }),
   }));
-  const git = vi.fn(async () => ({ code: 0, stdout: '', stderr: '' }));
+  const git = opts.git ?? vi.fn<GitExec>(async () => ({ code: 0, stdout: '', stderr: '' }));
   const deliveryIndex = new DeliveryIndex();
   const retryIndex = new RetryIndex();
   const audit = AuditLog.noop();
@@ -216,6 +216,33 @@ describe('review-change launch', () => {
       expect(record).toHaveBeenCalledWith('run.launched', expect.anything(), expect.objectContaining({ detail: expect.objectContaining({ reviewChange: expect.objectContaining({ provenance: 'built_here' }) }) }));
       expect(gh).toHaveBeenCalledWith(['pr', 'view', '12', '--json', 'headRefName,headRefOid,url,state,isCrossRepository'],
         { cwd: root, timeoutMs: 5000, env: { GH_TOKEN: 'gho_deliverbot', GH_HOST: 'github.com', GH_REPO: 'github.com/org/repo' } });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fetches a private branch target as the repository\'s push identity, not git\'s own credential helper (crew#1804)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'crew-1804-route-'));
+    try {
+      execFileSync('git', ['init', '-q', root]);
+      execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:org/private-app.git'], { cwd: root });
+      const gh = vi.fn<GhExec>(async (args) => args[0] === 'auth' && args.includes('deliverbot')
+        ? { code: 0, stdout: 'gho_deliverbot\n', stderr: '' } : { code: 1, stdout: '', stderr: 'no token' });
+      // git's own helper holds another login that cannot see the repository: only the pinned token fetches.
+      const git = vi.fn<GitExec>(async (args, _cwd, env) => {
+        if (args.includes('fetch')) return env?.['GH_TOKEN'] === 'gho_deliverbot' && args.includes('https://github.com/org/private-app.git')
+          ? { code: 0, stdout: '', stderr: '' } : { code: 128, stdout: '', stderr: "remote: Repository not found." };
+        return { code: 0, stdout: args[0] === 'rev-parse' ? HEAD : '', stderr: '' };
+      });
+      const { post, launched, record } = buildApp({ root, gh, git, settings: { deliverIdentityByRepo: { repo: 'deliverbot' } } });
+      const res = await post({ problem: 'review branch feature/min' });
+      expect(res.statusCode, res.body).toBe(201);
+      expect(launched[0]!.problem).toContain('built outside this studio');
+      expect(record).toHaveBeenCalledWith('run.launched', expect.anything(), expect.objectContaining({ detail: expect.objectContaining({ reviewChange: expect.objectContaining({ provenance: 'outside', headSha: HEAD }) }) }));
+      const fetch = git.mock.calls.find(([args]) => args.includes('fetch'))!;
+      expect(fetch[0].slice(-4)).toEqual(['fetch', '-q', 'https://github.com/org/private-app.git', '+refs/heads/feature/min:refs/remotes/origin/feature/min']);
+      expect(fetch[0].join(' ')).not.toContain('gho_deliverbot');
+      expect(fetch[2]).toMatchObject({ GH_TOKEN: 'gho_deliverbot', GIT_ALLOW_PROTOCOL: 'https', GIT_TERMINAL_PROMPT: '0' });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

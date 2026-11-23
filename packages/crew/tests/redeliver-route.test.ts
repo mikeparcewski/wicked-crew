@@ -22,7 +22,7 @@ const apps: FastifyInstance[] = [];
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8', env: { ...process.env } }).trim();
 }
-function fixture(conflict = 'CHANGELOG.md') {
+function fixture(conflict = 'CHANGELOG.md', o: { settings?: Record<string, unknown>; gh?: NonNullable<RuntimeDeps['redeliverGhExec']> } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'crew-redeliver-'));
   roots.push(root);
   const origin = join(root, 'origin.git');
@@ -65,14 +65,14 @@ function fixture(conflict = 'CHANGELOG.md') {
   const audit = AuditLog.noop(); const record = vi.spyOn(audit, 'record');
   const view = { session: { id, status: 'completed', repo_ref: 'repo', workdir: null }, units: [] } as unknown as SessionView;
   const runtime = { deliveryIndex: index, checkRunTree: check,
-    redeliverGhExec: async (args: string[]) => ({ code: 0, stdout: execFileSync(join(bin, 'gh'), args, { env, encoding: 'utf8' }), stderr: '' }),
+    redeliverGhExec: o.gh ?? (async (args: string[]) => ({ code: 0, stdout: execFileSync(join(bin, 'gh'), args, { env, encoding: 'utf8' }), stderr: '' })),
     redeliverExec: async (wd: string, script: string) => {
       try { return { status: 0, output: execFileSync('bash', ['-lc', script], { cwd: wd, env, encoding: 'utf8' }) }; }
       catch (err) { const e = err as { status: number; stdout: string; stderr: string }; return { status: e.status, output: `${e.stdout}${e.stderr}` }; }
     },
   } as RuntimeDeps;
   const app = Fastify(); apps.push(app);
-  registerRoutes(app, withRunViews({ getSettings: async () => ({}), sessionsDetail: async () => [view], sessions: async () => [id], listRepos: async () => [{ id: 'repo', root_path: clone }] } as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit, authMode: 'off' }, runtime);
+  registerRoutes(app, withRunViews({ getSettings: async () => (o.settings ?? {}), sessionsDetail: async () => [view], sessions: async () => [id], listRepos: async () => [{ id: 'repo', root_path: clone }] } as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit, authMode: 'off' }, runtime);
   return { root, origin, clone, old, oldBase, base, env, log, pushLog, pr, savePr, index, check, record, app, view, runtime };
 }
 afterEach(async () => { for (const app of apps.splice(0)) await app.close(); for (const root of roots.splice(0)) removeScratch(root); });
@@ -178,4 +178,27 @@ it('records a successful push even when PR comment and body edits fail', async (
   expect(git(f.origin, 'rev-parse', 'delivered')).toBe(res.json().newHead);
   expect(f.index.commitFor(id)).toBe(res.json().newHead);
   expect(f.record).toHaveBeenCalledWith('run.redelivered', expect.anything(), expect.anything());
+});
+
+it('reads the delivered PR as the deliver identity, not gh\'s active account (crew#1804)', async () => {
+  vi.stubEnv('GH_TOKEN', '');
+  vi.stubEnv('GH_ACCOUNT', '');
+  try {
+    let pr = '';
+    const gh = vi.fn<NonNullable<RuntimeDeps['redeliverGhExec']>>(async (args, opts) => {
+      if (args[0] === 'auth') return args.includes('deliverbot') ? { code: 0, stdout: 'gho_deliverbot\n', stderr: '' } : { code: 1, stdout: '', stderr: 'no token' };
+      // gh's active account cannot see the repository; only the deliver identity's own token can.
+      return opts.env?.['GH_TOKEN'] === 'gho_deliverbot' ? { code: 0, stdout: pr, stderr: '' }
+        : { code: 1, stdout: '', stderr: "GraphQL: Could not resolve to a Repository with the name 'o/r'. (repository)" };
+    });
+    const f = fixture('CHANGELOG.md', { settings: { deliverIdentityByRepo: { repo: 'deliverbot' } }, gh });
+    pr = readFileSync(join(f.root, 'pr.json'), 'utf8');
+    const res = await f.app.inject(`/api/v1/runs/${id}/pr`);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ number: 42, headSha: f.old });
+    expect(gh).toHaveBeenCalledWith(['pr', 'view', url, '--json', expect.any(String)],
+      expect.objectContaining({ env: { GH_TOKEN: 'gho_deliverbot', GH_HOST: 'github.com', GH_REPO: 'github.com/o/r' } }));
+  } finally {
+    vi.unstubAllEnvs();
+  }
 });
