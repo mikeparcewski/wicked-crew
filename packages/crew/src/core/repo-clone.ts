@@ -4,12 +4,13 @@
  * A plain clone uses this computer's own git sign-in (its credential helper). An Azure DevOps URL is cloned with the
  * daemon's Azure DevOps credential when it holds one (`AZURE_DEVOPS_EXT_PAT`, or the `CREW_ADO_*` service principal),
  * the way the deliver phase pushes: the deliver helper mints the header (`node ado.mjs header`), and it reaches this
- * ONE `git clone` through `GIT_CONFIG_*` in the child's environment, scoped to the repository's canonical URL
- * (`http.<url>.extraHeader`) after an empty entry resets any ambient extra header. Redirects are refused, hooks are off,
- * git's own credential helpers are off for it, the raw credential variables are not in its environment, and only the
- * URL's own protocol is allowed. The header is never in argv, never written to the clone's `.git/config` (environment
- * config is not persisted) and never in an error: a message that
- * could carry it is redacted. The clone is of the canonical URL, so the registered `origin` carries no userinfo.
+ * ONE `git clone --no-checkout` through `GIT_CONFIG_*` in the child's environment, scoped to the repository's
+ * canonical URL (`http.<url>.extraHeader`) after an empty entry resets any ambient extra header. Redirects are refused,
+ * hooks are off, git's own credential helpers are off for it, the raw credential variables are not in its environment,
+ * and only the URL's own protocol is allowed. The working tree is checked out after, by a git without the header, so no
+ * filter or hook the repository selects runs beside it. The header is never in argv, never written to the clone's
+ * `.git/config` (environment config is not persisted) and never in an error: a message that could carry it is
+ * redacted. The clone is of the canonical URL, so the registered `origin` carries no userinfo.
  */
 
 import { adoCredentials, adoRepoOf, ADO_PAT_ENV, ADO_SP_ENV, type AdoRepo } from './deliver-credentials.js';
@@ -108,7 +109,9 @@ export async function cloneRepository(gitUrl: string, cloneDir: string, opts: { 
     throw new Error(`${ADO_CLONE_REFUSED} ${ado.webUrl}: ${why !== '' ? why : 'it could not mint a sign-in header'}`);
   }
   try {
-    await execCapped('git', ['-c', 'credential.helper=', 'clone', '--', ado.gitUrl, cloneDir], {
+    // The header rides ONLY the fetch: `--no-checkout`, so no smudge/process filter, hook or other repository-selected
+    // command runs while it is in the environment (a filter the host's config names would inherit it).
+    await execCapped('git', ['-c', 'credential.helper=', 'clone', '--no-checkout', '--', ado.gitUrl, cloneDir], {
       timeout: CLONE_TIMEOUT_MS,
       env: adoCloneEnv(base, ado.gitUrl, header),
     });
@@ -117,4 +120,9 @@ export async function cloneRepository(gitUrl: string, cloneDir: string, opts: { 
     if (!CLONE_DENIED.test(message)) throw new Error(message);
     throw new Error(`${ADO_CLONE_REFUSED} ${ado.webUrl} (it has no access to it, or the URL is wrong). Git said: ${message}`);
   }
+  // The working tree, in a second git with no header and no raw credential (an empty repository has nothing to check out).
+  const plain: NodeJS.ProcessEnv = { ...base };
+  for (const n of ADO_RAW_ENV) delete plain[n];
+  const born = await execCapped('git', ['-C', cloneDir, 'rev-parse', '--verify', '--quiet', 'HEAD'], { timeout: 30_000, env: plain }).then(() => true, () => false);
+  if (born) await execCapped('git', ['-C', cloneDir, 'checkout', '--quiet', '--force', 'HEAD'], { timeout: CLONE_TIMEOUT_MS, env: plain });
 }

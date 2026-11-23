@@ -174,6 +174,16 @@ describe('prRevisionOf', () => {
     expect(prRevisionOf('Revise the parser in a separate pull request', [gh], 'tiny')).toBeNull();
     expect(prRevisionOf('Add the test. Do not open a new PR.', [gh], 'tiny')).toEqual({ pr: gh, named: null });
     expect(prRevisionOf('Update the same PR, without opening a new PR', [gh], 'tiny')).toEqual({ pr: gh, named: null });
+    // A negative contraction is a negation; a plain "open a PR" is a new one; a negated "add … to PR" changes none.
+    expect(prRevisionOf("Add the test on the same PR; don't open a new PR", [gh], 'tiny')).toEqual({ pr: gh, named: null });
+    expect(prRevisionOf("Add the test on the same PR, don’t open a PR", [gh], 'tiny')).toEqual({ pr: gh, named: null });
+    expect(prRevisionOf('Update README and open a PR', [gh], 'tiny')).toBeNull();
+    expect(prRevisionOf('Fix it and create a pull request', [gh], 'tiny')).toBeNull();
+    expect(prRevisionOf("Don't add tests to PR #4; just reproduce the failure locally", [gh], 'tiny')).toBeNull();
+    expect(prRevisionOf('Never commit to PR #4', [gh], 'tiny')).toBeNull();
+    expect(prRevisionOf("Don't apply the patch to the PR", [gh], 'tiny')).toBeNull();
+    // "the open PR" is the delivered one, not a request to open one.
+    expect(prRevisionOf('Push the fix to the open PR', [gh], 'tiny')).toEqual({ pr: gh, named: null });
   });
   it('reads "add … to PR #N" and "… on PR #N" as revisions', () => {
     expect(prRevisionOf('Add regression tests to PR #4', [gh], 'tiny')).toEqual({ pr: gh, named: null });
@@ -189,6 +199,13 @@ describe('prRevisionOf', () => {
   it('every named PR is a target: two delivered ones is a choice to make, one undelivered among them refuses', () => {
     expect(prRevisionOf('Update PR #4 using https://github.com/o/tiny-math/pull/5 as a reference', [gh, gh5], 'tiny')).toEqual({ pr: null, named: null, miss: 'several' });
     expect(prRevisionOf('Update PR #4 like PR #9', [gh, gh5], 'tiny')).toEqual({ pr: null, named: 'pull request #9', miss: 'not-delivered' });
+    expect(prRevisionOf('Update PR #4 and #9', [gh], 'tiny')).toEqual({ pr: null, named: 'pull request #9', miss: 'not-delivered' });
+    expect(prRevisionOf('Update PRs #4, #5', [gh, gh5], 'tiny')).toEqual({ pr: null, named: null, miss: 'several' });
+    expect(prRevisionOf('Update PR o/tiny-math#9', [gh], 'tiny')).toEqual({ pr: null, named: 'o/tiny-math#9', miss: 'not-delivered' });
+    expect(prRevisionOf('Update PR other/repo#4', [gh], 'tiny')).toEqual({ pr: null, named: 'other/repo#4', miss: 'not-delivered' });
+    expect(prRevisionOf('Update PR o/tiny-math#4', [gh], 'tiny')).toEqual({ pr: gh, named: null });
+    // A count after a PR is not another PR.
+    expect(prRevisionOf('Update PR #4 and 5 more tests', [gh], 'tiny')).toEqual({ pr: gh, named: null });
     // The same PR by URL and by number is one target.
     expect(prRevisionOf('Update PR #5 (https://github.com/o/tiny-math/pull/5)', [gh, gh5], 'tiny')).toEqual({ pr: gh5, named: null });
   });

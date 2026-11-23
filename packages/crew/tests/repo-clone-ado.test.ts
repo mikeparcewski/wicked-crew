@@ -8,7 +8,7 @@
 // `target` seam (the rest of `adoRepoOf`'s answer, the canonical shape, is kept).
 
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -70,6 +70,8 @@ async function fixture(): Promise<Fx> {
   git(seed, 'config', 'user.email', 'seed@test');
   git(seed, 'config', 'user.name', 'seed');
   writeFileSync(join(seed, 'README.md'), 'tiny-math\n');
+  // The repository selects a filter for its README (a host whose config defines `leak` runs it at checkout).
+  writeFileSync(join(seed, '.gitattributes'), 'README.md filter=leak\n');
   git(seed, 'add', '-A');
   git(seed, 'commit', '-qm', 'base');
   git(seed, 'push', '-q', bare, 'main');
@@ -161,6 +163,10 @@ function seam(fx: Fx, minted: string[][] = []): AdoCloneSeam {
   };
 }
 
+/** A hook or filter's record of what it ran with: a line saying it ran, and only the variables that could carry a sign-in
+ *  (never the whole environment: a failing assertion prints what it compared). */
+const RECORD = (file: string): string => `{ echo ran; env | grep -iE '^(GIT_CONFIG|AZURE_DEVOPS|CREW_ADO)' || true; } >> '${file}'\n`;
+
 function expectNoSecret(text: string): void {
   for (const s of [PAT, Buffer.from(`:${PAT}`).toString('base64')]) expect(text).not.toContain(s);
 }
@@ -220,23 +226,57 @@ describe('crew#1839 From a URL on Azure DevOps', () => {
     expect(registerFailure(message, undefined, '/nonexistent-home', true).code).toBe('repo_clone_denied');
   }, 60_000);
 
-  it('a hook this computer\'s git config names does not run in the credential-bearing clone, and no raw credential is in its env', async () => {
+  it('a hook this computer\'s git config names runs, if at all, without the header or any credential in its environment', async () => {
     const fx = await fixture();
-    // A host whose git config names a hooks folder (and a template with an active hook): either would run post-checkout.
+    // A host whose git config names a hooks folder: its hooks run on every clone, inside that git's environment.
     const hooks = join(fx.root, 'hooks');
     mkdirSync(hooks, { recursive: true });
     const leaked = join(fx.root, 'hook-saw-env.txt');
-    writeFileSync(join(hooks, 'post-checkout'), `#!/bin/sh\nenv > '${leaked}'\n`);
-    chmodSync(join(hooks, 'post-checkout'), 0o755);
+    for (const name of ['post-checkout', 'reference-transaction']) {
+      writeFileSync(join(hooks, name), `#!/bin/sh\n${RECORD(leaked)}cat > /dev/null\n`);
+      chmodSync(join(hooks, name), 0o755);
+    }
     writeFileSync(join(fx.env['HOME']!, '.gitconfig'), `[core]\n\thooksPath = ${hooks}\n`);
-    // The hook does run in a plain clone on this host (so the test can fail).
-    execFileSync('git', ['clone', '-q', join(fx.root, 'srv', 'org', 'proj', '_git', 'repo'), join(fx.root, 'plain')], { env: fx.env });
-    expect(existsSync(leaked)).toBe(true);
-    rmSync(leaked);
     const dir = join(fx.root, 'clone');
     await cloneRepository('https://dev.azure.com/org/proj/_git/repo', dir, { ado: seam(fx) });
     expect(readFileSync(join(dir, 'README.md'), 'utf8')).toBe('tiny-math\n');
-    expect(existsSync(leaked)).toBe(false);
+    // The checkout's post-checkout hook ran (so the test can fail), and saw nothing it could sign in with.
+    const seen = readFileSync(leaked, 'utf8');
+    expect(seen).toContain('ran');
+    expectNoSecret(seen);
+    expect(seen.toLowerCase()).not.toContain('extraheader');
+    expect(seen).not.toContain('Authorization');
+    for (const n of ENV) expect(seen).not.toContain(`${n}=`);
+  }, 60_000);
+
+  it('a checkout filter the repository selects runs without the header or any credential in its environment', async () => {
+    const fx = await fixture();
+    const leaked = join(fx.root, 'filter-saw-env.txt');
+    const filter = join(fx.root, 'leak.sh');
+    writeFileSync(filter, `#!/bin/sh\n${RECORD(leaked)}cat\n`);
+    chmodSync(filter, 0o755);
+    writeFileSync(join(fx.env['HOME']!, '.gitconfig'), `[filter "leak"]\n\tsmudge = ${filter}\n`);
+    const dir = join(fx.root, 'clone');
+    await cloneRepository('https://dev.azure.com/org/proj/_git/repo', dir, { ado: seam(fx) });
+    expect(readFileSync(join(dir, 'README.md'), 'utf8')).toBe('tiny-math\n');
+    // The filter did run (so the test can fail), and saw nothing it could sign in with.
+    const seen = readFileSync(leaked, 'utf8');
+    expect(seen).toContain('ran');
+    expectNoSecret(seen);
+    expect(seen.toLowerCase()).not.toContain('extraheader');
+    expect(seen).not.toContain('Authorization');
+    for (const n of ENV) expect(seen).not.toContain(`${n}=`);
+  }, 60_000);
+
+  it('an empty repository clones, with nothing to check out', async () => {
+    const fx = await fixture();
+    execFileSync('git', ['init', '-q', '--bare', '-b', 'main', join(fx.root, 'srv', 'org', 'proj', '_git', 'empty')]);
+    const dir = join(fx.root, 'clone');
+    const s = seam(fx);
+    await cloneRepository('https://dev.azure.com/org/proj/_git/empty', dir, {
+      ado: { ...s, target: (u) => ({ ...adoRepoOf(u)!, gitUrl: `${fx.url}/org/proj/_git/empty`, loginBase: fx.url }) },
+    });
+    expect(git(dir, 'remote', 'get-url', 'origin').trim()).toBe(`${fx.url}/org/proj/_git/empty`);
   }, 60_000);
 
   it('a redirect is refused even where this computer\'s git config follows redirects for that URL', async () => {
