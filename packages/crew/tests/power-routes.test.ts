@@ -291,6 +291,28 @@ describe('power mode routes', () => {
       expect(r.json().answered).toEqual({ checkpoint: 3, at: OPEN.at });
     });
 
+    it('two answers for the same pause: the second reads the pause the first left and is refused (codex r1)', async () => {
+      const h = await paused();
+      const NEXT = { ...OPEN, at: OPEN.at + 60_000, checkpoint: 4 };
+      let release!: () => void;
+      // The first answer consumes pause 3; the orchestrator then opens pause 4 before the second answer is read.
+      h.adapter['answerPowerPause']!.mockImplementationOnce(async () => {
+        await new Promise<void>((resolve) => { release = resolve; });
+        h.adapter['sessionsDetail']!.mockResolvedValue([runView('p1', { ...POWER, pause: NEXT }), runView('phased', undefined)]);
+        return { ...POWER, pause: null };
+      });
+      const first = answer(h, { checkpoint: 3, at: OPEN.at }).then((r) => r);
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      const second = answer(h, { decision: 'stop', checkpoint: 3, at: OPEN.at }).then((r) => r);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      release();
+      expect((await first).json()).toMatchObject({ answered: { checkpoint: 3, at: OPEN.at } });
+      const refused = await second;
+      expect(refused.statusCode).toBe(409);
+      expect(refused.json()).toMatchObject({ open: { checkpoint: 4, at: NEXT.at } });
+      expect(h.adapter.answerPowerPause).toHaveBeenCalledTimes(1);
+    });
+
     it('rejects a malformed identity as 400', async () => {
       const h = await paused();
       for (const bad of [{ checkpoint: 0 }, { checkpoint: 1.5 }, { checkpoint: '3' }, { at: -1 }]) expect((await answer(h, bad)).statusCode).toBe(400);
