@@ -12,16 +12,24 @@ mentioned only where a daemon release depends on them.
 
 ## [0.18.21] — 2026-11-23
 
-Patch release on the train-12 cut 7504491e, carrying 34 PRs since 0.18.20: #1733, #1734, #1735, #1749, #1746, #1748, #1755, #1757, #1759, #1747, #1756, #1758, #1711, #1754, #1765, #1770, #1769, #1772, #1768, #1773, #1771, #1776, #1778, #1777, #1785, #1783, #1789, #1784, #1786, #1781, #1782, #1799, #1796, #1798. wicked-crew-api-types 0.224.0 releases with it: 0.223.0 plus the type changes from #1758, #1765, #1773, #1776, #1778, #1782, #1783, #1784, #1789, #1796 and #1798 (it stays a workspace link in this repository).
+Patch release on the train-12 re-cut 4 c14af846, carrying 58 PRs since 0.18.20: #1733, #1734, #1735, #1749, #1746, #1748, #1755, #1757, #1759, #1747, #1756, #1758, #1711, #1754, #1765, #1770, #1769, #1772, #1768, #1773, #1771, #1776, #1778, #1777, #1785, #1783, #1789, #1784, #1786, #1781, #1782, #1799, #1796, #1798. wicked-crew-api-types 0.224.0 releases with it: 0.223.0 plus the type changes from #1758, #1765, #1773, #1776, #1778, #1782, #1783, #1784, #1789, #1796 and #1798 (it stays a workspace link in this repository), #1809, #1801, #1811, #1805, #1808, #1810, #1807, #1806, #1817, #1816, #1815, #1821, #1820, #1824, #1830, #1827, #1829, #1826, #1828, #1825, #1831, #1833, #1834, #1836.
 
 ### Added
 
 - ToolActivity names its launch's seat as cli (core#1786) (#1778)
 - A card creates the project the person named when none matches (crew#1694) (#1789)
+- Page GET /apps with limit and cursor (#1809)
+- A team plan step carries its controls (wicked-core#1259) (#1811)
+- The launch card names a seat seen sharing a provider (#1821)
+- A pause answer names the pause it answers (#1820)
+- GET /settings/start-on-login reads whether this daemon starts at login (studio#1324) (#1829)
 
 ### Changed
 
 - The event-loop bound counts the main thread's work, not the runner's scheduling (#1770)
+- The four timing-shaped CI flakes assert on events or a documented margin (#1810)
+- Measure a cold GET /runs on the long-lived home (#1824)
+- Mark the made-up password fixture as ggignore (#1830)
 
 ### Fixed
 
@@ -56,6 +64,22 @@ Patch release on the train-12 cut 7504491e, carrying 34 PRs since 0.18.20: #1733
 - Open core.db with defensive mode off in the long-lived home clone (estate 0.35 FTS guard trigger) (#1799)
 - Graph answers relay via rows and link state; freshness counts current members only (#1796)
 - Carry core's typed satisfied_by links and the product-only marker (#1798)
+- /health never waits on the actor for chat workflows; frame-started run reads queue behind requests (#1767, #1779) (#1801)
+- Read PRs as the deliver identity; branch punctuation; commit authors from known runs only (#1805)
+- The learnings dir follows WICKED_HOME (#1808)
+- A job runs on the repository the words name; every scope repo is pickable; chat seats stay out of cd (#1807)
+- TTS hardening from the #1548 review, items 2, 3, 6 and 7 (#1806)
+- Host-floor answer-only turns pick a claude or pi seat (crew#1704) (#1817)
+- A read acceptance binds to the schema seen; credentials never name a project; uploads keep no free pages (crew#1788, crew#1790, crew#1787) (#1816)
+- Every default dir follows WICKED_HOME; tests settle audit appends before cleanup (crew#1802, crew#1813) (#1815)
+- A retry card in a chat that has ended offers no Try again it can't keep (crew#1745) (#1827)
+- A policy-silenced claude on the host floor is told its own reason (crew#1818) (#1826)
+- Work roots follow WICKED_HOME; tts install, status and WAV tail (crew#1823, crew#1559) (#1828)
+- Name the seats left off; pin the branch/commit fetch and redeliver's PR read (crew#1803, crew#1804) (#1825)
+- A capture whose review failed is ended with what its review said (core#1799 cert) (#1831)
+- The review seat ran none of the work it reviews; run-cost facts scoped to the run's project (#1833)
+- A named-source knowledge recall requires the source before estate ranks (crew#1362 item 4) (#1834)
+- A person's profile writes its data shapes into knowledge, and a re-profile replaces them (crew#1625) (#1836)
 
 ## [0.18.20] — 2026-11-22
 
