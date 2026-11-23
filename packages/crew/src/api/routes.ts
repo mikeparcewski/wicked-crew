@@ -281,6 +281,7 @@ import {
   deliverTargetView,
   isGitHubLogin,
   pinnedGhExec,
+  pinnedGitExec,
   pushIdentityOf,
   readDeliverOriginUrl,
   resolvePullRequest as resolvePullRequestViaGh,
@@ -2299,15 +2300,16 @@ export function registerRoutes(
     deliveredCommit: (id) => deliveryIndex.commitFor(id),
     revisesPr: (id) => retryIndex.revisesPrFor(id),
     gh: pinnedGhExec(readIdentityOf(repoRef), runtime.reviewChange?.gh ?? defaultGhExec),
-    git: runtime.reviewChange?.git ?? (async (args, cwd) => {
+    // crew#1804: a branch or commit target's fetch runs as the deliver identity too, like the deliver script's `_gnet`.
+    git: pinnedGitExec(readIdentityOf(repoRef), runtime.reviewChange?.git ?? (async (args, cwd, env) => {
       try {
-        return { ...(await execCapped('git', args, { cwd, timeout: 5_000 })), code: 0 };
+        return { ...(await execCapped('git', args, { cwd, timeout: 5_000, ...(env !== undefined ? { env: { ...process.env, ...env } } : {}) })), code: 0 };
       } catch (err) {
         // Only exit 1 proves non-membership; preserve it separately from lookup failures.
         const code = (err as { code?: unknown }).code;
         return { code: typeof code === 'number' ? code : null, stdout: '', stderr: message(err) };
       }
-    }),
+    }), runtime.reviewChange?.gh ?? defaultGhExec),
   });
   /** DES-L9: PR number → head branch, through `gh pr view` as the repository's push identity (crew#1792) unless the
    *  runtime injected an answerer. */
@@ -6049,7 +6051,7 @@ export function registerRoutes(
       const root = await repoRootOf(repoRef);
       if (root === undefined) return null;
       const ex = await reviewChangeExclusion(words, reviewChangeDeps(repoRef, root));
-      return ex.ok ? ex.excludeSeats : null;
+      return ex.ok ? { seats: ex.excludeSeats, ...(ex.provenance === 'unknown' && ex.why !== undefined ? { unknown: ex.why } : {}) } : null;
     },
     powerPresets: async (projectId) => {
       if (!powerSupported() || ((await adapter.getSettings()).powerModeDefault ?? true) === false || typeof adapter.listPresets !== 'function') return null;
