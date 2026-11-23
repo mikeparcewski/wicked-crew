@@ -11,8 +11,8 @@
  * estate relay answers from the same in-force set the rule judge reads). Agents start with their prompt and tools and
  * pull what they need (operator, 2026-11-11): the statements are no longer pushed into every unit's prompt.
  * The review and QE seats judge each rule to check (garden's governed-worker E7: KEPT / BROKEN / N/A / DEFERRED /
- * UNASSESSED, a broken rule fails review, but a process rule (RVWL-*) is reported and never fails it: core#1316); the
- * builder is told it does not mark its own compliance.
+ * UNASSESSED, a broken rule fails review, but an unedited shipped process rule (RVWL-*) is reported and never fails it;
+ * an edited one is judged like any other rule: core#1316); the builder is told it does not mark its own compliance.
  *
  * Like the learnings block (`learnings/recall.ts`), the deliver text takes it back out (`core/deliver-text.ts`) and a
  * relaunch from an earlier run's problem replaces it, never stacks it. Nothing here records a verdict: per-rule

@@ -99,7 +99,7 @@ describe('the rules block', () => {
     expect(lines.at(-1)).toBe(RULES_BRIEF_CLOSE);
     expect(block).toContain('3 in force, 2 to check (1 apply, 1 may apply), 1 not applicable');
     expect(block).toContain('does not mark its own compliance');
-    // (core#1316) The reviewer is told a process rule (RVWL-*) is reported, never a reason to fail review.
+    // (core#1316) The reviewer is told a shipped (unedited) RVWL-* process rule is reported, never a fail reason.
     expect(block).toContain('a broken rule fails review, but a shipped process rule (RVWL-*) is only reported.');
     expect(block).toContain(`Applies to this job:\n- DEV-TINYMATH-2 (warn): ${TINY.statement}`);
     expect(block).toContain(`May apply:\n- learn-tests-with-fixes (warn): ${LEARN.statement}`);
