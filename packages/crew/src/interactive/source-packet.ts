@@ -797,6 +797,8 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
  * where figures may come from and how to cite them, and gives the reviewing step the hashes crew holds, which the writer
  * cannot change.
  */
+/** `recordsRepo: false` = a refine: the writer's own self-check has no `--repo` folders (no repository rides a revision,
+ *  CREW-UX-8), and crew's landing guard checks the citations instead (crew#1727). */
 export function packetClause(inboxDir: string, packet: SourcePacket, notesWhere: string, opts: { recordsRepo?: boolean } = {}): string {
   const records = packet.files.filter((f) => packetDirOf(f.name) === 'records').map((f) => f.name);
   const sources = packet.files.filter((f) => packetDirOf(f.name) === 'sources' && !f.name.startsWith('MANIFEST-')).map((f) => f.name);
@@ -812,7 +814,8 @@ export function packetClause(inboxDir: string, packet: SourcePacket, notesWhere:
     `records' figure. Cite each figure ` +
     `with data-source="<file>:<line>", the file's name as it is in records/ without the folder ` +
     (opts.recordsRepo === false
-      ? `(sources/ cannot be cited; this revision's self-check runs without repository folders). `
+      ? `(sources/ cannot be cited; your own self-check runs without folders, but when the revision lands crew checks every ` +
+        `citation against records/ and the document's repositories, and refuses it when the cited line does not carry the figure). `
       : `(records/ is one of the self-check's --repo folders; sources/ is not, so nothing there can be cited). `) +
     `Leave out any claim nothing in ` +
     `the packet supports, and list it ${notesWhere}. ` +

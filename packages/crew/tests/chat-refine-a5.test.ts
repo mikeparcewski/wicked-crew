@@ -41,6 +41,10 @@ function gardenIo(state: { keep: 'kept' | 'broken' | 'error'; argv: string[][] }
     },
   };
 }
+/** A refine that cites nothing: no packet records, no grounded repositories. */
+const NO_CLAIMS = { files: [], packetBytes: (): Buffer => { throw new Error('no packet'); }, repos: [] };
+/** The `--repo` folders of one floor argv. */
+const repoDirs = (argv: string[]): string[] => argv.flatMap((a, i) => (argv[i - 1] === '--repo' ? [a] : []));
 /** The draft floor's self-check: notes valid, no leaks. */
 const floorIo = { gardenRoot: () => '/garden', run: async () => ({ stdout: JSON.stringify({ verdict: 'PASS', checks: { claims: { ok: true }, contrast: { ok: true }, leaks: { ok: true }, notes: { ok: true } } }), code: 0 }) };
 
@@ -105,7 +109,7 @@ describe('A5: a refine of the open document', () => {
   it('the landing guard is fail closed: a broken edit, a leak, or a check that cannot run lands nothing', async () => {
     const out = join(dir, 'revised.html');
     writeFileSync(out, '<h2 data-wid="h">Release 0.17</h2>');
-    const input = { outPath: out, notesPath: join(dir, 'notes.json'), runId: RUN, docsRoot, doc: 'deck', base: 3, allow: [], allowOf: () => [] };
+    const input = { outPath: out, notesPath: join(dir, 'notes.json'), runId: RUN, docsRoot, doc: 'deck', base: 3, allow: [], allowOf: () => [], claims: NO_CLAIMS };
     const state = { keep: 'kept' as 'kept' | 'broken' | 'error', argv: [] as string[][] };
     expect(await guardRefine(input, { floor: floorIo, garden: gardenIo(state) })).toMatchObject({ ok: true, kept: 1 });
     state.keep = 'broken';
@@ -184,8 +188,15 @@ describe('A5: a refine of the open document', () => {
     });
     const floorCalls: string[][] = [];
     const outcomes: Array<{ runId: string; outcome: unknown }> = [];
+    const recordsAtFloor: string[] = [];
     const w = await start({ keep: 'kept', argv: [] }, outcomes, undefined, {
-      floor: { ...floorIo, run: async (argv) => { floorCalls.push(argv); return floorIo.run(); } },
+      floor: { ...floorIo, run: async (argv) => {
+        floorCalls.push(argv);
+        // crew#1727: the records folder is crew's own copy (never the writer's inbox), and holds the packet's records.
+        const [records] = repoDirs(argv);
+        recordsAtFloor.push(records!.startsWith(join(chatDir)) ? 'inbox' : readFileSync(join(records!, 'run-evidence-x.md'), 'utf8'));
+        return floorIo.run();
+      } },
     });
     bindings.begin({ ref: '_unfiled/deck', mount: '_unfiled', doc: 'deck', projectId: null, owner: 'mike', chatId: 'c1', chatInstance: null, scopeProject: null, proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [], graphDb: '/graphs/chat.db' }, { pid: 'c1:t1', runId: RUN, base: 3, op: 'refine' });
     bindings.addPacket('_unfiled/deck', packet.canonical, packet.tokens);
@@ -195,6 +206,7 @@ describe('A5: a refine of the open document', () => {
     expect(w.launches[0]!.problem).toContain('MANIFEST-');
     expect(w.launches[0]!.problem).not.toContain('--repo');
     expect(w.launches[0]!.problem).not.toContain("records/ is one of the self-check's");
+    expect(w.launches[0]!.problem).toContain('when the revision lands crew checks every citation against records/');
     expect(w.launches[0]!.projectGraph).toBeUndefined(); // Unfiled: its chat's repo graph is no project graph (W24)
     expect(w.launches[0]!.repoRef).toBeUndefined();
     if (tampered) writeFileSync(join(runDir, 'records', 'run-evidence-x.md'), 'Coverage 99%');
@@ -209,7 +221,9 @@ describe('A5: a refine of the open document', () => {
     } else {
       await waitFor(() => w.announced.some((e) => e.event_type === DRAFT_COMPLETED));
       expect(floorCalls).toHaveLength(1);
-      expect(floorCalls[0]).not.toContain('--repo');
+      expect(repoDirs(floorCalls[0]!)).toHaveLength(1);
+      expect(recordsAtFloor).toEqual(['Coverage 80%']);
+      expect(existsSync(repoDirs(floorCalls[0]!)[0]!)).toBe(false); // crew's copy is removed after the floor
       expect(existsSync(join(chatDir, 'landed', RUN, 'records'))).toBe(false);
     }
   });
@@ -234,20 +248,26 @@ describe('A5: a refine of the open document', () => {
     expect(w.launches[0]!).toMatchObject({ projectId: 'proj-a', projectGraph: { dbPath: '/graphs/proj-a.db' } });
   });
 
-  it('lands a refine with existing repository citations without passing --repo to the floor', async () => {
+  it('crew#1727: checks a refine against its records and a snapshot of each repository the document is grounded on', async () => {
     const cited = '<html><body><h2 data-wid="h">Release 0.17</h2><p data-source="src/x.ts:12">Coverage reached 80%.</p></body></html>';
     writeFileSync(join(docsRoot, 'deck', '_v3.html'), cited);
+    const repo = join(dir, 'widgets');
+    mkdirSync(join(repo, 'src'), { recursive: true });
+    writeFileSync(join(repo, 'src', 'x.ts'), `${'//\n'.repeat(11)}// Coverage reached 80%.\n`);
     const floorCalls: string[][] = [];
+    const atFloor: string[] = [];
     const outcomes: Array<{ runId: string; outcome: unknown }> = [];
     const w = await start({ keep: 'kept', argv: [] }, outcomes, undefined, {
       floor: { ...floorIo, run: async (argv) => {
         floorCalls.push(argv);
         expect(readFileSync(argv[3]!, 'utf8')).toBe(cited);
-        if (argv.includes('--repo')) return { stdout: JSON.stringify({ verdict: 'FAIL', failed: ['claims'], checks: { claims: { ok: false, by_kind: { 'dangling-source': 1 } }, contrast: { ok: true }, leaks: { ok: true }, notes: { ok: true } } }), code: 1 };
+        // A snapshot, never the live checkout, and it holds the cited file.
+        const dirs = repoDirs(argv);
+        atFloor.push(...dirs.slice(1).map((d) => (d === repo ? 'live' : readFileSync(join(d, 'src', 'x.ts'), 'utf8').split('\n')[11]!)));
         return floorIo.run();
       } },
     });
-    bindings.begin({ ref: '_unfiled/deck', mount: '_unfiled', doc: 'deck', projectId: null, owner: 'mike', chatId: 'c1', chatInstance: null, scopeProject: null, proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [], graphDb: null }, { pid: 'c1:t1', runId: RUN, base: 3, op: 'refine' });
+    bindings.begin({ ref: '_unfiled/deck', mount: '_unfiled', doc: 'deck', projectId: null, owner: 'mike', chatId: 'c1', chatInstance: null, scopeProject: null, proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [{ id: 'repo-1', name: 'widgets', rootPath: repo }], graphDb: null }, { pid: 'c1:t1', runId: RUN, base: 3, op: 'refine' });
     await w.sub.launchBound(spec());
     const runDir = join(chatDir, `refine-${RUN}`);
     expect(readFileSync(join(runDir, 'current.html'), 'utf8')).toBe(cited);
@@ -256,10 +276,30 @@ describe('A5: a refine of the open document', () => {
     w.fire({ type: 'sessionCompleted', session: RUN });
     await waitFor(() => outcomes.length > 0 || w.announced.some((e) => e.event_type === DRAFT_COMPLETED));
     expect(floorCalls).toHaveLength(1);
-    expect(floorCalls[0]).not.toContain('--repo');
+    expect(repoDirs(floorCalls[0]!)).toHaveLength(2);
+    expect(atFloor).toEqual(['// Coverage reached 80%.']);
     expect(outcomes).toEqual([]);
     expect(w.announced.find((e) => e.event_type === DRAFT_COMPLETED)?.payload).toMatchObject({ document_id: 'deck', expect_head: 3 });
     expect(readFileSync(join(chatDir, 'landed', RUN, 'revised.html'), 'utf8')).toBe(cited);
+  });
+
+  it('crew#1727: a refused citation names a grounded repository that could not be read, and what to do', async () => {
+    const out = join(dir, 'revised.html');
+    writeFileSync(out, '<h2 data-wid="h">Release 0.17</h2>');
+    const dangling = { ...floorIo, run: async () => ({ stdout: JSON.stringify({ verdict: 'FAIL', failed: ['claims'], checks: { claims: { ok: false, by_kind: { 'dangling-source': 1 } }, contrast: { ok: true }, leaks: { ok: true }, notes: { ok: true } } }), code: 1 }) };
+    const input = { outPath: out, notesPath: join(dir, 'notes.json'), runId: RUN, docsRoot, doc: 'deck', base: 3, allow: [], allowOf: () => [],
+      claims: { ...NO_CLAIMS, repos: [{ name: 'widgets', rootPath: join(dir, 'gone') }] } };
+    const r = await guardRefine(input, { floor: dangling, garden: gardenIo({ keep: 'kept', argv: [] }) });
+    expect(r).toMatchObject({ ok: false, reason: expect.stringContaining('dangling-source') });
+    expect(r.ok ? '' : r.reason).toContain('The repository widgets this document is grounded on could not be read on this host');
+    // A record whose bytes no longer match the launch's is refused before any floor runs.
+    let floorRan = false;
+    const bad = await guardRefine(
+      { ...input, claims: { files: [{ name: 'run-a-x.md', sha256: '0'.repeat(64), bytes: 3 }], packetBytes: () => Buffer.from('abc'), repos: [] } },
+      { floor: { ...floorIo, run: async () => { floorRan = true; return floorIo.run(); } }, garden: gardenIo({ keep: 'kept', argv: [] }) },
+    );
+    expect(bad).toMatchObject({ ok: false, reason: expect.stringContaining('could not read the records this document cites') });
+    expect(floorRan).toBe(false);
   });
 
   it('changes the open document as a new version on its head, keeping the person\'s edits: the derived run, the two helpers, the keep list, and the checked bytes announced with run_id + expect_head', async () => {
