@@ -26,7 +26,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from '../zod.js';
 
@@ -249,12 +249,15 @@ export function sha256Of(buf: Buffer): string {
 
 /**
  * Read a file holding at most `cap` bytes, never allocating more than `cap + 1` (codex r1 on X3: a
- * file swapped for a huge one is refused before it is read whole). `null` = over the cap.
+ * file swapped for a huge one is refused before it is read whole). The open never waits (O_NONBLOCK): a FIFO
+ * swapped in for a checked file would otherwise block the daemon until something writes to it (crew#1702 review).
+ * `null` = over the cap, or not a regular file.
  */
 export function readCapped(path: string, cap: number): Buffer | null {
-  const fd = openSync(path, 'r');
+  const fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
   try {
-    if (fstatSync(fd).size > cap) return null;
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.size > cap) return null;
     const buf = Buffer.alloc(cap + 1);
     let n = 0;
     for (;;) {
