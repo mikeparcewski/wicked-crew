@@ -426,7 +426,7 @@ describe('onboard proposals', () => {
       ['my checkout is "/home/me/Private Client Files/repo"', 'Client'],
       ['my checkout is ‘C:\\Users\\me\\Client Work\\repo’', 'Client Work'],
       // xreview r1: a quoted key, a quoted value of several words, a Digest parameter list, an apostrophe inside a path.
-      ['config is {"password": "Hunter22"}', 'Hunter22'],
+      ['config is {"password": "Hunter22"}', 'Hunter22'], // ggignore: a made-up value the test feeds in; not a credential
       ['password = "correct horse battery staple"', 'horse battery'],
       ['Authorization: Digest username="Alice Private Client", realm="crew", nonce="N"', 'Private Client'],
       ['my checkout is ‘/home/me/Mike’s Private Client Files/repo’', 'Private Client'],

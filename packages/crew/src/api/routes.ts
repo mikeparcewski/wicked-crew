@@ -403,6 +403,9 @@ import { idleClis, probeSeatImages, SeatImageRebuilder, seatImageStatusVia, type
 import { RunCostCache } from './needs.js';
 import { governanceStoreFix, legacyHomeOutboxPath } from '../core/governance-store.js';
 import { UsageError, replayOutboxInto } from '../cli/governance.js';
+import { DEFAULT_DAEMON_PORT } from '../cli/port.js';
+import type { ServicePlatform } from '../cli/service.js';
+import { startOnLoginStatus } from './start-on-login.js';
 import { foldDeadletters } from './governance-health.js';
 import { RetryIndex } from './retry-index.js';
 import { SEAT_RECORD_DEFAULT_DAYS, SEAT_RECORD_MAX_DAYS, seatRecord } from './seat-record.js';
@@ -1488,6 +1491,8 @@ interface RuntimeServices {
   resolvePullRequest?: (repoRoot: string, number: number) => Promise<PullRequestResolution>;
   /** Review provenance must be testable without contacting GitHub or mutating a real clone. */
   reviewChange?: Partial<Pick<ReviewChangeDeps, 'gh' | 'git'>>;
+  /** studio#1324: where the start-on-login read looks (tests); production reads this host's platform and home. */
+  startOnLogin?: { platform?: ServicePlatform; home?: string };
   /** crew#627: how the issues a launch's intent links are read (`gh issue view`, 5 s each).
    *  Injectable so route tests answer without gh; production uses `core/linked-issues.ts`. */
   resolveLinkedIssues?: (
@@ -10282,6 +10287,12 @@ export function registerRoutes(
   // additive `path` (api-types 0.38.0 `SettingsResponse.path?`; adjudicated §4.6 — `path`, not
   // `settings_path`).
   app.get(`${V}/settings`, async () => ({ settings: await adapter.getSettings(), path: settingsFilePath() }));
+  // studio#1324: whether this daemon's port starts at login (`serve --install-service`), for Settings' status row. The
+  // port is the one this daemon listens on (the default when it is not listening, as under inject).
+  app.get(`${V}/settings/start-on-login`, { config: { manifest: { responseType: 'StartOnLoginStatus', statusCodes: [200] } } }, async () => {
+    const bound = app.server.address();
+    return startOnLoginStatus(bound !== null && typeof bound === 'object' ? bound.port : DEFAULT_DAEMON_PORT, runtime.startOnLogin?.platform, runtime.startOnLogin?.home);
+  });
 
   // The demo video's palette from the studio skin (operator 2026-10-14): read-only, derived from `studio.appearance`;
   // garden's demo stage and interactive's re-cuts read it as their default colours.
