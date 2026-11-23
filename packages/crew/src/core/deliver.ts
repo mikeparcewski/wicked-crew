@@ -88,6 +88,7 @@
 
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { devNull } from 'node:os';
 import type { GitIdent } from '../setup/known.js';
 import { childEnvWithBootEstateDb } from './governance-store.js';
 import type { PhaseDef, WorkflowDef } from './types.js';
@@ -505,10 +506,25 @@ export function pinnedGitExec(
     if (pin.kind === 'refused') return { stdout: '', stderr: pin.why, code: 1 };
     if (pin.kind === 'unpinned') return git(args, cwd, extra);
     const url = `https://github.com/${pin.repo}.git`;
+    // A `url.*.insteadOf` that rewrites the canonical URL (to another login's https URL, say) would fetch as someone
+    // else: refused, as the deliver script refuses it before `_gnet` (xreview r1).
+    const rewrites = await git(['config', '--get-regexp', '^url\\..*\\.insteadof$'], cwd);
+    if (rewrites.code !== 0 && rewrites.code !== 1) return { stdout: '', stderr: "could not read git's url rewrites, so the fetch cannot be pinned", code: 1 };
+    for (const line of rewrites.code === 0 ? rewrites.stdout.split('\n') : []) {
+      const value = line.slice(line.indexOf(' ') + 1).trim();
+      if (line.includes(' ') && value !== '' && url.startsWith(value)) {
+        return { stdout: '', stderr: `git config rewrites ${value} (a url.*.insteadOf), so the fetch would not use the deliver identity; remove the rewrite for this repository`, code: 1 };
+      }
+    }
     const refspec = branch === undefined ? '+refs/heads/*:refs/remotes/origin/*' : `+refs/heads/${branch}:refs/remotes/origin/${branch}`;
     const token = pin.token ?? (env['GH_TOKEN'] ?? '').trim();
     return git(
-      ['-c', 'credential.helper=', '-c', `credential.https://github.com.helper=${GITHUB_TOKEN_HELPER}`, 'fetch', '-q', url, refspec],
+      [
+        '-c', 'credential.helper=', '-c', `credential.https://github.com.helper=${GITHUB_TOKEN_HELPER}`,
+        // No hook, maintenance or submodule fetch runs with the token in its environment (xreview r1).
+        '-c', `core.hooksPath=${devNull}`, '-c', 'maintenance.auto=false', '-c', 'gc.auto=0',
+        'fetch', '-q', '--no-recurse-submodules', url, refspec,
+      ],
       cwd,
       {
         ...extra,

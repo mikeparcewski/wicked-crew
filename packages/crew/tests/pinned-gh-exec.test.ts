@@ -1,7 +1,7 @@
 // crew#1792: crew's own PR reads (review-change's provenance read, the revision's resolvePullRequest) run as the
 // deliver identity, in the deliver script's credential order, whatever account gh has active on the host.
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -113,9 +113,14 @@ describe('pinnedGhExec (crew#1792)', () => {
 });
 
 type GitCall = { args: string[]; cwd: string; env: Readonly<Record<string, string>> | undefined };
-function fakeGit(): { git: GitExec; calls: GitCall[] } {
+/** A git seam that records every call; `config --get-regexp` answers as git does with no rewrite configured (exit 1). */
+function fakeGit(rewrites = ''): { git: GitExec; calls: GitCall[] } {
   const calls: GitCall[] = [];
-  return { calls, git: async (args, cwd, env) => { calls.push({ args, cwd, env }); return { code: 0, stdout: '', stderr: '' }; } };
+  return { calls, git: async (args, cwd, env) => {
+    if (args[0] === 'config') return rewrites === '' ? { code: 1, stdout: '', stderr: '' } : { code: 0, stdout: rewrites, stderr: '' };
+    calls.push({ args, cwd, env });
+    return { code: 0, stdout: '', stderr: '' };
+  } };
 }
 
 describe('pinnedGitExec (crew#1804)', () => {
@@ -126,8 +131,9 @@ describe('pinnedGitExec (crew#1804)', () => {
     await pinnedGitExec(async () => 'deliverbot', git, exec, {})(['fetch', 'origin', 'feature/min'], root);
     expect(calls).toHaveLength(1);
     const [call] = calls;
-    expect(call!.args.slice(-4)).toEqual(['fetch', '-q', 'https://github.com/acme/private-app.git', '+refs/heads/feature/min:refs/remotes/origin/feature/min']);
+    expect(call!.args.slice(-5)).toEqual(['fetch', '-q', '--no-recurse-submodules', 'https://github.com/acme/private-app.git', '+refs/heads/feature/min:refs/remotes/origin/feature/min']);
     expect(call!.args.slice(0, 2)).toEqual(['-c', 'credential.helper=']);
+    expect(call!.args).toEqual(expect.arrayContaining(['maintenance.auto=false', 'gc.auto=0', '--no-recurse-submodules']));
     expect(call!.args.join(' ')).not.toContain('gho_deliverbot');
     expect(call!.env).toMatchObject({
       GH_TOKEN: 'gho_deliverbot', GIT_ALLOW_PROTOCOL: 'https', GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_COUNT: '4',
@@ -138,9 +144,11 @@ describe('pinnedGitExec (crew#1804)', () => {
     expect(calls[1]!.args.slice(-2)).toEqual(['https://github.com/acme/private-app.git', '+refs/heads/*:refs/remotes/origin/*']);
   });
 
-  it('hands real git the token through its one-command helper only, whatever helper the host configured', () => {
+  it('hands real git the token through its one-command helper only, never asking the helper the host configured', () => {
     const root = checkout('https://github.com/acme/private-app.git');
-    execFileSync('git', ['config', 'credential.helper', '!echo password=host-login-token; :'], { cwd: root });
+    // A complete credential, so git would stop at it were it asked; it leaves a mark when it is.
+    const asked = join(root, 'host-helper-asked');
+    execFileSync('git', ['config', 'credential.helper', `!touch '${asked}'; echo username=host-login; echo password=host-login-token; :`], { cwd: root });
     const { git, calls } = fakeGit();
     return pinnedGitExec(async () => null, git, fakeGh({}).exec, { GH_TOKEN: 'exported' })(['fetch', 'origin', 'main'], root).then(() => {
       const [call] = calls;
@@ -151,8 +159,45 @@ describe('pinnedGitExec (crew#1804)', () => {
       });
       expect(out).toContain('username=x-access-token');
       expect(out).toContain('password=exported');
-      expect(out).not.toContain('host-login-token');
+      expect(out).not.toContain('host-login');
+      expect(existsSync(asked)).toBe(false);
     });
+  });
+
+  it('refuses a url.*.insteadOf that rewrites the canonical URL, fetching nothing (xreview r1)', async () => {
+    const root = checkout('git@github.com:acme/private-app.git');
+    // The shape `git config --get-regexp` prints: `<key> <value>`.
+    const { git, calls } = fakeGit('url.https://other-login:tok@github.com/.insteadof https://github.com/\n');
+    const out = await pinnedGitExec(async () => 'deliverbot', git, fakeGh({ deliverbot: 'gho_deliverbot' }).exec, {})(['fetch', 'origin'], root);
+    expect(out.code).toBe(1);
+    expect(out.stderr).toContain('url.*.insteadOf');
+    expect(calls).toEqual([]);
+    // A rewrite of another host does not apply.
+    const other = fakeGit('url.https://mirror.example/.insteadof https://gitlab.com/\n');
+    expect((await pinnedGitExec(async () => 'deliverbot', other.git, fakeGh({ deliverbot: 'gho_deliverbot' }).exec, {})(['fetch', 'origin'], root)).code).toBe(0);
+    expect(other.calls).toHaveLength(1);
+  });
+
+  it('runs no repository hook with the token in its environment (real git, xreview r1)', async () => {
+    // A repository whose core.hooksPath holds a reference-transaction hook that would record its environment.
+    const root = checkout('https://github.com/acme/private-app.git');
+    const hooks = join(root, 'hooks');
+    mkdirSync(hooks);
+    const ran = join(root, 'hook-ran');
+    writeFileSync(join(hooks, 'reference-transaction'), `#!/bin/sh\nenv > '${ran}'\n`);
+    chmodSync(join(hooks, 'reference-transaction'), 0o755);
+    execFileSync('git', ['config', 'core.hooksPath', hooks], { cwd: root });
+    const { git, calls } = fakeGit();
+    await pinnedGitExec(async () => null, git, fakeGh({}).exec, { GH_TOKEN: 'exported' })(['fetch', 'origin', 'main'], root);
+    const opts = calls[0]!.args.slice(0, calls[0]!.args.indexOf('fetch'));
+    // The same -c options on a ref update that fires reference-transaction: the hook never runs.
+    execFileSync('git', [...opts, 'update-ref', 'refs/remotes/origin/main', execFileSync('git', ['hash-object', '-t', 'commit', '-w', '--stdin'], {
+      cwd: root, input: 'tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor a <a@b> 0 +0000\ncommitter a <a@b> 0 +0000\n\nx\n', encoding: 'utf8',
+    }).trim()], { cwd: root, env: { ...process.env, ...calls[0]!.env } });
+    expect(existsSync(ran)).toBe(false);
+    // Without them the hook does run (the fixture is live).
+    execFileSync('git', ['update-ref', '-d', 'refs/remotes/origin/main'], { cwd: root });
+    expect(existsSync(ran)).toBe(true);
   });
 
   it('runs every other git command, and a fetch with nothing to pin, as it is', async () => {

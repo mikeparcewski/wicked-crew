@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { registerRoutes, type RuntimeDeps } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -75,7 +75,9 @@ function fixture(conflict = 'CHANGELOG.md', o: { settings?: Record<string, unkno
   registerRoutes(app, withRunViews({ getSettings: async () => (o.settings ?? {}), sessionsDetail: async () => [view], sessions: async () => [id], listRepos: async () => [{ id: 'repo', root_path: clone }] } as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit, authMode: 'off' }, runtime);
   return { root, origin, clone, old, oldBase, base, env, log, pushLog, pr, savePr, index, check, record, app, view, runtime };
 }
-afterEach(async () => { for (const app of apps.splice(0)) await app.close(); for (const root of roots.splice(0)) removeScratch(root); });
+// The PR read is pinned per the daemon's environment (crew#1804): every case runs as a daemon with none exported.
+beforeEach(() => { vi.stubEnv('GH_TOKEN', ''); vi.stubEnv('GH_ACCOUNT', ''); });
+afterEach(async () => { vi.unstubAllEnvs(); for (const app of apps.splice(0)) await app.close(); for (const root of roots.splice(0)) removeScratch(root); });
 const post = (app: FastifyInstance) => app.inject({ method: 'POST', url: `/api/v1/runs/${id}/redeliver` });
 
 it('T1/T5 rebases CHANGELOG only, checks the exact tree, leases the push and discloses the same result', async () => {
@@ -181,9 +183,7 @@ it('records a successful push even when PR comment and body edits fail', async (
 });
 
 it('reads the delivered PR as the deliver identity, not gh\'s active account (crew#1804)', async () => {
-  vi.stubEnv('GH_TOKEN', '');
-  vi.stubEnv('GH_ACCOUNT', '');
-  try {
+  {
     let pr = '';
     const gh = vi.fn<NonNullable<RuntimeDeps['redeliverGhExec']>>(async (args, opts) => {
       if (args[0] === 'auth') return args.includes('deliverbot') ? { code: 0, stdout: 'gho_deliverbot\n', stderr: '' } : { code: 1, stdout: '', stderr: 'no token' };
@@ -198,7 +198,5 @@ it('reads the delivered PR as the deliver identity, not gh\'s active account (cr
     expect(res.json()).toMatchObject({ number: 42, headSha: f.old });
     expect(gh).toHaveBeenCalledWith(['pr', 'view', url, '--json', expect.any(String)],
       expect.objectContaining({ env: { GH_TOKEN: 'gho_deliverbot', GH_HOST: 'github.com', GH_REPO: 'github.com/o/r' } }));
-  } finally {
-    vi.unstubAllEnvs();
   }
 });

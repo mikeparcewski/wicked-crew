@@ -240,7 +240,7 @@ describe('review-change launch', () => {
       expect(launched[0]!.problem).toContain('built outside this studio');
       expect(record).toHaveBeenCalledWith('run.launched', expect.anything(), expect.objectContaining({ detail: expect.objectContaining({ reviewChange: expect.objectContaining({ provenance: 'outside', headSha: HEAD }) }) }));
       const fetch = git.mock.calls.find(([args]) => args.includes('fetch'))!;
-      expect(fetch[0].slice(-4)).toEqual(['fetch', '-q', 'https://github.com/org/private-app.git', '+refs/heads/feature/min:refs/remotes/origin/feature/min']);
+      expect(fetch[0].slice(-5)).toEqual(['fetch', '-q', '--no-recurse-submodules', 'https://github.com/org/private-app.git', '+refs/heads/feature/min:refs/remotes/origin/feature/min']);
       expect(fetch[0].join(' ')).not.toContain('gho_deliverbot');
       expect(fetch[2]).toMatchObject({ GH_TOKEN: 'gho_deliverbot', GIT_ALLOW_PROTOCOL: 'https', GIT_TERMINAL_PROMPT: '0' });
     } finally {
