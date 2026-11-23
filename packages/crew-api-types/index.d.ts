@@ -7359,9 +7359,9 @@ export interface StartOnLoginStatus {
   installed: boolean;
   /** The unit file, home-relative (`~/Library/LaunchAgents/…`); `null` when none is installed. */
   unit: string | null;
-  /** `wicked-crew serve [--port <port>] --install-service`. */
+  /** `wicked-crew serve --port <port> --install-service`: always the port, so a shell's `CREW_PORT` can't redirect it. */
   installCommand: string;
-  /** `wicked-crew serve [--port <port>] --uninstall-service`. */
+  /** `wicked-crew serve --port <port> --uninstall-service`. */
   uninstallCommand: string;
 }
 

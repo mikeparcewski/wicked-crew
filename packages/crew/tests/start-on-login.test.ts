@@ -12,6 +12,7 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { AuditLog } from '../src/api/audit.js';
+import { resolveDaemonPort } from '../src/cli/port.js';
 import { renderPlist, renderSystemdUnit, serviceUnitPath, type ServicePlatform, type ServiceSpec } from '../src/cli/service.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { removeScratch } from './setup/scratch.js';
@@ -42,7 +43,7 @@ describe('startOnLoginStatus (studio#1324)', () => {
     const h = home();
     expect(startOnLoginStatus(7701, 'darwin', h)).toEqual({
       platform: 'darwin', port: 7701, installed: false, unit: null,
-      installCommand: 'wicked-crew serve --install-service', uninstallCommand: 'wicked-crew serve --uninstall-service',
+      installCommand: 'wicked-crew serve --port 7701 --install-service', uninstallCommand: 'wicked-crew serve --port 7701 --uninstall-service',
     });
     install('darwin', h, 7701);
     expect(startOnLoginStatus(7701, 'darwin', h)).toMatchObject({ installed: true, unit: '~/Library/LaunchAgents/com.wickedagile.wicked-crew.plist' });
@@ -55,8 +56,42 @@ describe('startOnLoginStatus (studio#1324)', () => {
     });
   });
 
+  it('the commands name this port even when the shell carries another CREW_PORT', () => {
+    const st = startOnLoginStatus(7701, 'linux', home());
+    for (const cmd of [st.installCommand, st.uninstallCommand]) {
+      // `wicked-crew serve …`: what the CLI's service verb resolves the port from (src/cli/index.ts runServiceVerb).
+      expect(resolveDaemonPort(cmd.split(' ').slice(2), { CREW_PORT: '7741' }), cmd).toBe(7701);
+    }
+  });
+
+  it('a home spelled with a doubled separator or a dot segment still comes off the unit path', () => {
+    const h = home();
+    install('linux', h, 7701);
+    for (const spelled of [h.replace(/\/(?=[^/]*$)/u, '//'), join(h, '.') + '/./', `${h}/`]) {
+      expect(startOnLoginStatus(7701, 'linux', spelled).unit, spelled).toBe('~/.config/systemd/user/wicked-crew.service');
+    }
+  });
+
   it('elsewhere nothing is automated: never installed, the command still prints its recipe', () => {
-    expect(startOnLoginStatus(7701, 'other', home())).toMatchObject({ platform: 'other', installed: false, unit: null, installCommand: 'wicked-crew serve --install-service' });
+    expect(startOnLoginStatus(7701, 'other', home())).toMatchObject({ platform: 'other', installed: false, unit: null, installCommand: 'wicked-crew serve --port 7701 --install-service' });
+  });
+
+  it('GET /settings/start-on-login reads the port this daemon listens on', async () => {
+    const h = home();
+    const app = Fastify();
+    apps.push(app);
+    registerRoutes(app, { getSettings: async () => ({}) } as unknown as CoreAdapter, new GateCache(), new ElicitationCache(),
+      { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit: AuditLog.noop(), authMode: 'off' },
+      { startOnLogin: { platform: 'linux', home: h } });
+    await app.listen({ host: '127.0.0.1', port: 0 });
+    const port = (app.server.address() as { port: number }).port;
+    install('linux', h, port);
+    const res = await app.inject('/api/v1/settings/start-on-login');
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toEqual({
+      platform: 'linux', port, installed: true, unit: `~/.config/systemd/user/wicked-crew-${port}.service`,
+      installCommand: `wicked-crew serve --port ${port} --install-service`, uninstallCommand: `wicked-crew serve --port ${port} --uninstall-service`,
+    });
   });
 
   it('GET /settings/start-on-login answers it for this daemon', async () => {
@@ -71,7 +106,7 @@ describe('startOnLoginStatus (studio#1324)', () => {
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json()).toEqual({
       platform: 'linux', port: 7701, installed: true, unit: '~/.config/systemd/user/wicked-crew.service',
-      installCommand: 'wicked-crew serve --install-service', uninstallCommand: 'wicked-crew serve --uninstall-service',
+      installCommand: 'wicked-crew serve --port 7701 --install-service', uninstallCommand: 'wicked-crew serve --port 7701 --uninstall-service',
     });
     expect(res.body).not.toContain(h);
   });
