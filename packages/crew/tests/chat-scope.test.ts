@@ -1138,7 +1138,8 @@ describe('crew#1569: the statement on the container seat floor', () => {
     expect(text).toContain('Do NOT `cd` into a repository: run every command from where you start, and name the repository\'s path in it instead,');
     expect(text).toContain('e.g. `git -C /srv/repos/alpha log -5` or `ls /srv/repos/alpha`.');
     // Only what the engine refuses: a cd that also runs a hidden writer or a changing git command (core gate_hook.rs,
-    // crew#1795). A refusal there is advisory, so the line never promises the answer stops.
+    // crew#1795). With wicked-core#1849 the hidden-writer refusal is advisory (the seat continues), so the line never
+    // promises the answer stops; a changing git command stays a fatal refusal.
     expect(text).toContain('The repositories are read-only: a command that `cd`s into one and also\nruns a script interpreter (python, node, a shell script) or a git command that changes something is refused.');
     expect(text).not.toContain('your answer stops');
     // The container floor's own checkout is the working directory: nothing to cd into, no line.

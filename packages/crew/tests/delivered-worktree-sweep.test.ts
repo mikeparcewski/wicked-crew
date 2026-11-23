@@ -70,12 +70,14 @@ describe('sweepDeliveredWorktree (crew#620)', () => {
     const wtPath = join(`${repo}.wicked`, 'wicked-worktrees', runId);
     git(repo, 'branch', branch);
     git(repo, 'worktree', 'add', wtPath, branch);
-    expect(worktreeList()).toContain(wtPath);
+    // Git lists paths with `/` on every platform (codex r1): compare one spelling.
+    const slashed = (p: string): string => p.replace(/\\/g, '/');
+    expect(slashed(worktreeList())).toContain(slashed(wtPath));
     const logs: string[] = [];
 
     await sweepDeliveredWorktree(runId, repo, (m) => logs.push(m));
 
-    expect(worktreeList()).not.toContain(wtPath);
+    expect(slashed(worktreeList())).not.toContain(slashed(wtPath));
     expect(existsSync(wtPath)).toBe(false);
     expect(logs).toContain(`[runs] worktree sweep: removed ${runId}`);
   });
