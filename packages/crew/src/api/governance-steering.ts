@@ -28,6 +28,7 @@ import { z } from '../zod.js';
 
 import { SteeringUnsupportedError, type CoreAdapter } from '../core/adapter.js';
 import type { Actor, SteeringImportEntry, SteeringImportResult } from '../core/types.js';
+import { wickedHomeDir } from '../core/wicked-home.js';
 import type { AuditLog } from './audit.js';
 import { recordRunLaunched, type RunTimingIndex } from './run-timing-index.js';
 import { API_PREFIX } from './api-prefix.js';
@@ -123,13 +124,8 @@ export const SteeringAuthorSchema = z.strictObject({
  * ride the problem statement, never the prompt-fattening content itself).
  */
 export function steeringInboxDir(runId: string): string {
-  // Env override first (the workflowOverlayDir pattern) — what keeps tests out of the
-  // operator's real ~/.wicked.
-  if (process.env.WICKED_STEERING_INBOX_DIR) {
-    return join(process.env.WICKED_STEERING_INBOX_DIR, runId);
-  }
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
-  return join(home, '.wicked', 'steering-inbox', runId);
+  // Env override first (the workflowOverlayDir pattern), else `${WICKED_HOME:-~/.wicked}/steering-inbox` (crew#1802).
+  return join(wickedHomeDir('WICKED_STEERING_INBOX_DIR', 'steering-inbox'), runId);
 }
 
 /**

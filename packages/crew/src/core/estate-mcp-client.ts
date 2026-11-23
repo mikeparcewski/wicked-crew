@@ -36,13 +36,13 @@
 
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { mcpStateDir } from '../mcp/registry-store.js';
 import { isDefaultStateHome } from '../projects/state-home.js';
 import { childEnvWithBootEstateDb } from './governance-store.js';
+import { wickedHome } from './wicked-home.js';
 
 /** The MCP protocol version crew declares in the handshake (the version the estate server speaks). */
 export const ESTATE_MCP_PROTOCOL_VERSION = '2024-11-05';
@@ -179,9 +179,7 @@ export function resolveMemoryDb(env: NodeJS.ProcessEnv = process.env): { path: s
   const explicit = env['WICKED_MEMORY_DB'];
   if (explicit !== undefined && explicit !== '') return { path: explicit, source: 'explicit' };
   if (!isDefaultStateHome()) return { path: join(mcpStateDir(), 'memory.db'), source: 'state-home' };
-  const home = env['WICKED_HOME'];
-  const base = home !== undefined && home !== '' ? home : join(homedir(), '.wicked');
-  return { path: join(base, 'memory.db'), source: 'global' };
+  return { path: join(wickedHome(env), 'memory.db'), source: 'global' };
 }
 
 /**
@@ -200,8 +198,7 @@ export function estateStoresEnv(env: NodeJS.ProcessEnv = process.env): Record<st
       stores[key] = join(mcpStateDir(), file);
     } else if (explicit === '') {
       // Empty values name temporary databases in estate; pin its historical default instead.
-      const home = env['WICKED_HOME'];
-      stores[key] = join(home !== undefined && home !== '' ? home : join(homedir(), '.wicked'), file);
+      stores[key] = join(wickedHome(env), file);
     }
   }
   return stores;
@@ -238,8 +235,7 @@ export function memoryStoreIsolationNotice(env: NodeJS.ProcessEnv = process.env)
   const { path, source } = resolveMemoryDb(env);
   if (source !== 'state-home') return null;
   if (existsSync(path)) return null;
-  const home = env['WICKED_HOME'];
-  const global = join(home !== undefined && home !== '' ? home : join(homedir(), '.wicked'), 'memory.db');
+  const global = join(wickedHome(env), 'memory.db');
   if (!existsSync(global)) return null;
   return (
     `wicked-crew: this daemon's memory store is ${path} (its own, derived from --db) and it is empty. ` +
