@@ -379,6 +379,8 @@ export interface WrittenShapes {
   unchanged: number;
   /** Older shapes of the source this profile replaced: forgotten from knowledge, or a pending one declined. */
   replaced: number;
+  /** Tables this profile could not read (timed out, over budget, refused, changed mid-read) whose earlier shape was kept. */
+  kept: number;
 }
 
 /** A write that stopped part way: `partial` is what was done before it (already in knowledge). */
@@ -400,6 +402,8 @@ const errText = (err: unknown): string => (err instanceof Error ? err.message : 
  *   catalog document, incoming `derived_from`, under `visible`, read whole), that shape is the newest crew record for
  *   the relation (what the readers take, {@link currentShapes}), and it is the same ({@link shapeIdentity}: the bands
  *   and the links, not the day): it is left;
+ * - it is kept when this profile could not read the table (`rows: null`) and estate holds a live shape crew wrote on
+ *   it: that shape is left, and the unread one is written only where none is held yet;
  * - otherwise the new shape is submitted and approved FIRST, then every other shape crew wrote for the relation is
  *   forgotten by its exact node id (one already gone is a no-op), whether or not the neighbourhood showed it.
  *
@@ -420,7 +424,7 @@ export async function writeShapes(
   const mine = (await list()).filter((p) => ownedShape(p) && p.payload!.shape!.sourceId === sourceId);
   const approved = new Map(mine.filter((p) => p.state === 'approved').map((p) => [String(p.id), p] as const));
   const newest = new Map(currentShapes([...approved.values()]).map((p) => [String(p.payload!.shape!.relation), String(p.id)] as const));
-  const done: WrittenShapes = { written: [], unchanged: 0, replaced: 0 };
+  const done: WrittenShapes = { written: [], unchanged: 0, replaced: 0, kept: 0 };
   const keep = new Set<string>();
   /** The state the queue holds for `id` now (a decision whose answer was lost is read back, never assumed). */
   const stateNow = async (id: string): Promise<string | null> => {
@@ -451,6 +455,17 @@ export async function writeShapes(
     for (const p of proposals) {
       const relation = p.payload.shape.relation;
       const live = await liveOn(relation);
+      // A table this profile could not read (`rows: null`: budget, timeout, refused, changed mid-read, unreadable)
+      // tells nothing new about it: the shape estate holds stays as it is, joins and code links included. A cut
+      // neighbourhood keeps every version crew wrote. The unread shape is written only where none is held yet.
+      if (p.payload.shape.profile.rows === null) {
+        const held = live ?? [...approved].filter(([, q]) => q.payload?.shape?.relation === relation).map(([id]) => id);
+        if (held.length > 0) {
+          for (const id of held) keep.add(id);
+          done.kept++;
+          continue;
+        }
+      }
       const only = live?.length === 1 ? live[0]! : null;
       if (only !== null && newest.get(relation) === only && shapeIdentity(approved.get(only)!.payload!.shape!) === shapeIdentity(p.payload.shape)) {
         keep.add(only);

@@ -5,7 +5,8 @@
 //
 // NEGATIVE CONTROLS:
 // - nothing of a person's profile waits in the review queue (red on the pre-#1625 writer, which filed proposals);
-// - a replaced shape is gone from recall and from the map (red without the forget: two shapes of one table recall).
+// - a replaced shape is gone from recall and from the map (red without the forget: two shapes of one table recall);
+// - a table a re-profile could not read keeps its shape and edges (coord F1: red when the unread shape replaced it).
 
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -81,7 +82,7 @@ describe.skipIf(EXE === '')('data shapes through a real wicked-estate-mcp', () =
 
   it('NEGATIVE CONTROL: a person\'s profile is in knowledge at once, with its typed edges, and nothing waits in the queue', async () => {
     expect(Object.keys(ids).sort()).toEqual(['support.regions', 'support.tickets']);
-    expect(again).toEqual({ written: [], unchanged: 2, replaced: 0 });
+    expect(again).toEqual({ written: [], unchanged: 2, replaced: 0, kept: 0 });
     const pending = (await estate('proposal.list', { kind_type: 'knowledge', state: 'pending' })) as { proposals: unknown[] };
     expect(pending.proposals).toEqual([]);
     const m = await buildKnowledgeMap(estate, [{ id: SID, name: 'support-pg', described: true }], ['escalations']);
@@ -94,6 +95,27 @@ describe.skipIf(EXE === '')('data shapes through a real wicked-estate-mcp', () =
     expect(shapeItems(await recall([`source:${SID}`, 'repo:escalations']))).toHaveLength(2);
     // A visible set without the repo the tickets shape describes hides that one (estate derived repo:escalations).
     expect(shapeItems(await recall([`source:${SID}`]))).toHaveLength(1);
+  }, 90_000);
+
+  it('NEGATIVE CONTROL (coord F1): a re-profile that could not read a table keeps its shape, its joins and its describes edges', async () => {
+    const unread = {
+      relations: [
+        { key: 'support.tickets', rows: null, error: 'timeout', columns: [] },
+        { key: 'support.regions', rows: '1-99' as const, error: null, columns: [{ name: 'id', type: 'integer', nullPct: 0, hasNulls: false, cardinality: 'unique' as const, keyCandidate: true }] },
+      ],
+      joins: [{ from: 'support.tickets', columns: ['region_id'], to: 'support.regions', references: ['id'], basis: 'fk' as const, overlap: 'all' as const }],
+    };
+    const code = new Map([['support.tickets', [{ repo: 'escalations', symbolId: CODE, name: 'Ticket', kind: 'class', file: 'src/ticket.ts' }]]]);
+    const out = await writeShapes(estate, SID, shapeProposals({ id: SID, name: 'support-pg' }, unread, code, '2026-11-22T00:00:00.000Z', 'mike'), async () => BOTH, VISIBLE);
+    expect(out).toEqual({ written: [], unchanged: 1, replaced: 0, kept: 1 });
+    const m = await buildKnowledgeMap(estate, [{ id: SID, name: 'support-pg', described: true }], ['escalations']);
+    expect(m.nodes.filter((n) => n.kind === 'shape').map((n) => n.proposalId).sort()).toEqual([ids['support.regions'], ids['support.tickets']].sort());
+    const rel = (r: string) => m.edges.filter((e) => e.rel === r).map((e) => [e.from, e.to]);
+    expect(rel('joins')).toEqual([[`knowledge:${catalogDocId(SID, 'support.tickets')}`, `knowledge:${catalogDocId(SID, 'support.regions')}`]]);
+    expect(rel('describes')).toEqual([[`knowledge:${catalogDocId(SID, 'support.tickets')}`, `estate:${CODE}`]]);
+    expect(shapeItems(await recall([`source:${SID}`, 'repo:escalations']))).toHaveLength(2);
+    const pending = (await estate('proposal.list', { kind_type: 'knowledge', state: 'pending' })) as { proposals: unknown[] };
+    expect(pending.proposals).toEqual([]);
   }, 90_000);
 
   it('NEGATIVE CONTROL: a re-profile replaces the set: a changed shape is rewritten, a dropped table\'s shape is forgotten', async () => {

@@ -16075,6 +16075,8 @@ export interface SourceProfileResponse {
   unchanged?: number;
   /** (crew#1625) Older shapes of the source this profile replaced (forgotten from knowledge, or a pending one declined). */
   replaced?: number;
+  /** (crew#1625) Tables this profile could not read whose earlier shape stays in knowledge as it was (absent: none). */
+  kept?: number;
   /** @deprecated (crew#1625) Always empty: a profile files nothing for review. */
   proposed: Array<{ id: string; relation: string }>;
   /** @deprecated (crew#1625) Always 0. */

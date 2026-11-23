@@ -173,9 +173,10 @@ count queries only, so no value enters crew. It keeps bands (rows by order of ma
 5%), finds likely joins and the code that describes each table, and writes one data shape per table straight into
 knowledge, scoped to the source. You started the profile, so it is already your decision: nothing goes to the
 review queue. Profiling again replaces the source's shapes. A shape that is the same is left, a changed one is
-rewritten, and the shape of a table the source no longer has is removed. A shape an agent proposes still waits for
-you in the review queue. Studio shows the shapes on Understand's **Knowledge map** (`GET /knowledge/map`, a
-person's only).
+rewritten, and the shape of a table the source no longer has is removed. A table the profile could not read (it
+timed out, ran past the budget, was refused or changed while it was read) keeps its earlier shape. A shape an
+agent proposes still waits for you in the review queue. Studio shows the shapes on Understand's **Knowledge map**
+(`GET /knowledge/map`, a person's only).
 
 ## Trackers: GitHub Issues and Jira
 

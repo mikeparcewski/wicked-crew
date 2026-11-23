@@ -179,12 +179,12 @@ export function registerShapeRoutes(app: FastifyInstance, deps: ShapeRouteDeps):
         const write = async (proposals: Parameters<typeof writeShapes>[2], visible: string[], detail: Record<string, unknown>): Promise<Awaited<ReturnType<typeof writeShapes>> | { failed: unknown }> => {
           try {
             const shapes = await writeShapes(deps.estate, s.id, proposals, catalogNow, visible);
-            deps.audit.record('knowledge.source.profiled', actor, { detail: { source: name, ...detail, written: shapes.written.map((w) => w.id), unchanged: shapes.unchanged, replaced: shapes.replaced } });
+            deps.audit.record('knowledge.source.profiled', actor, { detail: { source: name, ...detail, written: shapes.written.map((w) => w.id), unchanged: shapes.unchanged, replaced: shapes.replaced, kept: shapes.kept } });
             return shapes;
           } catch (err) {
             // What was written before the failure is in knowledge: the audit and the answer say so.
-            const partial = err instanceof ShapeWriteError ? err.partial : { written: [], unchanged: 0, replaced: 0 };
-            deps.audit.record('knowledge.source.profiled', actor, { detail: { source: name, ...detail, failed: capped(err), written: partial.written.map((w) => w.id), unchanged: partial.unchanged, replaced: partial.replaced } });
+            const partial = err instanceof ShapeWriteError ? err.partial : { written: [], unchanged: 0, replaced: 0, kept: 0 };
+            deps.audit.record('knowledge.source.profiled', actor, { detail: { source: name, ...detail, failed: capped(err), written: partial.written.map((w) => w.id), unchanged: partial.unchanged, replaced: partial.replaced, kept: partial.kept } });
             void reply.code(502).send({ error: `estate did not take every shape (${partial.written.length} written, ${partial.replaced} replaced before it stopped): ${capped(err)}; profile it again`, code: 'estate_unavailable' });
             return { failed: err };
           }
@@ -259,6 +259,7 @@ export function registerShapeRoutes(app: FastifyInstance, deps: ShapeRouteDeps):
           written: shapes.written,
           unchanged: shapes.unchanged,
           replaced: shapes.replaced,
+          ...(shapes.kept > 0 ? { kept: shapes.kept } : {}),
           proposed: [],
           alreadyProposed: 0,
           codeSearch: { searched: code.searched, notSearched: code.notSearched },
