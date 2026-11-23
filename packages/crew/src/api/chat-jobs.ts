@@ -190,6 +190,70 @@ export interface JobContext {
    *  accepts here (the launch's own `namesPreset` source). A job whose workflow is one is started as a power run or held
    *  at its plan by the person's Start, so its sentence promises neither. `null`/absent = no Start chooses. */
   powerPresets?: ReadonlySet<string> | null;
+  /** (crew#1840) The pull requests this chat's runs delivered, read when the words name a pull request. Absent = none
+   *  read (a job then never updates one). */
+  deliveredPrs?: readonly DeliveredPr[];
+}
+
+// ── crew#1840: a job that updates a pull request this chat delivered ──────────────────────────────────────────────
+
+/** A pull request a run of this chat delivered (its run record's `deliverUrl`), on the run's repository. */
+export interface DeliveredPr {
+  number: number;
+  url: string;
+  runId: string;
+  repoRef: string | null;
+}
+
+/** The number of a pull request URL crew records (`…/pull/<n>` on GitHub, `…/_git/<repo>/pullrequest/<n>` on Azure
+ *  DevOps), else `null`. */
+export function prNumberOfUrl(url: string): number | null {
+  const m = /^https:\/\/[^\s?#]+\/(?:pull|pullrequest)\/(\d+)$/i.exec(url.trim());
+  return m === null ? null : Number(m[1]);
+}
+
+/** Words that ask to change an existing pull request rather than make new work: "revise the PR", "update pull request
+ *  #3", "on the same PR", "do not open a new PR". */
+const ASKS_PR_CHANGE = new RegExp(
+  [
+    String.raw`\b(?:revise|revising|update|amend|change|add(?:ing)? to|push(?:ing)? (?:on)?to|fix up)\b[^!?\n]{0,80}?(?:\b(?:PR|pull[ -]?request)\b|\/(?:pull|pullrequest)\/\d+)`,
+    String.raw`\b(?:same|existing|that|this|delivered|open)\s+(?:PR|pull[ -]?request)\b`,
+    String.raw`\b(?:no|not open a|don'?t open a|never open a)\s+(?:new|second)\s+(?:PR|pull[ -]?request)\b`,
+  ].join('|'),
+  'i',
+);
+
+/** Whether `words` name a pull request at all (the cheap gate before the chat's runs are read). */
+export function mentionsPullRequest(words: string): boolean {
+  return /\b(?:PR|pull[ -]?requests?)\b|\/(?:pull|pullrequest)\/\d+/i.test(words);
+}
+
+/**
+ * Which delivered pull request, if any, the person's words ask this job to update. `null` = they do not ask to change
+ * a pull request. `{ pr: null, named }` = they ask, but crew cannot attach one: the PR they name (a URL or a number) is
+ * not one this chat delivered on the job's repository, or they name none and there is not exactly one.
+ */
+export function prRevisionOf(words: string, delivered: readonly DeliveredPr[], repoRef: string | null): { pr: DeliveredPr | null; named: string | null } | null {
+  if (!ASKS_PR_CHANGE.test(words)) return null;
+  const mine = delivered.filter((d) => repoRef !== null && d.repoRef === repoRef);
+  const urls = [...words.matchAll(/https:\/\/[^\s)\]>"']+/g)].map((m) => m[0].replace(/[.,;:!?]+$/, '')).filter((u) => prNumberOfUrl(u) !== null);
+  if (urls.length > 0) {
+    const hit = mine.find((d) => urls.some((u) => u.toLowerCase() === d.url.toLowerCase()));
+    return { pr: hit ?? null, named: hit === undefined ? urls[0]! : null };
+  }
+  const n = /\b(?:PR|pull[ -]?request)\s*#?(\d+)\b/i.exec(words)?.[1];
+  if (n !== undefined) {
+    const hit = mine.find((d) => d.number === Number(n));
+    return { pr: hit ?? null, named: hit === undefined ? `pull request #${Number(n)}` : null };
+  }
+  const distinct = [...new Map(mine.map((d) => [d.url.toLowerCase(), d])).values()];
+  return { pr: distinct.length === 1 ? distinct[0]! : null, named: null };
+}
+
+/** (crew#1840) What a job's Go adds to its run launch when the job updates a delivered pull request: `revisesPr` and
+ *  `deliver: "pr"` (a revision needs its deliver phase). Empty for any other job. */
+export function jobRevisionLaunch(p: Pick<ArtifactProposal, 'revisesPr' | 'repoRefs'>): { revisesPr?: number; deliver?: 'pr' } {
+  return p.revisesPr !== undefined && p.repoRefs?.[0] !== undefined ? { revisesPr: p.revisesPr.number, deliver: 'pr' } : {};
 }
 
 export class JobRefusal extends Error {
@@ -599,6 +663,19 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     parts.push(`Carrying: ${ds.join(', ')}.`);
   }
   if (facts.skipQe !== null) parts.push(`Without QE acceptance (you said: “${facts.skipQe.reason}”), labelled on the job.`);
+  // (crew#1840) A job that makes a pull request, asked to change one this chat delivered on the same repository,
+  // updates THAT pull request (`revisesPr`); asked but not attachable, the card says it opens a new one and where a
+  // delivered PR is revised. Nothing else in the proposal ever says where the work is delivered.
+  const prAsk = launch === 'run' && delivers === 'pr' && repo !== null ? prRevisionOf(facts.words, ctx.deliveredPrs ?? [], repo.id) : null;
+  const revisesPr = prAsk?.pr ?? null;
+  if (revisesPr !== null) {
+    parts.push(`It updates pull request #${revisesPr.number}, which an earlier job of this chat delivered; no new pull request is opened.`);
+  } else if (prAsk !== null) {
+    notes.push(
+      `This job opens a new pull request: ${prAsk.named !== null ? `${prAsk.named} is not one this chat delivered on ${repo!.name}` : `this chat has no one pull request on ${repo!.name} it delivered to update`}. ` +
+        'To change a delivered pull request, use Revise this PR on the job that delivered it.',
+    );
+  }
   // crew#1570: a domain extraction runs many hours on a large repository; the catalog's fixed range would mislead.
   const sizeBound = card.id === 'analyze-codebase' && r.option?.id === 'domain';
   const time = sizeBound ? DOMAIN_TIME : minutesLabel(r.resolved.typicalMinutes);
@@ -665,6 +742,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     suggestions: suggestions.slice(0, 2),
     question,
     sketch: sketchOf(r, startChooses),
+    ...(revisesPr !== null ? { revisesPr: { number: revisesPr.number, url: revisesPr.url, runId: revisesPr.runId } } : {}),
     revises: ctx.revises,
     lineage: ctx.lineage ?? ctx.pid,
     ...(ctx.answers !== undefined ? { answers: ctx.answers } : {}),

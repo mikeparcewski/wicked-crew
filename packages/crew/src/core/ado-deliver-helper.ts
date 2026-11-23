@@ -18,7 +18,8 @@
  * (crew#933) It also links Azure Boards work items (`AB#<id>` in the intent) on the pull request it
  * opens (`workItemRefs`), updates the title and description of the one it adopts on a re-deliver,
  * and serves the revision mode: `view` (launch: the PR's head branch and state, minting its own
- * header), `state` and `comment` (the deliver phase: a thread carrying the run record).
+ * header), `state` and `comment` (the deliver phase: a thread carrying the run record). (crew#1838) `workitem` reads an
+ * Azure Boards work item the launch's intent names (`AB#<id>`), minting its own header as `view` does.
  *
  * Plain JavaScript in a string on purpose: the script must not depend on where crew's dist lives
  * (a run waits at its gate across a crew upgrade), and the same text is what the tests run.
@@ -155,6 +156,29 @@ async function view(loginBase, apiBase, webUrl, id) {
   const head = typeof p.sourceRefName === 'string' && p.sourceRefName.startsWith('refs/heads/') ? p.sourceRefName.slice('refs/heads/'.length) : null;
   process.stdout.write(JSON.stringify({ headRefName: head, state: prState(p), isCrossRepository: Boolean(p.forkSource), url: webUrl + '/pullrequest/' + p.pullRequestId }) + '\n');
 }
+// (crew#1838) Launch time: an Azure Boards work item the intent names (AB#<id>), read with the daemon's own
+// credential (the header is minted here, as 'view' does). Prints the fields a reader needs as JSON; the description and
+// the comments stay HTML (the daemon turns them into text). Comments are read only when the item says it has some.
+async function workitem(loginBase, projectBase, id) {
+  if (!/^[0-9]+$/.test(String(id))) fail('not a work item id: ' + String(id).slice(0, 40));
+  const auth = await header(loginBase);
+  const base = projectBase.replace(/\/+$/, '') + '/_apis/wit/workitems/' + id;
+  const r = await call(base + '?$expand=all&' + API, { method: 'GET', headers: { Authorization: auth, Accept: 'application/json' } });
+  if (r.status === 401 || r.status === 403 || r.status === 203) fail('Azure DevOps refused the daemon\'s credential for work item ' + id + ' (HTTP ' + r.status + ')', 5);
+  if (r.status === 404) fail('Azure DevOps has no work item ' + id + ' in this project, or the credential cannot see it (HTTP 404)', 6);
+  if (!r.ok || !r.json || typeof r.json.id !== 'number' || !r.json.fields) fail('Azure DevOps could not read work item ' + id + ' (HTTP ' + r.status + ')');
+  const f = r.json.fields;
+  const s = (x) => (typeof x === 'string' ? x : '');
+  const html = r.json._links && r.json._links.html && typeof r.json._links.html.href === 'string' ? r.json._links.html.href : '';
+  const out = { id: r.json.id, title: s(f['System.Title']), state: s(f['System.State']), type: s(f['System.WorkItemType']), description: s(f['System.Description']), reproSteps: s(f['Microsoft.VSTS.TCM.ReproSteps']), url: /^https:\/\//.test(html) ? html : '', comments: [], commentsRead: true };
+  if (typeof f['System.CommentCount'] === 'number' && f['System.CommentCount'] > 0) {
+    const c = await call(base.replace('/_apis/wit/workitems/', '/_apis/wit/workItems/') + '/comments?api-version=7.1-preview.4', { method: 'GET', headers: { Authorization: auth, Accept: 'application/json' } });
+    const list = c.ok && c.json && Array.isArray(c.json.comments) ? c.json.comments : null;
+    if (list === null) out.commentsRead = false;
+    else out.comments = list.map((x) => ({ author: x && x.createdBy && typeof x.createdBy.displayName === 'string' ? x.createdBy.displayName : 'unknown', text: x && typeof x.text === 'string' ? x.text : '' }));
+  }
+  process.stdout.write(JSON.stringify(out) + '\n');
+}
 async function state(apiBase, id) {
   const auth = env.WICKED_ADO_AUTH || '';
   if (!auth) fail('no Azure DevOps auth header was handed to the state step');
@@ -175,6 +199,7 @@ async function comment(apiBase, id, bodyFile) {
 (async () => {
   if (cmd === 'header') process.stdout.write((await header(args[0])) + '\n');
   else if (cmd === 'view') await view(...args);
+  else if (cmd === 'workitem') await workitem(...args);
   else if (cmd === 'state') await state(...args);
   else if (cmd === 'comment') await comment(...args);
   else if (cmd === 'same') {

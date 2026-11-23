@@ -862,6 +862,10 @@ export function chatJobLines(mode: 'cards' | 'prose'): string[] {
     'with the new `card` or `option`; crew asks whether to start it again. Anything else is answered.',
     '',
     '**While a job runs**, a request to add to it is answered in prose, pointing at the job\'s own plan Edit; no block.',
+    '',
+    '**A change to a pull request a job of this chat delivered** ("revise that PR", "add a test on the same PR"): new work,',
+    'routed as above. Crew decides where it is delivered and the card says it ("It updates pull request #N"); never say',
+    'yourself that it lands on, or is constrained to, an existing pull request.',
   ];
 }
 
