@@ -2792,10 +2792,11 @@
     {
       "method": "POST",
       "path": "/api/v1/schedules/:id/run",
-      "requestType": null,
+      "requestType": "ScheduleRunBody",
       "responseType": "ScheduleRunResponse",
       "statusCodes": [
         200,
+        400,
         403,
         404,
         409,
