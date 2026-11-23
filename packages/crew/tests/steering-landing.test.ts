@@ -254,4 +254,11 @@ describe('nextFreeRuleId (crew#1846)', () => {
     expect(nextFreeRuleId('PAT-9', new Set(['PAT-9']))).toBe('PAT-10');
     expect(nextFreeRuleId('no-number', new Set(['no-number', 'no-number-2']))).toBe('no-number-3');
   });
+
+  it('counts past the largest safe integer instead of stalling', async () => {
+    const { nextFreeRuleId } = await import('../src/api/steering-landing.js');
+    const { ruleIdsInUseLines } = await import('../src/api/governance-steering.js');
+    expect(nextFreeRuleId('PAT-1', new Set(['PAT-1', 'PAT-9007199254740992']))).toBe('PAT-9007199254740993');
+    expect(ruleIdsInUseLines(['PAT-9007199254740992']).at(-1)).toBe('Number new rules from PAT-9007199254740993 (patterns) and POL-001 (policies).');
+  });
 });

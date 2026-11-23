@@ -26,7 +26,7 @@
  *  - AUDITABLE — every landed rule records `governance.rule.upserted` with the chat provenance
  *    and the run id, exactly as the doctrine documents; a landing that could not happen records
  *    `governance.steering.landing_failed` with the reason.
- *  - IDEMPOTENT — a durable marker (`landed.json` beside the proposal) is written after a full
+ *  - IDEMPOTENT — a durable marker (`landed.json` in the daemon's state home) is written after a full
  *    landing; a replayed approve (daemon restart mid-request, double-driven gate) finds it and
  *    re-lands nothing.
  *  - NEVER OVER ANOTHER RULE (crew#1846) — the store write is an upsert keyed by rule id, so a
@@ -34,7 +34,9 @@
  *    replace a rule nobody chose to replace. The landing reads the ids on the store first (retired
  *    ones too): a taken id lands under the next free id of its prefix, said in `reminted` and on
  *    the rule's audit entry. The one id a landing updates in place is a rule THIS run landed
- *    before (a send-back re-approve, mapped through the marker's `landedAs`), named in `replacedIds`.
+ *    before (a send-back re-approve, mapped through the marker's `landedAs`), and only while it
+ *    still reads as this run left it (its revision); it is named in `replacedIds`. Landings are
+ *    serialized in this process, so two approvals never pick the same free id.
  *  - FAIL-LOUD — when no source yields a parseable proposal the approve still succeeds for the
  *    RUN (the gate decision is the operator's and already happened), but the response and the
  *    audit trail carry an explicit `landing.outcome: "failed"` with the reason. A silent no-op
@@ -47,13 +49,15 @@
 
 import { createHash } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import type { CoreAdapter } from '../core/adapter.js';
 import type { Actor, ConformanceRule, SessionView } from '../core/types.js';
 import { runNameOf } from '../core/run-identity.js';
+import { RuleChangedError, ruleRevision } from '../governance/rule-revision.js';
+import { crewStateHome } from '../projects/state-home.js';
 import { coreUnitId } from './evidence.js';
-import { STEERING_PROPOSAL_FILENAME, STEERING_TYPES, steeringInboxDir } from './governance-steering.js';
+import { STEERING_PROPOSAL_FILENAME, STEERING_TYPES, nextFreeNumberedId, steeringInboxDir } from './governance-steering.js';
 export { STEERING_PROPOSAL_FILENAME } from './governance-steering.js';
 import type { AuditLog } from './audit.js';
 
@@ -68,9 +72,11 @@ export function steeringProposalPath(runId: string): string {
   return join(steeringInboxDir(runId), STEERING_PROPOSAL_FILENAME);
 }
 
-/** Where a completed landing records what it landed (replay dedupe). */
+/** Where a landing records what it landed (replay dedupe, and the rules this run owns). In the daemon's state home
+ *  (crew#1846), never the run's steering inbox: the inbox is the run's write root, and a worker that could write this
+ *  record could claim another author's rule as its own. */
 export function steeringLandedMarkerPath(runId: string): string {
-  return join(steeringInboxDir(runId), STEERING_LANDED_MARKER_FILENAME);
+  return join(crewStateHome(), 'steering-landed', runId, STEERING_LANDED_MARKER_FILENAME);
 }
 
 /**
@@ -333,9 +339,27 @@ interface LandedMarker {
   reminted?: Array<{ from: string; to: string }>;
   replacedIds?: string[];
   /** (crew#1846) Drafted id → the id it landed under, for every rule this run has landed (kept across
-   *  landings), so a send-back re-approve updates its own rule instead of minting a second one.
-   *  Absent on older markers: their `ruleIds` landed under their own ids. */
+   *  landings, written after a partial landing too), so a send-back re-approve updates its own rule
+   *  instead of minting a second one. */
   landedAs?: Record<string, string>;
+  /** (crew#1846) Stored id → its revision as this run left it: an in-place update needs the rule unchanged. */
+  revisions?: Record<string, string>;
+}
+
+/** (crew#1846) One landing at a time in this daemon: the free-id pick and the writes are one step. */
+let landingTail: Promise<unknown> = Promise.resolve();
+function serialized<T>(work: () => Promise<T>): Promise<T> {
+  const run = landingTail.then(work, work);
+  landingTail = run.catch(() => undefined);
+  return run;
+}
+
+/** String entries of a stored map, ignoring anything else (the marker is a file). */
+function stringMap(v: unknown): Map<string, string> {
+  const out = new Map<string, string>();
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return out;
+  for (const [k, val] of Object.entries(v)) if (typeof val === 'string') out.set(k, val);
+  return out;
 }
 
 /**
@@ -350,17 +374,7 @@ export function nextFreeRuleId(id: string, taken: ReadonlySet<string>): string {
     while (taken.has(`${id}-${n}`)) n += 1;
     return `${id}-${n}`;
   }
-  const prefix = m[1]!;
-  const width = m[2]!.length;
-  let max = Number(m[2]);
-  for (const t of taken) {
-    if (!t.startsWith(prefix)) continue;
-    const rest = t.slice(prefix.length);
-    if (/^\d+$/u.test(rest)) max = Math.max(max, Number(rest));
-  }
-  let n = max + 1;
-  while (taken.has(`${prefix}${String(n).padStart(width, '0')}`)) n += 1;
-  return `${prefix}${String(n).padStart(width, '0')}`;
+  return nextFreeNumberedId(m[1]!, m[2]!.length, taken, BigInt(m[2]!));
 }
 
 /** JSON with every object's keys sorted, so the same rules always hash the same. */
@@ -507,7 +521,7 @@ export async function draftedSteeringRules(
  * `gatePrompt` is the cached gate prompt captured BEFORE the confirm (terminal events prune
  * the cache) — the last-resort proposal source.
  */
-export async function landSteeringProposal(
+export function landSteeringProposal(
   deps: SteeringLandingDeps,
   run: SessionView,
   gatePrompt?: string,
@@ -515,6 +529,15 @@ export async function landSteeringProposal(
    *  `snapshot`: the proposal the route read and validated `keep` against BEFORE the confirm — landed as is,
    *  never re-read, so what lands is what was checked. */
   opts: { keep?: readonly string[]; snapshot?: SteeringProposalSnapshot } = {},
+): Promise<SteeringLandingResult | undefined> {
+  return serialized(() => landOnce(deps, run, gatePrompt, opts));
+}
+
+async function landOnce(
+  deps: SteeringLandingDeps,
+  run: SessionView,
+  gatePrompt: string | undefined,
+  opts: { keep?: readonly string[]; snapshot?: SteeringProposalSnapshot },
 ): Promise<SteeringLandingResult | undefined> {
   const { keep, snapshot } = opts;
   const runId = run.session.id;
@@ -564,8 +587,7 @@ export async function landSteeringProposal(
   // ── Idempotency: a replayed approve of the SAME proposal re-lands nothing ─────
   // Keyed by the proposal's digest, not the run: a later gate (a floor phase after propose) can
   // send the run back to propose, and the revised proposal it then approves must land. A marker
-  // from before M8 carries no digest, so it cannot prove THIS proposal landed: it is ignored, and its
-  // ids count as this run's own (updated in place, never re-minted).
+  // from before M8 carries no digest, so it cannot prove THIS proposal landed: it is ignored.
   // DES-LEARN §3.1: the decision is the proposal AND the selection: a replay of the same pick re-lands nothing,
   // while a different pick of the same proposal (after a send-back) is a new decision and lands.
   const digest = keep === undefined
@@ -598,16 +620,12 @@ export async function landSteeringProposal(
       ...(Array.isArray(prior.replacedIds) && prior.replacedIds.length > 0 ? { replacedIds: prior.replacedIds } : {}),
     };
   }
-  // (crew#1846) What this run landed before, drafted id → stored id. An older marker has no map: its
-  // ids landed as drafted.
-  const ownLanded: Record<string, string> = {};
-  if (prior !== null) {
-    if (typeof prior.landedAs === 'object' && prior.landedAs !== null && !Array.isArray(prior.landedAs)) {
-      for (const [from, to] of Object.entries(prior.landedAs)) if (typeof to === 'string') ownLanded[from] = to;
-    } else {
-      for (const id of prior.ruleIds) if (typeof id === 'string') ownLanded[id] = id;
-    }
-  }
+  // (crew#1846) What this run landed before: drafted id → stored id, and each stored id's revision as
+  // this run left it. A revised draft may name its rule by either id.
+  const priorLandedAs = stringMap(prior?.landedAs);
+  const revisions = stringMap(prior?.revisions);
+  const ownLanded = new Map(priorLandedAs);
+  for (const to of priorLandedAs.values()) if (!ownLanded.has(to)) ownLanded.set(to, to);
 
   const defaultType = steeringTypeFromProblem(run.session.problem);
   const coercions: string[] = [];
@@ -637,9 +655,9 @@ export async function landSteeringProposal(
   // The write is an upsert by id, and the worker's ids are guesses: every id on the store (retired
   // ones too, so a withdrawn rule is never revived under new words) is taken. Unreadable = nothing
   // lands: landing blind could silently replace a rule in force.
-  let taken: Set<string>;
+  let stored: ConformanceRule[];
   try {
-    taken = new Set((await adapter.listConformanceRules()).map((r) => r.id));
+    stored = await adapter.listConformanceRules();
   } catch (err) {
     return failed(
       `the rules already on the store could not be read, so nothing was landed (a drafted rule could ` +
@@ -649,30 +667,39 @@ export async function landSteeringProposal(
       source,
     );
   }
-  const reminted: Array<{ from: string; to: string }> = [];
-  const replacedIds: string[] = [];
+  const taken = new Set(stored.map((r) => r.id));
+  // Declined drafts keep their ids too: a kept rule is never re-minted onto an id the result names as declined.
+  const claimed = new Set<string>(declinedIds);
   // Two passes: every id that lands as it is (this run's own, or free) is claimed first, so a re-minted
-  // id never takes one a later drafted rule holds.
-  const claimed = new Set<string>();
-  const firstPass = rules.map((rule): string | null => {
-    const own = ownLanded[rule.id];
-    const to = own !== undefined && !claimed.has(own)
-      ? own
-      : !taken.has(rule.id) && !claimed.has(rule.id) ? rule.id : null;
-    if (to !== null) {
-      claimed.add(to);
-      if (to === own && taken.has(own)) replacedIds.push(own);
+  // id never takes one a later drafted rule holds. This run's own id is updated in place only with the
+  // revision it left (`expected`): a rule someone edited or retired since is not this run's to change.
+  const firstPass = rules.map((rule): { to: string; expected?: string } | null => {
+    const own = ownLanded.get(rule.id);
+    if (own !== undefined && !claimed.has(own)) {
+      const expected = revisions.get(own);
+      if (!taken.has(own)) {
+        claimed.add(own);
+        return { to: own };
+      }
+      if (expected !== undefined) {
+        claimed.add(own);
+        return { to: own, expected };
+      }
     }
-    return to;
+    if (!taken.has(rule.id) && !claimed.has(rule.id)) {
+      claimed.add(rule.id);
+      return { to: rule.id };
+    }
+    return null;
   });
+  const remint = (id: string): string => {
+    const to = nextFreeRuleId(id, new Set([...taken, ...claimed]));
+    claimed.add(to);
+    return to;
+  };
   const targets = rules.map((rule, i) => {
-    let to = firstPass[i] ?? null;
-    if (to === null) {
-      to = nextFreeRuleId(rule.id, new Set([...taken, ...claimed]));
-      claimed.add(to);
-      reminted.push({ from: rule.id, to });
-    }
-    return { drafted: rule.id, rule: to === rule.id ? rule : { ...rule, id: to } };
+    const first = firstPass[i] ?? null;
+    return first === null ? { drafted: rule.id, rule, to: remint(rule.id) } : { drafted: rule.id, rule, ...first };
   });
 
   if (declinedIds.length > 0) {
@@ -681,23 +708,38 @@ export async function landSteeringProposal(
 
   // ── Land, auditing each write exactly as the doctrine documents ──────────────
   const landedIds: string[] = [];
-  const landedAs: Record<string, string> = { ...ownLanded };
+  const landedAs = new Map(priorLandedAs);
+  const reminted: Array<{ from: string; to: string }> = [];
+  const replacedIds: string[] = [];
   const failures: string[] = [];
-  for (const { drafted: draftedId, rule } of targets) {
+  for (const target of targets) {
+    const { drafted: draftedId } = target;
+    let to = target.to;
+    let replaced = target.expected !== undefined;
     try {
-      await adapter.upsertConformanceRule(rule);
-      landedIds.push(rule.id);
-      landedAs[draftedId] = rule.id;
+      try {
+        await adapter.upsertConformanceRule({ ...target.rule, id: to }, target.expected);
+      } catch (err) {
+        // This run's rule changed since it landed it: leave it as it is, land the revision as a new rule.
+        if (!(err instanceof RuleChangedError) || target.expected === undefined) throw err;
+        to = remint(draftedId);
+        replaced = false;
+        await adapter.upsertConformanceRule({ ...target.rule, id: to });
+      }
+      landedIds.push(to);
+      landedAs.set(draftedId, to);
+      if (replaced) replacedIds.push(to);
+      else if (to !== draftedId && ownLanded.get(draftedId) !== to) reminted.push({ from: draftedId, to });
       audit.record('governance.rule.upserted', actor, {
         runId,
         detail: {
-          id: rule.id,
+          id: to,
           source: 'chat',
           via: STEERING_AUTHOR_WORKFLOW,
           // crew#1846: the drafted id was taken, so the rule landed under a new one; or it updated the
           // rule this run landed at an earlier approve.
-          ...(draftedId !== rule.id ? { draftedId } : {}),
-          ...(replacedIds.includes(rule.id) ? { replaced: true } : {}),
+          ...(draftedId !== to ? { draftedId } : {}),
+          ...(replaced ? { replaced: true } : {}),
           // Shape coercions this landing applied to THIS rule (see normalizeProposedRule) —
           // audited so a worker-authored field the engine could not store is never silently
           // reshaped. Coercion notes are prefixed with the rule id they belong to.
@@ -708,17 +750,51 @@ export async function landSteeringProposal(
         },
       });
     } catch (err) {
-      failures.push(`${rule.id}: ${err instanceof Error ? err.message : String(err)}`);
+      failures.push(`${to}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  const landedReminted = reminted.filter((r) => landedIds.includes(r.to));
-  const landedReplaced = replacedIds.filter((id) => landedIds.includes(id));
   const changes = {
-    ...(landedReminted.length > 0 ? { reminted: landedReminted } : {}),
-    ...(landedReplaced.length > 0 ? { replacedIds: landedReplaced } : {}),
+    ...(reminted.length > 0 ? { reminted } : {}),
+    ...(replacedIds.length > 0 ? { replacedIds } : {}),
+  };
+
+  // ── Durable marker (best-effort) ─────────────────────────────────────────────
+  // Written after a partial landing too (without the digest, so the proposal is not "landed"): the
+  // rules that did land stay this run's own. Each landed rule's revision is read back so a later
+  // in-place update can prove the rule is still as this run left it; unreadable = no in-place update.
+  const writeMarker = async (complete: boolean): Promise<void> => {
+    try {
+      const nextRevisions = new Map(revisions);
+      try {
+        const now = new Map((await adapter.listConformanceRules()).map((r) => [r.id, r]));
+        for (const id of landedIds) {
+          const r = now.get(id);
+          if (r !== undefined) nextRevisions.set(id, ruleRevision(r));
+          else nextRevisions.delete(id);
+        }
+      } catch {
+        for (const id of landedIds) nextRevisions.delete(id);
+      }
+      const path = steeringLandedMarkerPath(runId);
+      await fsp.mkdir(dirname(path), { recursive: true });
+      const marker: LandedMarker = {
+        ruleIds: landedIds,
+        source,
+        at: new Date().toISOString(),
+        ...(complete ? { digest } : {}),
+        landedAs: Object.fromEntries(landedAs),
+        revisions: Object.fromEntries(nextRevisions),
+        ...declined,
+        ...changes,
+      };
+      await fsp.writeFile(path, JSON.stringify(marker, null, 2), 'utf8');
+    } catch {
+      /* a missing marker degrades to copies on a later approve, never an overwrite of another rule */
+    }
   };
 
   if (failures.length > 0) {
+    if (landedIds.length > 0) await writeMarker(false);
     return {
       ...failed(
         `landing was partial: ${landedIds.length} of ${rules.length} proposed rule(s) landed; ` +
@@ -730,14 +806,7 @@ export async function landSteeringProposal(
     };
   }
 
-  // ── Durable marker (best-effort: without it a replayed approve lands copies under new ids) ──
-  try {
-    await fsp.mkdir(steeringInboxDir(runId), { recursive: true });
-    const marker: LandedMarker = { ruleIds: landedIds, source, at: new Date().toISOString(), digest, landedAs, ...declined, ...changes };
-    await fsp.writeFile(steeringLandedMarkerPath(runId), JSON.stringify(marker, null, 2), 'utf8');
-  } catch {
-    /* a missing marker degrades to copies on a replay, never an overwrite of another rule */
-  }
+  await writeMarker(true);
 
   return { outcome: 'landed', ruleIds: landedIds, source, ...declined, ...changes };
 }

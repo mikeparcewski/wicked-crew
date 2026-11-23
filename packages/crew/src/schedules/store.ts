@@ -193,8 +193,7 @@ export class ScheduleStore {
       createdAt: prev?.createdAt ?? iso,
       updatedAt: iso,
     };
-    this.rows.set(id, row);
-    this.persist();
+    this.commit(id, row, prev);
     return { ...row };
   }
 
@@ -202,8 +201,7 @@ export class ScheduleStore {
     const prev = this.rows.get(id);
     if (prev === undefined) return undefined;
     const row: WorkflowSchedule = { ...prev, ...patch, updatedAt: now.toISOString() };
-    this.rows.set(id, row);
-    this.persist();
+    this.commit(id, row, prev);
     return { ...row };
   }
 
@@ -211,6 +209,19 @@ export class ScheduleStore {
     const had = this.rows.delete(id);
     if (had) this.persist();
     return had;
+  }
+
+  /** (crew#1837) Set the row and write the file; a write that fails puts the row back, so memory never holds what
+   *  the file (and the audit trail, written after a save) does not. */
+  private commit(id: string, row: WorkflowSchedule, prev: WorkflowSchedule | undefined): void {
+    this.rows.set(id, row);
+    try {
+      this.persist();
+    } catch (err) {
+      if (prev === undefined) this.rows.delete(id);
+      else this.rows.set(id, prev);
+      throw err;
+    }
   }
 
   private persist(): void {

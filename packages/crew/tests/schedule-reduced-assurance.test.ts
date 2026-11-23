@@ -161,3 +161,23 @@ describe('a one-seat review schedule (crew#1837)', () => {
     expect(bad.statusCode, bad.body).toBe(400);
   }, 20_000);
 });
+
+describe('a schedule save that cannot be written (crew#1837)', () => {
+  it('leaves the row as it was, so a retried accept is saved and audited, not skipped', async () => {
+    const { ScheduleStore } = await import('../src/schedules/store.js');
+    const dir = mkdtempSync(join(tmpdir(), 'schedule-store-rollback-'));
+    try {
+      const path = join(dir, 'daemon-schedules.json');
+      const store = new ScheduleStore(path);
+      store.put(REVIEW_WORKFLOW, { workflow: REVIEW_WORKFLOW, everyHours: 48 }, new Date());
+      // The write's temp file is a directory: writing it fails.
+      mkdirSync(`${path}.tmp-${process.pid}`);
+      expect(() => store.update(REVIEW_WORKFLOW, { reducedAssurance: true }, new Date())).toThrow();
+      expect(store.get(REVIEW_WORKFLOW)?.reducedAssurance).toBe(false);
+      expect(() => store.put('another', { workflow: REVIEW_WORKFLOW, everyHours: 48 }, new Date())).toThrow();
+      expect(store.get('another')).toBeUndefined();
+    } finally {
+      removeScratch(dir);
+    }
+  });
+});

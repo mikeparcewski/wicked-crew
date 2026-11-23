@@ -140,6 +140,23 @@ export const STEERING_PROPOSAL_FILENAME = 'proposed-rules.json';
 export const STEERING_IDS_LISTED_MAX = 200;
 
 /**
+ * (crew#1846) The first `<prefix><number>` no taken id uses, above `floor` and above every number a taken id of
+ * that prefix carries, zero-padded to `width`. BigInt: an id with a huge number never stalls the count.
+ */
+export function nextFreeNumberedId(prefix: string, width: number, taken: ReadonlySet<string>, floor: bigint = 0n): string {
+  let max = floor;
+  for (const t of taken) {
+    if (!t.startsWith(prefix)) continue;
+    const rest = t.slice(prefix.length);
+    if (/^\d+$/u.test(rest)) {
+      const n = BigInt(rest);
+      if (n > max) max = n;
+    }
+  }
+  return `${prefix}${(max + 1n).toString().padStart(width, '0')}`;
+}
+
+/**
  * (crew#1846) The author problem's "ids in use" block: every id on the store (retired ones too; capped at
  * {@link STEERING_IDS_LISTED_MAX}, the rest counted) and, for PAT- and POL- ids, the first free number. No block
  * when the store holds no rule.
@@ -151,11 +168,8 @@ export function ruleIdsInUseLines(ids: readonly string[]): string[] {
   const listed = sorted.slice(0, STEERING_IDS_LISTED_MAX);
   const more = sorted.length - listed.length;
   const next = (['PAT-', 'POL-'] as const).map((prefix) => {
-    const nums = sorted.filter((id) => id.startsWith(prefix) && /^\d+$/u.test(id.slice(prefix.length)));
-    const width = nums.length === 0 ? 3 : Math.max(...nums.map((id) => id.length - prefix.length));
-    let n = nums.reduce((m, id) => Math.max(m, Number(id.slice(prefix.length))), 0) + 1;
-    while (taken.has(`${prefix}${String(n).padStart(width, '0')}`)) n += 1;
-    return `${prefix}${String(n).padStart(width, '0')}`;
+    const widths = sorted.filter((id) => id.startsWith(prefix) && /^\d+$/u.test(id.slice(prefix.length))).map((id) => id.length - prefix.length);
+    return nextFreeNumberedId(prefix, widths.length === 0 ? 3 : Math.max(...widths), taken);
   });
   return [
     '',
