@@ -242,9 +242,12 @@ function noneReason(clis: readonly SystemCli[]): string {
     if (c.state === 'signed_out' || c.state === 'benched') return seatsOut(undefined, [c])[0]!;
     return `${c.cli} ${c.state === 'unknown' ? 'sign-in not confirmed' : 'not taking work'}`;
   });
-  const onHost = clis.some((c) => c.stateReason === HOST_FLOOR_BENCH_COPY) ? '; on this computer only Claude Code and Codex get work' : '';
-  // crew#1818: a policy-silenced claude says its own reason, once.
-  const policy = [...new Set(clis.flatMap((c) => isHostFloorBenchCopy(c.stateReason) && c.stateReason !== HOST_FLOOR_BENCH_COPY ? [c.stateReason!] : []))].map((r) => `; ${r}`).join('');
+  // crew#1818: a policy-silenced claude says its own reason, once, and the generic line then leaves claude out of it.
+  const policies = [...new Set(clis.flatMap((c) => isHostFloorBenchCopy(c.stateReason) && c.stateReason !== HOST_FLOOR_BENCH_COPY ? [c.stateReason!] : []))];
+  const policy = policies.map((r) => `; ${r}`).join('');
+  const onHost = clis.some((c) => c.stateReason === HOST_FLOOR_BENCH_COPY)
+    ? (policies.length > 0 ? '; on this computer only Codex gets work' : '; on this computer only Claude Code and Codex get work')
+    : '';
   const unread = clis.some((c) => c.stateReason === HOST_FLOOR_UNKNOWN_COPY) ? '; crew could not read which agents get work on this computer' : '';
   return `No helper is free to take work (${words.join(', ')})${onHost}${policy}${unread}`;
 }
@@ -507,7 +510,11 @@ export function buildNeeds(input: NeedsInput): Needs {
         kind: 'prevents',
         title: 'No helper can take work',
         reason: noneReason(input.clis),
-        remedy: 'Sign a CLI in, or wait for a bench to lift.',
+        // crew#1818: with no seat a sign-in or a lifting bench returns, the reason above is the remedy.
+        remedy: signable !== undefined || input.clis.some((c) => c.state === 'benched' && !isHostFloorBenchCopy(c.stateReason) && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY)
+          || !input.clis.some((c) => isHostFloorBenchCopy(c.stateReason))
+          ? 'Sign a CLI in, or wait for a bench to lift.'
+          : 'Do what the reason says for each helper, or set up another helper on the Helpers page.',
         target: { kind: 'cli', cli: (signable ?? input.clis[0]!).cli },
         action: signable !== undefined ? { kind: 'sign_in', label: 'Sign in' } : null,
       }),
@@ -558,6 +565,8 @@ export function buildNeeds(input: NeedsInput): Needs {
     for (const c of outSeats) {
       const named = needing.filter((r) => onSeat(r, c.cli));
       if (named.length === 0) continue;
+      // crew#1818: a seat the engine gives no work on this floor is not fixed by a sign-in: its reason, and reassign.
+      const benched = isHostFloorBenchCopy(c.stateReason) ? c.stateReason! : null;
       groups.set(`cli:out:${c.cli}`, {
         key: `cli:out:${c.cli}`,
         members: named.map((r) => ({ runId: r.runId, view: byId.get(r.runId), run: r, severity: 'yellow' as const, waitedMs: null })),
@@ -566,11 +575,13 @@ export function buildNeeds(input: NeedsInput): Needs {
           severity: 'yellow',
           source: 'cli',
           kind: 'slows',
-          title: `${c.label} is signed out`,
-          reason: `${plural(ms.length, 'job')} ${ms.length === 1 ? 'has' : 'have'} work on it, and it can’t take that work until it is signed in again`,
-          remedy: `Sign ${c.label} in again, or reassign the step to another agent.`,
+          title: benched === null ? `${c.label} is signed out` : `${c.label} gets no work here`,
+          reason: benched === null
+            ? `${plural(ms.length, 'job')} ${ms.length === 1 ? 'has' : 'have'} work on it, and it can’t take that work until it is signed in again`
+            : `${plural(ms.length, 'job')} ${ms.length === 1 ? 'has' : 'have'} work on it, and ${benched}`,
+          remedy: benched === null ? `Sign ${c.label} in again, or reassign the step to another agent.` : 'Reassign the step to another agent.',
           target: { kind: 'cli', cli: c.cli },
-          action: c.canSignIn ? { kind: 'sign_in', label: 'Sign in' } : null,
+          action: c.canSignIn && benched === null ? { kind: 'sign_in', label: 'Sign in' } : null,
         }),
       });
     }

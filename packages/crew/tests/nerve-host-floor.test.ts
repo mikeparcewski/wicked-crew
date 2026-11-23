@@ -2,6 +2,7 @@
 // engine gives it work on this floor (a host-floor bench is not work).
 
 import { describe, expect, it } from 'vitest';
+import type { SessionView, SystemRun } from 'wicked-crew-api-types';
 
 import { buildNeeds } from '../src/api/needs.js';
 import { HOST_FLOOR_BENCH_COPY, HOST_FLOOR_POLICY_COPY, HOST_FLOOR_SYSTEM_POLICY_COPY, HOST_FLOOR_UNKNOWN_COPY } from '../src/api/seat-standing.js';
@@ -221,5 +222,35 @@ describe('crew#1818: a policy-silenced claude on the host floor', () => {
     // A signed-out policy-silenced claude is no sign-in target: signing in does not lift the policy.
     const b = attention([out('claude', { host_floor_bench: SIGN_IN }), signedIn('opencode', BENCH)]);
     expect(b[0]).toMatchObject({ id: 'cli:none', action: null });
+  });
+
+  it('a mixed roster never says claude gets work beside its policy, and offers no remedy that cannot lift it (xreview r1)', () => {
+    for (const reason of [SIGN_IN, SYSTEM]) {
+      const a = attention([signedIn('claude', { host_floor_bench: reason }), out('codex'), signedIn('opencode', BENCH)]);
+      expect(a[0]!.id).toBe('cli:none');
+      expect(a[0]!.reason).not.toContain('only Claude Code and Codex');
+      expect(a[0]!.reason).toContain('on this computer only Codex gets work');
+      // codex can be signed in: the sign-in remedy stands.
+      expect(a[0]!.remedy).toBe('Sign a CLI in, or wait for a bench to lift.');
+    }
+    const alone = attention([signedIn('claude', { host_floor_bench: SYSTEM })]);
+    expect(alone[0]).toMatchObject({ id: 'cli:none', action: null });
+    expect(alone[0]!.remedy).not.toMatch(/Sign a CLI in|wait for a bench/);
+  });
+
+  it('a job whose next step is on a signed-out, policy-benched claude says the policy and offers reassignment, not sign-in (xreview r1)', () => {
+    const clis = clisOf([out('claude', { host_floor_bench: SYSTEM }), signedIn('codex'), signedIn('pi')]);
+    const view = {
+      session: { id: 'j', title: 'job j', problem: 'job j', status: 'executing', workflow_id: 'feature', repo_ref: 'repo-a', clis: ['claude', 'codex'], archived_at: null, created_at: Math.floor((NOW - 3_600_000) / 1000), delivery: 'none' },
+      units: [
+        { id: 'j:u1', session_id: 'j', ord: 1, status: 'done', assigned_cli: 'codex', phase_ref: null, stage: 'build' },
+        { id: 'j:u2', session_id: 'j', ord: 2, status: 'pending', assigned_cli: 'claude', phase_ref: null, stage: 'review' },
+      ],
+    } as unknown as SessionView;
+    const run = { runId: 'j', title: 'job j', status: 'executing', liveness: 'working', reason: '', phase: null, unitOrd: 2, seat: 'claude', lastEventAt: null, evidence: 'relay', quietForMs: 0, quietAfterMs: 300_000, stallAfterMs: 900_000 } as SystemRun;
+    const items = buildNeeds({ now: NOW, views: [view], runs: [run], infra: [], clis, gaps: judgeGaps([{ view, run }], clis), infraHoldsLive: () => false }).attention;
+    const item = items.find((i) => i.id === 'cli:out:claude')!;
+    expect(item).toMatchObject({ title: 'claude gets no work here', remedy: 'Reassign the step to another agent.', action: null });
+    expect(item.reason).toContain(HOST_FLOOR_SYSTEM_POLICY_COPY);
   });
 });
