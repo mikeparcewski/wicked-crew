@@ -25,6 +25,13 @@ import type { CoreAdapter } from '../core/adapter.js';
 import type { Actor, CoreEvent } from '../core/types.js';
 import type { AuditLog } from './audit.js';
 import { recordRunLaunched, type RunTimingIndex } from './run-timing-index.js';
+import { scrubEvidence } from './seat-scrub.js';
+import { scrubHomePaths } from './ui-text.js';
+
+/** One line of engine text for the stop line: home paths and secrets masked, whitespace folded. */
+function scrubbed(text: string): string {
+  return scrubEvidence(scrubHomePaths(text)).replace(/\s+/gu, ' ').trim();
+}
 
 /** The workflow a completed onboarding chains to (the engine's built-in preset). */
 export const CAPTURE_LEARNINGS_WORKFLOW = 'capture-learnings';
@@ -77,11 +84,16 @@ export class OnboardingCaptureChain {
     }
     const terminal = event.type === 'sessionCompleted' || event.type === 'sessionFailed' || event.type === 'runCancelled';
     const owned = this.launched.has(session) || this.deps.runTimingIndex.isOnboardingCapture(session);
-    if ((event.type as string) === 'gateEscalated' && owned && !this.ended.has(session)) {
+    // A review's words belong to the escalation they came with: a newer escalation replaces them (or clears them when it
+    // has none), and a step that runs again (`resumed`, `unitDispatched`) clears them (xreview r1 on #1831).
+    const type = event.type as string;
+    if (type === 'gateEscalated' && owned && !this.ended.has(session)) {
       const ev = event as unknown as Record<string, unknown>;
       const summary = ev['verdictSummary'];
       if (typeof summary === 'string' && summary.trim() !== '') this.verdicts.set(session, { ord: ev['ord'], summary });
+      else this.verdicts.delete(session);
     }
+    if (type === 'resumed' || type === 'unitDispatched') this.verdicts.delete(session);
     if (event.type === 'awaitingHuman' && owned && !this.ended.has(session)) void this.stopParked(session, event);
     if (terminal && owned) { this.launched.delete(session); this.stopping.delete(session); this.verdicts.delete(session); this.ended.add(session); }
     if (terminal && session === this.active) this.active = null;
@@ -118,15 +130,19 @@ export class OnboardingCaptureChain {
     const repo = this.launched.get(runId) ?? 'the repository';
     const ev = event as unknown as Record<string, unknown>;
     const gate = typeof ev['gateKind'] === 'string' && /^[A-Za-z0-9_.:-]{1,40}$/u.test(ev['gateKind']) ? ev['gateKind'].replace(/[_-]+/gu, ' ') : 'a gate';
-    // The gate's own sentence, without the answers it offers a person: nobody answers this one (core#1799 cert).
-    const prompt = typeof ev['prompt'] === 'string' ? ev['prompt'].split(/ — | \[engine gate/u)[0]!.replace(/\s+/gu, ' ').trim().slice(0, 200) : '';
-    // …and, when its review failed, what the review said (its verdict summary, the step's own words), so the person
-    // sees why it stopped.
-    // Its first line (the verdict) is the gate's sentence already: only the review's own words follow it.
+    // (core#1799 cert) When its review failed (an `escalation` this run's last `gateEscalated` came with, same ord), the
+    // line says what the review said, and the gate's sentence loses the answers it offers a person: nobody answers this
+    // one. Every other gate keeps its prompt as it was. Both are scrubbed (home paths, secrets) before they are cut: the
+    // line is stored on the audit trail and logged (xreview r1 on #1831).
     const verdict = this.verdicts.get(runId);
-    const lines = verdict !== undefined && verdict.ord === ev['ord'] ? verdict.summary.split('\n') : [];
+    this.verdicts.delete(runId);
+    const reviewed = verdict !== undefined && ev['gateKind'] === 'escalation' && verdict.ord === ev['ord'];
+    const raw = typeof ev['prompt'] === 'string' ? ev['prompt'] : '';
+    const prompt = scrubbed(reviewed ? raw.split(/ — | \[engine gate/u)[0]! : raw).slice(0, 200);
+    // Its first line (the verdict) is the gate's sentence already: only the review's own words follow it.
+    const lines = reviewed ? verdict.summary.split('\n') : [];
     if (lines.length > 1 && prompt.includes(lines[0]!.trim())) lines.shift();
-    const said = lines.join(' ').replace(/\s+/gu, ' ').trim().slice(0, 400);
+    const said = scrubbed(lines.join(' ')).slice(0, 400);
     const head = `Capture learnings from ${repo} stopped at ${gate}${prompt !== '' ? ` (${prompt})` : ''}: onboarding started it, so crew ends it rather than ask you.`;
     const reason = `${head}${said !== '' ? ` Its review said: “${said}”` : ''} Run Capture learnings yourself to try again.`;
     try {

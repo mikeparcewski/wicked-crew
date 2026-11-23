@@ -223,6 +223,35 @@ describe('crew#552 — onboarding → capture-learnings', () => {
     expect(reason).not.toMatch(/confirm to retry|request changes|reject to cancel/u);
   });
 
+  it('xreview r1 on #1831: the review words are scrubbed; a rerun step forgets them; a gate with no failed review keeps its whole prompt', async () => {
+    const h = harness();
+    h.chain.onEvent(frame('sessionCompleted', 'onb-1'));
+    h.chain.onEvent(frame('sessionCompleted', 'onb-2'));
+    await settle();
+    // cap-1: a review that quotes a secret and a home path.
+    h.chain.onEvent({
+      type: 'gateEscalated', session: 'cap-1', ord: 5,
+      verdictSummary: "the evaluator's verdict is FAIL\nThe proposal copies password=hunter2 from /home/alice/notes.md.",
+    } as unknown as CoreEvent);
+    h.chain.onEvent({ type: 'awaitingHuman', session: 'cap-1', ord: 5, gateKind: 'escalation', prompt: "Unit 5 verdict is NOT PASS (the evaluator's verdict is FAIL) — confirm to retry" } as unknown as CoreEvent);
+    await settle();
+    h.chain.onEvent(frame('runCancelled', 'cap-1'));
+    await settle();
+    // cap-2: a review escalated, the step ran again, and it stopped at a failure gate whose prompt has an em dash.
+    h.chain.onEvent({ type: 'gateEscalated', session: 'cap-2', ord: 2, verdictSummary: 'FAIL\nstale words from the first attempt' } as unknown as CoreEvent);
+    h.chain.onEvent({ type: 'unitDispatched', session: 'cap-2', ord: 2 } as unknown as CoreEvent);
+    h.chain.onEvent({ type: 'awaitingHuman', session: 'cap-2', ord: 2, gateKind: 'failure', prompt: 'Unit 2 (claude) ran out of time — the seat did not finish' } as unknown as CoreEvent);
+    await settle();
+    expect(h.cancels).toEqual(['cap-1', 'cap-2']);
+    await h.audit.flush();
+    const reasons = (await h.audit.readAll({ action: 'run.cancelled' })).map((l) => String((l.detail as Record<string, unknown>)['reason']));
+    const one = reasons.find((r) => r.includes('alpha'))!;
+    expect(one).toContain('Its review said: “The proposal copies password=<redacted>');
+    expect(one).not.toMatch(/hunter2|\/home\/alice/u);
+    const two = reasons.find((r) => r.includes('beta'))!;
+    expect(two).toBe('Capture learnings from beta stopped at failure (Unit 2 (claude) ran out of time — the seat did not finish): onboarding started it, so crew ends it rather than ask you. Run Capture learnings yourself to try again.');
+  });
+
   it('crew#1365: a stop the engine refuses is logged and leaves no audit line', async () => {
     const h = harness();
     const adapter = (h.chain as unknown as { deps: { adapter: { launchRun: unknown } } }).deps.adapter;
