@@ -2,8 +2,8 @@
  * How an editor looks on studio's Plugins page (program DES-LEARN §2): one line (`description`) and its `visuals`
  * — an icon on its colour, a preview image (light and dark), and whether studio may draw a live preview.
  *
- * The manifest names image FILES beside it, in the studio bundle's `editors/<id>/` directory (studio-bundle editors
- * only for now: garden's pack gate refuses the keys, and a pack's images would need descriptor-anchored reads). The
+ * The manifest names image FILES relative to its own directory: a studio-bundle editor's `editors/<id>/`, or an
+ * installed pack's root (where garden's install.py stages the declared images, crew#1702). The
  * registry reads each once, bounded, never through a link, and puts it on the wire as a `data:`
  * URL: no path and no remote URL ever reaches the browser, and an image is never served from crew's own origin (an SVG
  * opened there could run script; as an `<img src="data:…">` it cannot).
