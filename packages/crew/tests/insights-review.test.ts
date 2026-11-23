@@ -211,6 +211,15 @@ describe('the review seat ran none of the work it reviews (crew#1375, R≠)', ()
     expect(seatOf(await r.service.prepareLaunch(launchInput(), { trigger: 'manual' }))).toEqual(['pi']);
   });
 
+  it('a seat that judged a gate of the run took part in it too (gateEvaluated.judgeCli)', async () => {
+    const r = rig();
+    const t = NOW.getTime() - 9 * H;
+    (r.service as unknown as { deps: { adapter: { runEvents: unknown } } }).deps.adapter.runEvents = async (id: string) => (id === 'bad-1'
+      ? [{ type: 'gateEvaluated', ts: t + 1000, ord: 1, judgeCli: 'claude', judgeDistinct: true, agentVerdict: 'allow', combined: true }, ...eventsOf(id)]
+      : eventsOf(id));
+    expect(seatOf(await r.service.prepareLaunch(launchInput(), { trigger: 'manual' }))).toEqual(['codex']);
+  });
+
   it("a unit's recorded authors ran it too (authored_by)", async () => {
     const authored = () => views().map((v) => {
       const view = v as { session: { id: string }; units: Array<Record<string, unknown>> };

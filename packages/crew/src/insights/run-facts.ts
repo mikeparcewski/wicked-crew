@@ -28,8 +28,8 @@ export interface RunFact {
   /** Every CLI that was assigned a unit. */
   agents: string[];
   /** (crew#1375) Every seat that ran any of the run, as recorded: {@link agents} plus the seats a unit was distributed
-   *  to or reassigned from or to (`unitDistributed.cli`, `unitReassigned.previousCli`/`newCli`) and each unit's
-   *  `authored_by`, sorted. A review never lets one of these interpret the run. Absent on a fact not made by
+   *  to or reassigned from or to (`unitDistributed.cli`, `unitReassigned.previousCli`/`newCli`), the seats that judged
+   *  its gates (`gateEvaluated.judgeCli`) and each unit's `authored_by`, sorted. A review never lets one of these interpret the run. Absent on a fact not made by
    *  {@link runFactOf}. */
   ranBy?: string[];
   createdAtMs: number;
@@ -293,7 +293,7 @@ export function runFactOf(view: SessionView, events: readonly LooseEvent[], nowM
     // An agent attempt that reported no usage at all (`cliUsageUnreported`): its cost is missing from the sum.
     if (e.type === 'cliUsageUnreported') unpricedFrames += 1;
     if (e.type === 'unitReassigned') retries += 1;
-    for (const k of e.type === 'unitDistributed' ? ['cli'] : e.type === 'unitReassigned' ? ['previousCli', 'newCli'] : []) {
+    for (const k of e.type === 'unitDistributed' ? ['cli'] : e.type === 'unitReassigned' ? ['previousCli', 'newCli'] : e.type === 'gateEvaluated' ? ['judgeCli'] : []) {
       const cli = str(e[k]);
       if (cli !== null) ran.add(cli);
     }
