@@ -3555,6 +3555,10 @@ export class ChatProposals {
       if (folded.has(pid)) return pid;
       // A retry keeps the accepted choices only for edit ids still present on the new head.
       const fresh = base.kind === 'refine' && base.target !== undefined ? await this.refreshTarget(base) : base;
+      // crew#1745: a chat that has ended (closed, or the daemon restarted under the attempt) can't take Try again: its
+      // Go would only answer chat_gone. The card says so and where to go, with no Try again to press.
+      const ended = this.deps.chat(chatId) === null;
+      const again = ended ? '' : base.kind === 'refine' ? ' Try again revises the latest version, and keeps your edits.' : ' Try again fills the same document.';
       const retry: ArtifactProposal = {
         ...fresh,
         ...(base.kind === 'refine' ? { allow: (failed.accepting?.edits?.allow ?? []).filter((id) => fresh.protected?.some((e) => e.id === id)) } : {}),
@@ -3563,10 +3567,10 @@ export class ChatProposals {
         sourceRunId: runId,
         artifactRef,
         reason: base.kind === 'refine'
-          ? `The last change was not applied: ${reason}. Try again revises the latest version, and keeps your edits.`
-          : `The last attempt ended without a draft: ${reason}. Try again fills the same document.`,
+          ? `The last change was not applied: ${reason}.${again}`
+          : `The last attempt ended without a draft: ${reason}.${again}`,
         // A refine whose edits cannot be read on the new head stays blocked with why (codex A5 r2).
-        blocked: fresh !== base ? fresh.blocked : null,
+        blocked: ended ? CHAT_ENDED : fresh !== base ? fresh.blocked : null,
       };
       return this.write(chatId, { at: this.now(), turnId: failed.turnId, kind: 'proposal', proposal: retry }, instance) ? pid : null;
     });
