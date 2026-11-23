@@ -153,6 +153,11 @@ for (const target of PG_TARGETS) {
           queue.push({ id, state: 'pending', payload: args['payload'] });
           return { id };
         }
+        if (tool === 'knowledge.neighbors') {
+          // The shapes estate holds live on a table: those approved whose derived_from is this document.
+          const shapes = queue.filter((q) => q.state === 'approved' && (q.payload as { relate: Array<{ rel: string; to: string }> }).relate.some((r) => r.rel === 'derived_from' && r.to === args['id']));
+          return { nodes: [{ store: 'knowledge', id: args['id'] }, ...shapes.map((q) => ({ store: 'knowledge', id: `kconcept synthetic proposal:${q.id}:` }))], edges: [] };
+        }
         if (tool === 'proposal.approve') {
           const q = queue.find((x) => x.id === args['id'] && x.state === 'pending');
           if (q === undefined) throw new Error(`proposal ${String(args['id'])} is not pending`);

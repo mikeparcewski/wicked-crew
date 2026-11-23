@@ -21,7 +21,7 @@ import {
   rowsBand,
 } from '../src/knowledge/shapes/profile.js';
 import { registerShapeRoutes, relationsFromCatalog } from '../src/knowledge/shapes/routes.js';
-import { CatalogChangedError, catalogDocId, codeEvidence, currentShapes, encodeKey, joinEvidence, proposalIdOfNode, proposalNodeId, readCatalog, shapeContent, shapeIdentity, shapeProposals, writeShapes } from '../src/knowledge/shapes/shapes.js';
+import { CatalogChangedError, catalogDocId, codeEvidence, currentShapes, encodeKey, joinEvidence, proposalIdOfNode, proposalNodeId, readCatalog, shapeContent, shapeIdentity, shapeProposals, ShapeWriteError, writeShapes } from '../src/knowledge/shapes/shapes.js';
 import type { SqlCatalog } from '../src/sources/catalog/types.js';
 import type { SqlReadResult } from '../src/sources/drivers/types.js';
 
@@ -148,66 +148,103 @@ describe('shapes are proposals', () => {
   });
 
   it('crew#1625: a person\'s profile writes its shapes into knowledge (submit then approve), and nothing waits in the queue', async () => {
-    const e = queueEstate();
-    const proposals = shapeProposals({ id: SID, name: 'pg' }, { relations: [{ key: 's.t', rows: '1-99', error: null, columns: [] }, { key: 's.u', rows: '0', error: null, columns: [] }], joins: [] }, new Map(), '2026-11-04T00:00:00Z', 'mike');
-    expect(await writeShapes(e.estate, SID, proposals, new Set(['s.t', 's.u']))).toEqual({ written: [{ id: 'p1', relation: 's.t' }, { id: 'p2', relation: 's.u' }], unchanged: 0, replaced: 0 });
-    expect(e.calls.map((c) => c.tool)).toEqual(['proposal.list', 'proposal.submit', 'proposal.approve', 'proposal.submit', 'proposal.approve']);
+    const e = queueEstate(['s.t', 's.u']);
+    const proposals = shapeProposals({ id: SID, name: 'pg' }, { relations: [rel1('s.t', '1-99'), rel1('s.u', '0')], joins: [] }, new Map(), '2026-11-04T00:00:00Z', 'mike');
+    expect(await writeShapes(e.estate, SID, proposals, new Set(['s.t', 's.u']), VIS)).toEqual({ written: [{ id: 'p1', relation: 's.t' }, { id: 'p2', relation: 's.u' }], unchanged: 0, replaced: 0 });
+    expect(e.calls.map((c) => c.tool)).toEqual(['proposal.list', 'knowledge.neighbors', 'proposal.submit', 'proposal.approve', 'knowledge.neighbors', 'proposal.submit', 'proposal.approve']);
     expect(e.queue.filter((q) => q.state === 'pending')).toEqual([]);
-    expect([...e.live.keys()].sort()).toEqual(['crew:profile/pg/s.t', 'crew:profile/pg/s.u']);
+    expect(e.liveShapes()).toEqual(['p1', 'p2']);
     // Provenance: the person whose profile wrote it, outside the shape's identity.
     expect((e.queue[0]!.payload as { shape: { profiledBy?: string } }).shape.profiledBy).toBe('mike');
     expect(shapeIdentity((e.queue[0]!.payload as { shape: Record<string, unknown> }).shape)).not.toContain('mike');
   });
 
-  it('crew#1625: a re-profile replaces the source\'s set: unchanged kept, changed rewritten, a dropped table forgotten, an old pending shape declined', async () => {
-    const e = queueEstate();
-    const rel = (key: string, rows: '0' | '1-99' | '100-9,999') => ({ key, rows, error: null, columns: [] });
-    await writeShapes(e.estate, SID, shapeProposals({ id: SID, name: 'pg' }, { relations: [rel('s.t', '1-99'), rel('s.u', '1-99'), rel('s.gone', '0')], joins: [] }, new Map(), '2026-11-04T00:00:00Z'), null);
+  it('crew#1625: a re-profile replaces the source\'s set: unchanged kept, changed rewritten (approved before the old one goes), a dropped table forgotten, an old pending shape declined', async () => {
+    const e = queueEstate(['s.t', 's.u', 's.gone']);
+    await writeShapes(e.estate, SID, shapeProposals({ id: SID, name: 'pg' }, { relations: [rel1('s.t', '1-99'), rel1('s.u', '1-99'), rel1('s.gone', '0')], joins: [] }, new Map(), '2026-11-04T00:00:00Z'), null, VIS);
     // A shape filed for review before crew#1625 (another relation of the same source), and one of another source.
-    e.queue.push({ id: 'old', state: 'pending', payload: shapeProposals({ id: SID, name: 'pg' }, { relations: [rel('s.v', '0')], joins: [] }, new Map(), '2026-11-01T00:00:00Z')[0]!.payload });
-    e.queue.push({ id: 'other', state: 'pending', payload: shapeProposals({ id: 'other-src', name: 'o' }, { relations: [rel('s.t', '0')], joins: [] }, new Map(), '2026-11-01T00:00:00Z')[0]!.payload });
-    // An agent-proposed shape (no crew record) is the person's to review, never touched.
+    e.queue.push({ id: 'old', state: 'pending', payload: shapeProposals({ id: SID, name: 'pg' }, { relations: [rel1('s.v', '0')], joins: [] }, new Map(), '2026-11-01T00:00:00Z')[0]!.payload });
+    e.queue.push({ id: 'other', state: 'pending', payload: shapeProposals({ id: 'other-src', name: 'o' }, { relations: [rel1('s.t', '0')], joins: [] }, new Map(), '2026-11-01T00:00:00Z')[0]!.payload });
+    // An agent-proposed shape (no crew record), and a seat's proposal carrying a crew-like record (the relay stamped its
+    // run): both are the person's to review, never touched.
     e.queue.push({ id: 'agent', state: 'pending', payload: { content: 'x', scope: `source:${SID}` } });
+    e.queue.push({ id: 'seat', state: 'pending', provenance: { run_id: 'r-1', run_agent: 'claude' }, payload: shapeProposals({ id: SID, name: 'pg' }, { relations: [rel1('s.t', '0')], joins: [] }, new Map(), '2026-11-01T00:00:00Z')[0]!.payload });
+    e.docs.delete('s.gone');
     e.calls.length = 0;
-    const again = await writeShapes(e.estate, SID, shapeProposals({ id: SID, name: 'pg' }, { relations: [rel('s.t', '1-99'), rel('s.u', '100-9,999')], joins: [] }, new Map(), '2026-11-09T00:00:00Z'), new Set(['s.t', 's.u']));
+    const again = await writeShapes(e.estate, SID, shapeProposals({ id: SID, name: 'pg' }, { relations: [rel1('s.t', '1-99'), rel1('s.u', '100-9,999')], joins: [] }, new Map(), '2026-11-09T00:00:00Z'), new Set(['s.t', 's.u']), VIS);
     expect(again).toEqual({ written: [{ id: 'p4', relation: 's.u' }], unchanged: 1, replaced: 3 });
-    expect([...e.live.keys()].sort()).toEqual(['crew:profile/pg/s.t', 'crew:profile/pg/s.u']);
-    expect(e.live.get('crew:profile/pg/s.u')).toEqual(['p4']);
-    expect(e.queue.find((q) => q.id === 'old')!.state).toBe('rejected');
-    expect(e.queue.find((q) => q.id === 'other')!.state).toBe('pending');
-    expect(e.queue.find((q) => q.id === 'agent')!.state).toBe('pending');
-    // Readers take only the newest shape per relation (the replaced s.u record stays approved in estate's queue); the
-    // dropped table's record has no node left, which a reader's own read of it finds.
-    const approved = e.queue.filter((q) => q.state === 'approved');
-    expect(currentShapes(approved).map((q) => q.id)).toEqual(['p1', 'p3', 'p4']);
-    // A profile whose catalog read was incomplete forgets no relation it did not profile.
+    expect(e.liveShapes()).toEqual(['p1', 'p4']);
+    const tools = e.calls.map((c) => c.tool);
+    expect(tools.indexOf('proposal.approve')).toBeLessThan(tools.indexOf('knowledge.forget'));
+    expect(e.calls.filter((c) => c.tool === 'knowledge.forget').map((c) => c.args)).toEqual([{ id: proposalNodeId('p2', 'concept') }, { id: proposalNodeId('p3', 'concept') }]);
+    expect(Object.fromEntries(e.queue.filter((q) => !q.id.startsWith('p')).map((q) => [q.id, q.state]))).toEqual({ old: 'rejected', other: 'pending', agent: 'pending', seat: 'pending' });
+    // Readers take only the newest shape per relation (the replaced s.u record stays approved in estate's queue).
+    expect(currentShapes(e.queue.filter((q) => q.state === 'approved')).map((q) => q.id)).toEqual(['p1', 'p3', 'p4']);
+    // A profile whose catalog read was incomplete forgets no table it did not profile.
     e.calls.length = 0;
-    await writeShapes(e.estate, SID, shapeProposals({ id: SID, name: 'pg' }, { relations: [rel('s.t', '1-99')], joins: [] }, new Map(), '2026-11-10T00:00:00Z'), null);
-    expect(e.calls.map((c) => c.tool)).toEqual(['proposal.list']);
-    expect(e.live.has('crew:profile/pg/s.u')).toBe(true);
+    await writeShapes(e.estate, SID, shapeProposals({ id: SID, name: 'pg' }, { relations: [rel1('s.t', '1-99')], joins: [] }, new Map(), '2026-11-10T00:00:00Z'), null, VIS);
+    expect(e.calls.map((c) => c.tool)).toEqual(['proposal.list', 'knowledge.neighbors']);
+    expect(e.liveShapes()).toEqual(['p1', 'p4']);
+  });
+
+  it('crew#1625: what is live is estate\'s answer: an approved record whose node is gone is written again; two live versions (approved before #1625) become one', async () => {
+    const e = queueEstate(['s.t']);
+    const one = () => shapeProposals({ id: SID, name: 'pg' }, { relations: [rel1('s.t', '1-99')], joins: [] }, new Map(), '2026-11-04T00:00:00Z');
+    await writeShapes(e.estate, SID, one(), null, VIS);
+    e.forgetNode('p1'); // a person forgot it in Understand
+    expect((await writeShapes(e.estate, SID, one(), null, VIS)).written).toEqual([{ id: 'p2', relation: 's.t' }]);
+    // Two versions both approved in the old review (the same bands as the new profile and other bands).
+    const legacy = shapeProposals({ id: SID, name: 'pg' }, { relations: [rel1('s.t', '0')], joins: [] }, new Map(), '2026-11-01T00:00:00Z')[0]!.payload;
+    e.approveLegacy('legacy', legacy);
+    const out = await writeShapes(e.estate, SID, one(), null, VIS);
+    expect(out).toEqual({ written: [{ id: 'p3', relation: 's.t' }], unchanged: 0, replaced: 2 });
+    expect(e.liveShapes()).toEqual(['p3']);
+  });
+
+  it('crew#1625: a failed approval declines the shape it submitted and says what was written before it', async () => {
+    const e = queueEstate(['s.t', 's.u']);
+    let approvals = 0;
+    const estate = async (tool: string, args: Record<string, unknown>): Promise<unknown> => {
+      if (tool === 'proposal.approve' && ++approvals === 2) throw new Error('an endpoint is gone');
+      return e.estate(tool, args);
+    };
+    const err = await writeShapes(estate, SID, shapeProposals({ id: SID, name: 'pg' }, { relations: [rel1('s.t', '1-99'), rel1('s.u', '0')], joins: [] }, new Map(), '2026-11-04T00:00:00Z'), null, VIS).catch((x: unknown) => x);
+    expect(err).toBeInstanceOf(ShapeWriteError);
+    expect((err as ShapeWriteError).partial).toEqual({ written: [{ id: 'p1', relation: 's.t' }], unchanged: 0, replaced: 0 });
+    expect(e.queue.map((q) => [q.id, q.state])).toEqual([['p1', 'approved'], ['p2', 'rejected']]);
   });
 
   it('crew#1625: a shape the person declined in the old review is written when they profile again', async () => {
-    const e = queueEstate();
-    const [one] = shapeProposals({ id: SID, name: 'pg' }, { relations: [{ key: 's.t', rows: '1-99', error: null, columns: [] }], joins: [] }, new Map(), '2026-11-04T00:00:00Z');
+    const e = queueEstate(['s.t']);
+    const [one] = shapeProposals({ id: SID, name: 'pg' }, { relations: [rel1('s.t', '1-99')], joins: [] }, new Map(), '2026-11-04T00:00:00Z');
     e.queue.push({ id: 'declined', state: 'rejected', payload: one!.payload });
-    expect((await writeShapes(e.estate, SID, [one!], null)).written).toEqual([{ id: 'p1', relation: 's.t' }]);
+    expect((await writeShapes(e.estate, SID, [one!], null, VIS)).written).toEqual([{ id: 'p1', relation: 's.t' }]);
   });
 });
 
+const VIS = [`source:${SID}`, 'repo:r'];
+const rel1 = (key: string, rows: '0' | '1-99' | '100-9,999') => ({ key, rows, error: null, columns: [] });
+
 /**
  * Estate's queue and knowledge plane as the shape writer meets them: `proposal.list` answers `{proposals}` with
- * `state` and `payload` (proposals.rs dispatch_list), approve writes the node under the payload's `source`, and
- * `knowledge.forget {source}` drops every node with that exact source, answering `{forgotten, skipped_live_source}`.
+ * `state`, `provenance` and `payload` (proposals.rs dispatch_list); approve writes the node `kconcept synthetic
+ * proposal:<id>:` with its `derived_from` edge to its table's catalog document; `knowledge.neighbors` of a document
+ * answers the shapes derived from it (an unknown document: "no visible knowledge node"); `knowledge.forget {id}`
+ * answers `{forgotten, skipped_live_source}`.
  */
-function queueEstate() {
-  const queue: Array<{ id: string; state: string; payload: unknown }> = [];
-  const live = new Map<string, string[]>();
+function queueEstate(tables: string[]) {
+  const queue: Array<{ id: string; state: string; payload: unknown; provenance?: Record<string, string> }> = [];
+  const nodes = new Map<string, { pid: string; doc: string }>();
+  const docs = new Set(tables);
   const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
   let submitted = 0;
+  const derivedFrom = (payload: unknown): string => ((payload as { relate: Array<{ rel: string; to: string }> }).relate.find((r) => r.rel === 'derived_from')!.to);
+  const approve = (q: { id: string; payload: unknown }): void => {
+    nodes.set(proposalNodeId(q.id, (q.payload as { class?: string }).class), { pid: q.id, doc: derivedFrom(q.payload) });
+  };
   const estate = async (tool: string, args: Record<string, unknown>): Promise<unknown> => {
     calls.push({ tool, args });
-    if (tool === 'proposal.list') return { proposals: queue.filter((q) => args['state'] === undefined || q.state === args['state']).map((q) => structuredClone(q)) };
+    if (tool === 'proposal.list') return { proposals: queue.filter((q) => args['state'] === undefined || q.state === args['state']).map((q) => structuredClone({ provenance: {}, ...q })) };
     if (tool === 'proposal.submit') {
       const id = `p${++submitted}`;
       queue.push({ id, state: 'pending', payload: structuredClone(args['payload']) });
@@ -217,20 +254,33 @@ function queueEstate() {
       const q = queue.find((x) => x.id === args['id']);
       if (q === undefined || q.state !== 'pending') throw new Error(`proposal ${String(args['id'])} is not pending`);
       q.state = tool === 'proposal.approve' ? 'approved' : 'rejected';
-      if (q.state === 'approved') {
-        const source = String((q.payload as { source: string }).source);
-        live.set(source, [...(live.get(source) ?? []), q.id]);
-      }
+      if (q.state === 'approved') approve(q);
       return { outcome: q.state };
     }
+    if (tool === 'knowledge.neighbors') {
+      const doc = String(args['id']);
+      if (![...docs].some((t) => catalogDocId(SID, t) === doc)) throw new Error(`no visible knowledge node ${doc}`);
+      return { nodes: [{ store: 'knowledge', id: doc }, ...[...nodes].filter(([, n]) => n.doc === doc).map(([id]) => ({ store: 'knowledge', id }))], edges: [] };
+    }
     if (tool === 'knowledge.forget') {
-      const n = live.get(String(args['source']))?.length ?? 0;
-      live.delete(String(args['source']));
-      return { forgotten: n, skipped_live_source: 0 };
+      const had = nodes.delete(String(args['id']));
+      return { forgotten: had ? 1 : 0, skipped_live_source: 0 };
     }
     throw new Error(tool);
   };
-  return { estate, queue, live, calls };
+  return {
+    estate,
+    queue,
+    docs,
+    calls,
+    liveShapes: () => [...nodes.values()].map((n) => n.pid).sort(),
+    forgetNode: (pid: string) => nodes.delete(proposalNodeId(pid, 'concept')),
+    approveLegacy: (id: string, payload: unknown) => {
+      const q = { id, state: 'approved', payload };
+      queue.push(q);
+      approve(q);
+    },
+  };
 }
 
 describe('describes: exact-name code search', () => {
@@ -424,13 +474,13 @@ describe('review r1 folds', () => {
   it('a shape profiled again another day, unchanged, is not written again; a changed code endpoint is', async () => {
     const profile = { relations: [{ key: 's.t', rows: '1-99' as const, error: null, columns: [] }], joins: [] };
     const code = (symbolId: string) => new Map([['s.t', [{ repo: 'r', symbolId, name: 'T', kind: 'class', file: 'x' }]]]);
-    const e = queueEstate();
+    const e = queueEstate(['s.t']);
     // Estate hands a payload back with its keys in its own (sorted) order.
     const sortDeep = (v: unknown): unknown => (Array.isArray(v) ? v.map(sortDeep) : v !== null && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().reverse().map((k) => [k, sortDeep((v as Record<string, unknown>)[k])])) : v);
     const estate = async (tool: string, args: Record<string, unknown>): Promise<unknown> => e.estate(tool, tool === 'proposal.submit' ? { ...args, payload: sortDeep(args['payload']) } : args);
-    expect((await writeShapes(estate, SID, shapeProposals({ id: SID, name: 'pg' }, profile, code('a#'), '2026-11-04T00:00:00Z'), null)).written).toHaveLength(1);
-    expect(await writeShapes(estate, SID, shapeProposals({ id: SID, name: 'pg' }, profile, code('a#'), '2026-11-09T00:00:00Z'), null)).toEqual({ written: [], unchanged: 1, replaced: 0 });
-    expect(await writeShapes(estate, SID, shapeProposals({ id: SID, name: 'pg' }, profile, code('b#'), '2026-11-09T00:00:00Z'), null)).toEqual({ written: [{ id: 'p2', relation: 's.t' }], unchanged: 0, replaced: 1 });
+    expect((await writeShapes(estate, SID, shapeProposals({ id: SID, name: 'pg' }, profile, code('a#'), '2026-11-04T00:00:00Z'), null, VIS)).written).toHaveLength(1);
+    expect(await writeShapes(estate, SID, shapeProposals({ id: SID, name: 'pg' }, profile, code('a#'), '2026-11-09T00:00:00Z'), null, VIS)).toEqual({ written: [], unchanged: 1, replaced: 0 });
+    expect(await writeShapes(estate, SID, shapeProposals({ id: SID, name: 'pg' }, profile, code('b#'), '2026-11-09T00:00:00Z'), null, VIS)).toEqual({ written: [{ id: 'p2', relation: 's.t' }], unchanged: 0, replaced: 1 });
   });
 
   it('reads a catalog as one generation: a replaced generation starts again, and one that keeps changing is an error', async () => {

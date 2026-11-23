@@ -92,7 +92,7 @@ describe.skipIf(EXE === '' || process.platform === 'win32')('recall queries agai
     };
     const code = new Map([['support.tickets', [{ repo: 'escalations', symbolId: 'scip-typescript npm escalations 1.0.0 src/ticket.ts/Ticket#', name: 'Ticket', kind: 'class', file: 'src/ticket.ts' }]]]);
     // A person's profile writes its shapes into knowledge (crew#1625).
-    const written = await writeShapes(estate, SOURCE_ID, shapeProposals({ id: SOURCE_ID, name: 'support-pg' }, profile, code, new Date().toISOString()), null);
+    const written = await writeShapes(estate, SOURCE_ID, shapeProposals({ id: SOURCE_ID, name: 'support-pg' }, profile, code, new Date().toISOString()), null, [`source:${SOURCE_ID}`, 'repo:escalations']);
     expect(written.written.map((f) => f.relation).sort()).toEqual(['support.regions', 'support.tickets']);
   }, 120_000);
 

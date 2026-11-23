@@ -28,7 +28,7 @@ import { type NameLookup, searchableRepos, searchEntities } from './code-search.
 import { buildKnowledgeMap } from './map.js';
 import { type KnowledgeSummaryDeps, projectKnowledge } from '../summary.js';
 import { entityNames, PROFILE_BUDGET_MS, profileSource, type ProfileRelation } from './profile.js';
-import { CatalogChangedError, type EstateCall, readCatalog, shapeProposals, writeShapes } from './shapes.js';
+import { CatalogChangedError, type EstateCall, readCatalog, ShapeWriteError, shapeProposals, writeShapes } from './shapes.js';
 
 const V = API_PREFIX;
 
@@ -170,7 +170,10 @@ export function registerShapeRoutes(app: FastifyInstance, deps: ShapeRouteDeps):
           return reply.code(502).send({ error: `estate could not be read: ${capped(err)}`, code: 'estate_unavailable' });
         }
         const picked = relationsFromCatalog(held?.docs ?? [], catalog, s.viewsAllowed);
+        const catalogKeys = held === null || held.truncated ? null : new Set(held.docs.map((d) => d.key));
         if (picked.relations.length === 0) {
+          // (crew#1625) A source whose whole catalog no longer has a profiled table: its shapes go (nothing is profiled).
+          if (catalogKeys !== null) await writeShapes(deps.estate, s.id, [], catalogKeys, [`source:${s.id}`]).catch(() => undefined);
           return reply.code(409).send({ error: `crew has not written ${name}'s structure into knowledge yet: test its connection again, then profile it`, code: 'not_in_knowledge' });
         }
         let secret: { secret: string | null; missing: boolean };
@@ -221,12 +224,16 @@ export function registerShapeRoutes(app: FastifyInstance, deps: ShapeRouteDeps):
         const at = new Date().toISOString();
         // (crew#1625) The person started this profile: it is their decision, so the shapes go straight into knowledge.
         const proposals = shapeProposals({ id: s.id, name }, profile, code.matches, at, actor.id);
-        const catalogKeys = held === null || held.truncated ? null : new Set(held.docs.map((d) => d.key));
+        // What a shape may stand on: this source and every repository (a shape `describes` code in one).
+        const visible = [`source:${s.id}`, ...repos.map((r) => `repo:${r.id}`)];
         let shapes: Awaited<ReturnType<typeof writeShapes>>;
         try {
-          shapes = await writeShapes(deps.estate, s.id, proposals, catalogKeys);
+          shapes = await writeShapes(deps.estate, s.id, proposals, catalogKeys, visible);
         } catch (err) {
-          return reply.code(502).send({ error: `estate did not take the shapes: ${capped(err)}`, code: 'estate_unavailable' });
+          // What was written before the failure is in knowledge: the audit and the answer say so.
+          const partial = err instanceof ShapeWriteError ? err.partial : { written: [], unchanged: 0, replaced: 0 };
+          deps.audit.record('knowledge.source.profiled', actor, { detail: { source: name, failed: capped(err), written: partial.written.map((w) => w.id), unchanged: partial.unchanged, replaced: partial.replaced } });
+          return reply.code(502).send({ error: `estate did not take every shape (${partial.written.length} written before it stopped): ${capped(err)}; profile it again`, code: 'estate_unavailable' });
         }
         deps.audit.record('knowledge.source.profiled', actor, {
           detail: { source: name, relations: profile.relations.length, unread: profile.relations.filter((p) => p.rows === null).length, joins: profile.joins.length, describes: [...code.matches.values()].reduce((n, m) => n + m.length, 0), written: shapes.written.map((w) => w.id), unchanged: shapes.unchanged, replaced: shapes.replaced },
