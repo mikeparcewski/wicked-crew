@@ -68,13 +68,17 @@ export const STATE_HOME_BLOCKER_CODE = 'state_home_unregistered';
  * the state home; the fixture registers the top-level name each would create so a pre-existing
  * placement is fenced, and this module refuses to boot into one.
  *
+ * `home` (crew#1802): the dir the variable defaults to under `${WICKED_HOME:-~/.wicked}` (`core/wicked-home.ts`). With
+ * the variable unset, a `WICKED_HOME` that puts that dir inside the state home is refused the same way, naming
+ * `WICKED_HOME`.
+ *
  * `WICKED_INTERACTIVE_ROOT` is deliberately NOT listed since crew 0.7.35 (D-L7-1 / BC-49): the
  * interactive default now lives INSIDE the state home (`interactive/`, a registered join entry the
  * fence classifies), so the variable may name any path — inside the state home or out.
  */
-export const STATE_HOME_ROOT_ENVS: ReadonlyArray<{ variable: string; creates: string; fenced: boolean }> = [
+export const STATE_HOME_ROOT_ENVS: ReadonlyArray<{ variable: string; creates: string; fenced: boolean; home?: string }> = [
   { variable: 'WICKED_WORKFLOWS_DIR', creates: 'the workflow overlay directory (crew seeds the interactive-* drop-in defs into it at boot)', fenced: true },
-  { variable: 'WICKED_STEERING_INBOX_DIR', creates: 'the steering-inbox documents a governed run must READ — unreadable by construction under the fence', fenced: true },
+  { variable: 'WICKED_STEERING_INBOX_DIR', creates: 'the steering-inbox documents a governed run must READ — unreadable by construction under the fence', fenced: true, home: 'steering-inbox' },
   // crew#569: `PUT /settings` writes this FILE wherever the variable points; under the state home
   // the write lands as an unregistered entry the fence refuses every launch on — while /health
   // stays ok. Refuse-only: crew never seeds the file, so an existing placement is the config
@@ -83,7 +87,7 @@ export const STATE_HOME_ROOT_ENVS: ReadonlyArray<{ variable: string; creates: st
   // Studio OS behaviour 8: every capture writes its inbox here before its run launches; under the
   // state home that unregistered entry would refuse the capture's own launch. Refuse-only, like the
   // settings file: crew seeds nothing there at boot.
-  { variable: 'WICKED_CAPTURE_INBOX_DIR', creates: 'the capture inbox a capture run must READ', fenced: false },
+  { variable: 'WICKED_CAPTURE_INBOX_DIR', creates: 'the capture inbox a capture run must READ', fenced: false, home: 'capture-inbox' },
   // The Demo experience (studio#373): every demo launch mints its demo root here before its run
   // launches — the same refusal as the capture inbox, for the same reason.
   { variable: 'WICKED_DEMO_DIR', creates: 'the demo root a demo run writes its script, video and contact sheets to', fenced: false },
@@ -91,7 +95,12 @@ export const STATE_HOME_ROOT_ENVS: ReadonlyArray<{ variable: string; creates: st
   { variable: 'WICKED_RUN_DOCS_DIR', creates: 'the documents folder a job run must READ', fenced: false },
   // WT-W1: every repo-bound launch mints its evidence root here (the walkthrough author's dir and the
   // recorder's proof roots) before its run launches — the same refusal as the demo root.
-  { variable: 'WICKED_WALKTHROUGH_DIR', creates: 'the evidence root a run\'s walkthrough author and recorder write to', fenced: false },
+  { variable: 'WICKED_WALKTHROUGH_DIR', creates: 'the evidence root a run\'s walkthrough author and recorder write to', fenced: false, home: 'walkthroughs' },
+  // (crew#1802) The run-handoff dirs a seat reads and writes outside the state home: the same refusal, refuse-only.
+  { variable: 'WICKED_CREW_LEARNINGS_DIR', creates: 'the distil handoffs a learnings seat reads and writes', fenced: false, home: 'learnings' },
+  { variable: 'WICKED_CREW_REVIEWS_DIR', creates: 'the run directory a review run writes its analysis to', fenced: false, home: 'reviews' },
+  { variable: 'WICKED_CREW_EVAL_RUNS_DIR', creates: 'the report copy an eval run writes', fenced: false, home: 'evals' },
+  { variable: 'WICKED_CREW_INSPECTIONS_DIR', creates: 'the inspection records an inspect run writes', fenced: false, home: 'inspections' },
 ];
 
 /**
@@ -167,12 +176,17 @@ function topLevelUnder(p: string, root: string): string {
  * below the state home (the file itself when placed at the top level — crew#569).
  */
 export function assertWickedRootsOutsideStateHome(env: NodeJS.ProcessEnv, stateHome: string): void {
-  for (const { variable, creates } of STATE_HOME_ROOT_ENVS) {
+  const wickedHomeVar = env['WICKED_HOME'];
+  for (const { variable, creates, home } of STATE_HOME_ROOT_ENVS) {
     const value = env[variable];
-    if (value === undefined || value === '') continue;
-    if (!isInside(value, stateHome)) continue;
-    const entry = topLevelUnder(value, stateHome);
-    throw new StateHomePlacementError(variable, value, stateHome, entry === '' ? '(the state home itself)' : entry, creates);
+    let placed: { by: string; value: string; target: string } | null = null;
+    if (value !== undefined && value !== '') placed = { by: variable, value, target: value };
+    // crew#1802: the variable unset, its dir is `<WICKED_HOME>/<home>` (core/wicked-home.ts). The default `~/.wicked`
+    // is not checked, like every other unset variable's default.
+    else if (home !== undefined && wickedHomeVar !== undefined && wickedHomeVar !== '') placed = { by: 'WICKED_HOME', value: wickedHomeVar, target: join(wickedHomeVar, home) };
+    if (placed === null || !isInside(placed.target, stateHome)) continue;
+    const entry = topLevelUnder(placed.target, stateHome);
+    throw new StateHomePlacementError(placed.by, placed.value, stateHome, entry === '' ? '(the state home itself)' : entry, placed.by === variable ? creates : `${creates}, under WICKED_HOME/${home} while ${variable} is unset`);
   }
 }
 
