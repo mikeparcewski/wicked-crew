@@ -25,13 +25,18 @@ import type { CoreAdapter } from '../core/adapter.js';
 import type { Actor, CoreEvent } from '../core/types.js';
 import type { AuditLog } from './audit.js';
 import { recordRunLaunched, type RunTimingIndex } from './run-timing-index.js';
+import { publicText } from './cluster-status.js';
 import { scrubEvidence } from './seat-scrub.js';
-import { scrubHomePaths } from './ui-text.js';
 
-/** One line of engine text for the stop line: home paths and secrets masked, whitespace folded. */
+/** One line of engine text for the stop line: credentials (field spellings, URL userinfo, tokens) and home paths
+ *  masked by the diagnostic sanitizer, the seat-evidence scrub after it, whitespace folded (xreview r2 on #1831). */
 function scrubbed(text: string): string {
-  return scrubEvidence(scrubHomePaths(text)).replace(/\s+/gu, ' ').trim();
+  return scrubEvidence(publicText(text)).replace(/\s+/gu, ' ').trim();
 }
+
+/** The engine's `gateEscalated.condition` for a review whose verdict was not PASS (core `actor.rs`, `class`). Only
+ *  that escalation's summary is a review's words: a dead seat, a boundary deny or a floor carry a summary too. */
+const REVIEW_NOT_PASS = 'verdict_not_pass';
 
 /** The workflow a completed onboarding chains to (the engine's built-in preset). */
 export const CAPTURE_LEARNINGS_WORKFLOW = 'capture-learnings';
@@ -85,13 +90,15 @@ export class OnboardingCaptureChain {
     const terminal = event.type === 'sessionCompleted' || event.type === 'sessionFailed' || event.type === 'runCancelled';
     const owned = this.launched.has(session) || this.deps.runTimingIndex.isOnboardingCapture(session);
     // A review's words belong to the escalation they came with: a newer escalation replaces them (or clears them when it
-    // has none), and a step that runs again (`resumed`, `unitDispatched`) clears them (xreview r1 on #1831).
+    // is not a failed review, or has none), and a step that runs again (`resumed`, `unitDispatched`) clears them
+    // (xreview r1, r2 on #1831).
     const type = event.type as string;
     if (type === 'gateEscalated' && owned && !this.ended.has(session)) {
       const ev = event as unknown as Record<string, unknown>;
       const summary = ev['verdictSummary'];
-      if (typeof summary === 'string' && summary.trim() !== '') this.verdicts.set(session, { ord: ev['ord'], summary });
-      else this.verdicts.delete(session);
+      if (ev['condition'] === REVIEW_NOT_PASS && typeof summary === 'string' && summary.trim() !== '') {
+        this.verdicts.set(session, { ord: ev['ord'], summary });
+      } else this.verdicts.delete(session);
     }
     if (type === 'resumed' || type === 'unitDispatched') this.verdicts.delete(session);
     if (event.type === 'awaitingHuman' && owned && !this.ended.has(session)) void this.stopParked(session, event);
@@ -134,8 +141,8 @@ export class OnboardingCaptureChain {
     // line says what the review said, and the gate's sentence loses the answers it offers a person: nobody answers this
     // one. Every other gate keeps its prompt as it was. Both are scrubbed (home paths, secrets) before they are cut: the
     // line is stored on the audit trail and logged (xreview r1 on #1831).
+    // Kept until the stop takes: a refused stop's next gate frame says the same (xreview r2 on #1831).
     const verdict = this.verdicts.get(runId);
-    this.verdicts.delete(runId);
     const reviewed = verdict !== undefined && ev['gateKind'] === 'escalation' && verdict.ord === ev['ord'];
     const raw = typeof ev['prompt'] === 'string' ? ev['prompt'] : '';
     const prompt = scrubbed(reviewed ? raw.split(/ — | \[engine gate/u)[0]! : raw).slice(0, 200);
@@ -149,6 +156,7 @@ export class OnboardingCaptureChain {
       const status = await this.deps.adapter.cancelRun(runId);
       this.deps.audit.record('run.cancelled', ONBOARDING_CHAIN_ACTOR, { runId, detail: { status, reason } });
       this.deps.log(`[onboarding] ${reason}`);
+      this.verdicts.delete(runId);
       // Stopped: a replayed gate frame before its end frame stops nothing more (the end frame clears it).
     } catch (err) {
       // Not stopped: the next gate frame for it tries again.
