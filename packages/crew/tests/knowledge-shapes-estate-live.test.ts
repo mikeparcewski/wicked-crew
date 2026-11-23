@@ -69,10 +69,10 @@ describe.skipIf(EXE === '')('data shapes through a real wicked-estate-mcp', () =
       joins: [{ from: 'support.tickets', columns: ['region_id'], to: 'support.regions', references: ['id'], basis: 'fk' as const, overlap: 'all' as const }],
     };
     const code = new Map([['support.tickets', [{ repo: 'escalations', symbolId: CODE, name: 'Ticket', kind: 'class', file: 'src/ticket.ts' }]]]);
-    const written = await writeShapes(estate, SID, shapeProposals({ id: SID, name: 'support-pg' }, profile, code, '2026-11-01T00:00:00.000Z', 'mike'), BOTH, VISIBLE);
+    const written = await writeShapes(estate, SID, shapeProposals({ id: SID, name: 'support-pg' }, profile, code, '2026-11-01T00:00:00.000Z', 'mike'), async () => BOTH, VISIBLE);
     for (const f of written.written) ids[f.relation] = f.id;
     // Profiled again days later, unchanged: estate's stored payloads (its own key order) still read as the same shapes.
-    again = await writeShapes(estate, SID, shapeProposals({ id: SID, name: 'support-pg' }, profile, code, '2026-11-20T00:00:00.000Z', 'mike'), BOTH, VISIBLE);
+    again = await writeShapes(estate, SID, shapeProposals({ id: SID, name: 'support-pg' }, profile, code, '2026-11-20T00:00:00.000Z', 'mike'), async () => BOTH, VISIBLE);
   }, 90_000);
 
   afterAll(() => {
@@ -101,7 +101,7 @@ describe.skipIf(EXE === '')('data shapes through a real wicked-estate-mcp', () =
       relations: [{ key: 'support.tickets', rows: '10,000-999,999' as const, error: null, columns: [{ name: 'id', type: 'integer', nullPct: 0, hasNulls: false, cardinality: 'unique' as const, keyCandidate: true }] }],
       joins: [],
     };
-    const out = await writeShapes(estate, SID, shapeProposals({ id: SID, name: 'support-pg' }, changed, new Map(), '2026-11-25T00:00:00.000Z', 'mike'), new Set(['support.tickets']), VISIBLE);
+    const out = await writeShapes(estate, SID, shapeProposals({ id: SID, name: 'support-pg' }, changed, new Map(), '2026-11-25T00:00:00.000Z', 'mike'), async () => new Set(['support.tickets']), VISIBLE);
     expect(out.written.map((w) => w.relation)).toEqual(['support.tickets']);
     expect(out).toMatchObject({ unchanged: 0, replaced: 2 });
     const items = shapeItems(await recall([`source:${SID}`, 'repo:escalations']));

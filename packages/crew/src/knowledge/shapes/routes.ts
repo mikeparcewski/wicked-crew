@@ -170,10 +170,31 @@ export function registerShapeRoutes(app: FastifyInstance, deps: ShapeRouteDeps):
           return reply.code(502).send({ error: `estate could not be read: ${capped(err)}`, code: 'estate_unavailable' });
         }
         const picked = relationsFromCatalog(held?.docs ?? [], catalog, s.viewsAllowed);
-        const catalogKeys = held === null || held.truncated ? null : new Set(held.docs.map((d) => d.key));
+        /** (crew#1625) The source's catalog keys as estate holds them NOW (a dropped table's shape goes by these). */
+        const catalogNow = async (): Promise<Set<string> | null> => {
+          const got = await readCatalog(deps.estate, s.id, [`source:${s.id}`]);
+          return got === null || got.truncated ? null : new Set(got.docs.map((d) => d.key));
+        };
+        /** Write the person's shapes, auditing what was done whatever the outcome; a failure is the 502 it answers. */
+        const write = async (proposals: Parameters<typeof writeShapes>[2], visible: string[], detail: Record<string, unknown>): Promise<Awaited<ReturnType<typeof writeShapes>> | { failed: unknown }> => {
+          try {
+            const shapes = await writeShapes(deps.estate, s.id, proposals, catalogNow, visible);
+            deps.audit.record('knowledge.source.profiled', actor, { detail: { source: name, ...detail, written: shapes.written.map((w) => w.id), unchanged: shapes.unchanged, replaced: shapes.replaced } });
+            return shapes;
+          } catch (err) {
+            // What was written before the failure is in knowledge: the audit and the answer say so.
+            const partial = err instanceof ShapeWriteError ? err.partial : { written: [], unchanged: 0, replaced: 0 };
+            deps.audit.record('knowledge.source.profiled', actor, { detail: { source: name, ...detail, failed: capped(err), written: partial.written.map((w) => w.id), unchanged: partial.unchanged, replaced: partial.replaced } });
+            void reply.code(502).send({ error: `estate did not take every shape (${partial.written.length} written, ${partial.replaced} replaced before it stopped): ${capped(err)}; profile it again`, code: 'estate_unavailable' });
+            return { failed: err };
+          }
+        };
         if (picked.relations.length === 0) {
           // (crew#1625) A source whose whole catalog no longer has a profiled table: its shapes go (nothing is profiled).
-          if (catalogKeys !== null) await writeShapes(deps.estate, s.id, [], catalogKeys, [`source:${s.id}`]).catch(() => undefined);
+          if (held !== null && !held.truncated) {
+            const cleared = await write([], [`source:${s.id}`], { relations: 0 });
+            if ('failed' in cleared) return reply;
+          }
           return reply.code(409).send({ error: `crew has not written ${name}'s structure into knowledge yet: test its connection again, then profile it`, code: 'not_in_knowledge' });
         }
         let secret: { secret: string | null; missing: boolean };
@@ -226,18 +247,8 @@ export function registerShapeRoutes(app: FastifyInstance, deps: ShapeRouteDeps):
         const proposals = shapeProposals({ id: s.id, name }, profile, code.matches, at, actor.id);
         // What a shape may stand on: this source and every repository (a shape `describes` code in one).
         const visible = [`source:${s.id}`, ...repos.map((r) => `repo:${r.id}`)];
-        let shapes: Awaited<ReturnType<typeof writeShapes>>;
-        try {
-          shapes = await writeShapes(deps.estate, s.id, proposals, catalogKeys, visible);
-        } catch (err) {
-          // What was written before the failure is in knowledge: the audit and the answer say so.
-          const partial = err instanceof ShapeWriteError ? err.partial : { written: [], unchanged: 0, replaced: 0 };
-          deps.audit.record('knowledge.source.profiled', actor, { detail: { source: name, failed: capped(err), written: partial.written.map((w) => w.id), unchanged: partial.unchanged, replaced: partial.replaced } });
-          return reply.code(502).send({ error: `estate did not take every shape (${partial.written.length} written before it stopped): ${capped(err)}; profile it again`, code: 'estate_unavailable' });
-        }
-        deps.audit.record('knowledge.source.profiled', actor, {
-          detail: { source: name, relations: profile.relations.length, unread: profile.relations.filter((p) => p.rows === null).length, joins: profile.joins.length, describes: [...code.matches.values()].reduce((n, m) => n + m.length, 0), written: shapes.written.map((w) => w.id), unchanged: shapes.unchanged, replaced: shapes.replaced },
-        });
+        const shapes = await write(proposals, visible, { relations: profile.relations.length, unread: profile.relations.filter((p) => p.rows === null).length, joins: profile.joins.length, describes: [...code.matches.values()].reduce((n, m) => n + m.length, 0) });
+        if ('failed' in shapes) return reply;
         const body: SourceProfileResponse = {
           name,
           sourceId: s.id,
