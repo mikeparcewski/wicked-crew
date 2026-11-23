@@ -1568,6 +1568,23 @@ describe('launch admission and recovery', () => {
     expect(calls).toContainEqual([p.seats!.keys, true]);
   });
 
+  it('a covered card still says, before launch, which seat was seen sharing a provider and who is left (crew#1673)', async () => {
+    const r = rig({
+      roster: [{ key: 'claude', name: 'Builder' }, { key: 'codex', name: 'Reviewer' }, { key: 'pi', name: 'Helper' }],
+      repos: [{ id: 'r-pay', name: 'payments-service' }],
+      // The engine's covered answer once pi's launch was seen calling claude's provider (core#1594).
+      coverage: () => ({
+        covered: true, singleIdentity: false, benched: [],
+        authors: [{ seat: 'claude', judges: [{ seat: 'codex' }, { seat: 'pi', seenSharing: 'api.anthropic.com:443' }], soleJudge: 'codex', notJudges: [] }],
+        notes: ['pi was seen calling api.anthropic.com:443, the provider claude calls, so only codex can judge claude\'s work.'],
+      }),
+    });
+    await pick(r, 'bug');
+    const notes = open(r).sentence?.notes ?? [];
+    expect(notes).toContain('Helper was seen calling api.anthropic.com:443, as was Builder, so only Reviewer can check Builder\'s work independently.');
+    expect(notes.some((n) => n.startsWith('These seats'))).toBe(false);
+  });
+
   it('the card coverage note uses display names and names a benched seat once', async () => {
     const benched = { seat: 'pi', reason: 'benched', detail: 'cannot use this checkout' };
     const r = rig({
