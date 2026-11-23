@@ -282,7 +282,7 @@ describe('recall queries through the check and the executor (the app\'s project,
     }
   });
 
-  it('`source` keeps only what that source was derived from, asking estate under the WHOLE set (a two-source shape stays) with the larger budget', async () => {
+  it('`source` keeps only what that source was derived from, asking estate under the WHOLE set (a two-source shape stays) and requiring the source', async () => {
     f.sources.push(source('s-billing', 'billing-pg', { projects: ['p1'] }));
     const real = f.answers['knowledge.recall'];
     f.answers['knowledge.recall'] = { items: [...KNOWLEDGE_ITEMS, { node_id: 'kconcept synthetic proposal:x:', class: 'kconcept', label: 'tickets join accounts', body_snippet: 'support.tickets joins billing.accounts', score: 0.5, source: '', scope: 'source:s-support', deps: ['source:s-support', 'source:s-billing'], untrusted: false }] };
@@ -293,9 +293,32 @@ describe('recall queries through the check and the executor (the app\'s project,
       expect(body.rows).toEqual([['support-pg · support.tickets', 'table'], ['tickets join accounts', 'shape']]);
       const call = f.calls.slice(before).find((c) => c.tool === 'knowledge.recall')!;
       expect(call.args['visible']).toEqual(['repo:billing-api', 'source:s-billing', 'source:s-support']);
-      expect(call.args['token_budget']).toBe(16_000);
+      expect(call.args['token_budget']).toBe(8000);
+      expect(call.args['require']).toEqual(['source:s-support']);
     } finally {
       f.sources.pop();
+      f.answers['knowledge.recall'] = real;
+      h.executor.cache.invalidate('know');
+    }
+  });
+
+  it('crew#1362: a named source is found when other sources outrank it (estate filters by `require` before it ranks and spends the budget)', async () => {
+    // Estate's own contract (wicked-estate knowledge.recall `require`, engine.rs
+    // required_deps_filter_before_ranking_and_budget_and_include_scope_deps): only items whose deps include every
+    // required dep are candidates; then ranking and the budget. The budget here fits the top two items.
+    const real = f.answers['knowledge.recall'];
+    const outranking = Array.from({ length: 6 }, (_, i) => ({ node_id: `kdoc doc-${i}`, class: 'kdoc', label: `Doc ${i}`, body_snippet: 'tickets everywhere', score: 0.99 - i / 100, source: `docs/${i}.md`, scope: 'wiki', deps: [] as string[], untrusted: false }));
+    const ranked: Array<{ deps: string[] }> = [...outranking, KNOWLEDGE_ITEMS[1]!];
+    f.answers['knowledge.recall'] = (args: Record<string, unknown>) => {
+      const required = Array.isArray(args['require']) ? (args['require'] as string[]) : [];
+      const candidates = ranked.filter((i) => required.every((d) => i.deps.includes(d)));
+      return { items: candidates.slice(0, 2) };
+    };
+    try {
+      h.executor.cache.invalidate('know');
+      const body = await run('from_support');
+      expect(body.rows).toEqual([['support-pg · support.tickets', 'table']]);
+    } finally {
       f.answers['knowledge.recall'] = real;
       h.executor.cache.invalidate('know');
     }
