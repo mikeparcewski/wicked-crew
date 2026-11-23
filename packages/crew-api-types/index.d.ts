@@ -833,13 +833,37 @@ export interface RigorRaiseRequest {
   reason: string;
 }
 
-/** `POST /runs/:id/power/pause`: answer a checkpoint pause ({@link PowerPause}); 200 answers {@link PowerView}.
+/** `POST /runs/:id/power/pause`: answer a checkpoint pause ({@link PowerPause}); 200 answers {@link PowerPauseAnswer}.
  *  `continue_high` raises rigor to at least high (an operator floor), `continue` goes on (the `note`, if any, is the
  *  next turn's steer), `switch_phased` flips the switch off (the build hands off as it stands), `stop` cancels the
  *  run. 409 {@link PowerConflict} when the run is not paused. Human actors only; audited `run.power_mode.paused`. */
 export interface PowerPauseRequest {
   decision: 'continue_high' | 'continue' | 'switch_phased' | 'stop';
   note?: string | null | undefined;
+  /** (crew#1739) The pause this answers, as the card showed it ({@link PowerPause.checkpoint}). When either this or
+   *  {@link at} is given and the open pause differs (or none is open), the answer is refused with 409
+   *  {@link PowerPauseChanged} and nothing changes. Omit both to answer whatever pause is open. */
+  checkpoint?: number | undefined;
+  /** (crew#1739) The pause this answers: its {@link PowerPause.at}. */
+  at?: number | undefined;
+}
+
+/** (crew#1739) A power pause's identity: its checkpoint and when it opened. */
+export interface PowerPauseIdentity {
+  checkpoint: number;
+  at: number;
+}
+
+/** (crew#1739) The 200 body of `POST /runs/:id/power/pause`: the run's power view after the answer, and the pause the
+ *  answer consumed (null when the daemon read none open just before answering). */
+export interface PowerPauseAnswer extends PowerView {
+  answered: PowerPauseIdentity | null;
+}
+
+/** (crew#1739) The 409 body when a pause answer names a pause that is no longer open. `open` is the pause open now,
+ *  or null when the run is not paused. */
+export interface PowerPauseChanged extends PowerConflict {
+  open: PowerPauseIdentity | null;
 }
 
 /** The 409 (and 422) body of the power routes. */
@@ -7322,6 +7346,25 @@ export interface GitContributor {
   email: string;
 }
 
+/**
+ * `GET /api/v1/settings/start-on-login` (studio#1324): whether this daemon's port starts at login. The unit is the
+ * one `wicked-crew serve --install-service` writes for the port (crew#1469): a launchd agent on macOS, a systemd user
+ * unit on Linux. Elsewhere (`platform: 'other'`, Windows) nothing is automated: the install command prints a Task
+ * Scheduler recipe and `installed` is always false. Installing and removing stay CLI steps; these are their commands.
+ */
+export interface StartOnLoginStatus {
+  platform: 'darwin' | 'linux' | 'other';
+  /** The port this daemon listens on: the unit is per port. */
+  port: number;
+  installed: boolean;
+  /** The unit file, home-relative (`~/Library/LaunchAgents/…`); `null` when none is installed. */
+  unit: string | null;
+  /** `wicked-crew serve --port <port> --install-service`: always the port, so a shell's `CREW_PORT` can't redirect it. */
+  installCommand: string;
+  /** `wicked-crew serve --port <port> --uninstall-service`. */
+  uninstallCommand: string;
+}
+
 /** Daemon-persisted system settings (~/.config/wicked-core/settings.json). */
 export interface SystemSettings {
   /** Max nodes returned by wicked-estate graph-view (default 150). */
@@ -13346,6 +13389,22 @@ export interface TeamPlanStep {
    *  no `run` step, may be scoped `SCOPE {"touch":[]}`, which scores 0. Set on a code phase it is
    *  refused (`writes_nothing_on_code`). Omitted when unset. */
   writes_nothing?: boolean;
+  // (wicked-core#1259) The step's controls as the plan set them, carried on `plan.proposed`,
+  // `plan.accepted` and `plan.revised` steps so a plan card shows what shapes the step's gates.
+  // Display only (the engine composes from the plan itself); each is omitted when unset.
+  /** The step runs code (a step may raise its entry's). */
+  executes_code?: boolean;
+  /** The validator the step pins. */
+  validator_pin?: string;
+  /** The step's output is an acceptance requirement of its run. */
+  verified_evidence?: boolean;
+  /** The step's output must end with a capture-report marker. */
+  requires_capture_report?: boolean;
+  /** (crew#1311) The step's output is an answer its caller reads: the substance floor asks only
+   *  that an answer exists. */
+  answer_only?: boolean;
+  /** The deliverables the step must produce. */
+  required_deliverables?: string[];
 }
 
 /**
@@ -15175,6 +15234,13 @@ export interface PatchMcpToolBody {
    * Acceptance requires an effective read (409 `not_a_read`) and a registered schema (409 `not_registered`).
    */
   readAccepted?: boolean;
+  /**
+   * (crew#1788) The saved schema the person saw: the row's {@link McpTool.schemaHash} (64 lowercase hex). When set, a
+   * patch against any other saved schema (another save landed since the row was drawn) is refused 409
+   * `schema_changed` and changes nothing; read the tool again and show the new schema. Send it with `readAccepted` and
+   * `disclosure`, so the acceptance or review binds to what was reviewed.
+   */
+  expectedSchemaHash?: string;
 }
 
 /**
@@ -15988,8 +16054,11 @@ export interface SourceProfileJoin {
 /**
  * (api-types 0.186.0) `POST /sources/:name/profile`, a human operator's only (403 `profile_human_only`). The
  * value-free profile of a described native Postgres source, through the data gate's person read, and the data shapes
- * it filed as `knowledge` proposals for the review (one per relation; an identical shape already in the queue is not
- * filed again). 409 `not_in_knowledge`: estate holds no structure for the source yet.
+ * it wrote (one per relation). 409 `not_in_knowledge`: estate holds no structure for the source yet.
+ *
+ * (crew#1625) A profile the person started is their decision: its shapes go straight into knowledge, scoped to the
+ * source, and a re-profile replaces the source's set. Nothing is filed for review, so `proposed` is always empty and
+ * `alreadyProposed` always 0 (kept for clients that still read them; read `written`, `unchanged` and `replaced`).
  */
 export interface SourceProfileResponse {
   name: string;
@@ -16000,7 +16069,17 @@ export interface SourceProfileResponse {
   joins: SourceProfileJoin[];
   /** Code entities named exactly like a relation, in the repos' code graphs. */
   describes: Array<{ relation: string; repo: string; name: string; kind: string; file: string }>;
+  /** (crew#1625) The shapes written into knowledge now: the id names the knowledge node (`kconcept synthetic proposal:<id>:`). */
+  written?: Array<{ id: string; relation: string }>;
+  /** (crew#1625) Shapes already in knowledge and the same (the bands and the links, not the day): left as they are. */
+  unchanged?: number;
+  /** (crew#1625) Older shapes of the source this profile replaced (forgotten from knowledge, or a pending one declined). */
+  replaced?: number;
+  /** (crew#1625) Tables this profile could not read whose earlier shape stays in knowledge as it was (absent: none). */
+  kept?: number;
+  /** @deprecated (crew#1625) Always empty: a profile files nothing for review. */
   proposed: Array<{ id: string; relation: string }>;
+  /** @deprecated (crew#1625) Always 0. */
   alreadyProposed: number;
   codeSearch: { searched: string[]; notSearched: string[] };
   /** Catalog documents estate holds that crew's own catalog does not (or a view not allowed): not profiled. */
@@ -16025,6 +16104,8 @@ export interface KnowledgeShapeRecord {
   describes: Array<{ repo: string; symbolId: string; name: string; kind: string; file: string }>;
   /** Related tables whose join did not fit estate's 200 links per proposal (`joins` above keeps every one). */
   linksNotListed?: number;
+  /** (crew#1625) The actor id of the person whose profile wrote it (provenance). */
+  profiledBy?: string;
 }
 
 /** (api-types 0.186.0) A node of the Knowledge map. `key` is `<store>:<id>` (`source:`, `repo:`, `knowledge:`, `estate:`). */
@@ -18558,10 +18639,23 @@ export interface AppArchived {
 
 /**
  * `GET /apps` (observer); `?project=<id>` keeps one project's apps. (api-types 0.196.0) `?archived=` picks which:
- * `active` (the default: archived apps are hidden from every lister), `archived`, or `all`.
+ * `active` (the default: archived apps are hidden from every lister), `archived`, or `all`. The order is oldest first
+ * (`createdAt`, then `slug`).
+ *
+ * (crew#1678) `?limit=<1..200>` answers one page in that order, with {@link AppsListResponse.nextCursor}; the next
+ * page is `?limit=<n>&cursor=<nextCursor>` with the same `project` and `archived`. A cursor without `limit`, a
+ * malformed one, or one given for another `project` or `archived` is `400`. Without `limit` the answer is every app,
+ * as before. Each page is read when it is asked for: an app made after the cursor's app is on a later page and one
+ * removed is not repeated; one archived, restored, or still being made behind the cursor shows when the list is read
+ * again from the first page.
  */
 export interface AppsListResponse {
   apps: AppSummary[];
+  /**
+   * (crew#1678) Present only when `?limit=` was sent: the opaque cursor for the next page, `null` on the last page.
+   * ABSENT on an older daemon, which ignores `limit` and answers every app.
+   */
+  nextCursor?: string | null;
 }
 
 /**

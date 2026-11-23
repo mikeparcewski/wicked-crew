@@ -93,7 +93,8 @@ function fakeEngine() {
       views.set(input.sessionId, { session: { id: input.sessionId, status: 'executing' }, units: [unit(input.sessionId, 'build', 1), unit(input.sessionId, 'check', 2), unit(input.sessionId, 'review', 3)] } as unknown as SessionView);
       return input.sessionId;
     },
-    sessionsDetail: async () => [...views.values()],
+    // crew#1779: a turn reads its one run, never a fold of the store.
+    runView: async (runId) => views.get(runId),
     cancelRun: async (runId) => {
       if (ctl.cancelFails) throw new Error('the engine is busy');
       cancelled.push(runId);
@@ -136,6 +137,28 @@ function setup(opts: { knowledge?: PackageKnowledge; auth?: boolean; verify?: (t
   });
   store = new AppStore({ stateFile: join(dir, 'daemon-apps.json'), appsRoot: join(dir, 'apps'), registry: fakeRegistry(), sourceStage: fakeStage(), turns: service });
   service.attach();
+  // crew#1780: the event path settles a turn in the background (AppTurnService.attach calls settleTurn and does not
+  // wait). The tests await the settlements the LAST emitted event started, instead of polling against a fixed timeout.
+  let fromEvent: Array<Promise<void>> = [];
+  const settleTurn = store.settleTurn.bind(store);
+  store.settleTurn = (slug, runId) => {
+    const p = settleTurn(slug, runId);
+    fromEvent.push(p);
+    return p;
+  };
+  const emit = (ev: Record<string, unknown>): void => {
+    fromEvent = [];
+    e.emit(ev);
+  };
+  /**
+   * Await what the last `emit` started. With `ended`, that run's turn must be over in the store's own record, read
+   * without a refresh: a GET would settle it on its own, so it could not tell the event path did.
+   */
+  const settled = async (ended?: string): Promise<void> => {
+    expect(fromEvent.length, 'the event started no settlement').toBeGreaterThan(0);
+    await Promise.all(fromEvent);
+    if (ended !== undefined) expect(store.turnApp(ended), 'the event path left the turn open').toBeNull();
+  };
   const app = Fastify({ logger: false });
   apps.push(app);
   const tokens: Record<string, Actor> = { human: HUMAN, agent: AGENT };
@@ -145,7 +168,7 @@ function setup(opts: { knowledge?: PackageKnowledge; auth?: boolean; verify?: (t
     const res = await app.inject({ method, url: `/api/v1${url}`, ...(payload !== undefined ? { payload: payload as object } : {}), ...(token !== undefined ? { headers: { authorization: `Bearer ${token}` } } : {}) });
     return { status: res.statusCode, body: res.json() as Record<string, unknown> & { app: AppDetail; code?: string } };
   };
-  return { dir, store, service, call, ...e };
+  return { dir, store, service, call, settled, ...e, emit };
 }
 
 const gitEnv = (root: string) => ({ ...process.env, GIT_DIR: join(root, '.git'), GIT_CONFIG_GLOBAL: '/dev/null' });
@@ -329,7 +352,8 @@ describe('apps turns: check, land, refuse', () => {
     // The review judged ANOTHER tree: nothing lands.
     s.set(runId, 'completed', { build: { status: 'done' }, check: { status: 'done' }, review: { status: 'done', assurance: { mode: 'full', required: [], ran: ['distinct_evaluator'], skipped: [], creator: 'claude', evaluator: 'codex', judge: null, tree: 'f'.repeat(40), attempt: 0 } } });
     s.emit({ type: 'sessionCompleted', session: runId });
-    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull());
+    await s.settled(runId);
+    expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull();
     d = (await s.call('GET', '/apps/escalations')).body.app;
     expect(d.head.version).toBe(2);
     expect(d.turns![0]).toMatchObject({ state: 'refused', code: 'not_reviewed', reason: expect.stringContaining('not the tree crew checked') });
@@ -346,7 +370,8 @@ describe('apps turns: check, land, refuse', () => {
     // Same seat for both: refused, whatever the tree.
     s.set(runId, 'completed', { review: { status: 'done', assurance: receipt('claude', 'claude') } });
     s.emit({ type: 'sessionCompleted', session: runId });
-    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.turns![0]!.state).toBe('refused'));
+    await s.settled(runId);
+    expect((await s.call('GET', '/apps/escalations')).body.app.turns![0]!.state).toBe('refused');
     expect((await s.call('GET', '/apps/escalations')).body.app.turns![0]).toMatchObject({ code: 'not_reviewed', reason: expect.stringContaining('the seat that built it') });
 
     const run2 = (await s.call('POST', '/apps/escalations/turns', { base: 2, message: 'again, properly' })).body['runId'] as string;
@@ -354,7 +379,8 @@ describe('apps turns: check, land, refuse', () => {
     s.outputs.set(`${run2}:build`, '- Added chart `chart-priority`\n- Added query `breaches_by_priority`');
     s.set(run2, 'completed', { review: { status: 'done', assurance: { ...receipt('claude', 'codex'), tree: (c2 as { tree: string }).tree } } });
     s.emit({ type: 'sessionCompleted', session: run2 });
-    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.head.version).toBe(3));
+    await s.settled(run2);
+    expect((await s.call('GET', '/apps/escalations')).body.app.head.version).toBe(3);
     const d = (await s.call('GET', '/apps/escalations')).body.app;
     expect(d.name).toBe('Escalations by priority');
     expect(d.head.receipt).toBe('reviewed');
@@ -388,14 +414,16 @@ describe('apps turns: check, land, refuse', () => {
     const runId = await startTurn(s);
     s.set(runId, 'failed', { build: { status: 'done' }, check: { status: 'rejected', denial_reason: 'apps_check: refused: check_failed - read_policy queries/x.sql: pg_sleep is not allowed' } });
     s.emit({ type: 'sessionFailed', session: runId });
-    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull());
+    await s.settled(runId);
+    expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull();
     expect((await s.call('GET', '/apps/escalations')).body.app.turns![0]).toMatchObject({ state: 'refused', code: 'check_failed', reason: expect.stringContaining('pg_sleep') });
     expect((await s.call('GET', '/apps/escalations')).body.app.head.version).toBe(2);
 
     const run2 = (await s.call('POST', '/apps/escalations/turns', { base: 2, message: 'add a chart' })).body['runId'] as string;
     s.set(run2, 'awaiting_human', { review: { status: 'rejected', denial_reason: 'the chart reads a column the message did not ask for' } });
     s.emit({ type: 'awaitingHuman', session: run2, ord: 3, gateKind: 'escalation', prompt: 'review failed' });
-    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull());
+    await s.settled(run2);
+    expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull();
     expect(s.cancelled).toEqual([run2]);
     expect((await s.call('GET', '/apps/escalations')).body.app.turns![1]).toMatchObject({ state: 'refused', code: 'review_refused', reason: expect.stringContaining('did not ask for') });
     // An approval gate the person answers is not a refusal: the turn keeps running.
@@ -485,16 +513,16 @@ describe('apps turns: check, land, refuse', () => {
     const units = view.units;
     // A malformed record for a parked run: isActive sees the refusal first, the settlement trips on the record.
     let reads = 0;
-    const orig = s.engine.sessionsDetail;
-    s.engine.sessionsDetail = async () => {
+    const orig = s.engine.runView;
+    s.engine.runView = async (id) => {
       reads += 1;
-      return reads % 2 === 0 ? [{ ...view, units: undefined as never }] : orig();
+      return reads % 2 === 0 ? { ...view, units: undefined as never } : orig(id);
     };
     expect((await s.call('GET', '/apps/escalations')).body.app.turn).toMatchObject({ runId });
     expect(s.cancelled).toEqual([]);
     expect((await s.call('POST', '/apps/escalations/turns', { base: 2, message: 'another' })).status).toBe(409);
     // Ended (completed) with the same malformed record: released, failed, nothing landed.
-    s.engine.sessionsDetail = async () => [{ ...view, session: { ...view.session, status: 'completed' }, units: undefined as never }];
+    s.engine.runView = async () => ({ ...view, session: { ...view.session, status: 'completed' }, units: undefined as never });
     const d = (await s.call('GET', '/apps/escalations')).body.app;
     expect(d.turn).toBeNull();
     expect(d.turns![0]).toMatchObject({ state: 'failed', code: 'unknown' });
@@ -508,7 +536,8 @@ describe('apps turns: check, land, refuse', () => {
     s.outputs.set(`${runId}:build`, 'I looked at the catalog.\n\nI did not add it: pg_sleep is refused by the read policy, so the check would refuse the turn.\n\nCounts: derived 0');
     s.set(runId, 'failed', { build: { status: 'rejected', denial_reason: 'executes-code phase reported done but left no change in the worktree' } });
     s.emit({ type: 'sessionFailed', session: runId });
-    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull());
+    await s.settled(runId);
+    expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull();
     const d = (await s.call('GET', '/apps/escalations')).body.app;
     expect(d.turns![0]).toMatchObject({ state: 'failed', code: 'no_change', reason: expect.stringContaining('pg_sleep is refused by the read policy') });
     expect(d.turns![0]!.reason).not.toContain('Counts');
@@ -636,7 +665,8 @@ describe('apps turns: check, land, refuse', () => {
     s.outputs.set(`${runId}:build`, 'I could not read the app\'s files: **access to the worktree was refused**, so I changed nothing.\n\n**STACK-CHECK:** looked at nothing (no file access) :: offers nothing this change needs.\n\nMemories proposed 0');
     s.set(runId, 'failed', { build: { status: 'rejected', denial_reason: 'executes-code phase reported done but left no change in the worktree' } });
     s.emit({ type: 'sessionFailed', session: runId });
-    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull());
+    await s.settled(runId);
+    expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull();
     const t = (await s.call('GET', '/apps/escalations')).body.app.turns![0]!;
     expect(t).toMatchObject({ state: 'failed', code: 'no_change' });
     expect(t.reason).toBe('The builder made no change it could hand on. It said: “I could not read the app\'s files: access to the worktree was refused, so I changed nothing.” Nothing landed.');
@@ -646,7 +676,8 @@ describe('apps turns: check, land, refuse', () => {
     s.outputs.set(`${run2}:build`, '**STACK-CHECK:** looked at nothing (no file access) :: offers nothing this change needs.');
     s.set(run2, 'failed', { build: { status: 'rejected', denial_reason: 'executes-code phase reported done but left no change in the worktree' } });
     s.emit({ type: 'sessionFailed', session: run2 });
-    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull());
+    await s.settled(run2);
+    expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull();
     expect((await s.call('GET', '/apps/escalations')).body.app.turns![1]!.reason).toBe('The builder made no change it could hand on. Nothing landed.');
   });
 
@@ -655,7 +686,8 @@ describe('apps turns: check, land, refuse', () => {
     const runId = await startTurn(s);
     s.set(runId, 'failed', { build: { status: 'rejected', denial_reason: 'the seat could not start: image missing' } });
     s.emit({ type: 'sessionFailed', session: runId });
-    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull());
+    await s.settled(runId);
+    expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull();
     expect((await s.call('GET', '/apps/escalations')).body.app.turns![0]).toMatchObject({ state: 'failed', code: 'step_failed', reason: expect.stringContaining('image missing') });
   });
 
@@ -742,7 +774,7 @@ describe('apps turns: a review held on steering rules waits for the person (F22)
     s.set(runId, 'awaiting_human', { build: { status: 'done' }, check: { status: 'done' }, review: held('rules_unchecked') });
     s.events.set(runId, holdFrames(runId));
     s.emit({ type: 'awaitingHuman', session: runId, ord: 3, gateKind: 'escalation', prompt: 'held' });
-    await new Promise((r) => setTimeout(r, 50));
+    await s.settled(); // the hold's settlement ran and left the turn open
     expect(s.cancelled).toEqual([]);
     const d = (await s.call('GET', '/apps/escalations')).body.app;
     expect(d.turn).toMatchObject({ runId });
@@ -756,7 +788,8 @@ describe('apps turns: a review held on steering rules waits for the person (F22)
     s.events.get(runId)!.push({ type: 'gateDecided', session: runId, ord: 3, allow: true });
     s.set(runId, 'completed', { review: { status: 'done', denial_reason: null, denial: null, assurance: { mode: 'full', required: ['distinct_evaluator'], ran: ['distinct_evaluator', 'rule_check'], skipped: [], creator: 'claude', evaluator: 'codex', judge: 'pi', tree: checkedTree, attempt: 0 } } });
     s.emit({ type: 'sessionCompleted', session: runId });
-    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.head.version).toBe(3));
+    await s.settled(runId);
+    expect((await s.call('GET', '/apps/escalations')).body.app.head.version).toBe(3);
     expect((await s.call('GET', '/apps/escalations')).body.app.turns![0]).toMatchObject({ state: 'landed', version: 3, reviewer: 'codex' });
   });
 
@@ -769,7 +802,8 @@ describe('apps turns: a review held on steering rules waits for the person (F22)
     // The person pressed Stop on the hold (the engine cancelled the run).
     s.set(runId, 'cancelled');
     s.emit({ type: 'runCancelled', session: runId });
-    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull());
+    await s.settled(runId);
+    expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull();
     expect((await s.call('GET', '/apps/escalations')).body.app.turns![0]).toMatchObject({ state: 'cancelled', code: 'cancelled' });
   });
 
@@ -831,7 +865,8 @@ describe('apps turns: a review held on steering rules waits for the person (F22)
     s.set(runId, 'awaiting_human', { build: { status: 'done' }, check: { status: 'done' }, review: { status: 'rejected', denial_reason: broken, denial: { phase: 'unit-3', source: 'rule_check', reason: broken } } });
     s.events.set(runId, [{ type: 'gateEscalated', session: runId, ord: 3, attempt: 0, condition: 'rule_broken', denialSource: 'rule_check', verdictSummary: broken }, { type: 'awaitingHuman', session: runId, ord: 3, gateKind: 'escalation', prompt: broken }]);
     s.emit({ type: 'awaitingHuman', session: runId, ord: 3, gateKind: 'escalation', prompt: broken });
-    await vi.waitFor(async () => expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull());
+    await s.settled(runId);
+    expect((await s.call('GET', '/apps/escalations')).body.app.turn).toBeNull();
     expect(s.cancelled).toEqual([runId]);
     expect((await s.call('GET', '/apps/escalations')).body.app.turns![0]).toMatchObject({ state: 'refused', code: 'review_refused', reason: expect.stringContaining('learn-tests-with-fixes') });
   });

@@ -17,7 +17,7 @@ import {
   type ProposalDispatcher,
 } from '../src/api/chat-proposals.js';
 import { ThemeLauncher } from '../src/api/proposal-theme.js';
-import { matchProject, OnboardLauncher, probeGitUrl, probeVerdict, readGitUrl, withoutCredentials } from '../src/api/proposal-onboard.js';
+import { creatableName, matchProject, OnboardLauncher, probeGitUrl, probeVerdict, readGitUrl, withoutCredentials } from '../src/api/proposal-onboard.js';
 import { chatMakeDigest, chatScopeStatement, daemonGroundingLines } from '../src/api/chat-scope.js';
 
 const ME: Actor = { id: 'maria', kind: 'human', trust: 'operator' };
@@ -418,12 +418,52 @@ describe('onboard proposals', () => {
       ['add https://alice:ghp_SECRET123@github.com/acme/repo.git', 'ghp_SECRET123'],
       ['add https://github.com/acme/repo.git', 'acme'],
       ['add it to docsteam', 'docs'],
+      // crew#1790: a credential or a quoted path pasted as several words: no word of it is a name the person said.
+      ['clone it with Authorization: Bearer Zq9TokenValue', 'Zq9TokenValue'],
+      ['the header is Bearer Zq9TokenValue', 'Zq9TokenValue'],
+      ['token: Zq9TokenValue and password = Hunter22', 'Hunter22'],
+      ['read it with ghp_Abc123def', 'ghp_Abc123def'],
+      ['my checkout is "/home/me/Private Client Files/repo"', 'Client'],
+      ['my checkout is ‘C:\\Users\\me\\Client Work\\repo’', 'Client Work'],
+      // xreview r1: a quoted key, a quoted value of several words, a Digest parameter list, an apostrophe inside a path.
+      ['config is {"password": "Hunter22"}', 'Hunter22'], // ggignore: a made-up value the test feeds in; not a credential
+      ['password = "correct horse battery staple"', 'horse battery'],
+      ['Authorization: Digest username="Alice Private Client", realm="crew", nonce="N"', 'Private Client'],
+      ['my checkout is ‘/home/me/Mike’s Private Client Files/repo’', 'Private Client'],
+      // xreview r2: a credential keyword inside a quoted path, an escaped quote inside a value, spaces around a parameter's `=`.
+      ['my checkout is "/home/me/Accounts Private Client Files/Bearer token/repo"', 'Private Client'],
+      ['{"password": "correct \\"Private Client credential\\" staple"}', 'Private Client'],
+      ['Authorization: Digest username = "Alice Private Client", realm="crew"', 'Private Client'],
+      ['Authorization: Digest username= "Alice Private Client", realm="crew"', 'Private Client'],
     ] as const).entries()) {
       const c = (await propose(r, `n${i}`, chatWith(r, `n${i}`, { words }), { onboard: { url: URL, project } }))!;
       expect(c).toMatchObject({ blocked: expect.stringMatching(/^no project has the name given \(projects here: /u), onboard: { projectId: null } });
       expect(c.onboard?.createProject ?? null).toBeNull();
       expect(JSON.stringify(c)).not.toContain(project);
     }
+  });
+
+  it('a name said outside a quoted path or a credential still creates the project; an apostrophe opens no quote (crew#1790)', async () => {
+    const r = rig();
+    for (const [i, [words, project]] of ([
+      ['put it in Docs Team; my copy is at "/home/me/Private Client Files/repo"', 'Docs Team'],
+      ["put it in Mike's Team, it lives under a/b, don't move it", 'Team'],
+      ['Authorization: Bearer Zq9TokenValue, then add it to Billing', 'Billing'],
+      // xreview r1: prose after a Digest parameter list is the person's again; a name that merely starts with a keyword is a name.
+      ['Authorization: Digest username="Alice Smith", realm="crew" then add it to Billing', 'Billing'],
+      ['add it to AuthorizationService', 'AuthorizationService'],
+      ['put it in Tokenizer Team', 'Tokenizer Team'],
+    ] as const).entries()) {
+      const c = (await propose(r, `k${i}`, chatWith(r, `k${i}`, { words }), { onboard: { url: URL, project } }))!;
+      expect(c.onboard?.createProject, words).toEqual({ name: project });
+    }
+  });
+
+  it('a long unclosed quoted path costs linear time (xreview r1)', () => {
+    const words = `my checkout is "${'/a'.repeat(30_000)} and ‘${'/b'.repeat(30_000)} then Docs Team`;
+    const t0 = Date.now();
+    expect(creatableName('Docs Team', words)).toBe('Docs Team');
+    expect(Date.now() - t0).toBeLessThan(2_000);
   });
 
   it('a Go again resumes the project its first Go made, by id: renamed since, archived since, or lost to another card (crew#1694 r1)', async () => {

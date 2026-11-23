@@ -25,6 +25,7 @@
  */
 
 import { homedir, userInfo } from 'node:os';
+import { wickedHome } from '../core/wicked-home.js';
 import { existsSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
@@ -100,15 +101,17 @@ export function isDefaultStateHome(): boolean {
 }
 
 /**
- * The default home keeps $HOME/.wicked/<name> unchanged; any other home uses the sibling
- * <state home>-<name>, never a directory inside the state home. Core's Read fence denies
+ * The default home keeps `${WICKED_HOME:-~/.wicked}/<name>` (crew#1823: the wicked home's one resolver,
+ * `core/wicked-home.ts`, so a daemon on a scratch WICKED_HOME never writes into the person's live home); any other
+ * home uses the sibling <state home>-<name>, never a directory inside the state home. Core's Read fence denies
  * state-home entries to workers, and an unregistered top-level entry refuses launches.
  * This is the same rule as demoRootDir and runDocumentsRootDir.
+ *
+ * Nothing already made moves: a clone is registered by its absolute `root_path` and a saved script is handed to its
+ * phase by its absolute path, so both keep working where they are.
  */
 export function wickedWorkRoot(name: string): string {
-  return isDefaultStateHome()
-    ? join(process.env.HOME ?? process.env.USERPROFILE ?? '/tmp', '.wicked', name)
-    : `${crewStateHome()}-${name}`;
+  return isDefaultStateHome() ? resolve(wickedHome(), name) : `${crewStateHome()}-${name}`;
 }
 
 function realSpelling(p: string): string {

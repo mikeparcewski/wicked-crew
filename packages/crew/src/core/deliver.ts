@@ -88,6 +88,7 @@
 
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { devNull } from 'node:os';
 import type { GitIdent } from '../setup/known.js';
 import { childEnvWithBootEstateDb } from './governance-store.js';
 import type { PhaseDef, WorkflowDef } from './types.js';
@@ -404,18 +405,150 @@ export type PullRequestResolution =
 /** The exec seam `resolvePullRequest` reads `gh` through — injectable so tests answer without gh. */
 export type GhExec = (
   args: string[],
-  opts: { cwd: string; timeoutMs: number },
+  /** `env`: variables set for this one gh call on top of the daemon's (the pinned token, {@link pinnedGhExec}). */
+  opts: { cwd: string; timeoutMs: number; env?: Readonly<Record<string, string>> },
 ) => Promise<{ stdout: string; stderr: string; code: number | null }>;
 
 export const defaultGhExec: GhExec = (args, opts) =>
   new Promise((resolve) => {
     // The daemon's governance-store variables never ride into a child (crew#495): the boot value is
     // restored and the exported store URL is stripped, the same helper every other spawn site uses.
-    execFile('gh', args, { cwd: opts.cwd, timeout: opts.timeoutMs, encoding: 'utf8', env: childEnvWithBootEstateDb(process.env) }, (err, stdout, stderr) => {
+    execFile('gh', args, { cwd: opts.cwd, timeout: opts.timeoutMs, encoding: 'utf8', env: { ...childEnvWithBootEstateDb(process.env), ...opts.env } }, (err, stdout, stderr) => {
       const code = err === null ? 0 : typeof (err as { code?: unknown }).code === 'number' ? ((err as { code: number }).code) : null;
       resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), code });
     });
   });
+
+/**
+ * (crew#1792) A gh exec whose reads run as the deliver identity, in the deliver script's own credential order
+ * ({@link GITHUB_CREDENTIAL_LINES}, {@link GH_CALL_LINE}), so a PR the deliver identity can see is readable whatever
+ * account gh has active on the host:
+ *  - an exported `GH_TOKEN` wins, as in the script; with no identity configured, gh's own login reads;
+ *  - on a github.com origin the call is pinned to it (`GH_HOST`/`GH_REPO`, so an inherited `GH_REPO` cannot point
+ *    the read at another repository), and a configured identity (the repository's pin, the setting, else
+ *    `GH_ACCOUNT`, {@link pushIdentityOf}) reads with that account's own token from gh's keyring
+ *    (`gh auth token --user`), passed to this one call only;
+ *  - an origin read as absent or not github.com: the identity does not apply, gh runs as it is;
+ *  - with a pin to apply (an exported token or an identity), an origin that cannot be read, or gh holding no token for
+ *    the account, is a failed read that says so, never a silent unpinned read.
+ * `identity` is read per call (settings change at run time); so is the registered checkout's origin.
+ */
+export function pinnedGhExec(
+  identity: () => Promise<string | null>,
+  exec: GhExec = defaultGhExec,
+  env: NodeJS.ProcessEnv = process.env,
+): GhExec {
+  return async (args, opts) => {
+    const pin = await deliverPin(identity, exec, env, opts.cwd, opts.timeoutMs);
+    if (pin.kind === 'refused') return { stdout: '', stderr: pin.why, code: 1 };
+    if (pin.kind === 'unpinned') return exec(args, opts);
+    const at = { GH_HOST: 'github.com', GH_REPO: `github.com/${pin.repo}` };
+    return exec(args, { ...opts, env: { ...opts.env, ...at, ...(pin.token !== null ? { GH_TOKEN: pin.token } : {}) } });
+  };
+}
+
+/**
+ * The pin a read as the deliver identity takes in `cwd` ({@link pinnedGhExec}, {@link pinnedGitExec}): `unpinned` with
+ * no exported `GH_TOKEN` and no identity, or on an origin that is not github.com; `refused` (said why) when a pin
+ * applies and the origin or the identity's token cannot be read; else the origin's `owner/repo` and the identity's own
+ * token (`null` = the exported `GH_TOKEN` stands).
+ */
+async function deliverPin(
+  identity: () => Promise<string | null>,
+  gh: GhExec,
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  timeoutMs: number,
+): Promise<{ kind: 'unpinned' } | { kind: 'refused'; why: string } | { kind: 'pinned'; repo: string; token: string | null }> {
+  const exported = (env['GH_TOKEN'] ?? '').trim() !== '';
+  const login = exported ? null : (await identity().catch(() => null)) || null;
+  if (!exported && login === null) return { kind: 'unpinned' };
+  if (login !== null && !isGitHubLogin(login)) return { kind: 'refused', why: `the deliver identity ${JSON.stringify(login.slice(0, 60))} is not a GitHub login` };
+  const origin = await readDeliverOriginUrl(cwd).catch(() => null);
+  if (origin === null) {
+    return { kind: 'refused', why: `could not read the repository's origin, so the read cannot be pinned to it${login === null ? '' : ` as the deliver identity ${login}`}` };
+  }
+  const repo = githubRepoOf(origin);
+  if (repo === null) return { kind: 'unpinned' };
+  if (login === null) return { kind: 'pinned', repo, token: null };
+  const read = await gh(['auth', 'token', '--hostname', 'github.com', '--user', login], { cwd, timeoutMs });
+  const token = read.code === 0 ? read.stdout.trim() : '';
+  if (token === '') {
+    return { kind: 'refused', why: `gh holds no token for ${login} on this machine and no GH_TOKEN is exported, so it cannot read as the deliver identity` };
+  }
+  return { kind: 'pinned', repo, token };
+}
+
+/** The git seam crew's own reads go through: exit codes kept, never thrown; `env` is set for this one call. */
+export type GitExec = (
+  args: string[],
+  cwd: string,
+  env?: Readonly<Record<string, string>>,
+) => Promise<{ code: number | null; stdout: string; stderr: string }>;
+
+/**
+ * (crew#1804) A git seam whose `fetch origin [<branch>]` runs as the deliver identity, the way the deliver script's
+ * `_gnet` fetches: from the canonical https URL of the github.com origin, with a one-command credential helper carrying
+ * the pinned token (from this call's environment, never argv), git's own helpers and any ambient `http.extraHeader`
+ * off, redirects refused and `GIT_ALLOW_PROTOCOL=https`. The fetch writes `refs/remotes/origin/…` as `git fetch origin`
+ * does. Pinned in {@link pinnedGhExec}'s order; every other git command, and a fetch with nothing to pin, runs as is.
+ */
+export function pinnedGitExec(
+  identity: () => Promise<string | null>,
+  git: GitExec,
+  gh: GhExec = defaultGhExec,
+  env: NodeJS.ProcessEnv = process.env,
+): GitExec {
+  return async (args, cwd, extra) => {
+    const branch = args[2];
+    if (args[0] !== 'fetch' || args[1] !== 'origin' || args.length > 3 || (branch !== undefined && !isSafeRefName(branch))) return git(args, cwd, extra);
+    const pin = await deliverPin(identity, gh, env, cwd, 5_000);
+    if (pin.kind === 'refused') return { stdout: '', stderr: pin.why, code: 1 };
+    if (pin.kind === 'unpinned') return git(args, cwd, extra);
+    const url = `https://github.com/${pin.repo}.git`;
+    // A `url.*.insteadOf` that rewrites the canonical URL (to another login's https URL, say) would fetch as someone
+    // else: refused, as the deliver script refuses it before `_gnet` (xreview r1).
+    const rewrites = await git(['config', '--get-regexp', '^url\\..*\\.insteadof$'], cwd);
+    if (rewrites.code !== 0 && rewrites.code !== 1) return { stdout: '', stderr: "could not read git's url rewrites, so the fetch cannot be pinned", code: 1 };
+    for (const line of rewrites.code === 0 ? rewrites.stdout.split('\n') : []) {
+      const value = line.slice(line.indexOf(' ') + 1).trim();
+      if (line.includes(' ') && value !== '' && url.startsWith(value)) {
+        return { stdout: '', stderr: `git config rewrites ${value} (a url.*.insteadOf), so the fetch would not use the deliver identity; remove the rewrite for this repository`, code: 1 };
+      }
+    }
+    const refspec = branch === undefined ? '+refs/heads/*:refs/remotes/origin/*' : `+refs/heads/${branch}:refs/remotes/origin/${branch}`;
+    const token = pin.token ?? (env['GH_TOKEN'] ?? '').trim();
+    return git(
+      [
+        '-c', 'credential.helper=', '-c', `credential.https://github.com.helper=${GITHUB_TOKEN_HELPER}`,
+        // No hook, alternate-refs command, askpass, maintenance or submodule fetch runs with the token in its
+        // environment (xreview r1, r2; the same keys apps/git.ts pins off).
+        '-c', `core.hooksPath=${devNull}`, '-c', 'core.alternateRefsCommand=', '-c', 'core.askPass=', '-c', 'credential.interactive=false',
+        '-c', 'maintenance.auto=false', '-c', 'gc.auto=0',
+        'fetch', '-q', '--no-recurse-submodules', url, refspec,
+      ],
+      cwd,
+      {
+        ...extra,
+        // An inherited GIT_CONFIG_PARAMETERS is read after GIT_CONFIG_COUNT and could restore another login's header.
+        GIT_CONFIG_PARAMETERS: '',
+        GIT_CONFIG_COUNT: '4',
+        GIT_CONFIG_KEY_0: 'http.extraHeader', GIT_CONFIG_VALUE_0: '',
+        GIT_CONFIG_KEY_1: `http.${url}.extraHeader`, GIT_CONFIG_VALUE_1: '',
+        GIT_CONFIG_KEY_2: 'http.followRedirects', GIT_CONFIG_VALUE_2: 'false',
+        GIT_CONFIG_KEY_3: `http.${url}.followRedirects`, GIT_CONFIG_VALUE_3: 'false',
+        GIT_ALLOW_PROTOCOL: 'https',
+        GIT_TERMINAL_PROMPT: '0',
+        // An empty GIT_ASKPASS is no askpass at all (git's prompt.c), so no prompt program sees the token either.
+        GIT_ASKPASS: '',
+        GH_TOKEN: token,
+      },
+    );
+  };
+}
+
+/** The deliver script's one-command credential helper: the token from the call's own `GH_TOKEN`. */
+const GITHUB_TOKEN_HELPER = '!f() { test "$1" = get && echo username=x-access-token && echo "password=$GH_TOKEN"; }; f';
 
 /**
  * `git remote get-url --push origin` in `rootPath` — the deliver gate's origin preflight (F2).

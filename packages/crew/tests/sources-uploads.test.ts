@@ -330,6 +330,29 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
     snap.close();
   });
 
+  it('crew#1787: a plain .sqlite (no virtual table) is rewritten too: what it freed before the upload is not in the snapshot, its rowids are as uploaded (fails before the fix)', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    makeSqlite(join(work, 'plain.sqlite'), { implicitRowids: true, freed: true });
+    const file = readFileSync(join(work, 'plain.sqlite'));
+    const up = await ingestUpload('plain.sqlite', file, { dir });
+    expect(up.dropped).toEqual([]);
+    expect(up.catalog.relations.map((r) => r.name).sort()).toEqual(['records', 'refs', 'refunds']);
+    const snapshot = readFileSync(snapshotPath(up.digest, dir));
+    for (const marker of ['zqxj-deleted-row', 'zqxj-dropped-table']) {
+      expect(file.includes(marker), marker).toBe(true);
+      expect(snapshot.includes(marker), marker).toBe(false);
+      expect(readFileSync(join(work, 'plain.sqlite')).includes(marker), marker).toBe(true);
+    }
+    expect(snapshot.equals(file)).toBe(false);
+    expect(readdirSync(dir).filter((n) => n.startsWith('.tmp-'))).toEqual([]);
+    const snap = new DatabaseSync(snapshotPath(up.digest, dir), { readOnly: true });
+    expect(snap.prepare('SELECT r.body FROM refs JOIN records r ON r.rowid = refs.record_rowid').all().map((x) => x['body'])).toEqual(['kept']);
+    expect(snap.prepare('SELECT id, region FROM refunds ORDER BY id').all().map((x) => [x['id'], x['region']])).toEqual([[1, 'EMEA'], [2, 'AMER']]);
+    snap.close();
+    // The same file stores once.
+    expect((await ingestUpload('plain.sqlite', file, { dir })).digest).toBe(up.digest);
+  });
+
   it('crew#1731: a virtual table that cannot be dropped is refused by its own name, never a shadow table called virtual; code is refused first', async () => {
     makeSqlite(join(work, 'unknown.sqlite'), { unknownModule: true });
     const err = await ingestUpload('unknown.sqlite', readFileSync(join(work, 'unknown.sqlite')), { dir }).catch((e: unknown) => e);

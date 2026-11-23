@@ -43,6 +43,17 @@ describe('state-home path ladders', () => {
     for (const name of ['repos', 'scripts']) expect(wickedWorkRoot(name)).toBe(join(home, '.wicked', name));
   });
 
+  it('on the default state home the work roots follow WICKED_HOME (crew#1823)', () => {
+    setCrewStateHome(defaultStateHome(home));
+    const scratch = join(root, 'scratch-wicked-home');
+    process.env['WICKED_HOME'] = scratch;
+    try {
+      for (const name of ['repos', 'scripts']) expect(wickedWorkRoot(name)).toBe(join(scratch, name));
+    } finally {
+      delete process.env['WICKED_HOME'];
+    }
+  });
+
   it('learning submits carry all isolated estate stores', () => {
     expect(learningSubmitEnv('r', 'codex', {})).toMatchObject({
       WICKED_MEMORY_DB: join(isolated, 'mcp', 'memory.db'),

@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  CLUSTER_TIMEOUT_MS,
   ClusterStatusReader,
   publicText,
   clusterDiagnostics,
@@ -62,6 +63,21 @@ describe('ClusterStatusReader', () => {
     finish({ stdout: JSON.stringify(READY), stderr: '' });
     expect((await second).kind).toBe('ok');
     await reader.read(); expect(exec).toHaveBeenCalledTimes(2);
+  });
+  it('a caller never waits past the engine bound, whatever bound it asks for (crew#1780: proven on fake time)', async () => {
+    vi.useFakeTimers();
+    try {
+      const exec = vi.fn(() => new Promise<{ stdout: string; stderr: string }>(() => undefined));
+      const reader = new ClusterStatusReader(() => ({ exe: '/core', home: '/h', exec }));
+      let settled: Settled<ClusterStatus> | null = null;
+      void reader.read(60_000).then((r) => { settled = r; });
+      await vi.advanceTimersByTimeAsync(CLUSTER_TIMEOUT_MS - 1);
+      expect(settled).toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toMatchObject({ kind: 'timeout', ms: CLUSTER_TIMEOUT_MS });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

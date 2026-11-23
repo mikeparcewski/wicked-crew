@@ -3,6 +3,7 @@ import { registerRedeliverRoutes, type CheckRunTree, type RedeliverExec } from '
 import type { GhExec } from '../core/deliver.js';
 import { REVIEW_WORKFLOW } from '../insights/workflow.js';
 import { runUsageCost, type LooseEvent, type RunUsageCost } from '../insights/run-facts.js';
+import { NoIndependentReviewer } from '../insights/review-service.js';
 import { appsRuntimeDir, appsServerArtifact, containerEngineKnown } from '../apps/publish/artifacts.js';
 import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { busSeamsOffWarning, busUnavailableWarning } from '../core/bus-notice.js';
@@ -280,6 +281,8 @@ import {
   deliverRepoFor,
   deliverTargetView,
   isGitHubLogin,
+  pinnedGhExec,
+  pinnedGitExec,
   pushIdentityOf,
   readDeliverOriginUrl,
   resolvePullRequest as resolvePullRequestViaGh,
@@ -326,7 +329,7 @@ import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, 
 import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, removeStagedDocuments, stagedDocumentsRemoved, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
 import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks, webScopeReason } from './run-sources.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
-import { CHAT_ENDED, LaunchRefusal, ChatProposals, LaunchOnceRegistry, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
+import { CHAT_ENDED, LaunchRefusal, ChatProposals, LaunchOnceRegistry, liveInRuns, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
 import { CATALOG_SEEDS } from '../workflow-catalog/catalog-data.js';
 import { registerInteractiveDocList } from '../interactive/doc-list-routes.js';
 import { REVIEWS_DIRNAME } from '../interactive/review-ledger.js';
@@ -402,6 +405,9 @@ import { idleClis, probeSeatImages, SeatImageRebuilder, seatImageStatusVia, type
 import { RunCostCache } from './needs.js';
 import { governanceStoreFix, legacyHomeOutboxPath } from '../core/governance-store.js';
 import { UsageError, replayOutboxInto } from '../cli/governance.js';
+import { DEFAULT_DAEMON_PORT } from '../cli/port.js';
+import type { ServicePlatform } from '../cli/service.js';
+import { startOnLoginStatus } from './start-on-login.js';
 import { foldDeadletters } from './governance-health.js';
 import { RetryIndex } from './retry-index.js';
 import { SEAT_RECORD_DEFAULT_DAYS, SEAT_RECORD_MAX_DAYS, seatRecord } from './seat-record.js';
@@ -1487,6 +1493,8 @@ interface RuntimeServices {
   resolvePullRequest?: (repoRoot: string, number: number) => Promise<PullRequestResolution>;
   /** Review provenance must be testable without contacting GitHub or mutating a real clone. */
   reviewChange?: Partial<Pick<ReviewChangeDeps, 'gh' | 'git'>>;
+  /** studio#1324: where the start-on-login read looks (tests); production reads this host's platform and home. */
+  startOnLogin?: { platform?: ServicePlatform; home?: string };
   /** crew#627: how the issues a launch's intent links are read (`gh issue view`, 5 s each).
    *  Injectable so route tests answer without gh; production uses `core/linked-issues.ts`. */
   resolveLinkedIssues?: (
@@ -2272,6 +2280,17 @@ export function registerRoutes(
   /** Repo root for a repo ref, from the registry — shared by the reprovision path below. */
   const repoRootOf = async (repoRef: string): Promise<string | undefined> =>
     (await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path;
+  /** (crew#1792) The push identity a repository's PR reads run as: its pin or the setting, else `GH_ACCOUNT` (the
+   *  deliver-target route's own resolution). Settings that cannot be read leave it to `GH_ACCOUNT`. */
+  const readIdentityOf = (repoRef: string) => async (): Promise<string | null> => {
+    let configured = '';
+    try {
+      configured = deliverIdentityFor(await adapter.getSettings(), repoRef).login;
+    } catch {
+      configured = '';
+    }
+    return pushIdentityOf(configured);
+  };
   /** The lookups a review-change exclusion reads (the launch and the job proposal read the same ones, CJ13). */
   const reviewChangeDeps = (repoRef: string, repoRoot: string): ReviewChangeDeps => ({
     repoRef,
@@ -2281,19 +2300,24 @@ export function registerRoutes(
     pushed: (id) => deliveryIndex.pushedFor(id),
     deliveredCommit: (id) => deliveryIndex.commitFor(id),
     revisesPr: (id) => retryIndex.revisesPrFor(id),
-    gh: runtime.reviewChange?.gh ?? defaultGhExec,
-    git: runtime.reviewChange?.git ?? (async (args, cwd) => {
+    gh: pinnedGhExec(readIdentityOf(repoRef), runtime.reviewChange?.gh ?? defaultGhExec),
+    // crew#1804: a branch or commit target's fetch runs as the deliver identity too, like the deliver script's `_gnet`.
+    git: pinnedGitExec(readIdentityOf(repoRef), runtime.reviewChange?.git ?? (async (args, cwd, env) => {
       try {
-        return { ...(await execCapped('git', args, { cwd, timeout: 5_000 })), code: 0 };
+        return { ...(await execCapped('git', args, { cwd, timeout: 5_000, ...(env !== undefined ? { env: { ...process.env, ...env } } : {}) })), code: 0 };
       } catch (err) {
         // Only exit 1 proves non-membership; preserve it separately from lookup failures.
         const code = (err as { code?: unknown }).code;
         return { code: typeof code === 'number' ? code : null, stdout: '', stderr: message(err) };
       }
-    }),
+    }), runtime.reviewChange?.gh ?? defaultGhExec),
   });
-  /** DES-L9: PR number → head branch, through `gh pr view` unless the runtime injected an answerer. */
-  const resolvePullRequest = runtime.resolvePullRequest ?? resolvePullRequestViaGh;
+  /** DES-L9: PR number → head branch, through `gh pr view` as the repository's push identity (crew#1792) unless the
+   *  runtime injected an answerer. */
+  const resolvePullRequest = (repoRoot: string, number: number, repoRef: string): Promise<PullRequestResolution> =>
+    runtime.resolvePullRequest !== undefined
+      ? runtime.resolvePullRequest(repoRoot, number)
+      : resolvePullRequestViaGh(repoRoot, number, pinnedGhExec(readIdentityOf(repoRef)));
   /** crew#627: the intent's linked issues, read under the daemon's identity at launch. */
   /** (DES-PM-001 §3.2) A project's live `crew.repo` members, for a tracker set. */
   const repoMembersOf = async (projectId: string): Promise<string[]> => (await adapter.projectMembers(projectId)).filter((m) => m.member_kind === 'crew.repo').map((m) => m.member_ref);
@@ -2592,20 +2616,37 @@ export function registerRoutes(
       ...[adapter.vaultBin != null ? vaultBinWarning(adapter.vaultBin) : null].filter((w) => w !== null),
     ];
   // crew#1157: the engine's built-in presets are compiled in, so the chat workflows it carries are
-  // read once (on the first probe that can read them) and held until restart.
+  // read once and held until restart. crew#1767: the read is an actor round trip, so it starts here,
+  // at registration (the first probe usually finds it held), at most one is in flight, and `/health`
+  // waits for it only inside the ping's own bound: a probe while the actor is busy answers `[]` (the
+  // engine's answer is not known yet) and a later probe answers the held list. A failed read is
+  // dropped, so the next probe reads again.
   let chatWorkflowsHeld: string[] | null = null;
-  const chatWorkflowsNow = async (): Promise<string[]> => {
-    if (chatWorkflowsHeld !== null) return chatWorkflowsHeld;
-    if (typeof adapter.listPresets !== 'function') return [];
-    try {
-      chatWorkflowsHeld = servedChatWorkflows(await adapter.listPresets());
-      return chatWorkflowsHeld;
-    } catch {
-      return [];
-    }
+  let chatWorkflowsRead: Promise<string[]> | null = null;
+  const chatWorkflowsLoad = (): Promise<string[]> => {
+    if (chatWorkflowsHeld !== null) return Promise.resolve(chatWorkflowsHeld);
+    if (typeof adapter.listPresets !== 'function') return Promise.resolve([]);
+    chatWorkflowsRead ??= Promise.resolve()
+      .then(() => adapter.listPresets())
+      .then((presets) => (chatWorkflowsHeld = servedChatWorkflows(presets)))
+      .catch(() => [] as string[])
+      .finally(() => {
+        chatWorkflowsRead = null;
+      });
+    return chatWorkflowsRead;
   };
+  void chatWorkflowsLoad();
   app.get(`${V}/health`, { config: { manifest: { statusCodes: [200] } } }, async () => {
+    const deadline = performance.now() + HEALTH_PING_WAIT_MS;
+    const workflowsRead = chatWorkflowsLoad();
     const ping = await enginePing();
+    let chatWorkflowsTimer: NodeJS.Timeout | undefined;
+    const chatWorkflows = await Promise.race([
+      workflowsRead,
+      new Promise<string[]>((resolve) => {
+        chatWorkflowsTimer = setTimeout(() => resolve([]), Math.max(0, deadline - performance.now()));
+      }),
+    ]).finally(() => clearTimeout(chatWorkflowsTimer));
     // F-E2E-030: what this deployment can keep. A composer reads `capabilities.deliverGate`
     // before it promises "pauses at the deliver gate"; a stub-driven route set without the
     // probe honestly reports no gate.
@@ -2646,7 +2687,7 @@ export function registerRoutes(
       chatAttachments: true,
       // api-types 0.141.0 (crew#1157): the read-only workflows `POST /chats {workflow}` runs on THIS
       // engine (`analyze` on a core-ts that carries it); `[]` = plain chats only.
-      chatWorkflows: await chatWorkflowsNow(),
+      chatWorkflows,
       // api-types 0.145.0: the evals, insights and schedules surfaces, read off the route table this
       // daemon serves, so a route set booted without one says false rather than an invented true.
       defaultEvals: app.hasRoute({ method: 'GET', url: `${V}/testing/default-evals/suites` }),
@@ -3909,7 +3950,7 @@ export function registerRoutes(
       if (root === undefined) {
         return reply.code(404).send({ error: `repoRef names an unknown repo: ${revisedRepo}` });
       }
-      const resolved = await resolvePullRequest(root, b.revisesPr);
+      const resolved = await resolvePullRequest(root, b.revisesPr, revisedRepo);
       if (!resolved.ok) return reply.code(409).send({ error: resolved.error });
       revisesPr = { number: b.revisesPr, headRef: resolved.pr.headRef, url: resolved.pr.url };
       input.baseRef = revisesPr.headRef;
@@ -4073,6 +4114,11 @@ export function registerRoutes(
       try {
         await (runtime.reviewLaunch as NonNullable<RuntimeDeps['reviewLaunch']>)(input);
       } catch (err) {
+        // (crew#1375) No seat that ran none of the reviewed work: the review-change refusal's shape, so a chat job's Start
+        // offers reduced assurance.
+        if (err instanceof NoIndependentReviewer) {
+          return reply.code(409).send({ code: err.code, error: `the review could not be prepared: ${err.message}`, excluded: err.excluded, retryWith: { reducedAssurance: true } });
+        }
         return reply.code(409).send({ error: `the review could not be prepared: ${message(err)}` });
       }
     }
@@ -4506,10 +4552,8 @@ export function registerRoutes(
    */
   proposalLaunchers.register('job', {
     find: async (identity) => (await adapter.sessions()).includes(identity.runId),
-    live: async (runId) => {
-      const v = await adapter.runView(runId);
-      return v !== undefined && !['completed', 'cancelled', 'failed'].includes(String(v.session.status));
-    },
+    // crew#1779: read off the check's one run list, never one engine read per job.
+    live: liveInRuns,
     launch: async (d) => {
       const p = d.resolution;
       if (p.shape === undefined || p.catalogRev === undefined) throw new Error('this proposal has no shape to launch');
@@ -5088,7 +5132,7 @@ export function registerRoutes(
               const again =
                 revisedRoot === undefined
                   ? ({ ok: false, error: `repo ${repoRef} is no longer registered — cannot re-check pull request #${revising.number}` } as const)
-                  : await resolvePullRequest(revisedRoot, revising.number);
+                  : await resolvePullRequest(revisedRoot, revising.number, repoRef);
               if (!again.ok) {
                 revisionRefused = again.error;
                 return;
@@ -6013,7 +6057,7 @@ export function registerRoutes(
       const root = await repoRootOf(repoRef);
       if (root === undefined) return null;
       const ex = await reviewChangeExclusion(words, reviewChangeDeps(repoRef, root));
-      return ex.ok ? ex.excludeSeats : null;
+      return ex.ok ? { seats: ex.excludeSeats, ...(ex.provenance === 'unknown' && ex.why !== undefined ? { unknown: ex.why } : {}) } : null;
     },
     powerPresets: async (projectId) => {
       if (!powerSupported() || ((await adapter.getSettings()).powerModeDefault ?? true) === false || typeof adapter.listPresets !== 'function') return null;
@@ -8234,7 +8278,27 @@ export function registerRoutes(
   const textOrNull = (v: string | null | undefined): string | null => (v === undefined || v === null || v.trim() === '' ? null : v.trim());
   const PowerToggleSchema = z.strictObject({ on: z.boolean(), reason: z.string().trim().max(2000).nullish() });
   const RigorRaiseSchema = z.strictObject({ atLeast: z.enum(RIGORS), reason: z.string().trim().min(1).max(2000) });
-  const PowerPauseSchema = z.strictObject({ decision: z.enum(['continue_high', 'continue', 'switch_phased', 'stop']), note: z.string().trim().max(8000).nullish() });
+  const PowerPauseSchema = z.strictObject({
+    decision: z.enum(['continue_high', 'continue', 'switch_phased', 'stop']),
+    note: z.string().trim().max(8000).nullish(),
+    // (crew#1739) The pause the person answered, as the card showed it (`PowerPause.checkpoint` / `.at`).
+    checkpoint: z.number().int().positive().optional(),
+    at: z.number().int().nonnegative().optional(),
+  });
+  /** (crew#1739) Each run's pause answers, one at a time (`onePauseAnswer`). */
+  const pauseAnswers = new Map<string, Promise<unknown>>();
+  const onePauseAnswer = <T>(runId: string, op: () => Promise<T>): Promise<T> => {
+    const next = (pauseAnswers.get(runId) ?? Promise.resolve()).then(op, op);
+    const settled = next.then(() => undefined, () => undefined);
+    pauseAnswers.set(runId, settled);
+    void settled.then(() => { if (pauseAnswers.get(runId) === settled) pauseAnswers.delete(runId); });
+    return next;
+  };
+  /** A power pause's identity: its checkpoint and when it opened (`PowerPause`), or null when none is open. */
+  const pauseIdentity = (view: Record<string, unknown> | null): { checkpoint: number; at: number } | null => {
+    const pause = view?.['pause'] as { checkpoint?: unknown; at?: unknown } | null | undefined;
+    return pause && typeof pause.checkpoint === 'number' && typeof pause.at === 'number' ? { checkpoint: pause.checkpoint, at: pause.at } : null;
+  };
   /** An engine refusal as HTTP: `not_found:` 404, `conflict:` 409, `refused:` / `bad_request:` 409 / 400. */
   const powerError = (reply: FastifyReply, err: unknown) => {
     const msg = message(err);
@@ -8304,20 +8368,40 @@ export function registerRoutes(
     const actor = actorOf(req);
     if (!isHumanOperator(actor)) return reply.code(403).send({ error: 'Only a person can answer a power-mode pause' });
     if (!powerSupported()) return reply.code(501).send({ error: 'This engine has no power mode' });
-    try {
-      const note = textOrNull(parsed.data.note);
-      const st = await adapter.answerPowerPause(id, parsed.data.decision, note, actor.id);
-      audit.record('run.power_mode.paused', actor, { runId: id, detail: { decision: parsed.data.decision } });
-      if (decisions !== null && note !== null) {
-        decisions.track(ingestDecision(decisions, {
-          host: 'inject', actor, words: note, projectId: projects.index.projectOf(id) ?? null, runId: id,
-        }));
+    // (crew#1739) One answer per run at a time: the read of the open pause and the engine's answer are one step, so a
+    // second answer reads what the first left (a newer pause, or none) and is refused if it named the old one. Every
+    // pause answer goes through this route.
+    return onePauseAnswer(id, async () => {
+      try {
+        // (crew#1739) Which pause this answer is for. One that names a pause no longer open is refused, so a queued
+        // answer (studio's undo window) never lands on a newer pause the person never saw.
+        const view = await powerView(id);
+        const open = pauseIdentity(view);
+        const { checkpoint, at } = parsed.data;
+        if (view !== null && (checkpoint !== undefined || at !== undefined) &&
+            (open === null || (checkpoint !== undefined && checkpoint !== open.checkpoint) || (at !== undefined && at !== open.at))) {
+          return reply.code(409).send({
+            error: 'Pause changed',
+            reason: open === null
+              ? 'This pause was already answered, and the run is not paused now. Nothing was changed.'
+              : `This answer was for an earlier pause; the run is now paused at checkpoint ${open.checkpoint}. Read the pause again. Nothing was changed.`,
+            open,
+          });
+        }
+        const note = textOrNull(parsed.data.note);
+        const st = await adapter.answerPowerPause(id, parsed.data.decision, note, actor.id);
+        audit.record('run.power_mode.paused', actor, { runId: id, detail: { decision: parsed.data.decision } });
+        if (decisions !== null && note !== null) {
+          decisions.track(ingestDecision(decisions, {
+            host: 'inject', actor, words: note, projectId: projects.index.projectOf(id) ?? null, runId: id,
+          }));
+        }
+        return reply.send({ runId: id, ...st, answered: open });
+      } catch (err) {
+        if (err instanceof MaintenanceDrainError) return reply.code(503).send(maintenanceDrainBody(err));
+        return powerError(reply, err);
       }
-      return reply.send({ runId: id, ...st });
-    } catch (err) {
-      if (err instanceof MaintenanceDrainError) return reply.code(503).send(maintenanceDrainBody(err));
-      return powerError(reply, err);
-    }
+    });
   });
 
   /** The run's `wicked.run.*` bus mirror after a cursor (`RunBusPage`). Read through the engine's own bus
@@ -10211,6 +10295,12 @@ export function registerRoutes(
   // additive `path` (api-types 0.38.0 `SettingsResponse.path?`; adjudicated §4.6 — `path`, not
   // `settings_path`).
   app.get(`${V}/settings`, async () => ({ settings: await adapter.getSettings(), path: settingsFilePath() }));
+  // studio#1324: whether this daemon's port starts at login (`serve --install-service`), for Settings' status row. The
+  // port is the one this daemon listens on (the default when it is not listening, as under inject).
+  app.get(`${V}/settings/start-on-login`, { config: { manifest: { responseType: 'StartOnLoginStatus', statusCodes: [200] } } }, async () => {
+    const bound = app.server.address();
+    return startOnLoginStatus(bound !== null && typeof bound === 'object' ? bound.port : DEFAULT_DAEMON_PORT, runtime.startOnLogin?.platform, runtime.startOnLogin?.home);
+  });
 
   // The demo video's palette from the studio skin (operator 2026-10-14): read-only, derived from `studio.appearance`;
   // garden's demo stage and interactive's re-cuts read it as their default colours.

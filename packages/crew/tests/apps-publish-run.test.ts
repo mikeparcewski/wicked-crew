@@ -56,7 +56,8 @@ async function rig() {
           states.set(input.sessionId, 'executing');
           return input.sessionId;
         },
-        sessionsDetail: async () => [...states].map(([id, status]) => ({ session: { id, status }, units: [] }) as unknown as SessionView),
+        // crew#1779: a publish reads its one run, never a fold of the store.
+        runView: async (id) => (states.has(id) ? ({ session: { id, status: states.get(id) }, units: [] }) as unknown as SessionView : undefined),
       },
     },
   } });

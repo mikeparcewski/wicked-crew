@@ -12,11 +12,11 @@
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { LaunchRunInput, WorkflowDef } from '../core/types.js';
+import { wickedHomeDir } from '../core/wicked-home.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
 import { SUITE_IDS, type DefaultEvalReport, type SuiteId } from './types.js';
@@ -26,9 +26,10 @@ export const RUN_EVALS_WORKFLOW_FILE = fileURLToPath(new URL('../../workflows/ru
 /** The Tool step's script beside this module (`.js` in dist). */
 export const RUN_EVALS_CLI = fileURLToPath(new URL('./run-cli.js', import.meta.url));
 
-/** Where each run's report copy lives: outside the daemon state home (the worker fence), like the reviews. */
+/** Where each run's report copy lives: outside the daemon state home (the worker fence), like the reviews.
+ *  `WICKED_CREW_EVAL_RUNS_DIR`, else `${WICKED_HOME:-~/.wicked}/evals` (crew#1802). */
 export function defaultEvalRunsDir(env: NodeJS.ProcessEnv = process.env): string {
-  return env['WICKED_CREW_EVAL_RUNS_DIR'] ?? join(homedir(), '.wicked', 'evals');
+  return wickedHomeDir('WICKED_CREW_EVAL_RUNS_DIR', 'evals', env);
 }
 
 export interface RunEvalsTokens {

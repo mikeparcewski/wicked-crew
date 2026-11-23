@@ -299,6 +299,45 @@ describe('POST /runs/preview == POST /runs (studio#1150)', () => {
     expect(store.get('rev-retry')).toMatchObject({ status: 'running', error: null });
   });
 
+  it('(crew#1375) every seat ran the reviewed work: 409 no_independent_reviewer with the reduced-assurance retry; that retry launches', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'posture-review-independent-'));
+    const store = new InsightsStore(join(root, 'insights.json'));
+    const at = Math.floor(Date.now() / 1000) - 3600;
+    // One run in the review window, its build unit on claude (the engine's WorkUnit row as `GET /runs` serves it).
+    const ran = [{
+      session: { id: 'bug-1', status: 'failed', created_at: at, deliver_requested: false, delivery: 'none', archived_at: null, workflow_id: 'bug', repo_ref: 'repo-1', title: 'bug-1', project_id: null },
+      units: [{ id: 'bug-1:build', session_id: 'bug-1', ord: 1, description: 'build', stage: 'build', assigned_cli: 'claude', assigned_invocation: null, council_task_ref: null, routing: { method: 'primary' }, denial_reason: null, phase_ref: 'build', conformance_ref: null, phase_status: 'failed', collection_scope: null, status: 'failed', role: 'creator' }],
+    }];
+    const service = new ReviewService({
+      store,
+      adapter: { sessionsDetail: async () => ran as never, runEvents: async () => [], seatsForWorkflow: async () => [{ key: 'claude' }] },
+      reviewsDir: join(root, 'reviews'),
+      estateTool: async () => ({}),
+      log: () => undefined,
+    });
+    const { app, adapter } = await daemon({ supports: false, setting: undefined, deliverDefault: 'none' }, {
+      reviewLaunch: async (input: LaunchRunInput) => { await service.prepareLaunch(input, { trigger: 'manual' }); },
+      reviewLaunchRefused: (runId: string, reason: string) => service.launchRefused(runId, reason),
+    });
+    const body = { problem: 'x', clisJson: '[]', workflow: 'review-recent-work', sessionId: 'rev-self' };
+    const refused = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: body });
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json()).toMatchObject({
+      code: 'no_independent_reviewer',
+      error: expect.stringMatching(/^the review could not be prepared: every seat that could interpret this review \(claude\) ran some of the work/u),
+      excluded: ['claude'],
+      retryWith: { reducedAssurance: true },
+    });
+    expect(adapter.launchRun!).not.toHaveBeenCalled();
+    expect(store.get('rev-self')).toBeUndefined();
+    const retried = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { ...body, ...refused.json().retryWith } });
+    expect(retried.statusCode, retried.body).toBe(201);
+    const input = adapter.launchRun!.mock.calls[0]?.[0] as LaunchRunInput;
+    expect(input.reducedAssurance).toBe(true);
+    expect(input.primary).toBe('claude');
+    expect(input.problem).toMatch(/Reduced assurance: every seat that could interpret this review ran some of the work/u);
+  });
+
   it('(crew#1375) a failure after the engine took the review leaves it running: a retry under its id is refused', async () => {
     const root = mkdtempSync(join(tmpdir(), 'posture-review-taken-'));
     const store = new InsightsStore(join(root, 'insights.json'));

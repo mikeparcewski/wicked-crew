@@ -24,11 +24,11 @@
  */
 
 import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync, existsSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { SessionView } from 'wicked-crew-api-types';
 import type { LaunchRunInput, WorkflowDef } from '../core/types.js';
+import { wickedHomeDir } from '../core/wicked-home.js';
 import type { LooseEvent } from '../insights/run-facts.js';
 import { creatorSeats, extractLearnings, normalizeLearning, projectOf, repoOf, type LearningCandidate, type LearningKind, type PersonContextSection } from './extract.js';
 
@@ -78,9 +78,14 @@ export function runLearningsMode(env: NodeJS.ProcessEnv = process.env): RunLearn
   return env['VITEST'] !== undefined || env['NODE_ENV'] === 'test' ? 'off' : 'distill';
 }
 
-/** Where each source run's distil handoff lives: outside the daemon state home (the worker fence), like reviews. */
+/**
+ * Where each source run's distil handoff lives: outside the daemon state home (the worker fence), like reviews.
+ * `WICKED_CREW_LEARNINGS_DIR` names it; else `${WICKED_HOME:-~/.wicked}/learnings`, so a daemon on a scratch
+ * `WICKED_HOME` (a proof or test daemon) never writes into the person's live home (crew#1800). An empty value is unset.
+ * Always absolute: the dir becomes the distil seat's read and write roots, which the engine takes only absolute.
+ */
 export function defaultLearningsDir(env: NodeJS.ProcessEnv = process.env): string {
-  return env['WICKED_CREW_LEARNINGS_DIR'] ?? join(homedir(), '.wicked', 'learnings');
+  return wickedHomeDir('WICKED_CREW_LEARNINGS_DIR', 'learnings', env);
 }
 
 export function loadDistillWorkflow(file = DISTILL_WORKFLOW_FILE): WorkflowDef {

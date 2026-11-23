@@ -189,6 +189,62 @@ describe('a person-made job proposal', () => {
     expect((await pick(r, 'migrate', { option: 'upgrade', words: 'other words' })).body).toMatchObject({ code: 'request_reused' });
   });
 
+  // crew#1791: a chat with more than 4 repositories in scope; the request names the sixth.
+  const MANY = [
+    { id: 'r-pay', name: 'payments-service' }, { id: 'r-bill', name: 'billing-api' }, { id: 'r-web', name: 'web-app' },
+    { id: 'r-docs', name: 'docs' }, { id: 'r-ops', name: 'ops-tools' }, { id: 'r-tiny', name: 'tiny-math-rd' },
+    { id: 'r-acme', name: 'acme' }, { id: 'r-cli', name: 'cli-kit' }, { id: 'r-ui', name: 'ui-lib' }, { id: 'r-last', name: 'last-one' },
+  ];
+  const ALL = ['r-pay', 'r-bill', 'r-web', 'r-docs', 'r-tiny', 'r-acme', 'r-cli', 'r-ui', 'r-last'];
+
+  it('runs on the repository the words name, whatever its place in the scope (crew#1791)', async () => {
+    const r = rig({ repos: MANY });
+    expect((await pick(r, 'migrate', { option: 'upgrade', words: 'In tiny-math-rd, bump to node 22.' })).code).toBe(201);
+    const p = open(r);
+    expect(p.repoRefs).toEqual(['r-tiny']);
+    expect(p.sentence!.ask).not.toBe('Which repository?');
+  });
+
+  it('asks "Which repository?" with every repository in scope, those the words name first (crew#1791)', async () => {
+    // Two named: not clear, so the person picks, the named ones leading.
+    const r = rig({ repos: MANY });
+    expect((await pick(r, 'migrate', { option: 'upgrade', words: 'bump ops-tools and tiny-math-rd to node 22' })).code).toBe(201);
+    const p = open(r);
+    expect(p.repoRefs ?? []).toEqual([]);
+    expect(p.sentence!.ask).toBe('Which repository?');
+    // Ten in scope: every one is offered, past the former caps of 4 (question) and 8 (need).
+    const offered = ['r-ops', 'r-tiny', ...ALL.filter((id) => id !== 'r-tiny')];
+    expect(p.question!.choices.map((c) => c.edit.repoRef)).toEqual(offered);
+    expect(p.needs!.find((n) => n.id === 'repo')!.choices!.map((c) => c.value)).toEqual(offered);
+    // A link names its repository, so a linked one and a named one are two: the person picks (studio's rule).
+    const linked = rig({ repos: MANY });
+    expect((await pick(linked, 'migrate', { option: 'upgrade', words: 'Port https://github.com/acme/tiny-math-rd/pull/7 to node 22; billing-api has a similar fix' })).code).toBe(201);
+    expect(open(linked).repoRefs ?? []).toEqual([]);
+    expect(open(linked).question!.choices.slice(0, 2).map((c) => c.edit.repoRef)).toEqual(['r-bill', 'r-tiny']);
+    // A link alone names it clearly.
+    const only = rig({ repos: MANY });
+    expect((await pick(only, 'migrate', { option: 'upgrade', words: 'Port https://github.com/acme/tiny-math-rd/pull/7 to node 22.' })).code).toBe(201);
+    expect(open(only).repoRefs).toEqual(['r-tiny']);
+    // A plain word that is also a repository's name (`docs`) never picks it; a longer token never names a shorter one.
+    for (const words of ['update the docs for node 22', 'bump tiny-math-rd2 to node 22',
+      // An organisation's or a group's link names no repository, even one called like the owner.
+      'Upgrade the items in https://github.com/orgs/acme/projects/7 to node 22', 'Upgrade https://gitlab.com/groups/acme/-/merge_requests to node 22']) {
+      const q = rig({ repos: MANY });
+      expect((await pick(q, 'migrate', { option: 'upgrade', words })).code).toBe(201);
+      expect(open(q).repoRefs ?? []).toEqual([]);
+    }
+  });
+
+  it("a seat's block that names no repository takes the one the person's words name (crew#1791)", async () => {
+    const r = rig({ repos: MANY });
+    const said = { at: 900, kind: 'user', turnId: 't1', owner: true, text: 'In tiny-math-rd, plan the move to node 22', seats: ['claude'] } as const;
+    r.records.push(said as never);
+    const p = await r.svc.resolveDetected({ chatId: CHAT, turnId: 't1', seat: 'claude', records: [said as never],
+      block: { op: 'entry', entry: 'plan-it', confidence: 0.95, sources: [], repos: [] } as never });
+    expect(p).not.toBeNull();
+    expect(p!.repoRefs).toEqual(['r-tiny']);
+  });
+
   it('a hidden card is refused by id and reached by its alias', async () => {
     const r = rig();
     expect((await pick(r, 'test-analysis')).body).toMatchObject({ code: 'card_hidden' });
@@ -619,7 +675,7 @@ describe('codex/pi r1 folds', () => {
   // from the roster and refused primary=claude with a 502; the passage also listed it among the helpers.
   it('a review of a change is led and helped only by seats that did not write it (CJ13)', async () => {
     const asked: Array<[string, string]> = [];
-    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async (repoRef, words) => { asked.push([repoRef, words]); return ['claude']; } });
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async (repoRef, words) => { asked.push([repoRef, words]); return { seats: ['claude'] }; } });
     await pick(r, 'review-change', { words: 'review pull request 9' });
     const p = open(r);
     expect(asked).toEqual([['r-pay', 'review pull request 9']]);
@@ -628,16 +684,32 @@ describe('codex/pi r1 folds', () => {
     const seats = p.sentence!.tokens.find((t) => t.kind === 'seats')!;
     expect(seats.label).not.toMatch(/Claude/);
     expect((seats.swap?.choices ?? []).map((c) => c.label)).toEqual(['pi leads']);
+    // crew#1803: the card says which seat it left off and why.
+    expect(p.sentence!.notes).toContain("Claude left off: authors of this change don't review it");
     expect(r.launcher.launched).toHaveLength(0);
     // A lead swap to the author is not taken; a swap to another reviewer is (and keeps the author out).
     await swap(r, p.pid, { lead: 'claude' }, 'lead-claude');
     expect(open(r).seats?.lead).toBe('codex');
     await swap(r, open(r).pid, { lead: 'pi' }, 'lead-pi');
     expect(open(r).seats).toMatchObject({ lead: 'pi', keys: ['pi', 'codex'] });
+    // The note rides every version and never refuses a seat edit (crew#1803).
+    expect(open(r).sentence!.notes).toContain("Claude left off: authors of this change don't review it");
+  });
+
+  it('a review whose authors crew cannot read names the recent seats it left off and why (crew#1803)', async () => {
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async () => ({ seats: ['claude', 'pi'], unknown: 'could not read PR #9' }) });
+    await pick(r, 'review-change', { words: 'review pull request 9' });
+    const p = open(r);
+    expect(p.seats?.lead).toBe('codex');
+    expect(p.sentence!.notes).toContain("Claude, pi left off: crew could not read who made this change (could not read PR #9), so seats that worked in this repository in the last 90 days don't review it");
+    // No seat left off, no note: the roster is kept as it is.
+    const none = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async () => ({ seats: [], unknown: 'could not read PR #9' }) });
+    await pick(none, 'review-change', { words: 'review pull request 9' });
+    expect(open(none).sentence!.notes.join(' ')).not.toMatch(/left off/);
   });
 
   it('a review whose every seat wrote the change keeps the roster, so the launch decides (CJ13)', async () => {
-    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async () => ['claude', 'codex', 'pi'] });
+    const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async () => ({ seats: ['claude', 'codex', 'pi'] }) });
     await pick(r, 'review-change', { words: 'review pull request 9' });
     expect(open(r).seats?.lead).toBe('claude');
   });
@@ -649,7 +721,7 @@ describe('codex/pi r1 folds', () => {
     const r = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async (_repo, words) => {
       asked.push(words);
       const t = parseReviewTarget(words);
-      return authorsOf[t?.kind === 'pr' ? String(t.number) : 'none'] ?? [];
+      return { seats: authorsOf[t?.kind === 'pr' ? String(t.number) : 'none'] ?? [] };
     } });
     await pick(r, 'review-change', { words: 'review the latest change' });
     expect(open(r).seats).toMatchObject({ lead: 'codex', keys: ['codex', 'pi'] });
@@ -664,7 +736,7 @@ describe('codex/pi r1 folds', () => {
     const r = rig({
       roster: [{ key: 'claude', name: 'Claude' }, { key: 'codex', name: 'Codex' }, { key: 'pi', name: 'pi' }, { key: 'agy', name: 'Antigravity' }],
       repos: [{ id: 'r-pay', name: 'payments-service' }],
-      reviewAuthors: async (_repo, words) => { const t = parseReviewTarget(words); return authorsOf[t?.kind === 'pr' ? String(t.number) : 'none'] ?? []; },
+      reviewAuthors: async (_repo, words) => { const t = parseReviewTarget(words); return { seats: authorsOf[t?.kind === 'pr' ? String(t.number) : 'none'] ?? [] }; },
     });
     await pick(r, 'review-change', { words: 'review the latest change' });
     expect(open(r).seats?.keys).toEqual(['pi', 'agy']);
@@ -676,7 +748,7 @@ describe('codex/pi r1 folds', () => {
     const r = rig({
       roster: [{ key: 'claude', name: 'Claude' }, { key: 'codex', name: 'Codex' }, { key: 'pi', name: 'pi' }, { key: 'agy', name: 'Antigravity' }],
       repos: [{ id: 'r-pay', name: 'payments-service' }],
-      reviewAuthors: async () => ['claude', 'codex'],
+      reviewAuthors: async () => ({ seats: ['claude', 'codex'] }),
     });
     await pick(r, 'review-change', { words: 'review pull request 9' });
     expect(open(r).seats?.keys).toEqual(['pi', 'agy']);
@@ -687,7 +759,7 @@ describe('codex/pi r1 folds', () => {
 
   it('only carried seats that all wrote the new change are picked again; an empty or unavailable choice stays short (CJ13)', async () => {
     const roster = [{ key: 'claude', name: 'Claude' }, { key: 'codex', name: 'Codex' }, { key: 'pi', name: 'pi' }];
-    const r = rig({ roster, repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async () => ['claude'] });
+    const r = rig({ roster, repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async () => ({ seats: ['claude'] }) });
     await pick(r, 'review-change', { words: 'review pull request 9' });
     expect(open(r).seats?.keys).toEqual(['codex', 'pi']);
     // codex and pi leave the roster (not authors): a detail-only revision does not swap in the author.
@@ -701,7 +773,7 @@ describe('codex/pi r1 folds', () => {
     await pick(failing, 'review-change', { words: 'review pull request 9' });
     expect(open(failing).seats?.lead).toBe('claude');
     let calls = 0;
-    const other = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async () => { calls += 1; return ['claude']; } });
+    const other = rig({ repos: [{ id: 'r-pay', name: 'payments-service' }], reviewAuthors: async () => { calls += 1; return { seats: ['claude'] }; } });
     await pick(other, 'migrate', { option: 'upgrade', words: 'bump to node 22' });
     expect(calls).toBe(0);
     expect(open(other).seats?.lead).toBe('claude');
@@ -1510,6 +1582,23 @@ describe('launch admission and recovery', () => {
     expect(p.sentence?.notes.join(' ')).toContain('anthropic');
     expect(p.sentence?.notes.join(' ')).not.toContain('judge is the author of the validator');
     expect(calls).toContainEqual([p.seats!.keys, true]);
+  });
+
+  it('a covered card still says, before launch, which seat was seen sharing a provider and who is left (crew#1673)', async () => {
+    const r = rig({
+      roster: [{ key: 'claude', name: 'Builder' }, { key: 'codex', name: 'Reviewer' }, { key: 'pi', name: 'Helper' }],
+      repos: [{ id: 'r-pay', name: 'payments-service' }],
+      // The engine's covered answer once pi's launch was seen calling claude's provider (core#1594).
+      coverage: () => ({
+        covered: true, singleIdentity: false, benched: [],
+        authors: [{ seat: 'claude', judges: [{ seat: 'codex' }, { seat: 'pi', seenSharing: 'api.anthropic.com:443' }], soleJudge: 'codex', notJudges: [] }],
+        notes: ['pi was seen calling api.anthropic.com:443, the provider claude calls, so only codex can judge claude\'s work.'],
+      }),
+    });
+    await pick(r, 'bug');
+    const notes = open(r).sentence?.notes ?? [];
+    expect(notes).toContain('Helper was seen calling api.anthropic.com:443, as was Builder, so only Reviewer can check Builder\'s work independently.');
+    expect(notes.some((n) => n.startsWith('These seats'))).toBe(false);
   });
 
   it('the card coverage note uses display names and names a benched seat once', async () => {

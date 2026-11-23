@@ -1,7 +1,8 @@
 // DES-KNOWLEDGE-DATA-001 §19 B4 END TO END, on B3b's describe writer: a person tests a real Postgres source (B3b's
-// SourceProjector writes its structure into a REAL wicked-estate-mcp), profiles it (this lane's route), approves one
-// shape and declines another, and the Knowledge map draws exactly the approved one. Stores in a temp dir; skipped
-// without WICKED_ESTATE_MCP_EXE or a Postgres URL.
+// SourceProjector writes its structure into a REAL wicked-estate-mcp) and profiles it: since crew#1625 the shapes are
+// in knowledge at once (the person started it), nothing waits in the review queue, and the Knowledge map draws every
+// one. Profiled again, unchanged, nothing is written again. Stores in a temp dir; skipped without
+// WICKED_ESTATE_MCP_EXE or a Postgres URL.
 
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -175,29 +176,31 @@ for (const target of EXE === '' ? [] : PG_TARGETS) {
       if (base !== undefined) rmSync(base, { recursive: true, force: true });
     }, 60_000);
 
-    it('Test -> Profile -> Approve one, Decline one -> the map draws exactly the approved shape', async () => {
+    it('Test -> Profile -> the shapes are knowledge at once, the queue holds none, the map draws them; again, unchanged', async () => {
       const res = await app.inject({ method: 'POST', url: '/api/v1/sources/support-pg/profile' });
       expect(res.statusCode, res.body).toBe(200);
       const body = res.json() as SourceProfileResponse;
       // Every relation B3b projected is profiled under its own key (the quoted one too).
       expect(body.relations.map((r) => r.key).sort()).toEqual(['support."order-items"', 'support.assignments', 'support.regions', 'support.tickets']);
       expect(body.relations.every((r) => r.error === null)).toBe(true);
-      const id = (rel: string): string => body.proposed.find((p) => p.relation === rel)!.id;
-      // Nothing is knowledge yet.
+      expect(body.written!.map((w) => w.relation).sort()).toEqual(['support."order-items"', 'support.assignments', 'support.regions', 'support.tickets']);
+      expect(body.proposed).toEqual([]);
+      const id = (rel: string): string => body.written!.find((p) => p.relation === rel)!.id;
+      const pending = (await estate('proposal.list', { kind_type: 'knowledge', state: 'pending' })) as { proposals: unknown[] };
+      expect(pending.proposals).toEqual([]);
       const recall = async (): Promise<string> => JSON.stringify(await estate('knowledge.recall', { query: 'support.tickets joins support.regions value-free', visible: [`source:${SID}`, 'repo:escalations'] }));
-      expect(await recall()).not.toContain('value-free: counts in bands');
-      expect(((await estate('proposal.approve', { id: id('support.tickets') })) as { outcome: string }).outcome).toBe('promoted');
-      expect(((await estate('proposal.approve', { id: id('support."order-items"') })) as { outcome: string }).outcome).toBe('promoted');
-      await estate('proposal.reject', { id: id('support.regions') });
+      expect(await recall()).toContain('value-free: counts in bands');
       const m = await buildKnowledgeMap(estate, [{ id: SID, name: 'support-pg', described: true }], ['escalations']);
-      expect(m.nodes.filter((n) => n.kind === 'shape').map((n) => n.proposalId).sort()).toEqual([id('support."order-items"'), id('support.tickets')].sort());
-      expect(JSON.stringify(m)).not.toContain(id('support.regions'));
+      expect(m.nodes.filter((n) => n.kind === 'shape').map((n) => n.proposalId).sort()).toEqual(body.written!.map((w) => w.id).sort());
       expect(m.sources).toEqual([{ id: SID, name: 'support-pg', described: true, inKnowledge: true, tables: 4 }]);
       const joins = m.edges.filter((e) => e.rel === 'joins').map((e) => [m.nodes.find((n) => n.key === e.from)?.label, m.nodes.find((n) => n.key === e.to)?.label]);
-      expect(joins.sort()).toEqual([['support."order-items"', 'support.tickets'], ['support.tickets', 'support.regions']]);
+      expect(joins).toEqual(expect.arrayContaining([['support."order-items"', 'support.tickets'], ['support.tickets', 'support.regions']]));
       expect(m.edges.some((e) => e.rel === 'describes')).toBe(true);
-      expect(await recall()).toContain('value-free: counts in bands');
       expect(proposalNodeId(id('support.tickets'), 'concept')).toContain('kconcept synthetic proposal:');
+      // Profiled again, unchanged: estate's live shapes are the same, so nothing is written or replaced.
+      const again = await app.inject({ method: 'POST', url: '/api/v1/sources/support-pg/profile' });
+      expect(again.statusCode, again.body).toBe(200);
+      expect(again.json()).toMatchObject({ written: [], unchanged: 4, replaced: 0 });
     }, 120_000);
   });
 }

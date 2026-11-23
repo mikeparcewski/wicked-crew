@@ -24,6 +24,7 @@ import { randomUUID } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import { basename, extname, join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
+import { wickedHomeDir } from '../core/wicked-home.js';
 import { z } from '../zod.js';
 import { refuseStaleReplacement } from '../learnings/replacement-lineage.js';
 import { API_PREFIX } from './api-prefix.js';
@@ -76,11 +77,10 @@ export const FileProposalSchema = z.strictObject({
 });
 
 /** Where a capture's materials land: a per-run inbox on the daemon host (the steering-author
- *  pattern — runs read the daemon's filesystem; only paths ride the problem statement). */
+ *  pattern — runs read the daemon's filesystem; only paths ride the problem statement).
+ *  `WICKED_CAPTURE_INBOX_DIR`, else `${WICKED_HOME:-~/.wicked}/capture-inbox` (crew#1802). */
 export function captureInboxDir(runId: string): string {
-  if (process.env.WICKED_CAPTURE_INBOX_DIR) return join(process.env.WICKED_CAPTURE_INBOX_DIR, runId);
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
-  return join(home, '.wicked', 'capture-inbox', runId);
+  return join(wickedHomeDir('WICKED_CAPTURE_INBOX_DIR', 'capture-inbox'), runId);
 }
 
 /**

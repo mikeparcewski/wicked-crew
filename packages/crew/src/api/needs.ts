@@ -39,7 +39,7 @@ import type {
   SystemTarget,
   SystemUnresolvedItem,
 } from '../core/types.js';
-import { HOST_FLOOR_BENCH_COPY, HOST_FLOOR_UNKNOWN_COPY } from './seat-standing.js';
+import { HOST_FLOOR_BENCH_COPY, HOST_FLOOR_UNKNOWN_COPY, isHostFloorBenchCopy } from './seat-standing.js';
 
 const DAY_MS = 86_400_000;
 /** A failed run launched longer ago than this is history to resolve, not a need. */
@@ -232,19 +232,38 @@ function seatsOut(v: SessionView | undefined, clis: readonly SystemCli[]): strin
  */
 function noneReason(clis: readonly SystemCli[]): string {
   // A seat the engine gives no work on this floor keeps its real reason: the shortcuts below would lose it.
-  const hostReason = clis.some((c) => c.stateReason === HOST_FLOOR_BENCH_COPY || c.stateReason === HOST_FLOOR_UNKNOWN_COPY);
+  const hostReason = clis.some((c) => isHostFloorBenchCopy(c.stateReason) || c.stateReason === HOST_FLOOR_UNKNOWN_COPY);
   if (!hostReason && clis.every((c) => c.state === 'unknown')) return 'No helper’s sign-in can be confirmed right now';
   const out = seatsOut(undefined, clis);
   if (!hostReason && out.length === clis.length) return `Every helper is signed out or benched (${out.join(', ')})`;
   const words = clis.map((c) => {
     if (c.stateReason === HOST_FLOOR_UNKNOWN_COPY) return `${c.cli} work eligibility unknown`;
-    if (c.stateReason === HOST_FLOOR_BENCH_COPY) return `${c.cli} not taking work`;
+    if (isHostFloorBenchCopy(c.stateReason)) return `${c.cli} not taking work`;
     if (c.state === 'signed_out' || c.state === 'benched') return seatsOut(undefined, [c])[0]!;
     return `${c.cli} ${c.state === 'unknown' ? 'sign-in not confirmed' : 'not taking work'}`;
   });
-  const onHost = clis.some((c) => c.stateReason === HOST_FLOOR_BENCH_COPY) ? '; on this computer only Claude Code and Codex get work' : '';
+  // crew#1818: a policy-silenced claude says its own reason, once, and the generic line then leaves claude out of it.
+  const policies = [...new Set(clis.flatMap((c) => isHostFloorBenchCopy(c.stateReason) && c.stateReason !== HOST_FLOOR_BENCH_COPY ? [c.stateReason!] : []))];
+  const policy = policies.map((r) => `; ${r}`).join('');
+  const onHost = clis.some((c) => c.stateReason === HOST_FLOOR_BENCH_COPY)
+    ? (policies.length > 0 ? '; on this computer only Codex gets work' : '; on this computer only Claude Code and Codex get work')
+    : '';
   const unread = clis.some((c) => c.stateReason === HOST_FLOOR_UNKNOWN_COPY) ? '; crew could not read which agents get work on this computer' : '';
-  return `No helper is free to take work (${words.join(', ')})${onHost}${unread}`;
+  return `No helper is free to take work (${words.join(', ')})${onHost}${policy}${unread}`;
+}
+
+/**
+ * crew#1818: what can bring a helper back when none can take work: a sign-in (a signable seat), a bench that lifts by
+ * itself (any bench but the host floor's), both, or neither: then the reason above is the remedy. A roster with no
+ * host-floor reason keeps the one sentence it always had.
+ */
+function noneRemedy(clis: readonly SystemCli[], signable: boolean): string {
+  const hostFloor = clis.some((c) => isHostFloorBenchCopy(c.stateReason) || c.stateReason === HOST_FLOOR_UNKNOWN_COPY);
+  const lifts = clis.some((c) => c.state === 'benched' && !isHostFloorBenchCopy(c.stateReason) && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY);
+  if (!hostFloor || (signable && lifts)) return 'Sign a CLI in, or wait for a bench to lift.';
+  if (signable) return 'Sign a CLI in.';
+  if (lifts) return 'Wait for a bench to lift.';
+  return 'Do what the reason says for each helper, or set up another helper on the Helpers page.';
 }
 
 /** Why a held run is held, in a person's words (the denial's category, never its raw text). */
@@ -493,7 +512,7 @@ export function buildNeeds(input: NeedsInput): Needs {
   const anyWorker = input.clis.some((c) => c.workEligible && c.state !== 'signed_out' && c.state !== 'benched');
   if (input.clis.length > 0 && !anyWorker) {
     // A signed-out seat that could take work here after sign-in: never a host-benched one (signing in changes nothing).
-    const signable = input.clis.find((c) => c.canSignIn && c.state === 'signed_out' && c.stateReason !== HOST_FLOOR_BENCH_COPY && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY);
+    const signable = input.clis.find((c) => c.canSignIn && c.state === 'signed_out' && !isHostFloorBenchCopy(c.stateReason) && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY);
     const live = input.runs.filter((r) => eligible(r.runId)).map((r) => ({ runId: r.runId, view: byId.get(r.runId), run: r, severity: 'red' as const, waitedMs: msOf(r.gate?.receivedAt ?? null) }));
     groups.set('cli:none', {
       key: 'cli:none',
@@ -505,7 +524,7 @@ export function buildNeeds(input: NeedsInput): Needs {
         kind: 'prevents',
         title: 'No helper can take work',
         reason: noneReason(input.clis),
-        remedy: 'Sign a CLI in, or wait for a bench to lift.',
+        remedy: noneRemedy(input.clis, signable !== undefined),
         target: { kind: 'cli', cli: (signable ?? input.clis[0]!).cli },
         action: signable !== undefined ? { kind: 'sign_in', label: 'Sign in' } : null,
       }),
@@ -520,10 +539,10 @@ export function buildNeeds(input: NeedsInput): Needs {
   // Fewer than two distinct CLIs signed in (a second seat of one CLI is not a second agent; a benched
   // one is still signed in, and its bench lifts by itself). A job already held for want of a reviewer
   // says it in its own item: one cause, one item.
-  const signedKeys = [...new Set(input.clis.filter((c) => (c.state === 'benched' ? c.stateReason !== HOST_FLOOR_BENCH_COPY && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY : c.state === 'signed_in' && c.workEligible)).map((c) => cliKeyOf(c.cli)))];
+  const signedKeys = [...new Set(input.clis.filter((c) => (c.state === 'benched' ? !isHostFloorBenchCopy(c.stateReason) && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY : c.state === 'signed_in' && c.workEligible)).map((c) => cliKeyOf(c.cli)))];
   if (anyWorker && signedKeys.length < 2 && distinctJudgePair(input.clis) === null && !input.gaps.some((g) => eligible(g.run.runId))) {
     const only = [...new Set(input.clis.filter((c) => c.workEligible && c.state === 'signed_in').map((c) => cliKeyOf(c.cli)))];
-    const signable = input.clis.find((c) => c.canSignIn && c.state === 'signed_out' && !only.includes(cliKeyOf(c.cli)) && c.stateReason !== HOST_FLOOR_BENCH_COPY && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY);
+    const signable = input.clis.find((c) => c.canSignIn && c.state === 'signed_out' && !only.includes(cliKeyOf(c.cli)) && !isHostFloorBenchCopy(c.stateReason) && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY);
     groups.set('cli:one-reviewer', {
       key: 'cli:one-reviewer',
       members: [],
@@ -556,6 +575,8 @@ export function buildNeeds(input: NeedsInput): Needs {
     for (const c of outSeats) {
       const named = needing.filter((r) => onSeat(r, c.cli));
       if (named.length === 0) continue;
+      // crew#1818: a seat the engine gives no work on this floor is not fixed by a sign-in: its reason, and reassign.
+      const benched = isHostFloorBenchCopy(c.stateReason) ? c.stateReason! : null;
       groups.set(`cli:out:${c.cli}`, {
         key: `cli:out:${c.cli}`,
         members: named.map((r) => ({ runId: r.runId, view: byId.get(r.runId), run: r, severity: 'yellow' as const, waitedMs: null })),
@@ -564,11 +585,13 @@ export function buildNeeds(input: NeedsInput): Needs {
           severity: 'yellow',
           source: 'cli',
           kind: 'slows',
-          title: `${c.label} is signed out`,
-          reason: `${plural(ms.length, 'job')} ${ms.length === 1 ? 'has' : 'have'} work on it, and it can’t take that work until it is signed in again`,
-          remedy: `Sign ${c.label} in again, or reassign the step to another agent.`,
+          title: benched === null ? `${c.label} is signed out` : `${c.label} gets no work here`,
+          reason: benched === null
+            ? `${plural(ms.length, 'job')} ${ms.length === 1 ? 'has' : 'have'} work on it, and it can’t take that work until it is signed in again`
+            : `${plural(ms.length, 'job')} ${ms.length === 1 ? 'has' : 'have'} work on it, and ${benched}`,
+          remedy: benched === null ? `Sign ${c.label} in again, or reassign the step to another agent.` : 'Reassign the step to another agent.',
           target: { kind: 'cli', cli: c.cli },
-          action: c.canSignIn ? { kind: 'sign_in', label: 'Sign in' } : null,
+          action: c.canSignIn && benched === null ? { kind: 'sign_in', label: 'Sign in' } : null,
         }),
       });
     }

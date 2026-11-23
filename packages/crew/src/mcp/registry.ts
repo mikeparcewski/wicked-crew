@@ -685,7 +685,7 @@ export class McpRegistry {
    */
   async patchTool(
     subject: string,
-    patch: { enabled?: boolean | undefined; classOverride?: McpToolClass | null | undefined; disclosure?: ToolDisclosureClass | null | undefined; readAccepted?: boolean | undefined },
+    patch: { enabled?: boolean | undefined; classOverride?: McpToolClass | null | undefined; disclosure?: ToolDisclosureClass | null | undefined; readAccepted?: boolean | undefined; expectedSchemaHash?: string | undefined },
     opts: { mayGrantWrite?: boolean; mayReviewDisclosure?: boolean; mayAcceptRead?: boolean } = {},
   ): Promise<{ tool: McpTool; grantedWrite: boolean }> {
     const parts = parseMcpSubject(subject);
@@ -695,6 +695,10 @@ export class McpRegistry {
       const s = this.find(file.servers, parts.server);
       const t = s.tools.find((x) => x.name === parts.tool);
       if (t === undefined) throw new McpRegistryError(404, 'unknown_tool', `no tool ${subject}`);
+      // crew#1788: the patch was made against the schema the person saw; another save in between changed it.
+      if (patch.expectedSchemaHash !== undefined && t.schemaHash !== patch.expectedSchemaHash) {
+        throw new McpRegistryError(409, 'schema_changed', `${subject}'s saved schema changed since it was shown: read the tool again and review the new schema`);
+      }
       // (DES-KNOWLEDGE-DATA-001 §5.1) A disclosure class is reviewed by a human operator, against the schema the
       // operator saved; clearing one (the tool is offered to no agent) needs no review.
       if (patch.disclosure != null) {

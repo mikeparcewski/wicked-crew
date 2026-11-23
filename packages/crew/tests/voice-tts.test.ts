@@ -375,6 +375,25 @@ describe('tts text and synthesis', () => {
     expect(ttsWavProblem(wav())).toBeNull();
   });
 
+  it('refuses a truncated chunk header at the tail and an odd-sized chunk missing its pad byte (crew#1559)', () => {
+    // An extra chunk after the audio, as a writer appends a LIST chunk; the RIFF size always matches the length.
+    const withTail = (tail: Buffer): Buffer => {
+      const b = Buffer.concat([wav(), tail]);
+      b.writeUInt32LE(b.length - 8, 4);
+      return b;
+    };
+    const chunk = (id: string, body: Buffer, pad: boolean): Buffer => {
+      const h = Buffer.alloc(8);
+      h.write(id, 0, 'ascii');
+      h.writeUInt32LE(body.length, 4);
+      return Buffer.concat([h, body, pad && body.length % 2 === 1 ? Buffer.alloc(1) : Buffer.alloc(0)]);
+    };
+    expect(ttsWavProblem(withTail(Buffer.from('LIS')))).toBe('the file ends inside a chunk header');
+    expect(ttsWavProblem(withTail(chunk('LIST', Buffer.from('abc'), false)))).toBe('the last chunk is missing its pad byte');
+    expect(ttsWavProblem(withTail(chunk('LIST', Buffer.from('abc'), true)))).toBeNull();
+    expect(ttsWavProblem(withTail(chunk('LIST', Buffer.from('ab'), true)))).toBeNull();
+  });
+
   it('caps what piper may print in bytes, not characters', async () => {
     // a child that writes 30,000 three-byte characters on stderr (90,000 bytes)
     const spawn = vi.fn(() => {
@@ -812,6 +831,65 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
     await s.installDone();
   });
 
+  it('a double click on install probes once: the second waits for the first and reads its outcome (crew#1559)', async () => {
+    let release!: (p: PythonInfo) => void;
+    const gate = new Promise<PythonInfo>((r) => { release = r; });
+    const probe = vi.fn(() => gate);
+    const s = service({ spawn: installSpawn().spawn, probe });
+    const first = s.startInstall([VOICE_A.id]);
+    const second = s.startInstall([VOICE_A.id]).catch((e: unknown) => e);
+    await new Promise((r) => setTimeout(r, 20));
+    release(PY);
+    expect(await first).toEqual({ started: true });
+    expect(await second).toMatchObject({ status: 409, code: 'voice_install_running' });
+    // Each admission probes fresh (`pickPython(true)`): before the fix both probed, side by side.
+    expect(probe).toHaveBeenCalledTimes(1);
+    await s.installDone();
+  });
+
+  it('a DELETE during the first install probe refuses the installs queued behind it too: nothing installs after it (crew#1559)', async () => {
+    // The first probe hangs until the removal aborts it, as a real probe child is killed.
+    const probe = vi.fn().mockImplementationOnce((_name: string, _dir: string, signal?: AbortSignal) => new Promise<PythonInfo | null>((r) => {
+      signal?.addEventListener('abort', () => r(null));
+    })).mockImplementation(() => PY);
+    const sp = installSpawn();
+    const s = service({ spawn: sp.spawn, probe });
+    const first = s.startInstall([VOICE_A.id]).catch((e: unknown) => e);
+    const second = s.startInstall([VOICE_A.id]).catch((e: unknown) => e);
+    await new Promise((r) => setTimeout(r, 20));
+    await s.remove();
+    expect(await first).toMatchObject({ status: 409, code: 'voice_tts_missing' });
+    // Before the fence the queued request reached its turn after the removal and installed again.
+    expect(await second).toMatchObject({ status: 409, code: 'voice_tts_missing' });
+    expect(sp.calls).toEqual([]);
+    expect(existsSync(join(dir, 'tts', 'engine'))).toBe(false);
+    // A request made after the removal is a new ask and installs.
+    expect(await s.startInstall([VOICE_A.id])).toEqual({ started: true });
+    await s.installDone();
+  });
+
+  it('status during a removal waits for it and reports the machine, not "being removed" (crew#1559)', async () => {
+    const st = stubbornSpawn();
+    try {
+      const s = service({ spawn: st.spawn });
+      installed(s);
+      const speaking = s.speak('hello', VOICE_A.id).catch(() => undefined);
+      await new Promise((r) => setTimeout(r, 60));
+      const removal = s.remove();
+      let settled = false;
+      const status = s.status().then((b) => { settled = true; return b; });
+      await new Promise((r) => setTimeout(r, 40));
+      // The removal still waits for its synthesis child: status does not answer the transient.
+      expect(settled).toBe(false);
+      st.release();
+      await Promise.all([speaking, removal]);
+      const body = await status;
+      expect(body.supported).toEqual({ ok: true, reason: null });
+      expect(body.python.found).toBe(true);
+      expect(body.engine.found).toBe(false);
+    } finally { st.release(); st.killSpy.mockRestore(); }
+  });
+
   it('revision 2: DELETE invalidates a pending probe and status starts a new round', async () => {
     let release!: (p: PythonInfo) => void;
     const gate = new Promise<PythonInfo>((r) => { release = r; });
@@ -894,8 +972,18 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
       expect(st.killed).toContainEqual([-777, 'SIGKILL']);
       expect(removed).toBe(false);
       st.release();
-      await Promise.all([pending, removal]);
-      expect(st.started()).toBe(1);
+      await removal;
+      // crew#1559 (5): the status read that the removal cut short probes again once it is done, rather than answer
+      // the aborted probe as "no Python".
+      let answered = false;
+      void pending.then(() => { answered = true; });
+      // Each name it tries is another stubborn child: close them one by one until the read answers.
+      for (let i = 0; i < 40 && !answered; i += 1) {
+        await new Promise((r) => setTimeout(r, 5));
+        st.release();
+      }
+      await pending;
+      expect(st.started()).toBeGreaterThan(1);
     } finally { st.release(); st.killSpy.mockRestore(); }
   });
 
@@ -920,7 +1008,7 @@ describe('tts revision: isolation, deadlines, cleanup and verification', () => {
     await s.installDone();
     expect((await s.status()).install).toBeNull();
     await s.speak('hello', VOICE_A.id);
-    expect(calls.filter((c) => c.args[1] === '-c')).toHaveLength(2);
+    expect(calls.filter((c) => c.args[1] === '-c')).toHaveLength(1); // one probe: the install uses startInstall's (crew#1559)
     for (const kind of ['venv', 'pip', 'piper']) expect(calls.some((c) => c.args.includes(kind))).toBe(true);
     for (const c of calls) {
       expect(c.cwd).toBe(resolve(dir));
@@ -1176,5 +1264,63 @@ describe('voice suite hygiene', () => {
     await s.speak('hello', VOICE_A.id);
     await s.sample(VOICE_A.id);
     expect(readdirSync(process.cwd()).sort()).toEqual(before);
+  });
+});
+
+describe('crew#1559: install, probe and platform hardening', () => {
+  it('item 2: an install uses the probe it was admitted on, and never probes a second time', async () => {
+    const probe = vi.fn((cmd: string) => (cmd === 'python3' ? PY : null));
+    const inst = installSpawn();
+    const s = service({ spawn: inst.spawn, probe });
+    expect(await s.startInstall([VOICE_A.id])).toEqual({ started: true });
+    await s.installDone();
+    expect((await s.status()).install).toBeNull();
+    expect(probe.mock.calls.filter(([cmd]) => cmd === 'python3')).toHaveLength(1);
+    expect(inst.calls.filter((c) => c.args.includes('venv'))).toHaveLength(1);
+  });
+
+  it('item 2: a launch whose signal is already aborted is refused before anything is spawned', async () => {
+    const inst = installSpawn();
+    const ac = new AbortController();
+    ac.abort();
+    expect(await probePython('python3', dir, { signal: ac.signal, spawn: inst.spawn })).toBeNull();
+    expect(inst.spawn).not.toHaveBeenCalled();
+  });
+
+  it('item 3: the glibc is read once per process, not on every status', async () => {
+    vi.resetModules();
+    const fresh = await import('../src/voice/tts.js');
+    const report = vi.spyOn(process.report, 'getReport');
+    try {
+      const s = new fresh.TtsService({ dir, locksDir: locks, platform: 'linux', env: { PATH: '/usr/bin' }, probe: () => PY, voices: [VOICE_A] });
+      await s.status();
+      await s.status();
+      await new fresh.TtsService({ dir, locksDir: locks, platform: 'linux', env: { PATH: '/usr/bin' }, probe: () => PY, voices: [VOICE_A] }).status();
+      expect(report).toHaveBeenCalledTimes(1);
+    } finally {
+      report.mockRestore();
+    }
+  });
+
+  it('item 6: the probe runs with the service env, not the daemon process env', async () => {
+    const inst = installSpawn();
+    const s = new TtsService({ dir, locksDir: locks, platform: 'linux', glibc: () => '2.35', spawn: inst.spawn, voices: [VOICE_A], env: { PATH: '/svc/only/bin', CREW_1559_MARK: 'svc' } });
+    await s.pickPython();
+    const probes = inst.calls.filter((c) => c.args[0] === '-I' && c.args[1] === '-c');
+    expect(probes.length).toBeGreaterThan(0);
+    for (const c of probes) {
+      expect(c.env['PATH']).toBe('/svc/only/bin');
+      expect(c.env['CREW_1559_MARK']).toBe('svc');
+    }
+  });
+
+  it('item 6: WICKED_CREW_PYTHON is trimmed before it is tested and resolved', async () => {
+    const probe = vi.fn((cmd: string) => (cmd === '/x/mine' ? { ...PY, path: '/x/mine' } : null));
+    const picked = await service({ probe, env: { PATH: '/usr/bin', WICKED_CREW_PYTHON: '  /x/mine \n' } }).pickPython();
+    expect(probe.mock.calls.map(([cmd]) => cmd)).toEqual(['/x/mine']);
+    expect(picked.python?.path).toBe('/x/mine');
+    const named = vi.fn((cmd: string) => (cmd === 'python3.12' ? PY : null));
+    await service({ probe: named, env: { PATH: '/usr/bin', WICKED_CREW_PYTHON: ' python3.12 ' } }).pickPython();
+    expect(named.mock.calls.map(([cmd]) => cmd)).toEqual(['python3.12']);
   });
 });
