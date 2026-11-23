@@ -15,7 +15,7 @@
  */
 import { createHash } from 'node:crypto';
 
-import { coverageNote, type JudgeCoverage } from '../core/assurance.js';
+import { coverageNote, sharingNotes, type JudgeCoverage } from '../core/assurance.js';
 import { SEAT_STANDING_FIELDS } from '../core/engine-roster.js';
 import type {
   ArtifactProposal,
@@ -545,10 +545,12 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     swap: ctx.chat.repos.length > 1 ? { choices: ctx.chat.repos.filter((x) => x.id !== repo.id).slice(0, 4).map((x) => ({ label: x.name, edit: { repoRef: x.id } })) } : null,
   });
   const selfSeated = r.workflow !== null && SELF_SEATED.has(r.workflow);
-  const disclosure = !short && !selfSeated
-    ? coverageNote(ctx.coverage?.(seats.keys, repo !== null) ?? null, (key) => ctx.roster.find((s) => s.key === key)?.name ?? key) ?? judgeDisclosure(r, seats.keys.length)
-    : null;
+  const nameOfSeat = (key: string): string => ctx.roster.find((s) => s.key === key)?.name ?? key;
+  const coverage = !short && !selfSeated ? ctx.coverage?.(seats.keys, repo !== null) ?? null : null;
+  const disclosure = !short && !selfSeated ? coverageNote(coverage, nameOfSeat) ?? judgeDisclosure(r, seats.keys.length) : null;
   if (disclosure !== null) notes.push(disclosure);
+  // (crew#1673) A covered card still says, before launch, which seats were seen sharing a provider (core#1594).
+  notes.push(...sharingNotes(coverage, nameOfSeat));
   // Lead swaps come from the pool work is drawn from; the row shows only when it offers a choice (crew#1590).
   const swapChoices = (ctx.pool ?? ctx.roster).filter((x) => x.key !== seats.lead).slice(0, 4).map((x) => ({ label: `${x.name} leads`, edit: { lead: x.key } }));
   const seatsTok = t({

@@ -72,7 +72,8 @@
  *                                       against the deployment policy: 400 with the policy's code); a `sql`
  *                                       Postgres body is saved as the same document (descriptor version 2)
  *   POST   /mcp/servers                 also `disclosures` and `acceptedReads`: human operator only
- *   PATCH  /mcp/tools/:subject          also `disclosure` and `readAccepted`: read acceptance/withdrawal is human operator only
+ *   PATCH  /mcp/tools/:subject          also `disclosure` and `readAccepted`: read acceptance/withdrawal is human operator only;
+ *                                       `expectedSchemaHash` binds the patch to the schema the person saw (409 `schema_changed`)
  *   GET    /mcp/registry/generations    the kept generations (human operator only)
  *   POST   /mcp/registry/restore        `{generation}`: restore one, failing closed (human operator only)
  *
@@ -286,7 +287,9 @@ export const SaveMcpServerSchema = z.strictObject({
   disclosures: record(z.string().min(1).max(256), disclosureClass).refine((d) => Object.keys(d).length <= 512, { error: 'at most 512 tools' }).optional(),
 });
 export const PatchMcpServerSchema = z.strictObject({ enabled: z.boolean() });
-export const PatchMcpToolSchema = z.strictObject({ enabled: z.boolean().optional(), classOverride: toolClass.nullable().optional(), disclosure: disclosureClass.nullable().optional(), readAccepted: z.boolean().optional() })
+// crew#1788: `expectedSchemaHash` is the saved schema the person saw (the row's `schemaHash`); a patch against any other
+// one is refused 409 `schema_changed` in the same mutation, so a tick never accepts a schema nobody reviewed.
+export const PatchMcpToolSchema = z.strictObject({ enabled: z.boolean().optional(), classOverride: toolClass.nullable().optional(), disclosure: disclosureClass.nullable().optional(), readAccepted: z.boolean().optional(), expectedSchemaHash: z.string().regex(/^[0-9a-f]{64}$/u, 'a schema hash is 64 lowercase hex characters').optional() })
   .refine((p) => p.enabled !== undefined || p.classOverride !== undefined || p.disclosure !== undefined || p.readAccepted !== undefined, { error: 'set enabled, classOverride, disclosure, readAccepted or a combination' });
 /** Unknown query parameters (a cache-buster) are ignored, as they always were. */
 export const McpServersQuerySchema = z.object({ view: z.enum(['full', 'agent']).optional() });
