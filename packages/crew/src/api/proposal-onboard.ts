@@ -235,10 +235,12 @@ export interface OnboardTurn {
  *  is never where a project name comes from. */
 const ADDRESS_CHARS = /[@:/\\?#&=]/u;
 
-/** A credential's value: a quoted string (to its closing quote, or the end of the line when it has none) or one word. */
-const SECRET_VALUE = String.raw`(?:"[^"\n]*"?|'[^'\n]*'?|“[^”\n]*”?|\S+)`;
-/** One `key=value` parameter of an Authorization header (`username="Alice Smith"`, `nonce=abc`). */
-const AUTH_PARAM = String.raw`[\w-]+=(?:"[^"\n]*"?|[^\s,]*)`;
+/** A quoted string to its closing quote (or the end of the line when it has none); a backslash escapes the next char. */
+const QUOTED = String.raw`(?:"(?:[^"\\\n]|\\.)*"?|'(?:[^'\\\n]|\\.)*'?|“[^”\n]*”?)`;
+/** A credential's value: a quoted string or one word. */
+const SECRET_VALUE = String.raw`(?:${QUOTED}|\S+)`;
+/** One `key=value` parameter of an Authorization header (`username="Alice Smith"`, `nonce = abc`). */
+const AUTH_PARAM = String.raw`[\w-]+[ \t]*=[ \t]*(?:${QUOTED}|[^\s,]+)`;
 
 /**
  * (crew#1790) Spans of the person's words that carry a credential even though no single word in them holds an address
@@ -299,7 +301,8 @@ function withoutQuotedPaths(words: string): string {
 export function creatableName(name: string, words: string): string | null {
   if (!CreateProjectSchema.shape.name.safeParse(name).success || ADDRESS_CHARS.test(name)) return null;
   // crew#1790: a credential or a quoted path pasted as several words is set aside whole first.
-  const said = withoutQuotedPaths(CREDENTIAL_SPANS.reduce((text, span) => text.replace(span, ' \u0000 '), words));
+  // Quoted paths first, on the words as written, so a credential keyword inside a path cannot eat its closing quote.
+  const said = CREDENTIAL_SPANS.reduce((text, span) => text.replace(span, ' \u0000 '), withoutQuotedPaths(words));
   // xreview r1: a token inside an address the person pasted (`https://u:TOKEN@host/acme/x`) is not a name they said.
   // A word's own sentence punctuation (`Team?`, `Team:`) does not make it one.
   const plain = said.split(/\s+/u).map((w) => (ADDRESS_CHARS.test(w.replace(/[?:.,;!)"'’”]+$/u, '')) ? '\u0000' : w)).join(' ');

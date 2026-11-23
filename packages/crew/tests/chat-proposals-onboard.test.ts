@@ -430,6 +430,11 @@ describe('onboard proposals', () => {
       ['password = "correct horse battery staple"', 'horse battery'],
       ['Authorization: Digest username="Alice Private Client", realm="crew", nonce="N"', 'Private Client'],
       ['my checkout is ‘/home/me/Mike’s Private Client Files/repo’', 'Private Client'],
+      // xreview r2: a credential keyword inside a quoted path, an escaped quote inside a value, spaces around a parameter's `=`.
+      ['my checkout is "/home/me/Accounts Private Client Files/Bearer token/repo"', 'Private Client'],
+      ['{"password": "correct \\"Private Client credential\\" staple"}', 'Private Client'],
+      ['Authorization: Digest username = "Alice Private Client", realm="crew"', 'Private Client'],
+      ['Authorization: Digest username= "Alice Private Client", realm="crew"', 'Private Client'],
     ] as const).entries()) {
       const c = (await propose(r, `n${i}`, chatWith(r, `n${i}`, { words }), { onboard: { url: URL, project } }))!;
       expect(c).toMatchObject({ blocked: expect.stringMatching(/^no project has the name given \(projects here: /u), onboard: { projectId: null } });
