@@ -25,7 +25,7 @@ import { lstat, readFile, statfs, stat } from 'node:fs/promises';
 import { cpus, homedir, loadavg } from 'node:os';
 import { delimiter, join } from 'node:path';
 
-import { HOST_FLOOR_BENCH_COPY, HOST_FLOOR_UNKNOWN_COPY } from './seat-standing.js';
+import { HOST_FLOOR_UNKNOWN_COPY, hostFloorBenchCopy } from './seat-standing.js';
 
 import type {
   AcpCliDiagnostics,
@@ -1131,7 +1131,7 @@ function hostBenched(seat: RosterSeatLike): boolean {
 
 /** The real reason the engine gives the seat no work on this floor: the bench, or the bench read failing closed. */
 function hostFloorReason(seat: RosterSeatLike): string | null {
-  if (typeof seat.host_floor_bench === 'string' && seat.host_floor_bench !== '') return HOST_FLOOR_BENCH_COPY;
+  if (typeof seat.host_floor_bench === 'string' && seat.host_floor_bench !== '') return hostFloorBenchCopy(seat.host_floor_bench);
   if (typeof seat.host_floor_unknown === 'string' && seat.host_floor_unknown !== '') return HOST_FLOOR_UNKNOWN_COPY;
   return null;
 }

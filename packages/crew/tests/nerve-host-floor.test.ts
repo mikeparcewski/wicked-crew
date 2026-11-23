@@ -2,9 +2,10 @@
 // engine gives it work on this floor (a host-floor bench is not work).
 
 import { describe, expect, it } from 'vitest';
+import type { SessionView, SystemRun } from 'wicked-crew-api-types';
 
 import { buildNeeds } from '../src/api/needs.js';
-import { HOST_FLOOR_BENCH_COPY, HOST_FLOOR_UNKNOWN_COPY } from '../src/api/seat-standing.js';
+import { HOST_FLOOR_BENCH_COPY, HOST_FLOOR_POLICY_COPY, HOST_FLOOR_SYSTEM_POLICY_COPY, HOST_FLOOR_UNKNOWN_COPY } from '../src/api/seat-standing.js';
 import { buildClis, judgeGaps, type RosterSeatLike } from '../src/api/system-snapshot.js';
 
 const NOW = Date.parse('2026-11-15T12:00:00Z');
@@ -191,5 +192,69 @@ describe('crew#1564 review r7: a quota-benched seat still counts toward a second
   it('the same roster with codex host-benched instead does give the second-agent item', () => {
     const a = attention([signedIn('claude'), signedIn('codex', { ...BENCH, council_eligible: false })]);
     expect(a.map((i) => i.id)).toEqual(['cli:one-reviewer']);
+  });
+});
+
+// crew#1818: wicked-core `managed_hooks_only_refusal_reason` (src/execute_wrapped.rs), both remedies as the engine words them.
+const POLICY = (remedy: string) =>
+  `claude can't be governed on the wrapped path on this machine: settings in /etc/claude-code/managed-settings.json silence the engine's gate hook (\`allowManagedHooksOnly: true\` or \`disableAllHooks: true\`); refusing the governed unit rather than running it ungoverned. ${remedy} (core#653, C5)`;
+const SIGN_IN = POLICY("It is organization policy that came with the seat's sign-in: run governed work on the container floor (WICKED_SEAT_FLOOR=container), whose claude seat does not carry it, or route it to another seat");
+const SYSTEM = POLICY("It is this machine's system policy for Claude Code: route governed work to another seat, or ask whoever manages this machine to change it");
+
+describe('crew#1818: a policy-silenced claude on the host floor', () => {
+  const clisOf = (roster: RosterSeatLike[]) => buildClis({ roster, acp: {}, seatGovernance: [], containerFloor: false, hostBoundary: null, week: null });
+
+  it('reads its own reason, by where the policy lives, never the generic host-floor sentence', () => {
+    const [signIn, system] = clisOf([signedIn('claude', { host_floor_bench: SIGN_IN }), signedIn('claude', { host_floor_bench: SYSTEM })]);
+    expect(signIn).toMatchObject({ state: 'signed_in', stateReason: HOST_FLOOR_POLICY_COPY, workEligible: false });
+    expect(system).toMatchObject({ state: 'signed_in', stateReason: HOST_FLOOR_SYSTEM_POLICY_COPY, workEligible: false });
+    expect(HOST_FLOOR_POLICY_COPY).toContain('WICKED_SEAT_FLOOR=container');
+    // A system policy binds claude in a container too: no container remedy.
+    expect(HOST_FLOOR_SYSTEM_POLICY_COPY).not.toContain('WICKED_SEAT_FLOOR=container');
+  });
+
+  it('the needs list counts it as not taking work and says why, not "only Claude Code and Codex get work"', () => {
+    const a = attention([signedIn('claude', { host_floor_bench: SIGN_IN }), out('codex')]);
+    expect(a[0]).toMatchObject({ id: 'cli:none', target: { kind: 'cli', cli: 'codex' } });
+    expect(a[0]!.reason).toContain('claude not taking work');
+    expect(a[0]!.reason).toContain(HOST_FLOOR_POLICY_COPY);
+    expect(a[0]!.reason).not.toContain('only Claude Code and Codex');
+    // A signed-out policy-silenced claude is no sign-in target: signing in does not lift the policy.
+    const b = attention([out('claude', { host_floor_bench: SIGN_IN }), signedIn('opencode', BENCH)]);
+    expect(b[0]).toMatchObject({ id: 'cli:none', action: null });
+  });
+
+  it('a mixed roster never says claude gets work beside its policy, and offers no remedy that cannot lift it (xreview r1)', () => {
+    for (const reason of [SIGN_IN, SYSTEM]) {
+      const a = attention([signedIn('claude', { host_floor_bench: reason }), out('codex'), signedIn('opencode', BENCH)]);
+      expect(a[0]!.id).toBe('cli:none');
+      expect(a[0]!.reason).not.toContain('only Claude Code and Codex');
+      expect(a[0]!.reason).toContain('on this computer only Codex gets work');
+      // codex can be signed in; no bench here lifts by itself (fold check).
+      expect(a[0]!.remedy).toBe('Sign a CLI in.');
+    }
+    // A quota bench lifts by itself: waiting is offered, a sign-in is not (nothing to sign in).
+    const quota = { kind: 'quota_exhausted', reason: 'usage limit', lifts_at: '2099-11-15T14:00:00Z', last_at: '2026-11-15T11:00:00Z', runs: 1, source: 'engine' };
+    const waiting = attention([signedIn('claude', { host_floor_bench: SYSTEM }), signedIn('codex', { recent_bench: quota })]);
+    expect(waiting[0]).toMatchObject({ id: 'cli:none', remedy: 'Wait for a bench to lift.' });
+    const alone = attention([signedIn('claude', { host_floor_bench: SYSTEM })]);
+    expect(alone[0]).toMatchObject({ id: 'cli:none', action: null });
+    expect(alone[0]!.remedy).not.toMatch(/Sign a CLI in|wait for a bench/);
+  });
+
+  it('a job whose next step is on a signed-out, policy-benched claude says the policy and offers reassignment, not sign-in (xreview r1)', () => {
+    const clis = clisOf([out('claude', { host_floor_bench: SYSTEM }), signedIn('codex'), signedIn('pi')]);
+    const view = {
+      session: { id: 'j', title: 'job j', problem: 'job j', status: 'executing', workflow_id: 'feature', repo_ref: 'repo-a', clis: ['claude', 'codex'], archived_at: null, created_at: Math.floor((NOW - 3_600_000) / 1000), delivery: 'none' },
+      units: [
+        { id: 'j:u1', session_id: 'j', ord: 1, status: 'done', assigned_cli: 'codex', phase_ref: null, stage: 'build' },
+        { id: 'j:u2', session_id: 'j', ord: 2, status: 'pending', assigned_cli: 'claude', phase_ref: null, stage: 'review' },
+      ],
+    } as unknown as SessionView;
+    const run = { runId: 'j', title: 'job j', status: 'executing', liveness: 'working', reason: '', phase: null, unitOrd: 2, seat: 'claude', lastEventAt: null, evidence: 'relay', quietForMs: 0, quietAfterMs: 300_000, stallAfterMs: 900_000 } as SystemRun;
+    const items = buildNeeds({ now: NOW, views: [view], runs: [run], infra: [], clis, gaps: judgeGaps([{ view, run }], clis), infraHoldsLive: () => false }).attention;
+    const item = items.find((i) => i.id === 'cli:out:claude')!;
+    expect(item).toMatchObject({ title: 'claude gets no work here', remedy: 'Reassign the step to another agent.', action: null });
+    expect(item.reason).toContain(HOST_FLOOR_SYSTEM_POLICY_COPY);
   });
 });
