@@ -245,6 +245,59 @@ describe('power mode routes', () => {
     expect(h.adapter.answerPowerPause).toHaveBeenCalledWith('p1', 'continue', null, 'human-1');
   });
 
+  // crew#1739: a pause answer names the pause it answers. The pause is the engine's own `PowerPause`
+  // (wicked-core src/power.rs:282, camelCase: at, checkpoint, reasons, recommended).
+  describe('a pause answer carries the pause it answers (crew#1739)', () => {
+    const OPEN = { at: 1_763_800_000_000, checkpoint: 3, reasons: ['the diff spans two products'], recommended: 'split' };
+    async function paused(pause: typeof OPEN | null = OPEN) {
+      const h = await harness();
+      h.adapter['sessionsDetail']!.mockResolvedValue([runView('p1', { ...POWER, pause }), runView('phased', undefined)]);
+      return h;
+    }
+    const answer = (h: Harness, payload: Record<string, unknown>) =>
+      h.app.inject({ method: 'POST', url: '/api/v1/runs/p1/power/pause', headers: HUMAN, payload: { decision: 'continue', ...payload } });
+
+    it('refuses an answer for an earlier pause with 409 and the pause open now, and changes nothing', async () => {
+      const h = await paused();
+      for (const named of [{ checkpoint: 2 }, { at: OPEN.at - 1 }, { checkpoint: 3, at: OPEN.at - 1 }]) {
+        const r = await answer(h, named);
+        expect(r.statusCode).toBe(409);
+        expect(r.json()).toMatchObject({ error: 'Pause changed', open: { checkpoint: 3, at: OPEN.at } });
+        expect(r.json().reason).toContain('checkpoint 3');
+      }
+      expect(h.adapter.answerPowerPause).not.toHaveBeenCalled();
+    });
+
+    it('refuses an answer naming a pause when none is open (it was answered elsewhere)', async () => {
+      const h = await paused(null);
+      const r = await answer(h, { checkpoint: 3, at: OPEN.at });
+      expect(r.statusCode).toBe(409);
+      expect(r.json()).toMatchObject({ error: 'Pause changed', open: null });
+      expect(h.adapter.answerPowerPause).not.toHaveBeenCalled();
+    });
+
+    it('answers the named open pause and says which pause it answered', async () => {
+      const h = await paused();
+      const r = await answer(h, { checkpoint: 3, at: OPEN.at });
+      expect(r.statusCode).toBe(200);
+      expect(r.json()).toMatchObject({ runId: 'p1', answered: { checkpoint: 3, at: OPEN.at } });
+      expect(h.adapter.answerPowerPause).toHaveBeenCalledWith('p1', 'continue', null, 'human-1');
+    });
+
+    it('still answers an unnamed answer, and names the pause it consumed', async () => {
+      const h = await paused();
+      const r = await answer(h, {});
+      expect(r.statusCode).toBe(200);
+      expect(r.json().answered).toEqual({ checkpoint: 3, at: OPEN.at });
+    });
+
+    it('rejects a malformed identity as 400', async () => {
+      const h = await paused();
+      for (const bad of [{ checkpoint: 0 }, { checkpoint: 1.5 }, { checkpoint: '3' }, { at: -1 }]) expect((await answer(h, bad)).statusCode).toBe(400);
+      expect(h.adapter.answerPowerPause).not.toHaveBeenCalled();
+    });
+  });
+
   it('answers 503 for the bus page when the daemon has no bus', async () => {
     const h = await harness();
     expect((await h.app.inject({ method: 'GET', url: '/api/v1/runs/p1/bus', headers: HUMAN })).statusCode).toBe(503);
