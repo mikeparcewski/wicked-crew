@@ -5,9 +5,10 @@
  * daemon's Azure DevOps credential when it holds one (`AZURE_DEVOPS_EXT_PAT`, or the `CREW_ADO_*` service principal),
  * the way the deliver phase pushes: the deliver helper mints the header (`node ado.mjs header`), and it reaches this
  * ONE `git clone` through `GIT_CONFIG_*` in the child's environment, scoped to the repository's canonical URL
- * (`http.<url>.extraHeader`) after an empty entry resets any ambient extra header. Redirects are refused, git's own
- * credential helpers are off for it, and only the URL's own protocol is allowed. The header is never in argv, never
- * written to the clone's `.git/config` (environment config is not persisted) and never in an error: a message that
+ * (`http.<url>.extraHeader`) after an empty entry resets any ambient extra header. Redirects are refused, hooks are off,
+ * git's own credential helpers are off for it, the raw credential variables are not in its environment, and only the
+ * URL's own protocol is allowed. The header is never in argv, never written to the clone's `.git/config` (environment
+ * config is not persisted) and never in an error: a message that
  * could carry it is redacted. The clone is of the canonical URL, so the registered `origin` carries no userinfo.
  */
 
@@ -41,6 +42,43 @@ function redact(text: string, secrets: readonly string[]): string {
   return out.replace(/(authorization\s*:\s*)(basic|bearer)\s+\S+/gi, '$1$2 [REDACTED]');
 }
 
+/** Where git looks for hooks when it must run none (an empty place: git finds no hook in it). */
+const NO_HOOKS = process.platform === 'win32' ? 'NUL' : '/dev/null';
+
+/** The raw Azure DevOps credential variables: the header is minted from them, so the clone's git never needs them. */
+const ADO_RAW_ENV = [ADO_PAT_ENV, ...ADO_SP_ENV] as const;
+
+/**
+ * The environment of the ONE credential-bearing `git clone`: the header scoped to the repository's canonical URL (after
+ * an empty entry resets any ambient extra header, globally and for that URL), redirects refused globally AND for that
+ * URL (an ambient `http.<url>.followRedirects` outranks the global key), hooks off (a hook a host's `core.hooksPath` or
+ * template names would run inside this environment), git's credential prompts off, only the URL's own protocol allowed,
+ * and the daemon's raw credential variables removed (the header is minted already). Exported for its test.
+ */
+export function adoCloneEnv(base: NodeJS.ProcessEnv, gitUrl: string, header: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base };
+  for (const n of ADO_RAW_ENV) delete env[n];
+  const config: Array<[string, string]> = [
+    ['http.extraHeader', ''],
+    [`http.${gitUrl}.extraHeader`, ''],
+    [`http.${gitUrl}.extraHeader`, `Authorization: ${header}`],
+    ['http.followRedirects', 'false'],
+    [`http.${gitUrl}.followRedirects`, 'false'],
+    ['core.hooksPath', NO_HOOKS],
+  ];
+  for (const k of Object.keys(env)) if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(k)) delete env[k];
+  // An inherited GIT_CONFIG_PARAMETERS is read after GIT_CONFIG_COUNT and could restore another header.
+  env['GIT_CONFIG_PARAMETERS'] = '';
+  env['GIT_CONFIG_COUNT'] = String(config.length);
+  config.forEach(([k, v], i) => {
+    env[`GIT_CONFIG_KEY_${i}`] = k;
+    env[`GIT_CONFIG_VALUE_${i}`] = v;
+  });
+  env['GIT_ALLOW_PROTOCOL'] = new URL(gitUrl).protocol.replace(':', '');
+  env['GIT_ASKPASS'] = '';
+  return env;
+}
+
 /**
  * Clone `gitUrl` into `cloneDir`. Throws git's own failure (an Azure DevOps one with the header redacted). An Azure
  * DevOps URL on a daemon without its credential is cloned as before (the host's git sign-in may still reach it); when
@@ -69,22 +107,10 @@ export async function cloneRepository(gitUrl: string, cloneDir: string, opts: { 
     const why = redact((mint.stderr || '').trim().split('\n').slice(-1)[0] ?? '', secrets).replace(/^deliver: /, '');
     throw new Error(`${ADO_CLONE_REFUSED} ${ado.webUrl}: ${why !== '' ? why : 'it could not mint a sign-in header'}`);
   }
-  const protocol = new URL(ado.gitUrl).protocol.replace(':', '');
   try {
     await execCapped('git', ['-c', 'credential.helper=', 'clone', '--', ado.gitUrl, cloneDir], {
       timeout: CLONE_TIMEOUT_MS,
-      env: {
-        ...base,
-        // An inherited GIT_CONFIG_PARAMETERS is read after GIT_CONFIG_COUNT and could restore another header.
-        GIT_CONFIG_PARAMETERS: '',
-        GIT_CONFIG_COUNT: '4',
-        GIT_CONFIG_KEY_0: 'http.extraHeader', GIT_CONFIG_VALUE_0: '',
-        GIT_CONFIG_KEY_1: `http.${ado.gitUrl}.extraHeader`, GIT_CONFIG_VALUE_1: '',
-        GIT_CONFIG_KEY_2: `http.${ado.gitUrl}.extraHeader`, GIT_CONFIG_VALUE_2: `Authorization: ${header}`,
-        GIT_CONFIG_KEY_3: 'http.followRedirects', GIT_CONFIG_VALUE_3: 'false',
-        GIT_ALLOW_PROTOCOL: protocol,
-        GIT_ASKPASS: '',
-      },
+      env: adoCloneEnv(base, ado.gitUrl, header),
     });
   } catch (err) {
     const message = redact(err instanceof Error ? err.message : String(err), secrets);

@@ -8,7 +8,7 @@
 // `target` seam (the rest of `adoRepoOf`'s answer, the canonical shape, is kept).
 
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,7 +17,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { registerFailure } from '../src/api/repo-input.js';
 import { adoRepoOf } from '../src/core/deliver-credentials.js';
 import { defaultAdoHelperExec, type AdoHelperExec } from '../src/core/deliver.js';
-import { ADO_CLONE_NO_CREDENTIAL, ADO_CLONE_REFUSED, cloneRepository, type AdoCloneSeam } from '../src/core/repo-clone.js';
+import { ADO_CLONE_NO_CREDENTIAL, ADO_CLONE_REFUSED, adoCloneEnv, cloneRepository, type AdoCloneSeam } from '../src/core/repo-clone.js';
 
 const PAT = 'pat-SECRET-0123456789abcdef'; // ggignore: a made-up test value, never a real token
 const BASIC = `Basic ${Buffer.from(`:${PAT}`).toString('base64')}`;
@@ -52,6 +52,8 @@ interface Fx {
   url: string;
   gitUrl: string;
   auths: string[];
+  /** The paths the server was asked for. */
+  paths: string[];
   /** A HOME with no git config, so no host credential helper answers for the loopback. */
   env: NodeJS.ProcessEnv;
 }
@@ -72,6 +74,7 @@ async function fixture(): Promise<Fx> {
   git(seed, 'commit', '-qm', 'base');
   git(seed, 'push', '-q', bare, 'main');
   const auths: string[] = [];
+  const paths: string[] = [];
   const closed: Promise<void>[] = [];
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const u = new URL(req.url ?? '/', 'http://x');
@@ -80,6 +83,13 @@ async function fixture(): Promise<Fx> {
     req.on('end', () => {
       const auth = String(req.headers['authorization'] ?? '');
       auths.push(auth);
+      paths.push(u.pathname);
+      // A repository that moved: a redirect to where it is now (the clone must not follow it).
+      if (u.pathname.startsWith('/moved/')) {
+        res.writeHead(301, { location: `${u.pathname.slice('/moved'.length)}${u.search}` });
+        res.end();
+        return;
+      }
       if (auth !== BASIC) {
         res.writeHead(401, { 'www-authenticate': 'Basic realm="ado"' });
         res.end('unauthorized');
@@ -132,7 +142,7 @@ async function fixture(): Promise<Fx> {
   // No Azure DevOps credential in it: a test hands its own.
   const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: '1', XDG_CONFIG_HOME: home };
   for (const n of ENV) delete env[n];
-  return { root, url, gitUrl: `${url}/org/proj/_git/repo`, auths, env };
+  return { root, url, gitUrl: `${url}/org/proj/_git/repo`, auths, paths, env };
 }
 
 /** The production reading of the URL, its git URL and login base re-pointed at the loopback. */
@@ -209,6 +219,63 @@ describe('crew#1839 From a URL on Azure DevOps', () => {
     expect(message).not.toContain(Buffer.from(':pat-wrong-0123456789').toString('base64'));
     expect(registerFailure(message, undefined, '/nonexistent-home', true).code).toBe('repo_clone_denied');
   }, 60_000);
+
+  it('a hook this computer\'s git config names does not run in the credential-bearing clone, and no raw credential is in its env', async () => {
+    const fx = await fixture();
+    // A host whose git config names a hooks folder (and a template with an active hook): either would run post-checkout.
+    const hooks = join(fx.root, 'hooks');
+    mkdirSync(hooks, { recursive: true });
+    const leaked = join(fx.root, 'hook-saw-env.txt');
+    writeFileSync(join(hooks, 'post-checkout'), `#!/bin/sh\nenv > '${leaked}'\n`);
+    chmodSync(join(hooks, 'post-checkout'), 0o755);
+    writeFileSync(join(fx.env['HOME']!, '.gitconfig'), `[core]\n\thooksPath = ${hooks}\n`);
+    // The hook does run in a plain clone on this host (so the test can fail).
+    execFileSync('git', ['clone', '-q', join(fx.root, 'srv', 'org', 'proj', '_git', 'repo'), join(fx.root, 'plain')], { env: fx.env });
+    expect(existsSync(leaked)).toBe(true);
+    rmSync(leaked);
+    const dir = join(fx.root, 'clone');
+    await cloneRepository('https://dev.azure.com/org/proj/_git/repo', dir, { ado: seam(fx) });
+    expect(readFileSync(join(dir, 'README.md'), 'utf8')).toBe('tiny-math\n');
+    expect(existsSync(leaked)).toBe(false);
+  }, 60_000);
+
+  it('a redirect is refused even where this computer\'s git config follows redirects for that URL', async () => {
+    const fx = await fixture();
+    writeFileSync(join(fx.env['HOME']!, '.gitconfig'), `[http "${fx.url}/"]\n\tfollowRedirects = true\n`);
+    const moved = `${fx.url}/moved/org/proj/_git/repo`;
+    const s = seam(fx);
+    const err = await cloneRepository('https://dev.azure.com/org/proj/_git/repo', join(fx.root, 'clone'), {
+      ado: { ...s, target: (u) => ({ ...adoRepoOf(u)!, gitUrl: moved, loginBase: fx.url }) },
+    }).catch((e: unknown) => e as Error);
+    expect(err).toBeInstanceOf(Error);
+    expectNoSecret((err as Error).message);
+    // Asked only at the old place: the redirect target never saw a request.
+    expect(fx.paths.length).toBeGreaterThan(0);
+    expect(fx.paths.every((p) => p.startsWith('/moved/'))).toBe(true);
+  }, 60_000);
+
+  it('the clone environment pins the header, redirects and hooks, and carries none of the raw credential variables', () => {
+    const url = 'https://dev.azure.com/org/proj/_git/repo';
+    const env = adoCloneEnv(
+      { PATH: '/bin', AZURE_DEVOPS_EXT_PAT: PAT, CREW_ADO_TENANT_ID: 't', CREW_ADO_CLIENT_ID: 'c', CREW_ADO_CLIENT_SECRET: 'sp-secret', GIT_CONFIG_KEY_7: 'http.extraHeader', GIT_CONFIG_VALUE_7: 'x', GIT_CONFIG_PARAMETERS: "'http.extraheader'='y'" }, // ggignore: made-up test values
+      url,
+      BASIC,
+    );
+    for (const n of ENV) expect(env[n]).toBeUndefined();
+    expect(env['GIT_CONFIG_KEY_7']).toBeUndefined();
+    expect(env['GIT_CONFIG_PARAMETERS']).toBe('');
+    const pairs = Array.from({ length: Number(env['GIT_CONFIG_COUNT']) }, (_, i) => [env[`GIT_CONFIG_KEY_${i}`], env[`GIT_CONFIG_VALUE_${i}`]]);
+    expect(pairs).toEqual([
+      ['http.extraHeader', ''],
+      [`http.${url}.extraHeader`, ''],
+      [`http.${url}.extraHeader`, `Authorization: ${BASIC}`],
+      ['http.followRedirects', 'false'],
+      [`http.${url}.followRedirects`, 'false'],
+      ['core.hooksPath', process.platform === 'win32' ? 'NUL' : '/dev/null'],
+    ]);
+    expect(env['GIT_ALLOW_PROTOCOL']).toBe('https');
+    expect(env['PATH']).toBe('/bin');
+  });
 
   it('a GitHub URL is cloned as before, with no Azure DevOps step', async () => {
     const minted: string[][] = [];

@@ -212,42 +212,75 @@ export function prNumberOfUrl(url: string): number | null {
   return m === null ? null : Number(m[1]);
 }
 
+const PR_WORD = String.raw`(?:PR|pull[ -]?request)`;
+/** A pull request URL inside words, up to its number (a `/files` tab, a query or a fragment after it is not part of it). */
+const PR_URL_IN_WORDS = /https:\/\/[^\s?#)\]>"'<]+?\/(?:pull|pullrequest)\/\d+(?!\d)/gi;
+
 /** Words that ask to change an existing pull request rather than make new work: "revise the PR", "update pull request
- *  #3", "on the same PR", "do not open a new PR". */
+ *  #3", "add a test to PR #4", "push it on PR #4", "on the same PR", "do not open a new PR". */
 const ASKS_PR_CHANGE = new RegExp(
   [
-    String.raw`\b(?:revise|revising|update|amend|change|add(?:ing)? to|push(?:ing)? (?:on)?to|fix up)\b[^!?\n]{0,80}?(?:\b(?:PR|pull[ -]?request)\b|\/(?:pull|pullrequest)\/\d+)`,
-    String.raw`\b(?:same|existing|that|this|delivered|open)\s+(?:PR|pull[ -]?request)\b`,
-    String.raw`\b(?:no|not open a|don'?t open a|never open a)\s+(?:new|second)\s+(?:PR|pull[ -]?request)\b`,
+    String.raw`\b(?:revise|revising|update|updating|amend|amending|fix up)\b[^!?\n]{0,80}?(?:\b${PR_WORD}\b|\/(?:pull|pullrequest)\/\d+)`,
+    String.raw`\b(?:add|adding|push|pushing|commit|committing|put|apply|applying)\b[^!?\n]{0,80}?\b(?:to|on|onto|into)\s+(?:(?:the|that|this|my|our)\s+)?(?:(?:same|existing|open|delivered)\s+)?(?:\b${PR_WORD}\b|https:\/\/\S+\/(?:pull|pullrequest)\/\d+)`,
+    String.raw`\b(?:on|to|onto|into)\s+${PR_WORD}\s*#?\d+`,
+    String.raw`\b(?:same|existing|that|this|delivered|open)\s+${PR_WORD}\b`,
+    String.raw`\b(?:no|not open a|don'?t open a|never open a)\s+(?:new|second)\s+${PR_WORD}\b`,
   ].join('|'),
   'i',
 );
+
+/** Words that ask for a NEW pull request ("open a new PR", "in a separate pull request"), or say not to change one
+ *  ("do not update PR #4"): no existing pull request is attached. A negated new-PR ask ("do not open a new PR") is not one. */
+const NEW_PR_ASK = new RegExp(String.raw`\b(?:(?:open|opening|create|creating|raise|raising|make|making|start|starting|file|filing)\s+|(?:in|as|into|with)\s+)(?:a\s+|an\s+)?(?:new|second|separate|another|fresh)\s+${PR_WORD}\b`, 'gi');
+const NEW_PR_NEGATED = /\b(?:not|n't|never|without|no need to)\s+(?:\w+\s+)?$/i;
+const KEEP_PR_ASK = new RegExp(String.raw`\b(?:do not|don'?t|never|without)\s+(?:revise|revising|update|updating|amend|amending|change|changing|touch|touching|push(?:ing)? (?:on)?to)\b[^!?\n]{0,40}?\b${PR_WORD}\b`, 'i');
+
+function asksForNewPr(words: string): boolean {
+  if (KEEP_PR_ASK.test(words)) return true;
+  return [...words.matchAll(NEW_PR_ASK)].some((m) => !NEW_PR_NEGATED.test(words.slice(Math.max(0, m.index - 24), m.index)));
+}
 
 /** Whether `words` name a pull request at all (the cheap gate before the chat's runs are read). */
 export function mentionsPullRequest(words: string): boolean {
   return /\b(?:PR|pull[ -]?requests?)\b|\/(?:pull|pullrequest)\/\d+/i.test(words);
 }
 
+/** Why a job asked to change a pull request does not update one (the card's note says it). */
+export type PrRevisionMiss = 'not-delivered' | 'none' | 'several';
+
 /**
  * Which delivered pull request, if any, the person's words ask this job to update. `null` = they do not ask to change
- * a pull request. `{ pr: null, named }` = they ask, but crew cannot attach one: the PR they name (a URL or a number) is
- * not one this chat delivered on the job's repository, or they name none and there is not exactly one.
+ * a pull request (or ask for a new one). `{ pr: null, … }` = they ask, but crew cannot attach one: a PR they name (a
+ * URL or a number) is not one this chat delivered on the job's repository (`named`), they name more than one this chat
+ * delivered (`several`), or they name none and there is not exactly one (`none`). Every PR named is a target: one that
+ * cannot be matched never falls back to another.
  */
-export function prRevisionOf(words: string, delivered: readonly DeliveredPr[], repoRef: string | null): { pr: DeliveredPr | null; named: string | null } | null {
-  if (!ASKS_PR_CHANGE.test(words)) return null;
+export function prRevisionOf(
+  words: string,
+  delivered: readonly DeliveredPr[],
+  repoRef: string | null,
+): { pr: DeliveredPr; named: null; miss?: undefined } | { pr: null; named: string | null; miss: PrRevisionMiss } | null {
+  if (!ASKS_PR_CHANGE.test(words) || asksForNewPr(words)) return null;
   const mine = delivered.filter((d) => repoRef !== null && d.repoRef === repoRef);
-  const urls = [...words.matchAll(/https:\/\/[^\s)\]>"']+/g)].map((m) => m[0].replace(/[.,;:!?]+$/, '')).filter((u) => prNumberOfUrl(u) !== null);
-  if (urls.length > 0) {
-    const hit = mine.find((d) => urls.some((u) => u.toLowerCase() === d.url.toLowerCase()));
-    return { pr: hit ?? null, named: hit === undefined ? urls[0]! : null };
+  const hits = new Map<string, DeliveredPr>();
+  const urls = [...words.matchAll(PR_URL_IN_WORDS)].map((m) => m[0]);
+  for (const u of urls) {
+    const hit = mine.find((d) => d.url.toLowerCase() === u.toLowerCase());
+    if (hit === undefined) return { pr: null, named: u, miss: 'not-delivered' };
+    hits.set(hit.url.toLowerCase(), hit);
   }
-  const n = /\b(?:PR|pull[ -]?request)\s*#?(\d+)\b/i.exec(words)?.[1];
-  if (n !== undefined) {
-    const hit = mine.find((d) => d.number === Number(n));
-    return { pr: hit ?? null, named: hit === undefined ? `pull request #${Number(n)}` : null };
+  // Numbers outside the URLs ("PR #4", "pull request 4").
+  const rest = words.replace(PR_URL_IN_WORDS, ' ');
+  for (const m of rest.matchAll(new RegExp(String.raw`\b${PR_WORD}\s*#?(\d+)\b`, 'gi'))) {
+    const n = Number(m[1]);
+    const hit = mine.find((d) => d.number === n);
+    if (hit === undefined) return { pr: null, named: `pull request #${n}`, miss: 'not-delivered' };
+    hits.set(hit.url.toLowerCase(), hit);
   }
+  if (hits.size > 1) return { pr: null, named: null, miss: 'several' };
+  if (hits.size === 1) return { pr: [...hits.values()][0]!, named: null };
   const distinct = [...new Map(mine.map((d) => [d.url.toLowerCase(), d])).values()];
-  return { pr: distinct.length === 1 ? distinct[0]! : null, named: null };
+  return distinct.length === 1 ? { pr: distinct[0]!, named: null } : { pr: null, named: null, miss: 'none' };
 }
 
 /** (crew#1840) What a job's Go adds to its run launch when the job updates a delivered pull request: `revisesPr` and
@@ -664,17 +697,19 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
   }
   if (facts.skipQe !== null) parts.push(`Without QE acceptance (you said: “${facts.skipQe.reason}”), labelled on the job.`);
   // (crew#1840) A job that makes a pull request, asked to change one this chat delivered on the same repository,
-  // updates THAT pull request (`revisesPr`); asked but not attachable, the card says it opens a new one and where a
+  // updates THAT pull request (`revisesPr`); asked but not attachable, the card says it updates none, why, and where a
   // delivered PR is revised. Nothing else in the proposal ever says where the work is delivered.
   const prAsk = launch === 'run' && delivers === 'pr' && repo !== null ? prRevisionOf(facts.words, ctx.deliveredPrs ?? [], repo.id) : null;
   const revisesPr = prAsk?.pr ?? null;
   if (revisesPr !== null) {
     parts.push(`It updates pull request #${revisesPr.number}, which an earlier job of this chat delivered; no new pull request is opened.`);
-  } else if (prAsk !== null) {
-    notes.push(
-      `This job opens a new pull request: ${prAsk.named !== null ? `${prAsk.named} is not one this chat delivered on ${repo!.name}` : `this chat has no one pull request on ${repo!.name} it delivered to update`}. ` +
-        'To change a delivered pull request, use Revise this PR on the job that delivered it.',
-    );
+  } else if (prAsk !== null && prAsk.miss !== undefined) {
+    const why = prAsk.miss === 'not-delivered'
+      ? `${prAsk.named ?? 'the pull request you named'} is not one this chat delivered on ${repo!.name}`
+      : prAsk.miss === 'several'
+        ? `you named more than one pull request this chat delivered on ${repo!.name}`
+        : `this chat has no one pull request on ${repo!.name} it delivered to update`;
+    notes.push(`This job won't update an existing pull request: ${why}. To change a delivered pull request, use Revise this PR on the job that delivered it.`);
   }
   // crew#1570: a domain extraction runs many hours on a large repository; the catalog's fixed range would mislead.
   const sizeBound = card.id === 'analyze-codebase' && r.option?.id === 'domain';

@@ -119,7 +119,7 @@ describe('crew#1840 a chat job that changes a pull request this chat delivered',
     expect(p.shape?.card).toBe('write-tests');
     expect(p.revisesPr).toEqual({ number: 1, url: PR_URL, runId: RUN });
     expect(p.sentence!.text).toContain('It updates pull request #1, which an earlier job of this chat delivered; no new pull request is opened.');
-    expect(p.sentence!.notes.join(' ')).not.toContain('opens a new pull request');
+    expect(p.sentence!.notes.join(' ')).not.toContain("won't update");
     expect(jobRevisionLaunch(p)).toEqual({ revisesPr: 1, deliver: 'pr' });
     const go = await r.svc.decide(CHAT, p.pid, { decision: 'go' }, ME, 'i1');
     expect(go.code).toBe(200);
@@ -127,14 +127,14 @@ describe('crew#1840 a chat job that changes a pull request this chat delivered',
     expect(jobRevisionLaunch(r.launcher.launched[0]!.resolution)).toEqual({ revisesPr: 1, deliver: 'pr' });
   });
 
-  it('asked, but the PR is not one this chat delivered: no revisesPr, and the card says it opens a new one', async () => {
+  it('asked, but the PR is not one this chat delivered: no revisesPr, and the card says it updates none and why', async () => {
     const r = rig([DELIVERED], () => 'another-chat');
     const p = await turn(r, ASK);
     expect(p.revisesPr).toBeUndefined();
     expect(jobRevisionLaunch(p)).toEqual({});
     expect(p.sentence!.text).not.toContain('updates pull request');
     expect(p.sentence!.notes).toContain(
-      `This job opens a new pull request: ${PR_URL} is not one this chat delivered on wicked. To change a delivered pull request, use Revise this PR on the job that delivered it.`,
+      `This job won't update an existing pull request: ${PR_URL} is not one this chat delivered on wicked. To change a delivered pull request, use Revise this PR on the job that delivered it.`,
     );
   });
 
@@ -157,15 +157,40 @@ describe('crew#1840 a chat job that changes a pull request this chat delivered',
 
 describe('prRevisionOf', () => {
   const gh = { number: 4, url: 'https://github.com/o/tiny-math/pull/4', runId: 'r1', repoRef: 'tiny' };
+  const gh5 = { ...gh, number: 5, url: 'https://github.com/o/tiny-math/pull/5', runId: 'r2' };
   it('picks the delivered PR by URL, by number, or the only one; refuses another repository\'s', () => {
     expect(prRevisionOf('Revise https://github.com/o/tiny-math/pull/4.', [gh], 'tiny')).toEqual({ pr: gh, named: null });
     expect(prRevisionOf('Update PR #4 with a test', [gh], 'tiny')).toEqual({ pr: gh, named: null });
     expect(prRevisionOf('add a test on the same PR', [gh], 'tiny')).toEqual({ pr: gh, named: null });
-    expect(prRevisionOf('Update PR #5 with a test', [gh], 'tiny')).toEqual({ pr: null, named: 'pull request #5' });
-    expect(prRevisionOf('add a test on the same PR', [gh], 'other')).toEqual({ pr: null, named: null });
-    expect(prRevisionOf('add a test on the same PR', [gh, { ...gh, number: 5, url: 'https://github.com/o/tiny-math/pull/5' }], 'tiny')).toEqual({ pr: null, named: null });
+    expect(prRevisionOf('Update PR #5 with a test', [gh], 'tiny')).toEqual({ pr: null, named: 'pull request #5', miss: 'not-delivered' });
+    expect(prRevisionOf('add a test on the same PR', [gh], 'other')).toEqual({ pr: null, named: null, miss: 'none' });
+    expect(prRevisionOf('add a test on the same PR', [gh, gh5], 'tiny')).toEqual({ pr: null, named: null, miss: 'none' });
     // Words that do not ask to change a pull request.
     expect(prRevisionOf('fix the bug PR #4 described', [gh], 'tiny')).toBeNull();
+  });
+  it('words that ask for a new pull request, or say not to change one, attach none; a negated new-PR ask is a revision', () => {
+    expect(prRevisionOf('Update README and open a new PR', [gh], 'tiny')).toBeNull();
+    expect(prRevisionOf('Do not update PR #4; open a new PR', [gh], 'tiny')).toBeNull();
+    expect(prRevisionOf('Revise the parser in a separate pull request', [gh], 'tiny')).toBeNull();
+    expect(prRevisionOf('Add the test. Do not open a new PR.', [gh], 'tiny')).toEqual({ pr: gh, named: null });
+    expect(prRevisionOf('Update the same PR, without opening a new PR', [gh], 'tiny')).toEqual({ pr: gh, named: null });
+  });
+  it('reads "add … to PR #N" and "… on PR #N" as revisions', () => {
+    expect(prRevisionOf('Add regression tests to PR #4', [gh], 'tiny')).toEqual({ pr: gh, named: null });
+    expect(prRevisionOf('Address the review comments on PR #4', [gh], 'tiny')).toEqual({ pr: gh, named: null });
+    expect(prRevisionOf('Push the fix onto pull request 4', [gh], 'tiny')).toEqual({ pr: gh, named: null });
+  });
+  it('a named URL is a target even with a tab, query or fragment after it, and never falls back to another PR', () => {
+    expect(prRevisionOf('Revise https://github.com/o/tiny-math/pull/4/files?w=1', [gh], 'tiny')).toEqual({ pr: gh, named: null });
+    expect(prRevisionOf('Revise https://github.com/o/tiny-math/pull/4#discussion_r1', [gh], 'tiny')).toEqual({ pr: gh, named: null });
+    expect(prRevisionOf('Revise https://github.com/other/repo/pull/99/files', [gh], 'tiny')).toEqual({ pr: null, named: 'https://github.com/other/repo/pull/99', miss: 'not-delivered' });
+    expect(prRevisionOf('Revise https://github.com/o/tiny-math/pull/41', [gh], 'tiny')).toEqual({ pr: null, named: 'https://github.com/o/tiny-math/pull/41', miss: 'not-delivered' });
+  });
+  it('every named PR is a target: two delivered ones is a choice to make, one undelivered among them refuses', () => {
+    expect(prRevisionOf('Update PR #4 using https://github.com/o/tiny-math/pull/5 as a reference', [gh, gh5], 'tiny')).toEqual({ pr: null, named: null, miss: 'several' });
+    expect(prRevisionOf('Update PR #4 like PR #9', [gh, gh5], 'tiny')).toEqual({ pr: null, named: 'pull request #9', miss: 'not-delivered' });
+    // The same PR by URL and by number is one target.
+    expect(prRevisionOf('Update PR #5 (https://github.com/o/tiny-math/pull/5)', [gh, gh5], 'tiny')).toEqual({ pr: gh5, named: null });
   });
   it('reads the PR number of both URL shapes crew records', () => {
     expect(prNumberOfUrl(PR_URL)).toBe(1);
