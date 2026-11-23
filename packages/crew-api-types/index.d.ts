@@ -833,13 +833,37 @@ export interface RigorRaiseRequest {
   reason: string;
 }
 
-/** `POST /runs/:id/power/pause`: answer a checkpoint pause ({@link PowerPause}); 200 answers {@link PowerView}.
+/** `POST /runs/:id/power/pause`: answer a checkpoint pause ({@link PowerPause}); 200 answers {@link PowerPauseAnswer}.
  *  `continue_high` raises rigor to at least high (an operator floor), `continue` goes on (the `note`, if any, is the
  *  next turn's steer), `switch_phased` flips the switch off (the build hands off as it stands), `stop` cancels the
  *  run. 409 {@link PowerConflict} when the run is not paused. Human actors only; audited `run.power_mode.paused`. */
 export interface PowerPauseRequest {
   decision: 'continue_high' | 'continue' | 'switch_phased' | 'stop';
   note?: string | null | undefined;
+  /** (crew#1739) The pause this answers, as the card showed it ({@link PowerPause.checkpoint}). When either this or
+   *  {@link at} is given and the open pause differs (or none is open), the answer is refused with 409
+   *  {@link PowerPauseChanged} and nothing changes. Omit both to answer whatever pause is open. */
+  checkpoint?: number | undefined;
+  /** (crew#1739) The pause this answers: its {@link PowerPause.at}. */
+  at?: number | undefined;
+}
+
+/** (crew#1739) A power pause's identity: its checkpoint and when it opened. */
+export interface PowerPauseIdentity {
+  checkpoint: number;
+  at: number;
+}
+
+/** (crew#1739) The 200 body of `POST /runs/:id/power/pause`: the run's power view after the answer, and the pause the
+ *  answer consumed (null when the daemon read none open just before answering). */
+export interface PowerPauseAnswer extends PowerView {
+  answered: PowerPauseIdentity | null;
+}
+
+/** (crew#1739) The 409 body when a pause answer names a pause that is no longer open. `open` is the pause open now,
+ *  or null when the run is not paused. */
+export interface PowerPauseChanged extends PowerConflict {
+  open: PowerPauseIdentity | null;
 }
 
 /** The 409 (and 422) body of the power routes. */

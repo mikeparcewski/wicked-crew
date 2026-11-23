@@ -8267,7 +8267,27 @@ export function registerRoutes(
   const textOrNull = (v: string | null | undefined): string | null => (v === undefined || v === null || v.trim() === '' ? null : v.trim());
   const PowerToggleSchema = z.strictObject({ on: z.boolean(), reason: z.string().trim().max(2000).nullish() });
   const RigorRaiseSchema = z.strictObject({ atLeast: z.enum(RIGORS), reason: z.string().trim().min(1).max(2000) });
-  const PowerPauseSchema = z.strictObject({ decision: z.enum(['continue_high', 'continue', 'switch_phased', 'stop']), note: z.string().trim().max(8000).nullish() });
+  const PowerPauseSchema = z.strictObject({
+    decision: z.enum(['continue_high', 'continue', 'switch_phased', 'stop']),
+    note: z.string().trim().max(8000).nullish(),
+    // (crew#1739) The pause the person answered, as the card showed it (`PowerPause.checkpoint` / `.at`).
+    checkpoint: z.number().int().positive().optional(),
+    at: z.number().int().nonnegative().optional(),
+  });
+  /** (crew#1739) Each run's pause answers, one at a time (`onePauseAnswer`). */
+  const pauseAnswers = new Map<string, Promise<unknown>>();
+  const onePauseAnswer = <T>(runId: string, op: () => Promise<T>): Promise<T> => {
+    const next = (pauseAnswers.get(runId) ?? Promise.resolve()).then(op, op);
+    const settled = next.then(() => undefined, () => undefined);
+    pauseAnswers.set(runId, settled);
+    void settled.then(() => { if (pauseAnswers.get(runId) === settled) pauseAnswers.delete(runId); });
+    return next;
+  };
+  /** A power pause's identity: its checkpoint and when it opened (`PowerPause`), or null when none is open. */
+  const pauseIdentity = (view: Record<string, unknown> | null): { checkpoint: number; at: number } | null => {
+    const pause = view?.['pause'] as { checkpoint?: unknown; at?: unknown } | null | undefined;
+    return pause && typeof pause.checkpoint === 'number' && typeof pause.at === 'number' ? { checkpoint: pause.checkpoint, at: pause.at } : null;
+  };
   /** An engine refusal as HTTP: `not_found:` 404, `conflict:` 409, `refused:` / `bad_request:` 409 / 400. */
   const powerError = (reply: FastifyReply, err: unknown) => {
     const msg = message(err);
@@ -8337,20 +8357,40 @@ export function registerRoutes(
     const actor = actorOf(req);
     if (!isHumanOperator(actor)) return reply.code(403).send({ error: 'Only a person can answer a power-mode pause' });
     if (!powerSupported()) return reply.code(501).send({ error: 'This engine has no power mode' });
-    try {
-      const note = textOrNull(parsed.data.note);
-      const st = await adapter.answerPowerPause(id, parsed.data.decision, note, actor.id);
-      audit.record('run.power_mode.paused', actor, { runId: id, detail: { decision: parsed.data.decision } });
-      if (decisions !== null && note !== null) {
-        decisions.track(ingestDecision(decisions, {
-          host: 'inject', actor, words: note, projectId: projects.index.projectOf(id) ?? null, runId: id,
-        }));
+    // (crew#1739) One answer per run at a time: the read of the open pause and the engine's answer are one step, so a
+    // second answer reads what the first left (a newer pause, or none) and is refused if it named the old one. Every
+    // pause answer goes through this route.
+    return onePauseAnswer(id, async () => {
+      try {
+        // (crew#1739) Which pause this answer is for. One that names a pause no longer open is refused, so a queued
+        // answer (studio's undo window) never lands on a newer pause the person never saw.
+        const view = await powerView(id);
+        const open = pauseIdentity(view);
+        const { checkpoint, at } = parsed.data;
+        if (view !== null && (checkpoint !== undefined || at !== undefined) &&
+            (open === null || (checkpoint !== undefined && checkpoint !== open.checkpoint) || (at !== undefined && at !== open.at))) {
+          return reply.code(409).send({
+            error: 'Pause changed',
+            reason: open === null
+              ? 'This pause was already answered, and the run is not paused now. Nothing was changed.'
+              : `This answer was for an earlier pause; the run is now paused at checkpoint ${open.checkpoint}. Read the pause again. Nothing was changed.`,
+            open,
+          });
+        }
+        const note = textOrNull(parsed.data.note);
+        const st = await adapter.answerPowerPause(id, parsed.data.decision, note, actor.id);
+        audit.record('run.power_mode.paused', actor, { runId: id, detail: { decision: parsed.data.decision } });
+        if (decisions !== null && note !== null) {
+          decisions.track(ingestDecision(decisions, {
+            host: 'inject', actor, words: note, projectId: projects.index.projectOf(id) ?? null, runId: id,
+          }));
+        }
+        return reply.send({ runId: id, ...st, answered: open });
+      } catch (err) {
+        if (err instanceof MaintenanceDrainError) return reply.code(503).send(maintenanceDrainBody(err));
+        return powerError(reply, err);
       }
-      return reply.send({ runId: id, ...st });
-    } catch (err) {
-      if (err instanceof MaintenanceDrainError) return reply.code(503).send(maintenanceDrainBody(err));
-      return powerError(reply, err);
-    }
+    });
   });
 
   /** The run's `wicked.run.*` bus mirror after a cursor (`RunBusPage`). Read through the engine's own bus
