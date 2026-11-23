@@ -10,6 +10,53 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.18.21] — 2026-11-23
+
+Patch release on the train-12 cut 7504491e, carrying 34 PRs since 0.18.20: #1733, #1734, #1735, #1749, #1746, #1748, #1755, #1757, #1759, #1747, #1756, #1758, #1711, #1754, #1765, #1770, #1769, #1772, #1768, #1773, #1771, #1776, #1778, #1777, #1785, #1783, #1789, #1784, #1786, #1781, #1782, #1799, #1796, #1798.
+
+### Added
+
+- ToolActivity names its launch's seat as cli (core#1786) (#1778)
+- A card creates the project the person named when none matches (crew#1694) (#1789)
+
+### Changed
+
+- The event-loop bound counts the main thread's work, not the runner's scheduling (#1770)
+
+### Fixed
+
+- Keep a JSON text block valid through the scrub; record what the release withheld (crew-C11 A) (#1733)
+- A run's addresses and source pick live on its launch record (crew-C11 B) (#1734)
+- Erase a removed source from estate across a restart; project an over-limit source; keep acks (crew-C11 C) (#1735)
+- Interactive-draft-sourced is a system workflow (wicked-core#1357) (#1749)
+- Cost routing consults the seat (#1746)
+- Card-scoped run-evals; a refused review launch is resumable (#1375, partial) (#1748)
+- A refused turn names the steering rules it broke (#1755)
+- An ambiguous case's ask is scored on its choices (#1757)
+- A refused scheduled launch is on the activity trail (#1759)
+- A saved shadow keeps the built-in's checks or its card turns off (#1747)
+- A private-network sign-in issuer is refused with why and the range that allows it (#1756)
+- The governance evals get the memory store, and import takes memory samples (#1758)
+- **Editor install:** the install-time conformance run now goes through the engine's one-port OS jail (`Core.runEditorConformance`, garden `--engine`) instead of an unjailed child pointed at the daemon. A host that cannot jail it, or an engine without the binding, refuses the install (#1389). (#1711)
+- A refused turn's reason is the reviewer's findings, never its bookkeeping (#1347, #1540) (#1754)
+- A known run with no open question answers 200 null, not 404 (studio#984) (#1765)
+- Every test file runs with the lexical memory embedder, no model download on engine boot (#1769)
+- Dock steers under Decisions, zoned times, journaled writes, the person's context in run learnings (crew-C17 A) (#1772)
+- StopAll waits for every adapter to exit and remove its run directory (#1768)
+- An auto capture never asks the person; a rejected proposal says who and why (crew-C17 B) (#1773)
+- The publication lock is published whole, so a refusal always names its holder (#1771)
+- An open demo cut is a video the chat can't change; a refine of one is blocked (studio#1140) (#1776)
+- A request about one run reads that run alone, never a fold of the store (#1777)
+- A policy rule lands on a real project id, inert ones are migrated; review and search read git_url (#1774, #1744) (#1785)
+- Soft retire with restore, knowledge forget; every crew rejection records why (#1697, #1261) (#1783)
+- Named helpers, kept writer, owned titles, refusals that name their Go (wave 1) (#1784)
+- A refine reads the chat up to its own turn, checks records/ citations; floor reuse needs the same counter and browser (wave 1) (#1786)
+- A tombstone drop keeps no restore point; kept acks are provisional and durable (#1781)
+- Accept a SQLite upload with a full-text index; sweep stale upload temps; mirror core's state-home fixture (#1782)
+- Open core.db with defensive mode off in the long-lived home clone (estate 0.35 FTS guard trigger) (#1799)
+- Graph answers relay via rows and link state; freshness counts current members only (#1796)
+- Carry core's typed satisfied_by links and the product-only marker (#1798)
+
 ## [0.18.20] — 2026-11-22
 
 Patch release on the train-11 cut 34beb673, carrying 48 PRs since 0.18.19: #1653, #1654, #1655, #1657, #1659, #1661, #1662, #1664, #1665, #1666, #1668, #1670, #1671, #1672, #1674, #1675, #1676, #1677, #1679, #1680, #1681, #1684, #1686, #1687, #1688, #1689, #1690, #1691, #1693, #1700, #1701, #1708, #1709, #1710, #1712, #1715, #1717, #1718, #1719, #1720, #1721, #1723, #1729, #1730, #1732, #1736, #1738, #1743. wicked-crew-api-types 0.223.0 releases with it: 0.216.0 plus the type changes from #1676, #1677, #1693, #1701, #1712, #1720 and #1723 (it stays a workspace link in this repository).
