@@ -10238,6 +10238,12 @@ export interface ArtifactProposal {
   /** (api-types 0.194.0) The held plan this reshape was offered for (a `plan_offer`'s `ord` and `planRev`): its Reject is
    *  bound to that version, so a plan revised since is 409 `gate_changed`, never rejected unseen. */
   heldPlan?: { ord: number; planRev: number };
+  /**
+   * (crew#1840) A job asked to change a pull request a run of this chat delivered (on the job's repository): Go
+   * launches it with `revisesPr: number` and `deliver: "pr"`, so its work is pushed onto that pull request's branch and
+   * no new one is opened. The sentence says so. ABSENT: the job opens a pull request of its own (when it makes one).
+   */
+  revisesPr?: { number: number; url: string; runId: string };
   /** (§2.5) What else a reshape launches with, from the held run's launch envelope. */
   relaunch?: Pick<LaunchEnvelope, 'deliver' | 'deliverGate' | 'campaignId' | 'groupLabel' | 'revisesPr' | 'forceQeAcceptance' | 'clisJson'>;
 }

@@ -325,7 +325,7 @@ const BRIEF_COPY_MAX = 512 * 1024;
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
 import { crewStateHome, stateHomeOfDb, wickedWorkRoot } from '../projects/state-home.js';
-import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, jobLaunchRoster, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
+import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, jobLaunchRoster, jobRevisionLaunch, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
 import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, removeStagedDocuments, stagedDocumentsRemoved, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
 import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks, webScopeReason } from './run-sources.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
@@ -4603,6 +4603,8 @@ export function registerRoutes(
             ...(p.relaunch?.deliver !== undefined ? { deliver: p.relaunch.deliver } : {}),
             ...(p.relaunch?.deliverGate !== undefined && p.relaunch.deliver !== 'none' ? { deliverGate: p.relaunch.deliverGate } : {}),
             ...(p.relaunch?.revisesPr !== undefined && p.relaunch.deliver === 'pr' && p.repoRefs?.[0] !== undefined ? { revisesPr: p.relaunch.revisesPr } : {}),
+            // (crew#1840) A job asked to change a pull request this chat delivered updates it: no second PR.
+            ...jobRevisionLaunch(p),
           },
           { ...ctx, fromProposal: d.pid, ...(d.power === true ? { powerRequired: true } : {}) },
         );
