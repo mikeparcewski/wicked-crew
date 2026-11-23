@@ -1,7 +1,7 @@
 /**
  * Data shapes and the Knowledge map (DES-KNOWLEDGE-DATA-001 §10, §19 B4):
  *
- *   POST /sources/:name/profile   HUMAN   profile a source (value-free), file its shapes as proposals for review
+ *   POST /sources/:name/profile   HUMAN   profile a source (value-free), write its shapes into knowledge (crew#1625)
  *   GET  /knowledge/map           HUMAN   the approved shapes and the source catalogs, as nodes and typed edges
  *   GET  /knowledge/summary       HUMAN   what an app in a project can be built on: counts and names only (§9.1)
  *
@@ -28,7 +28,7 @@ import { type NameLookup, searchableRepos, searchEntities } from './code-search.
 import { buildKnowledgeMap } from './map.js';
 import { type KnowledgeSummaryDeps, projectKnowledge } from '../summary.js';
 import { entityNames, PROFILE_BUDGET_MS, profileSource, type ProfileRelation } from './profile.js';
-import { CatalogChangedError, type EstateCall, fileShapes, readCatalog, shapeProposals } from './shapes.js';
+import { CatalogChangedError, type EstateCall, readCatalog, shapeProposals, writeShapes } from './shapes.js';
 
 const V = API_PREFIX;
 
@@ -112,7 +112,7 @@ export function relationsFromCatalog(
 }
 
 export function registerShapeRoutes(app: FastifyInstance, deps: ShapeRouteDeps): void {
-  // One profile per source at a time on this daemon: two at once would both read the queue empty and file twice.
+  // One profile per source at a time on this daemon: two at once would both read the same shapes and write twice.
   const running = new Map<string, Promise<unknown>>();
   const oneAtATime = <T>(sourceId: string, job: () => Promise<T>): Promise<T> => {
     const prior = running.get(sourceId) ?? Promise.resolve();
@@ -219,15 +219,17 @@ export function registerShapeRoutes(app: FastifyInstance, deps: ShapeRouteDeps):
           return reply.code(409).send({ error: `${name} was switched off, removed or saved again while it was profiled: nothing was filed; profile it again`, code: 'source_changed' });
         }
         const at = new Date().toISOString();
-        const proposals = shapeProposals({ id: s.id, name }, profile, code.matches, at);
-        let filed: Awaited<ReturnType<typeof fileShapes>>;
+        // (crew#1625) The person started this profile: it is their decision, so the shapes go straight into knowledge.
+        const proposals = shapeProposals({ id: s.id, name }, profile, code.matches, at, actor.id);
+        const catalogKeys = held === null || held.truncated ? null : new Set(held.docs.map((d) => d.key));
+        let shapes: Awaited<ReturnType<typeof writeShapes>>;
         try {
-          filed = await fileShapes(deps.estate, proposals);
+          shapes = await writeShapes(deps.estate, s.id, proposals, catalogKeys);
         } catch (err) {
           return reply.code(502).send({ error: `estate did not take the shapes: ${capped(err)}`, code: 'estate_unavailable' });
         }
         deps.audit.record('knowledge.source.profiled', actor, {
-          detail: { source: name, relations: profile.relations.length, unread: profile.relations.filter((p) => p.rows === null).length, joins: profile.joins.length, describes: [...code.matches.values()].reduce((n, m) => n + m.length, 0), proposed: filed.filed.length, alreadyProposed: filed.skipped },
+          detail: { source: name, relations: profile.relations.length, unread: profile.relations.filter((p) => p.rows === null).length, joins: profile.joins.length, describes: [...code.matches.values()].reduce((n, m) => n + m.length, 0), written: shapes.written.map((w) => w.id), unchanged: shapes.unchanged, replaced: shapes.replaced },
         });
         const body: SourceProfileResponse = {
           name,
@@ -236,8 +238,11 @@ export function registerShapeRoutes(app: FastifyInstance, deps: ShapeRouteDeps):
           relations: profile.relations,
           joins: profile.joins,
           describes: [...code.matches.entries()].flatMap(([relation, ms]) => ms.map((m) => ({ relation, repo: m.repo, name: m.name, kind: m.kind, file: m.file }))),
-          proposed: filed.filed,
-          alreadyProposed: filed.skipped,
+          written: shapes.written,
+          unchanged: shapes.unchanged,
+          replaced: shapes.replaced,
+          proposed: [],
+          alreadyProposed: 0,
           codeSearch: { searched: code.searched, notSearched: code.notSearched },
           ...(picked.notInCatalog > 0 ? { notInKnowledge: picked.notInCatalog } : {}),
           ...(picked.notListed > 0 ? { notListed: picked.notListed } : {}),

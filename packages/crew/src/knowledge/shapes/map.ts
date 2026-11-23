@@ -10,7 +10,7 @@
  */
 
 import type { KnowledgeMapEdge, KnowledgeMapNode, KnowledgeMapResponse } from '../../core/types.js';
-import { catalogDocId, type EstateCall, proposalIdOfNode, proposalNodeId, readCatalog } from './shapes.js';
+import { catalogDocId, currentShapes, type EstateCall, proposalIdOfNode, proposalNodeId, readCatalog } from './shapes.js';
 
 export const MAP_SHAPES_MAX = 60;
 export const MAP_TABLES_MAX = 300;
@@ -62,6 +62,8 @@ export async function buildKnowledgeMap(estate: EstateCall, sources: readonly Ma
   const unhydrated = new Set<string>();
   /** Sources whose catalog could not be read whole: none of their tables is drawn, from any read. */
   const unread = new Set<string>();
+  /** (crew#1625) Every relation of each source whose catalog was read whole. */
+  const relationsOf = new Map<string, Set<string>>();
   let tables = 0;
   /** The one admission of a table node (the catalog read and every neighbourhood alike), under {@link MAP_TABLES_MAX}. */
   const admitTable = (): boolean => {
@@ -95,6 +97,7 @@ export async function buildKnowledgeMap(estate: EstateCall, sources: readonly Ma
       if (got !== null) {
         inKnowledge = true;
         if (got.truncated) truncated = true;
+        else relationsOf.set(s.id, new Set(got.docs.map((d) => d.key)));
         for (const d of got.docs) {
           count++;
           if (!admitTable()) continue;
@@ -110,10 +113,16 @@ export async function buildKnowledgeMap(estate: EstateCall, sources: readonly Ma
     sourceRows.push({ id: s.id, name: s.name, described: s.described, inKnowledge, tables: count });
   }
 
-  let approved: Array<{ id?: unknown; payload?: { content?: unknown; class?: unknown; relate?: unknown; relate_code?: unknown; shape?: { relation?: unknown; source?: unknown } } }> = [];
+  let approved: Array<{ id?: unknown; payload?: { content?: unknown; class?: unknown; relate?: unknown; relate_code?: unknown; shape?: { sourceId?: unknown; relation?: unknown; source?: unknown } } }> = [];
   try {
     const got = (await estate('proposal.list', { kind_type: 'knowledge', state: 'approved' })) as { proposals?: typeof approved } | null;
-    approved = (got?.proposals ?? []).filter((p) => Array.isArray(p.payload?.relate) || Array.isArray(p.payload?.relate_code));
+    // (crew#1625) A re-profiled relation: only the shape in knowledge now, not the ones the re-profile replaced.
+    // A profiled table the source no longer has: the re-profile forgot its shape, so it is not looked for.
+    approved = currentShapes((got?.proposals ?? []).filter((p) => Array.isArray(p.payload?.relate) || Array.isArray(p.payload?.relate_code))).filter((p) => {
+      const shape = p.payload?.shape;
+      const held = typeof shape?.sourceId === 'string' ? relationsOf.get(shape.sourceId) : undefined;
+      return held === undefined || typeof shape?.relation !== 'string' || held.has(shape.relation);
+    });
   } catch {
     notes.push('the approved shapes could not be read from estate');
   }

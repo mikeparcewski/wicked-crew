@@ -1,7 +1,11 @@
 /**
- * Data shapes as recommendations (DES-KNOWLEDGE-DATA-001 §10.1): what the profiler learned becomes INERT proposals in
- * estate's one review queue, like memories and policies. Nothing here writes knowledge: a person approves a shape in
- * the review, and only then does estate write the node, its typed edges and its derived deps (B3a's approve).
+ * Data shapes (DES-KNOWLEDGE-DATA-001 §10.1): what the profiler learned about a source, one shape per relation.
+ *
+ * A profile a person starts is their decision (operator ruling 2026-11-19, crew#1625): {@link writeShapes} writes the
+ * shapes straight into knowledge through estate's one shape writer (`proposal.submit` then `proposal.approve`, which
+ * derives the deps from the endpoints, writes the typed edges and flips the node visible), and a re-profile replaces
+ * the source's set. Nothing waits in the review queue. A shape an agent proposes (garden's data skill) carries no
+ * crew record and still waits for a person there.
  *
  * One shape per profiled relation, `kind_type: knowledge`, `class: concept`, scoped to the source
  * (`source:<registry id>`), its content the value-free summary, and its links:
@@ -10,7 +14,7 @@
  *   confirmed);
  * - `describes` (`relate_code[]`) to each code entity named exactly like the relation in a repo's code graph.
  *
- * The proposer declares no `deps`: estate derives them from the endpoints at approve (§4.3) and refuses a declared
+ * The writer declares no `deps`: estate derives them from the endpoints at approve (§4.3) and refuses a declared
  * set that differs.
  */
 
@@ -27,6 +31,8 @@ export interface ShapeRecord {
   describes: CodeMatch[];
   /** Related tables whose join did not fit estate's 200 links (the record above keeps every join). */
   linksNotListed?: number;
+  /** The person whose profile wrote it (their actor id); provenance only, not part of {@link shapeIdentity}. */
+  profiledBy?: string;
 }
 
 /** A code entity named exactly like a relation. */
@@ -134,6 +140,7 @@ export function shapeProposals(
   profile: SourceProfile,
   describes: ReadonlyMap<string, readonly CodeMatch[]>,
   at: string,
+  by?: string,
 ): ShapeProposal[] {
   return profile.relations.map((p) => {
     const self = catalogDocId(src.id, p.key);
@@ -175,7 +182,7 @@ export function shapeProposals(
         capture: 'profile' as const,
         relate,
         relate_code,
-        shape: { format: 1 as const, sourceId: src.id, source: src.name, relation: p.key, profile: p, joins, describes: code, ...(linksNotListed > 0 ? { linksNotListed } : {}) },
+        shape: { format: 1 as const, sourceId: src.id, source: src.name, relation: p.key, profile: p, joins, describes: code, ...(linksNotListed > 0 ? { linksNotListed } : {}), ...(by !== undefined ? { profiledBy: by } : {}) },
       },
       facets: {},
     };
@@ -320,33 +327,100 @@ export async function catalogKeys(estate: EstateCall, sourceId: string): Promise
 interface ListedProposal {
   id?: unknown;
   state?: unknown;
-  payload?: { content?: unknown; shape?: { sourceId?: unknown; relation?: unknown; profile?: unknown; joins?: unknown; describes?: unknown } };
+  payload?: { class?: unknown; source?: unknown; observed_at?: unknown; shape?: { sourceId?: unknown; relation?: unknown; profile?: unknown; joins?: unknown; describes?: unknown } };
+}
+
+/** A proposal's crew shape record key (`<source id> <relation>`), or `null` when it carries none. */
+function shapeKey(p: unknown): string | null {
+  const shape = (p as ListedProposal | null)?.payload?.shape;
+  return typeof shape?.sourceId === 'string' && typeof shape.relation === 'string' ? JSON.stringify([shape.sourceId, shape.relation]) : null;
 }
 
 /**
- * File each shape unless the queue already holds the same one (pending, approved, or declined: a person who said no
- * is not asked again for the same shape). "The same" is {@link shapeIdentity}: the profile's bands and the links, not
- * the day it was profiled. Answers the ids filed and the count skipped. The caller serializes filing per source.
+ * The approved proposals that stand for live knowledge (crew#1625): of the crew-profiled shapes, only the newest per
+ * source and relation (`observed_at`, a later listing breaking a tie), since a re-profile forgets the node of the one
+ * it replaces while estate keeps its approved record. A proposal with no crew record (an agent-proposed shape) is kept
+ * as listed. Order is kept. Pure.
  */
-export async function fileShapes(estate: EstateCall, proposals: readonly ShapeProposal[]): Promise<{ filed: Array<{ id: string; relation: string }>; skipped: number }> {
+export function currentShapes<T>(approved: readonly T[]): T[] {
+  const newest = new Map<string, number>();
+  approved.forEach((p, i) => {
+    const key = shapeKey(p);
+    if (key === null) return;
+    const at = String((p as ListedProposal).payload?.observed_at ?? '');
+    const held = newest.get(key);
+    if (held === undefined || String((approved[held] as ListedProposal).payload?.observed_at ?? '') <= at) newest.set(key, i);
+  });
+  return approved.filter((p, i) => {
+    const key = shapeKey(p);
+    return key === null || newest.get(key) === i;
+  });
+}
+
+/** What {@link writeShapes} did. */
+export interface WrittenShapes {
+  /** The shapes written now: their proposal id (which names the knowledge node) and relation. */
+  written: Array<{ id: string; relation: string }>;
+  /** Shapes already in knowledge, the same (see {@link shapeIdentity}): left as they are. */
+  unchanged: number;
+  /** Older shapes of the source this profile replaced: forgotten from knowledge, or a pending one declined. */
+  replaced: number;
+}
+
+/**
+ * Write a person's profile of one source into knowledge (crew#1625; the module doc). Per relation: a shape the same as
+ * the one in knowledge ({@link shapeIdentity}: the bands and the links, not the day) is left; otherwise the older
+ * shapes of that relation are forgotten (`knowledge.forget` by their exact `source`) and the new one is submitted and
+ * approved. Shapes of relations the source's catalog no longer holds are forgotten too (`catalog`: estate's catalog
+ * keys, `null` when the read was incomplete, so nothing is taken as gone), and every pending shape of the source
+ * (filed for review before crew#1625) is declined, so the queue holds none of it. A shape a person declined earlier is
+ * no reason to skip: profiling again is the decision. The caller serializes writes per source.
+ */
+export async function writeShapes(estate: EstateCall, sourceId: string, proposals: readonly ShapeProposal[], catalog: ReadonlySet<string> | null): Promise<WrittenShapes> {
   const listed = (await estate('proposal.list', { kind_type: 'knowledge' })) as { proposals?: ListedProposal[] } | null;
-  const have = new Set(
-    (listed?.proposals ?? [])
-      .filter((p) => typeof p.payload?.shape?.sourceId === 'string')
-      .map((p) => shapeIdentity(p.payload!.shape!)),
-  );
-  const filed: Array<{ id: string; relation: string }> = [];
-  let skipped = 0;
+  const mine = (listed?.proposals ?? []).filter((p) => typeof p.id === 'string' && p.payload?.shape?.sourceId === sourceId);
+  const current = new Map(currentShapes(mine.filter((p) => p.state === 'approved')).map((p) => [String(p.payload!.shape!.relation), p] as const));
+  const keep = new Set<string>();
+  const forgotten = new Set<string>();
+  let replaced = 0;
+  /**
+   * Forget the nodes of a relation's approved shapes, by each one's exact `source` (once each): every version a person
+   * or an earlier profile approved, under whatever name the source had then. A relation with no approved shape has no
+   * node to forget.
+   */
+  const forgetRelation = async (relation: string): Promise<void> => {
+    const sources = new Set(mine.filter((p) => p.state === 'approved' && p.payload?.shape?.relation === relation && typeof p.payload.source === 'string').map((p) => p.payload!.source as string));
+    for (const source of sources) {
+      if (forgotten.has(source)) continue;
+      forgotten.add(source);
+      const got = (await estate('knowledge.forget', { source })) as { forgotten?: unknown } | null;
+      if (typeof got?.forgotten === 'number' && got.forgotten > 0) replaced++;
+    }
+  };
+  const written: WrittenShapes['written'] = [];
+  let unchanged = 0;
   for (const p of proposals) {
-    const key = shapeIdentity(p.payload.shape);
-    if (have.has(key)) {
-      skipped++;
+    const relation = p.payload.shape.relation;
+    const live = current.get(relation);
+    if (live !== undefined && shapeIdentity(live.payload!.shape!) === shapeIdentity(p.payload.shape)) {
+      keep.add(String(live.id));
+      unchanged++;
       continue;
     }
+    await forgetRelation(relation);
     const got = (await estate('proposal.submit', { kind_type: p.kind_type, payload: p.payload, facets: p.facets })) as { id?: unknown } | null;
     if (typeof got?.id !== 'string' || got.id === '') throw new Error('proposal.submit returned no id');
-    have.add(key);
-    filed.push({ id: got.id, relation: p.payload.shape.relation });
+    keep.add(got.id);
+    await estate('proposal.approve', { id: got.id });
+    written.push({ id: got.id, relation });
   }
-  return { filed, skipped };
+  // Relations the source no longer has (a dropped table). One left out of this profile by its caps stays.
+  const profiled = new Set(proposals.map((p) => p.payload.shape.relation));
+  if (catalog !== null) for (const relation of current.keys()) if (!profiled.has(relation) && !catalog.has(relation)) await forgetRelation(relation);
+  for (const p of mine) {
+    if (p.state !== 'pending' || keep.has(String(p.id))) continue;
+    await estate('proposal.reject', { id: p.id });
+    replaced++;
+  }
+  return { written, unchanged, replaced };
 }
