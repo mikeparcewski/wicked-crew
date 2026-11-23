@@ -11,10 +11,9 @@ import { execCapped } from '../core/exec.js';
 import { publicText } from './cluster-status.js';
 import { canonicalize } from '../projects/state-home-preflight.js';
 import { crewStateHome, stateHomeOfDb } from '../projects/state-home.js';
-import { gatewayName, resolveContainerRuntime } from './system-snapshot.js';
 import { homeless } from './seat-standing.js';
 
-export type SeatLoginVerb = 'argv' | 'ingest' | 'status' | 'sign-out';
+export type SeatLoginVerb = 'argv' | 'ingest' | 'status' | 'sign-out' | 'abandon';
 export type ExecLike = (
   file: string,
   args: string[],
@@ -55,8 +54,11 @@ export function defaultSeatFloor(env: NodeJS.ProcessEnv = process.env): string {
   return 'container';
 }
 
+/** The seats whose sign-in the engine's `seat-login` runs. */
+export const CONTAINER_LOGIN_CLIS: readonly string[] = ['claude', 'codex', 'pi', 'opencode', 'copilot'];
+
 export function isContainerLoginCli(cli: string): boolean {
-  return ['claude', 'codex', 'pi', 'opencode', 'copilot'].includes(cli);
+  return CONTAINER_LOGIN_CLIS.includes(cli);
 }
 
 /** Where a container seat's one-time sign-in runs (the engine's `seat_login::host_login`): codex, pi and
@@ -168,52 +170,22 @@ export function closedBeforeSignIn(cli: string): string {
 
 /** Fifteen minutes allows browser/device approval but bounds an abandoned dialog's reservation. */
 export const SIGNIN_MAX_AGE_MS = 15 * 60_000;
-export type LoginContainer = { runtime: string; name: string };
-
-/** Only the engine's explicit run --name is a removal target; host sign-ins have none. */
-export function loginContainerFromArgv(argv: string[]): LoginContainer | null {
-  if (argv[1] !== 'run' || !argv[0]) return null;
-  const index = argv.indexOf('--name');
-  const name = index < 0 ? argv.find((arg) => arg.startsWith('--name='))?.slice(7) : argv[index + 1];
-  return name && /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name) ? { runtime: argv[0], name } : null;
+/** (crew#1523, wicked-core#1673) End the sign-in the engine's last `argv` opened for `cli`: the engine stops its
+ *  login pod (or host login) and removes its store, and leaves the broker's credential alone. Idempotent. Crew
+ *  never removes an engine-owned pod or container itself. A failure is logged and the next sign-in or sign-out
+ *  clears what is left. The caller holds the seat's serial queue, so this can never end a newer sign-in. */
+export async function endSignIn(cli: string, deps: SeatLoginDeps, log: (line: string) => void): Promise<void> {
+  const out = await runSeatLogin('abandon', cli, deps);
+  if (out.rc !== 0) log(`Sign-in cleanup for ${cli} did not finish: ${loginDetail(out.stderr) || 'seat-login abandon failed'}`);
 }
 
-export async function removeLoginContainer(container: LoginContainer | null, deps: SeatLoginDeps = {}): Promise<void> {
-  if (container === null) return;
-  await (deps.exec ?? execCapped)(container.runtime, ['rm', '-f', container.name], { timeout: 3_000, env: process.env });
-}
-
-/** A restart owns only this gateway's exact session names, never a name-prefix deletion. */
-export interface LoginContainerSweepDeps {
-  gatewayDir: string;
-  exec?: ExecLike;
-  runtime?: () => string | null;
-  log: (line: string) => void;
-}
-
-export async function sweepLoginContainers(input: LoginContainerSweepDeps): Promise<void> {
-  try {
-    const runtime = (input.runtime ?? resolveContainerRuntime)();
-    if (runtime === null) { input.log('Sign-in cleanup skipped: container runtime unavailable.'); return; }
-    const prefix = `${gatewayName(gatewayDirOf(input.gatewayDir))}-login-`;
-    const pattern = new RegExp(`^${prefix}(claude|codex|pi|opencode|copilot|agy)-[0-9a-f]{8}$`);
-    const exec = input.exec ?? execCapped;
-    const out = await exec(runtime, ['ps', '-a', '--filter', `name=${prefix}`, '--format', '{{.Names}}'], { timeout: 3_000, env: process.env });
-    const names = [...new Set(out.stdout.split(/\r?\n/).filter((name) => pattern.test(name)))];
-    // One bounded removal also bounds shutdown when many abandoned sessions exist.
-    if (names.length > 0) await exec(runtime, ['rm', '-f', ...names], { timeout: 3_000, env: process.env });
-  } catch {
-    input.log('Sign-in cleanup skipped: container runtime unavailable.');
-  }
-}
-
-export function registerLoginCleanup(app: FastifyInstance, deps: SeatLoginDeps): void {
-  const sweep = async (): Promise<void> => {
-    if (!isContainerSeatFloor() || deps.gatewayDir === undefined) return;
-    await sweepLoginContainers({ ...deps, gatewayDir: deps.gatewayDir, log: (line) => app.log.info(line) });
-  };
-  app.addHook('onReady', sweep);
-  app.addHook('onClose', sweep);
+/** A daemon start owns no sign-in: one a previous process opened (its terminal died with it) is ended through the
+ *  engine before the routes listen, so it cannot race a new sign-in. */
+export function registerLoginCleanup(app: FastifyInstance, deps: SeatLoginDeps, clis: readonly string[] = CONTAINER_LOGIN_CLIS): void {
+  app.addHook('onReady', async () => {
+    if (!isContainerSeatFloor()) return;
+    await Promise.all(clis.map((cli) => endSignIn(cli, deps, (line) => app.log.info(line))));
+  });
 }
 
 export async function runSeatLogin(
@@ -380,7 +352,7 @@ export function registerSeatContainerLoginRoutes(app: FastifyInstance, input: Se
   // released only by its owner (the generation that reserved it).
   const openLogins = new Map<string, {
     generation: number; openedAt: number; terminalId: string | null; exited: boolean;
-    container: LoginContainer | null; stop?: () => void;
+    stop?: () => void;
     /** (crew-0182) A HOST sign-in whose terminal is open: close it and ingest for this same generation. A host CLI
      *  such as pi keeps running after its sign-in finished, so closing the view is how the person ends it. */
     finish?: (() => Promise<void>) | undefined;
@@ -401,8 +373,8 @@ export function registerSeatContainerLoginRoutes(app: FastifyInstance, input: Se
       if (session.terminalId !== null) {
         try { await adapter.closeTerminal(session.terminalId); } catch { /* already exited */ }
       }
-      try { await removeLoginContainer(session.container, seatLoginDeps); }
-      catch { app.log.info('Sign-in cleanup skipped: container runtime unavailable.'); }
+      // The engine ends the remote half (login pod or host login, and its store) (crew#1523).
+      await endSignIn(cli, seatLoginDeps, (line) => app.log.info(line));
       return true;
     });
   };
@@ -454,7 +426,7 @@ export function registerSeatContainerLoginRoutes(app: FastifyInstance, input: Se
       }
       // Reserved BEFORE the first await: a sign-out that lands meanwhile wins.
       const generation = bump(cli);
-      const session = { generation, openedAt: Date.now(), terminalId: null as string | null, exited: false, container: null as LoginContainer | null, stop: () => {}, finish: undefined as (() => Promise<void>) | undefined };
+      const session = { generation, openedAt: Date.now(), terminalId: null as string | null, exited: false, stop: () => {}, finish: undefined as (() => Promise<void>) | undefined };
       openLogins.set(cli, session);
       containerLoginOutcomes.delete(cli);
       const out = await serial(cli, () => runSeatLogin('argv', cli, seatLoginDeps));
@@ -473,10 +445,10 @@ export function registerSeatContainerLoginRoutes(app: FastifyInstance, input: Se
         release(cli, generation);
         return reply.code(502).send(failureBody(message(err), cli));
       }
-      session.container = loginContainerFromArgv(argv);
+      // Superseded: whatever bumped the generation (a cancel, a sign-out, a newer sign-in) queued the engine call
+      // that ends this session after its argv, on the seat's serial queue.
       if (loginGeneration.get(cli) !== generation) {
         release(cli, generation);
-        try { await removeLoginContainer(session.container, seatLoginDeps); } catch { /* runtime down */ }
         return reply.code(409).send(signInFailure('sign-in was superseded', cli));
       }
       let termId: string | null = null;
@@ -518,9 +490,7 @@ export function registerSeatContainerLoginRoutes(app: FastifyInstance, input: Se
         }
         // A sign-out (or a newer sign-in) while this ingest ran owns the outcome now.
         if (loginGeneration.get(cli) === generation) containerLoginOutcomes.set(cli, outcome);
-      }).finally(async () => {
-        try { await removeLoginContainer(session.container, seatLoginDeps); }
-        catch { app.log.info('Sign-in cleanup skipped: container runtime unavailable.'); }
+      }).finally(() => {
         release(cli, generation);
       });
       const done = (): void => {
@@ -542,7 +512,8 @@ export function registerSeatContainerLoginRoutes(app: FastifyInstance, input: Se
       } catch (err) {
         stop();
         release(cli, generation);
-        try { await removeLoginContainer(session.container, seatLoginDeps); } catch { /* runtime down */ }
+        // No terminal opened, so nothing else will end the session this argv opened (queued before any newer argv).
+        if (loginGeneration.get(cli) === generation) void serial(cli, () => endSignIn(cli, seatLoginDeps, (line) => app.log.info(line)));
         return reply.code(400).send(failureBody(message(err), cli));
       }
       session.terminalId = termId;
@@ -567,7 +538,6 @@ export function registerSeatContainerLoginRoutes(app: FastifyInstance, input: Se
       if (loginGeneration.get(cli) !== generation) {
         stop();
         try { await adapter.closeTerminal(termId); } catch { /* already closed */ }
-        try { await removeLoginContainer(session.container, seatLoginDeps); } catch { /* runtime down */ }
         release(cli, generation);
         return reply.code(409).send(signInFailure('sign-in was superseded', cli));
       }
