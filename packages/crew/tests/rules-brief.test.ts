@@ -99,6 +99,8 @@ describe('the rules block', () => {
     expect(lines.at(-1)).toBe(RULES_BRIEF_CLOSE);
     expect(block).toContain('3 in force, 2 to check (1 apply, 1 may apply), 1 not applicable');
     expect(block).toContain('does not mark its own compliance');
+    // (core#1316) The reviewer is told a process rule (RVWL-*) is reported, never a reason to fail review.
+    expect(block).toContain('a broken rule fails review, but a shipped process rule (RVWL-*) is only reported.');
     expect(block).toContain(`Applies to this job:\n- DEV-TINYMATH-2 (warn): ${TINY.statement}`);
     expect(block).toContain(`May apply:\n- learn-tests-with-fixes (warn): ${LEARN.statement}`);
     expect(lines).toContain('- MCPS-1004');
@@ -190,23 +192,23 @@ describe('the rules block', () => {
   });
 
   it('(xreview) when every bare id fits, every id is named: the overflow line is reserved only when ids are left out', async () => {
-    // 229 short ids: every bare id fits in 4 KiB (about 4,083 bytes), but not with the overflow line reserved too.
-    const rules = Array.from({ length: 229 }, (_, i) => ({ id: `R-${String(i).padStart(3, '0')}`, severity: 'warn', statement: 'hello' }) as ConformanceRule);
+    // 226 short ids (the header names process rules, core#1316): every bare id fits in 4 KiB (about 4,092 bytes), but not with the overflow line reserved too.
+    const rules = Array.from({ length: 226 }, (_, i) => ({ id: `R-${String(i).padStart(3, '0')}`, severity: 'warn', statement: 'hello' }) as ConformanceRule);
     const block = rulesBriefBlock(rules, await matchRulesForJob(rules, bugJob(), null))!;
     expect(Buffer.byteLength(block)).toBeLessThanOrEqual(RULES_BLOCK_MAX_BYTES);
-    expect(ruleLines(block)).toHaveLength(229);
+    expect(ruleLines(block)).toHaveLength(226);
     expect(block).not.toContain('did not fit');
   });
 
   it('(xreview r3) a block whose bare ids fill exactly the cap names every id', async () => {
-    const rules = Array.from({ length: 229 }, (_, i) => ({ id: `R-${String(i).padStart(3, '0')}`, severity: 'warn', statement: 'hello' }) as ConformanceRule);
+    const rules = Array.from({ length: 226 }, (_, i) => ({ id: `R-${String(i).padStart(3, '0')}`, severity: 'warn', statement: 'hello' }) as ConformanceRule);
     const probe = rulesBriefBlock(rules, await matchRulesForJob(rules, bugJob(), null))!;
     // Lengthen the first id until the all-bare block is exactly RULES_BLOCK_MAX_BYTES.
     const bareBytes = Buffer.byteLength(probe) - ': hello'.length * probe.split('(warn): hello').length + ': hello'.length;
     rules[0]!.id += 'x'.repeat(RULES_BLOCK_MAX_BYTES - bareBytes);
     const block = rulesBriefBlock(rules, await matchRulesForJob(rules, bugJob(), null))!;
     expect(Buffer.byteLength(block)).toBe(RULES_BLOCK_MAX_BYTES);
-    expect(ruleLines(block)).toHaveLength(229);
+    expect(ruleLines(block)).toHaveLength(226);
     expect(block).not.toContain('(warn): hello'); // all bare: the ids alone fill the cap
     expect(block).not.toContain('did not fit');
   });
