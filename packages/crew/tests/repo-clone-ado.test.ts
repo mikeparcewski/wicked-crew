@@ -43,10 +43,6 @@ afterEach(async () => {
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
-function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8' });
-}
-
 interface Fx {
   root: string;
   url: string;
@@ -56,6 +52,10 @@ interface Fx {
   paths: string[];
   /** A HOME with no git config, so no host credential helper answers for the loopback. */
   env: NodeJS.ProcessEnv;
+}
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8' });
 }
 
 /** A bare repo served at `<loopback>/org/proj/_git/repo`, refusing any request without the PAT's header. */
