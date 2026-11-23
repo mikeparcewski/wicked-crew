@@ -198,6 +198,31 @@ describe('crew#552 — onboarding → capture-learnings', () => {
     expect(h.cancels).toEqual(['cap-1']);
   });
 
+  it('core#1799 (train-12 cert): a capture whose review failed is ended with what the review said, never the answers nobody gives', async () => {
+    const h = harness();
+    h.chain.onEvent(frame('sessionCompleted', 'onb-1'));
+    await settle();
+    // The engine's own frames, in their order (cert run 3b395499: gateEscalated, then awaitingHuman, same ord).
+    h.chain.onEvent({
+      type: 'gateEscalated', session: 'cap-1', ord: 5, condition: 'verdict_not_pass', denialSource: 'evaluator_verdict',
+      verdictSummary: "the evaluator's verdict is FAIL\nEvaluator review; no repository files changed.\n\nThe capture report counts 4 proposals but two cite no source.",
+    } as unknown as CoreEvent);
+    h.chain.onEvent({
+      type: 'awaitingHuman', session: 'cap-1', ord: 5, gateKind: 'escalation',
+      prompt: "Unit 5 verdict is NOT PASS (the evaluator's verdict is FAIL) — confirm to retry the phase, request changes to send the review back to the creator phase, or reject to cancel the run [engine gate: a denied unit pauses for a decision instead of failing the run (core#464)]",
+    } as unknown as CoreEvent);
+    await settle();
+    expect(h.cancels).toEqual(['cap-1']);
+    await h.audit.flush();
+    const lines = await h.audit.readAll({ action: 'run.cancelled' });
+    expect(lines).toHaveLength(1);
+    const reason = String((lines[0]!.detail as Record<string, unknown>)['reason']);
+    expect(reason).toBe(
+      "Capture learnings from alpha stopped at escalation (Unit 5 verdict is NOT PASS (the evaluator's verdict is FAIL)): onboarding started it, so crew ends it rather than ask you. Its review said: “Evaluator review; no repository files changed. The capture report counts 4 proposals but two cite no source.” Run Capture learnings yourself to try again.",
+    );
+    expect(reason).not.toMatch(/confirm to retry|request changes|reject to cancel/u);
+  });
+
   it('crew#1365: a stop the engine refuses is logged and leaves no audit line', async () => {
     const h = harness();
     const adapter = (h.chain as unknown as { deps: { adapter: { launchRun: unknown } } }).deps.adapter;

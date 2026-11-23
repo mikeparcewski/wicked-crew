@@ -62,6 +62,9 @@ export class OnboardingCaptureChain {
   private readonly ended = new Set<string>();
   /** crew#1365: the captures being stopped, or stopped and not yet seen end (one stop per capture). */
   private readonly stopping = new Set<string>();
+  /** (core#1799, train-12 cert) The review's own words when a capture's step escalated (`gateEscalated.verdictSummary`),
+   *  by run, with the step's ord: the stop line says why the review failed, not only that it did. */
+  private readonly verdicts = new Map<string, { ord: unknown; summary: string }>();
 
   constructor(private readonly deps: OnboardingCaptureDeps) {}
 
@@ -74,8 +77,13 @@ export class OnboardingCaptureChain {
     }
     const terminal = event.type === 'sessionCompleted' || event.type === 'sessionFailed' || event.type === 'runCancelled';
     const owned = this.launched.has(session) || this.deps.runTimingIndex.isOnboardingCapture(session);
+    if ((event.type as string) === 'gateEscalated' && owned && !this.ended.has(session)) {
+      const ev = event as unknown as Record<string, unknown>;
+      const summary = ev['verdictSummary'];
+      if (typeof summary === 'string' && summary.trim() !== '') this.verdicts.set(session, { ord: ev['ord'], summary });
+    }
     if (event.type === 'awaitingHuman' && owned && !this.ended.has(session)) void this.stopParked(session, event);
-    if (terminal && owned) { this.launched.delete(session); this.stopping.delete(session); this.ended.add(session); }
+    if (terminal && owned) { this.launched.delete(session); this.stopping.delete(session); this.verdicts.delete(session); this.ended.add(session); }
     if (terminal && session === this.active) this.active = null;
     if (terminal && this.launchingFor !== null) this.endedWhileLaunching.add(session);
     void this.next();
@@ -110,8 +118,17 @@ export class OnboardingCaptureChain {
     const repo = this.launched.get(runId) ?? 'the repository';
     const ev = event as unknown as Record<string, unknown>;
     const gate = typeof ev['gateKind'] === 'string' && /^[A-Za-z0-9_.:-]{1,40}$/u.test(ev['gateKind']) ? ev['gateKind'].replace(/[_-]+/gu, ' ') : 'a gate';
-    const prompt = typeof ev['prompt'] === 'string' ? ev['prompt'].replace(/\s+/gu, ' ').trim().slice(0, 200) : '';
-    const reason = `Capture learnings from ${repo} stopped at ${gate}${prompt !== '' ? ` (${prompt})` : ''}: onboarding started it, so crew ends it rather than ask you. Run Capture learnings yourself to try again.`;
+    // The gate's own sentence, without the answers it offers a person: nobody answers this one (core#1799 cert).
+    const prompt = typeof ev['prompt'] === 'string' ? ev['prompt'].split(/ — | \[engine gate/u)[0]!.replace(/\s+/gu, ' ').trim().slice(0, 200) : '';
+    // …and, when its review failed, what the review said (its verdict summary, the step's own words), so the person
+    // sees why it stopped.
+    // Its first line (the verdict) is the gate's sentence already: only the review's own words follow it.
+    const verdict = this.verdicts.get(runId);
+    const lines = verdict !== undefined && verdict.ord === ev['ord'] ? verdict.summary.split('\n') : [];
+    if (lines.length > 1 && prompt.includes(lines[0]!.trim())) lines.shift();
+    const said = lines.join(' ').replace(/\s+/gu, ' ').trim().slice(0, 400);
+    const head = `Capture learnings from ${repo} stopped at ${gate}${prompt !== '' ? ` (${prompt})` : ''}: onboarding started it, so crew ends it rather than ask you.`;
+    const reason = `${head}${said !== '' ? ` Its review said: “${said}”` : ''} Run Capture learnings yourself to try again.`;
     try {
       const status = await this.deps.adapter.cancelRun(runId);
       this.deps.audit.record('run.cancelled', ONBOARDING_CHAIN_ACTOR, { runId, detail: { status, reason } });
