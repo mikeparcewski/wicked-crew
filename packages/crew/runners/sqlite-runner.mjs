@@ -61,8 +61,8 @@ try {
   if (req.op === 'strip') {
     // (crew#1731) An uploaded .sqlite's virtual tables (a full-text index, an R-tree) are dropped from crew's COPY of
     // the file, never the person's: DROP TABLE runs the module's own destroy, which drops its shadow tables too. A
-    // module this SQLite does not have cannot be dropped, and the upload is refused naming it. The copy is then
-    // rewritten with VACUUM INTO (live pages only, so nothing dropped, now or before the upload, stays in its free
+    // module this SQLite does not have cannot be dropped, and the upload is refused naming it. The copy (every upload's,
+    // with no virtual table to drop too: crew#1787) is then rewritten with VACUUM INTO (live pages only, so nothing dropped, now or before the upload, stays in its free
     // pages) and put in its place. Not a plain VACUUM: that renumbers the rowids of a table without an INTEGER PRIMARY
     // KEY, which another table may refer to; VACUUM INTO keeps them (codex r1, r2).
     const quote = (n) => '"' + String(n).replace(/"/g, '""') + '"';

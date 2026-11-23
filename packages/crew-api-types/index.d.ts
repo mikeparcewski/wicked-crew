@@ -15191,6 +15191,13 @@ export interface PatchMcpToolBody {
    * Acceptance requires an effective read (409 `not_a_read`) and a registered schema (409 `not_registered`).
    */
   readAccepted?: boolean;
+  /**
+   * (crew#1788) The saved schema the person saw: the row's {@link McpTool.schemaHash} (64 lowercase hex). When set, a
+   * patch against any other saved schema (another save landed since the row was drawn) is refused 409
+   * `schema_changed` and changes nothing; read the tool again and show the new schema. Send it with `readAccepted` and
+   * `disclosure`, so the acceptance or review binds to what was reviewed.
+   */
+  expectedSchemaHash?: string;
 }
 
 /**

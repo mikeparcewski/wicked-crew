@@ -418,11 +418,30 @@ describe('onboard proposals', () => {
       ['add https://alice:ghp_SECRET123@github.com/acme/repo.git', 'ghp_SECRET123'],
       ['add https://github.com/acme/repo.git', 'acme'],
       ['add it to docsteam', 'docs'],
+      // crew#1790: a credential or a quoted path pasted as several words: no word of it is a name the person said.
+      ['clone it with Authorization: Bearer Zq9TokenValue', 'Zq9TokenValue'],
+      ['the header is Bearer Zq9TokenValue', 'Zq9TokenValue'],
+      ['token: Zq9TokenValue and password = Hunter22', 'Hunter22'],
+      ['read it with ghp_Abc123def', 'ghp_Abc123def'],
+      ['my checkout is "/home/me/Private Client Files/repo"', 'Client'],
+      ['my checkout is ‘C:\\Users\\me\\Client Work\\repo’', 'Client Work'],
     ] as const).entries()) {
       const c = (await propose(r, `n${i}`, chatWith(r, `n${i}`, { words }), { onboard: { url: URL, project } }))!;
       expect(c).toMatchObject({ blocked: expect.stringMatching(/^no project has the name given \(projects here: /u), onboard: { projectId: null } });
       expect(c.onboard?.createProject ?? null).toBeNull();
       expect(JSON.stringify(c)).not.toContain(project);
+    }
+  });
+
+  it('a name said outside a quoted path or a credential still creates the project; an apostrophe opens no quote (crew#1790)', async () => {
+    const r = rig();
+    for (const [i, [words, project]] of ([
+      ['put it in Docs Team; my copy is at "/home/me/Private Client Files/repo"', 'Docs Team'],
+      ["put it in Mike's Team, it lives under a/b, don't move it", 'Team'],
+      ['Authorization: Bearer Zq9TokenValue, then add it to Billing', 'Billing'],
+    ] as const).entries()) {
+      const c = (await propose(r, `k${i}`, chatWith(r, `k${i}`, { words }), { onboard: { url: URL, project } }))!;
+      expect(c.onboard?.createProject, words).toEqual({ name: project });
     }
   });
 

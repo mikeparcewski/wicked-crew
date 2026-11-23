@@ -654,6 +654,25 @@ describe('Apps per-tool read acceptance (#1295)', () => {
     for (const type of ['mcp.tool.read_accepted', 'mcp.tool.read_withdrawn']) expect(entries).toEqual(expect.arrayContaining([expect.objectContaining({ action: type, detail: expect.objectContaining({ via: 'patch' }) })]));
   });
 
+  it('PATCH binds the acceptance to the schema the person saw: a save in between is refused 409 schema_changed (crew#1788)', async () => {
+    const seen = toolOf(await previewAndSave(), 'wt_echo').schemaHash!;
+    // Another operator saves a changed schema under the same subject after the row was drawn.
+    writeSpec({ tools: BASE_TOOLS.map((t) => t.name === 'wt_echo' ? { ...t, inputSchema: { type: 'object', properties: { changed: { type: 'number' } } } } : t) });
+    const now = toolOf(await previewAndSave(), 'wt_echo').schemaHash!;
+    expect(now).not.toBe(seen);
+    const stale = await patch({ readAccepted: true, expectedSchemaHash: seen });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json()).toMatchObject({ code: 'schema_changed' });
+    const store = new McpRegistryStore(join(base, 'state', 'mcp'));
+    expect((await store.read()).servers[0]!.tools.find((t) => t.name === 'wt_echo')).toMatchObject({ readAccepted: null });
+    expect((await audit.read()).some((e) => e.action === 'mcp.tool.read_accepted' && (e.detail as { via?: string } | undefined)?.via === 'patch')).toBe(false);
+    // Against the schema saved now, it lands bound to that schema.
+    const ok = await patch({ readAccepted: true, expectedSchemaHash: now });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect((await store.read()).servers[0]!.tools.find((t) => t.name === 'wt_echo')).toMatchObject({ readAccepted: { schemaHash: now } });
+    expect((await patch({ readAccepted: true, expectedSchemaHash: 'not-a-hash' })).statusCode).toBe(400);
+  });
+
   it.each(['agent', 'system'] as const)('%s cannot accept or withdraw reads', async (kind) => {
     await previewAndSave();
     const p = await preview();

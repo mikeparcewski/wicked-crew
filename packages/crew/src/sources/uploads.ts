@@ -12,7 +12,8 @@
  * - `.sqlite`: refused if it holds a view or a trigger (§5.1), inspected in the snapshot runner's child
  *   process, never in the daemon. A virtual table (a full-text index, an R-tree) is dropped from crew's copy
  *   with its shadow tables, in the same child, and the result names it (crew#1731); one whose module this
- *   SQLite lacks cannot be dropped, and the file is refused naming it.
+ *   SQLite lacks cannot be dropped, and the file is refused naming it. Every copy is then rewritten with
+ *   VACUUM INTO, so no snapshot keeps the file's free pages (crew#1787).
  * - A crash mid-upload leaves its `.tmp-*` files behind: each upload starts a sweep (one at a time, never awaited) that
  *   removes the ones older than {@link STALE_TMP_MS} and not a live upload's (crew#1724).
  * - Limits: 50 MB file, 200 MB after decompression, 1,000,000 rows, 200 columns, 30 s to parse.
@@ -262,22 +263,23 @@ export async function ingestUpload(filename: string, data: Buffer, opts: { dir?:
       // Every table that belonged to them: one that outlives the drop (a declaration rewritten so the module's destroy
       // skips it) is refused, never kept as a plain table (codex r1).
       const theirs = new Set([...dropped, ...inspected.objects.filter((o) => o.shadow).map((o) => o.name)]);
-      if (dropped.length > 0) {
-        within(deadline);
-        let failed: Array<{ name: string; error: string }>;
-        try {
-          failed = (await sqliteStrip(tmp, `${tmp}-vacuum`, dropped, Math.max(1, deadline - Date.now()))).failed;
-        } catch (err) {
-          if (err instanceof SourceQueryError && err.errorClass === 'timeout') throw tooSlow();
-          throw unavailable(err) ?? err;
-        }
-        if (failed.length > 0) {
-          throw new UploadError('sqlite_code', `an uploaded .sqlite may hold only tables and indexes, and crew could not drop ${failed.map((f) => `the virtual table ${f.name} (${f.error})`).join(', ')} from its copy; drop ${failed.length === 1 ? 'it' : 'them'} from a copy of the file (DROP TABLE <name>) and upload that`);
-        }
-        inspected = await inspectWithin(tmp, deadline);
-        const left = inspected.objects.filter((o) => (o.type !== 'table' && o.type !== 'index') || o.virtual || o.shadow || theirs.has(o.name));
-        if (left.length > 0) throw new UploadError('sqlite_code', `an uploaded .sqlite may hold only tables and indexes; after its virtual tables were dropped it still holds ${left.map((o) => o.name).join(', ')}`);
+      // (crew#1787) Every copy is rewritten (VACUUM INTO, in the runner's child), virtual tables or not, so the snapshot
+      // holds live pages only: rows or tables the person deleted before the upload never ride in its free pages (or in
+      // an image a publish copies it into). A plain file's snapshot is therefore not its bytes, and its digest differs.
+      within(deadline);
+      let failed: Array<{ name: string; error: string }>;
+      try {
+        failed = (await sqliteStrip(tmp, `${tmp}-vacuum`, dropped, Math.max(1, deadline - Date.now()))).failed;
+      } catch (err) {
+        if (err instanceof SourceQueryError && err.errorClass === 'timeout') throw tooSlow();
+        throw unavailable(err) ?? err;
       }
+      if (failed.length > 0) {
+        throw new UploadError('sqlite_code', `an uploaded .sqlite may hold only tables and indexes, and crew could not drop ${failed.map((f) => `the virtual table ${f.name} (${f.error})`).join(', ')} from its copy; drop ${failed.length === 1 ? 'it' : 'them'} from a copy of the file (DROP TABLE <name>) and upload that`);
+      }
+      inspected = await inspectWithin(tmp, deadline);
+      const left = inspected.objects.filter((o) => (o.type !== 'table' && o.type !== 'index') || o.virtual || o.shadow || theirs.has(o.name));
+      if (left.length > 0) throw new UploadError('sqlite_code', `an uploaded .sqlite may hold only tables and indexes; after its virtual tables were dropped it still holds ${left.map((o) => o.name).join(', ')}`);
       if (inspected.generated.length > 0) throw new UploadError('sqlite_code', `an uploaded .sqlite may not hold generated or hidden columns; it holds ${inspected.generated.join(', ')}`);
       const total = inspected.catalog.relations.reduce((a, r) => a + (r.rowEstimate ?? 0), 0);
       if (total > UPLOAD_LIMITS.rows) throw new UploadError('too_many_rows', `the database has more than ${UPLOAD_LIMITS.rows} rows`);

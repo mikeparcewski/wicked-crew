@@ -236,15 +236,32 @@ export interface OnboardTurn {
 const ADDRESS_CHARS = /[@:/\\?#&=]/u;
 
 /**
+ * (crew#1790) Spans of the person's words that carry a credential or a path even though no single word in them holds an
+ * address character: a quoted string with a path separator in it (a path with spaces), an `Authorization`/`Bearer`
+ * value, a named secret followed by its value (`token: x`, `password = x`), and a word shaped like a known token.
+ * Each is set aside whole before the name is looked for.
+ */
+const CREDENTIAL_SPANS: readonly RegExp[] = [
+  // A quote opens and closes outside a word, so an apostrophe (`Mike's`, `don’t`) never opens or closes one.
+  ...(['""', "''", '“”', '‘’', '``'] as const).map(([o, c]) => new RegExp(`(?<![\\p{L}\\p{N}])${o}[^${c}]*[/\\\\][^${c}]*${c}(?![\\p{L}\\p{N}])`, 'gu')),
+  /\bauthorization\s*:?\s*(?:(?:bearer|basic|digest|token)\s+)?\S+/giu,
+  /\bbearer\s+\S+/giu,
+  /\b(?:access[ _-]?token|auth[ _-]?token|token|api[ _-]?key|apikey|password|passwd|pwd|passphrase|secret|client[ _-]?secret|credentials?)\s*[:=]\s*\S+/giu,
+  /(?<![\p{L}\p{N}_])(?:gh[pousr]_|github_pat_|glpat-|xox[abeprs]-|sk-|sk_live_|rk_live_|AKIA|ASIA|AIza|eyJ)[\p{L}\p{N}_.-]*/gu,
+];
+
+/**
  * (crew#1694) The name a card may create a project under: one the person's own words say as whole words (ignoring case
  * and spacing), outside any address, path or credential they wrote; that `POST /projects` would take; and that holds
  * none of those characters itself (it is repeated on the card). `null` when it is none of these.
  */
 export function creatableName(name: string, words: string): string | null {
   if (!CreateProjectSchema.shape.name.safeParse(name).success || ADDRESS_CHARS.test(name)) return null;
+  // crew#1790: a credential or a quoted path pasted as several words is set aside whole first.
+  const said = CREDENTIAL_SPANS.reduce((text, span) => text.replace(span, ' \u0000 '), words);
   // xreview r1: a token inside an address the person pasted (`https://u:TOKEN@host/acme/x`) is not a name they said.
   // A word's own sentence punctuation (`Team?`, `Team:`) does not make it one.
-  const plain = words.split(/\s+/u).map((w) => (ADDRESS_CHARS.test(w.replace(/[?:.,;!)"'’”]+$/u, '')) ? '\u0000' : w)).join(' ');
+  const plain = said.split(/\s+/u).map((w) => (ADDRESS_CHARS.test(w.replace(/[?:.,;!)"'’”]+$/u, '')) ? '\u0000' : w)).join(' ');
   const escaped = norm(name).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
   return new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, 'u').test(norm(plain)) ? name : null;
 }
