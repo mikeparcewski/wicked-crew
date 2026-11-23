@@ -509,6 +509,12 @@ describe('the seat parse', () => {
         { key: 'mislabelled', binary: 'claude', headless_invocation: 'codex exec {PROMPT}', chat_admission: { unscoped: { ok: true } } },
         { key: 'my-sonnet', binary: 'node', headless_invocation: '"/opt/bin/claude.cmd" -p {PROMPT}', chat_admission: { unscoped: { ok: true } } },
       ] as unknown as RosterSeat[];
+      // (codex r2 on #1817) The engine's own reading of the executable: a quoted directory joins the
+      // name after it, and any final extension is dropped (its `file_stem`).
+      for (const inv of ['"/opt/Agent Tools"/claude -p "{PROMPT}"', '/opt/bin/claude.sh -p {PROMPT}']) {
+        const only = [{ key: 'wrapped', binary: 'x', headless_invocation: inv, chat_admission: { unscoped: { ok: true } } }] as unknown as RosterSeat[];
+        expect(chatSeat(only, true)?.key).toBe('wrapped');
+      }
     try {
       // The container floor (the default) keeps the roster's first admitted seat.
       process.env['WICKED_SEAT_FLOOR'] = 'container';
