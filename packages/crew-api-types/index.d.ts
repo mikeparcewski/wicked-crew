@@ -17911,15 +17911,16 @@ export interface VoiceTtsStatus {
  * `desk_snooze_invalid` for a time not in the future, more than 7 days ahead, or a key over 200 characters);
  * `DELETE /desk/snoozes/:key` → {@link DeskSnoozeWakeResponse} (audited `desk.need.woken`). Setting or ending one is
  * a human operator's (403 `human_operator_only`). A snooze only defers the item on the Desk: it stays in
- * `/system.attention[]`, and the skin brings it back when `until` passes or it gets worse than `severity`.
+ * `/system.attention[]`, and the skin brings it back when `until` passes or its rank rises above `severity`.
  */
 export interface DeskSnooze {
   /** The skin's own id for the item (`run:<id>`, `infra:disk`, a need-row key); opaque to the daemon. */
   key: string;
   /** ISO-8601: when the snooze ends by itself. */
   until: string;
-  /** What the person saw when they snoozed it; `null` when not said. */
-  severity: 'red' | 'yellow' | null;
+  /** The skin's own rank of the item when it was snoozed (higher is worse), so it can bring the item back when it
+   *  gets worse; `null` when not said. */
+  severity: number | null;
   /** ISO-8601: when it was snoozed. */
   at: string;
   /** The actor id that snoozed it. */
@@ -17934,7 +17935,8 @@ export interface DeskSnoozesResponse {
 export interface PutDeskSnoozeBody {
   /** ISO-8601 with an offset; in the future, at most 7 days ahead. */
   until: string;
-  severity?: 'red' | 'yellow';
+  /** A whole number 0-1000: the skin's rank of the item, higher is worse. */
+  severity?: number;
 }
 
 export interface DeskSnoozeWakeResponse {

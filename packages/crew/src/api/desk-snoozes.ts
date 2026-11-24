@@ -35,7 +35,8 @@ export const DESK_WOKEN = 'desk.need.woken';
 
 export const PutDeskSnoozeSchema = z.strictObject({
   until: z.iso.datetime({ offset: true }),
-  severity: z.enum(['red', 'yellow']).optional(),
+  /** The skin's own rank of the item when it was snoozed, higher is worse (studio's need-row severity). */
+  severity: z.number().int().min(0).max(1000).optional(),
 });
 
 export class DeskSnoozes {
@@ -63,7 +64,7 @@ export class DeskSnoozes {
         const until = e.detail?.['until'];
         const severity = e.detail?.['severity'];
         if (typeof until !== 'string' || !Number.isFinite(Date.parse(until))) continue;
-        map.set(k, { key: k, until, severity: severity === 'red' || severity === 'yellow' ? severity : null, at: new Date(e.ts).toISOString(), by: e.actor.id });
+        map.set(k, { key: k, until, severity: typeof severity === 'number' && Number.isInteger(severity) ? severity : null, at: new Date(e.ts).toISOString(), by: e.actor.id });
       }
       this.map = map;
       return map;
@@ -81,7 +82,7 @@ export class DeskSnoozes {
     return [...map.values()].sort((a, b) => Date.parse(a.until) - Date.parse(b.until) || a.key.localeCompare(b.key));
   }
 
-  async snooze(key: string, until: string, severity: 'red' | 'yellow' | null, actor: Actor, record: (s: DeskSnooze) => void): Promise<DeskSnooze> {
+  async snooze(key: string, until: string, severity: number | null, actor: Actor, record: (s: DeskSnooze) => void): Promise<DeskSnooze> {
     const map = await this.load();
     const s: DeskSnooze = { key, until: new Date(Date.parse(until)).toISOString(), severity, at: new Date(this.now()).toISOString(), by: actor.id };
     record(s);
@@ -131,7 +132,7 @@ export function registerDeskSnoozeRoutes(app: FastifyInstance, deps: DeskSnoozeR
       if (bad !== null) return reply.code(400).send({ error: `Cannot snooze it: ${bad}.`, code: 'desk_snooze_invalid' });
       const parsed = PutDeskSnoozeSchema.safeParse(req.body ?? {});
       if (!parsed.success) {
-        return reply.code(400).send({ error: 'Send {"until": "<ISO time>"} and, optionally, "severity": "red" | "yellow".', code: 'desk_snooze_invalid' });
+        return reply.code(400).send({ error: 'Send {"until": "<ISO time>"} and, optionally, "severity": <whole number 0-1000>.', code: 'desk_snooze_invalid' });
       }
       const until = Date.parse(parsed.data.until);
       const now = deps.snoozes.nowMs();

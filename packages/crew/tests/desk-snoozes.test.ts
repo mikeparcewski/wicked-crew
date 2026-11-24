@@ -49,9 +49,9 @@ afterEach(async () => {
 describe('crew#1124: snooze a Needs-you item', () => {
   it('PUT snoozes until a time, GET lists it, DELETE wakes it; each is audited', async () => {
     const until = '2026-11-24T13:00:00.000Z';
-    const put = await app.inject({ method: 'PUT', url: url(key), payload: { until, severity: 'red' } });
+    const put = await app.inject({ method: 'PUT', url: url(key), payload: { until, severity: 70 } });
     expect(put.statusCode).toBe(200);
-    expect(put.json()).toMatchObject({ key, until, severity: 'red', by: 'local', at: '2026-11-24T12:00:00.000Z' } satisfies Partial<DeskSnooze>);
+    expect(put.json()).toMatchObject({ key, until, severity: 70, by: 'local', at: '2026-11-24T12:00:00.000Z' } satisfies Partial<DeskSnooze>);
     const list = (await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse;
     expect(list.snoozes.map((s) => s.key)).toEqual([key]);
     const del = await app.inject({ method: 'DELETE', url: url(key) });
@@ -89,6 +89,8 @@ describe('crew#1124: snooze a Needs-you item', () => {
     expect(await bad(key, { until: '2026-11-24T11:59:00.000Z' })).toBe(400);
     expect(await bad(key, { until: new Date(clock + DESK_SNOOZE_MAX_MS + 60_000).toISOString() })).toBe(400);
     expect(await bad(key, { until: 'tomorrow' })).toBe(400);
+    expect(await bad(key, { until: '2026-11-24T13:00:00.000Z', severity: 'red' })).toBe(400);
+    expect(await bad(key, { until: '2026-11-24T13:00:00.000Z', severity: 1.5 })).toBe(400);
     expect(await bad(key, { until: '2026-11-24T13:00:00.000Z', hide: true })).toBe(400);
     expect(await bad('x'.repeat(201), { until: '2026-11-24T13:00:00.000Z' })).toBe(400);
     expect(await bad(key, { until: new Date(clock + DESK_SNOOZE_MAX_MS).toISOString() })).toBe(200);
