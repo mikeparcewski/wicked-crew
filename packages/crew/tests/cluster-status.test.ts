@@ -115,7 +115,7 @@ describe('clusterRows', () => {
     expect(noCtl.cluster).toMatchObject({ state: 'down', reason: expect.stringContaining('no sandboxes CRD'), remedy: expect.stringContaining('cluster install') });
   });
   it('crew#1844: every command a row names is filled in for this daemon, so it pastes and runs', () => {
-    const engine = { exe: join(homedir(), '.wicked', 'bin', 'wicked-core'), home: join(homedir(), '.wicked-crew') };
+    const engine = { exe: join(homedir(), '.wicked', 'bin/wicked-core'), home: join(homedir(), '.wicked-crew') };
     // The engine's own document for a state home with no cluster (wicked-core k8s/mod.rs resolve_settings).
     const none = clusterRows(ok({ configured: false, reachable: false, kind: 'no_cluster', detail: 'no cluster is configured for this daemon: run `wicked-core cluster install` or set WICKED_K8S_CONTEXT (the current kubectl context is never used implicitly)' }), true, at, engine);
     expect(none.cluster.remedy).toBe("Run `~/.wicked/bin/wicked-core cluster install --admin-context rancher-desktop --home ~/.wicked-crew` (rancher-desktop is Rancher Desktop's cluster; for a different cluster, use its context), then re-check.");
@@ -152,9 +152,9 @@ describe('clusterRows', () => {
     expect(shellPath('/home/ab/core', '/home/a')).toBe('/home/ab/core');
     expect(engineCommand({ exe: null, home: null }, 'cluster status')).toBe('wicked-core cluster status');
     // A relative engine path is the daemon's, made absolute; a bare name stays for PATH.
-    expect(engineCommand({ exe: 'bin/wicked-core', home: null }, 'cluster status')).toBe(`${shellPath(join(process.cwd(), 'bin', 'wicked-core'))} cluster status`);
-    expect(engineCommand({ exe: 'bin/wicked-core', home: null }, 'cluster status')).not.toMatch(/^bin\//);
-    expect(engineCommand({ exe: 'wicked-core', home: null }, 'cluster status')).toBe('wicked-core cluster status');
+    expect(engineCommand({ exe: 'bin/engine', home: null }, 'cluster status')).toBe(`${shellPath(join(process.cwd(), 'bin', 'engine'))} cluster status`);
+    expect(engineCommand({ exe: 'bin/engine', home: null }, 'cluster status')).not.toMatch(/^bin\//);
+    expect(engineCommand({ exe: 'engine', home: null }, 'cluster status')).toBe('engine cluster status');
     expect(clusterInstallCommand({ exe: '/opt/wc', home: '/var/crew' })).toBe('/opt/wc cluster install --admin-context rancher-desktop --home /var/crew');
   });
   it('each row from its own evidence: a known failure is never hidden by an unread neighbour', () => {
