@@ -14,7 +14,7 @@ import type { SessionView, SystemCli, SystemInfraRow, SystemRun } from 'wicked-c
 
 import { buildNeeds, foldRunCost, GATEWAY_START_BOUND_MS, GatewayStartWatch, isAnsweredAsk, needsLevel, RunCostCache, supersession } from '../src/api/needs.js';
 import { judgeGaps, probeBroker, runLiveness } from '../src/api/system-snapshot.js';
-import { clusterInstallCommand, clusterRows, gatewayNamespace, type ClusterStatus } from '../src/api/cluster-status.js';
+import { clusterInstallCommand, clusterRows, gatewayNamespace, kubectlWord, type ClusterStatus } from '../src/api/cluster-status.js';
 
 interface DumpRun {
   id: string;
@@ -535,8 +535,11 @@ describe('a gateway that never serves and a failing credential refresh (crew#184
       expect(remedy).toContain(`\`${clusterInstallCommand(engine)}\``);
       const ns = gatewayNamespace(home);
       expect(ns).toMatch(/^wicked-sys-w[0-9a-f]{12}$/);
-      expect(remedy).toContain(`\`kubectl --context rancher-desktop -n ${ns} describe pods -l wicked.dev/role=gateway\``);
-      expect(remedy).toContain(`\`kubectl --context rancher-desktop -n ${ns} logs deploy/agw --all-containers --tail 50\``);
+      // The kubectl this host's terminal runs (the daemon's PATH, Rancher Desktop's ~/.rd/bin included).
+      const kubectl = kubectlWord();
+      expect(remedy).toContain(`\`${kubectl} --context rancher-desktop -n ${ns} describe pods -l wicked.dev/role=gateway\``);
+      // Every container's log, init containers included; one not started yet does not stop the others (codex r1).
+      expect(remedy).toContain(`\`${kubectl} --context rancher-desktop -n ${ns} logs deploy/agw --all-containers --ignore-errors --prefix --tail 50\``);
     } finally { rmSync(home, { recursive: true, force: true }); }
   });
 
