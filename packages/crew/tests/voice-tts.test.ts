@@ -12,6 +12,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TTS_ENGINE, TTS_VOICES, ttsVoiceUrl, type TtsVoice, type TtsVoiceFile } from '../src/voice/tts-manifest.js';
+import { pickWheel, readPins, sizeLines, withSizes } from '../scripts/voice-lock-sizes.mjs';
 import { TTS_MAX_WAV_BYTES, TTS_MIN_PLATFORM, TtsService, lockPath, normalizeSpeakText, probePython, ttsWavProblem, type PythonInfo, type TtsDeps } from '../src/voice/tts.js';
 import { VoiceError, type VoiceSpawn } from '../src/voice/service.js';
 import { registerVoiceRoutes } from '../src/voice/routes.js';
@@ -584,6 +585,36 @@ describe('voice locks (committed data)', () => {
       'protobuf-7.36.2-cp310-abi3-macosx_10_9_universal2.whl',
     ]);
     expect(/^# engine-bytes: (\d+)$/m.exec(text)![1]).toBe('61090584');
+  });
+
+  it('crew#1563 review r1: the pick is the one pip makes: best tag rank, compressed tags, abi3 and universal2, then the higher build', () => {
+    const rank = new Map(['cp312-cp312-macosx_14_0_arm64', 'cp312-abi3-macosx_14_0_arm64', 'cp312-abi3-macosx_10_9_universal2', 'cp39-abi3-macosx_11_0_arm64', 'py3-none-any'].map((t, i) => [t, i]));
+    const w = (file: string, bytes = 1) => ({ file, bytes, sha256: file });
+    expect(pickWheel([w('x-1-py2.py3-none-any.whl'), w('x-1-cp312-cp312-macosx_14_0_arm64.whl')], rank)?.file).toBe('x-1-cp312-cp312-macosx_14_0_arm64.whl');
+    expect(pickWheel([w('x-1-py2.py3-none-any.whl'), w('x-1-cp39-abi3-macosx_11_0_arm64.whl')], rank)?.file).toBe('x-1-cp39-abi3-macosx_11_0_arm64.whl');
+    expect(pickWheel([w('x-1-cp39-abi3-macosx_11_0_arm64.whl'), w('x-1-cp312-abi3-macosx_10_9_universal2.whl')], rank)?.file).toBe('x-1-cp312-abi3-macosx_10_9_universal2.whl');
+    expect(pickWheel([w('x-1-1-py3-none-any.whl'), w('x-1-2-py3-none-any.whl'), w('x-1-py3-none-any.whl')], rank)?.file).toBe('x-1-2-py3-none-any.whl');
+    expect(pickWheel([w('x-1-10-py3-none-any.whl'), w('x-1-9a-py3-none-any.whl')], rank)?.file).toBe('x-1-10-py3-none-any.whl');
+    expect(pickWheel([w('x-1-cp311-cp311-win_amd64.whl')], rank)).toBeNull();
+  });
+
+  it('crew#1563 review r1: a picked wheel whose sha256 the lock lacks throws before anything is written; sizes-only keeps every pin', async () => {
+    const lock = '# Generated for t; do not edit.\n# wheel: old 1\n# engine-bytes: 1\na==1 \\\n    --hash=sha256:aa \\\n    --hash=sha256:ab\nb==2 \\\n    --hash=sha256:bb\n';
+    const rank = new Map([['py3-none-any', 0]]);
+    const wheelsOf = async (name: string) => (name === 'a' ? [{ file: 'a-1-py3-none-any.whl', bytes: 10, sha256: 'ab' }] : [{ file: 'b-2-py3-none-any.whl', bytes: 5, sha256: 'bb' }]);
+    const sizes = await sizeLines(rank, readPins(lock), wheelsOf);
+    expect(sizes).toBe('# wheel: a-1-py3-none-any.whl 10\n# wheel: b-2-py3-none-any.whl 5\n# engine-bytes: 15\n');
+    const out = withSizes(lock, '# Generated for t; do not edit.\n', sizes);
+    const reqs = (t: string) => t.split('\n').filter((l) => !l.startsWith('#')).join('\n');
+    expect(reqs(out)).toBe(reqs(lock));
+    await expect(sizeLines(rank, readPins(lock), async () => [{ file: 'a-1-py3-none-any.whl', bytes: 10, sha256: 'zz' }])).rejects.toThrow(/not in the lock/);
+    // Every committed lock is what the rewrite gives from its own lines: requirement lines byte for byte.
+    for (const n of names) {
+      const text = readFileSync(join(real, n), 'utf8');
+      const head = `${text.split('\n')[0]!}\n`;
+      const own = text.split('\n').filter((l) => l.startsWith('# wheel: ') || l.startsWith('# engine-bytes: ')).map((l) => `${l}\n`).join('');
+      expect(withSizes(text, head, own), n).toBe(text);
+    }
   });
 
   it('crew#1563: GET /voice/tts says the engine download size from the lock, null where there is no lock', async () => {
