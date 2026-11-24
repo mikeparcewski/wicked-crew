@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ADO_RAW_ENV, execCapped, withAdoCredential } from '../src/core/exec.js';
 import { childEnvWithBootEstateDb } from '../src/core/governance-store.js';
 import { defaultAdoHelperExec } from '../src/core/deliver.js';
+import { deliverShellEnv } from '../src/api/post-hoc-deliver.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = join(HERE, '..', 'src');
@@ -68,6 +69,13 @@ describe('crew#1843 every crew child but the header minters runs without the raw
     expect(seen.stdout + viaCaller.stdout).not.toContain(FAKE);
   }, 30_000);
 
+  it('the post-hoc deliver shell keeps the credential its header helper mints from, and nothing else comes back', () => {
+    const env = deliverShellEnv({ HOME: '/tmp/h' });
+    for (const n of ADO_RAW_ENV) expect(env[n] === FAKE, n).toBe(true);
+    expect(env['HOME']).toBe('/tmp/h');
+    expect(env['WICKED_CREW_GOVERNANCE_DB']).toBeUndefined();
+  });
+
   it('the Azure DevOps header helper still gets the PAT it mints from', async () => {
     // The PAT path (the service principal would call Entra): the helper answers `Basic <base64>` from the PAT alone.
     for (const n of ADO_RAW_ENV) if (n !== 'AZURE_DEVOPS_EXT_PAT') delete process.env[n];
@@ -87,9 +95,9 @@ describe('crew#1843 STATIC: only the header helper and the post-hoc deliver scri
         const before = src.slice(0, m.index);
         // The definition is not a use.
         if (/export function\s*$/.test(before)) continue;
-        // The enclosing function: the nearest `function name` or `const name =` above the call.
-        const fn = [...before.matchAll(/(?:function\s+([A-Za-z_$][\w$]*)|const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=)/g)].at(-1);
-        sites.push(`${rel} ${fn?.[1] ?? fn?.[2] ?? '?'}`);
+        // The enclosing top-level declaration: the nearest `export function name` / `export const name` above the call.
+        const fn = [...before.matchAll(/^export (?:async )?(?:function|const)\s+([A-Za-z_$][\w$]*)/gm)].at(-1);
+        sites.push(`${rel} ${fn?.[1] ?? '?'}`);
       }
     }
     expect(sites.sort()).toEqual(['api/post-hoc-deliver.ts deliverShellEnv', 'core/deliver.ts defaultAdoHelperExec']);

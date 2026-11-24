@@ -91,7 +91,7 @@ import { randomBytes } from 'node:crypto';
 import { devNull } from 'node:os';
 import type { GitIdent } from '../setup/known.js';
 import { childEnvWithBootEstateDb } from './governance-store.js';
-import { ADO_RAW_ENV, FSMONITOR_OFF_PARAMETER, gitChildEnv } from './exec.js';
+import { ADO_RAW_ENV, FSMONITOR_OFF_PARAMETER, gitChildEnv, withAdoCredential } from './exec.js';
 import type { PhaseDef, WorkflowDef } from './types.js';
 import { ADO_HELPER_JS } from './ado-deliver-helper.js';
 import { prChecksJs } from './pr-checks-helper.js';
@@ -384,7 +384,7 @@ export const defaultAdoHelperExec: AdoHelperExec = async (args, opts) => {
     const file = join(dir, 'ado.mjs');
     await writeFile(file, ADO_HELPER_JS, { mode: 0o600 });
     return await new Promise((resolve) => {
-      execFile(process.execPath, [file, ...args], { timeout: opts.timeoutMs, encoding: 'utf8', env: childEnvWithBootEstateDb(process.env) }, (err, stdout, stderr) => {
+      execFile(process.execPath, [file, ...args], { timeout: opts.timeoutMs, encoding: 'utf8', env: withAdoCredential(childEnvWithBootEstateDb(process.env), process.env) }, (err, stdout, stderr) => {
         const code = err === null ? 0 : typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : null;
         resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), code });
       });
