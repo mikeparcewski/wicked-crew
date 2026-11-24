@@ -12684,9 +12684,9 @@ export interface ApproveProposalBody {
 }
 
 /**
- * `POST /proposals` body (api-types 0.54.0) — a skin files ONE preference into the review queue
- * (studio's takes: "prefers takes like X", filed when a person picks one of two candidate outputs).
- * The daemon files it as `kind_type: "memory"` with `payload {content, tier: "semantic",
+ * `POST /proposals` body (api-types 0.54.0) — a skin files ONE memory into the review queue
+ * (studio's takes: "prefers takes like X", filed when a person picks one of two candidate outputs;
+ * the Memory page's add). The daemon files it as `kind_type: "memory"` with `payload {content, tier,
  * capture: "preference", source?}`; the kind is never the caller's (unknown keys are a 400).
  * Nothing is learned until the person accepts it on `/proposals`.
  */
@@ -12695,9 +12695,17 @@ export interface FileProposalBody {
   content: string;
   /** Becomes the `project` facet, so the preference is recalled on that project only. */
   project?: string;
+  /** (api-types 0.227.0, studio#1095) Becomes the `repo` facet: recalled on that repository only (1–256 chars). */
+  repo?: string;
+  /** (api-types 0.227.0, studio#1095) The memory tier: a fact (`semantic`, the default), a how-to (`procedural`) or
+   *  something that happened (`episodic`). Any other value is a 400. */
+  tier?: FileProposalTier;
   /** Where the pick was made, e.g. `doc:<docId>@v3` (kept on the payload). */
   source?: string;
 }
+
+/** (api-types 0.227.0) The tiers `POST /proposals` files into. */
+export type FileProposalTier = 'semantic' | 'procedural' | 'episodic';
 
 /** `POST /proposals` → 201: the pending proposal's id. */
 export interface FileProposalResponse {
