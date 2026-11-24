@@ -4,7 +4,7 @@ import type { RedeliverRunResult, RunPullRequest } from 'wicked-crew-api-types';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execCapped } from '../core/exec.js';
+import { execCapped, gitChildEnv } from '../core/exec.js';
 import { defaultGhExec, githubRepoOf, isSafeRefName, pinnedGhExec, pushIdentityOf, readDeliverOriginUrl, type GhExec } from '../core/deliver.js';
 import { refreshPushScript, refreshRebaseScript, type RefreshOptions } from '../core/redeliver.js';
 import type { CoreAdapter } from '../core/adapter.js';
@@ -38,7 +38,9 @@ export type RedeliverExec = (cwd: string, script: string) => Promise<{
 }>;
 export const runRefreshScript: RedeliverExec = async (cwd, script) => {
   try {
-    const r = await execCapped('bash', ['-lc', script], { cwd, timeout: 5 * 60000 });
+    // (crew#1862) Re-delivery never needs the Azure DevOps credential: the shell starts without it and with fsmonitor
+    // off, so not even a git its login profile runs sees it.
+    const r = await execCapped('bash', ['-lc', script], { cwd, timeout: 5 * 60000, env: gitChildEnv(process.env) });
     return { status: 0, output: r.stdout + r.stderr };
   } catch (err) {
     const e = err as {

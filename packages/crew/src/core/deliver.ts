@@ -91,7 +91,7 @@ import { randomBytes } from 'node:crypto';
 import { devNull } from 'node:os';
 import type { GitIdent } from '../setup/known.js';
 import { childEnvWithBootEstateDb } from './governance-store.js';
-import { gitChildEnv } from './exec.js';
+import { ADO_RAW_ENV, FSMONITOR_OFF_PARAMETER, gitChildEnv } from './exec.js';
 import type { PhaseDef, WorkflowDef } from './types.js';
 import { ADO_HELPER_JS } from './ado-deliver-helper.js';
 import { prChecksJs } from './pr-checks-helper.js';
@@ -781,6 +781,19 @@ export const GITHUB_CREDENTIAL_LINES: readonly string[] = [
   '  fi',
 ];
 
+/**
+ * (crew#1862) The first lines of the deliver and redeliver scripts: what `gitChildEnv` gives the gits crew starts itself,
+ * for the gits a script starts. The raw Azure DevOps variables lose their export (they stay readable here, for the
+ * credential preflight) and only the header mint exports them again, in its own subshell; every git, and every hook,
+ * filter or fsmonitor daemon of one, reads `core.fsmonitor=false` last. Every spelling of the names is unexported, in
+ * any letter case: a Windows child reads `Azure_Devops_Ext_Pat` as the same variable (`withoutAdoCredential`).
+ */
+export const SCRIPT_GIT_ENV_LINES: readonly string[] = [
+  `export -n ${ADO_RAW_ENV.join(' ')}`,
+  `for _v in $(compgen -e); do case "$_v" in ${ADO_RAW_ENV.map((n) => n.replace(/[A-Za-z]/g, (c) => `[${c.toLowerCase()}${c.toUpperCase()}]`)).join('|')}) export -n "$_v";; esac; done`,
+  `export GIT_CONFIG_PARAMETERS="\${GIT_CONFIG_PARAMETERS:+\$GIT_CONFIG_PARAMETERS }${FSMONITOR_OFF_PARAMETER}"`,
+];
+
 /** The `_rebasing` shell helper the shared resolver loop below calls. */
 export const REBASING_LINE =
     '_rebasing() { [ -d "$(git rev-parse --git-path rebase-merge 2>/dev/null)" ] || [ -d "$(git rev-parse --git-path rebase-apply 2>/dev/null)" ]; }';
@@ -998,6 +1011,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // replace that status under `set -e` (codex review).
     `_outcome() { local rc=$?; [ -z "$TD" ] || rm -rf "$TD" || true; echo "${DELIVER_OUTCOME_MARKER} $${DELIVER_NONCE_VAR} $VERDICT"; exit "$rc"; }`,
     'trap _outcome EXIT',
+    ...SCRIPT_GIT_ENV_LINES,
     // IDENTITY (DES-L9 D-18, crew#549 / F-RC1-010) — read ONCE, up front, before anything is
     // fetched, staged or pushed, so the refusal is the phase's WHOLE output (the engine's head-150
     // carries it). With GH_ACCOUNT set, a differing or unreadable active login REFUSES: the
@@ -1065,7 +1079,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // DRIFT: every push URL of origin must still name the consented repository (the GitHub rule,
     // crew#736). The URLs are passed as data, never printed (one may carry a token).
     '  "$ADONODE" "$TD/ado.mjs" same "$ADOGIT" "$(git remote get-url --push --all origin 2>/dev/null | sed -E "s#^(https?://)[^@/]*@#\\1#" || true)" || { echo "deliver: origin no longer points at $ADOWEB alone, the repository this delivery was approved for — nothing was staged, committed or pushed. Point origin back at it, or reject and relaunch against the new remote"; exit 1; }',
-    `  if ! ADOHDR=$("$ADONODE" "$TD/ado.mjs" header "$ADOLOGIN"); then VERDICT=rejected; : > ${DELIVER_STRANDED_SENTINEL} || true; echo "deliver: could not obtain the Azure DevOps credential (above) — nothing was staged, committed or pushed; fix the credential, then approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1; fi`,
+    `  if ! ADOHDR=$(export ${ADO_RAW_ENV.join(' ')}; "$ADONODE" "$TD/ado.mjs" header "$ADOLOGIN"); then VERDICT=rejected; : > ${DELIVER_STRANDED_SENTINEL} || true; echo "deliver: could not obtain the Azure DevOps credential (above) — nothing was staged, committed or pushed; fix the credential, then approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1; fi`,
     // The raw credential leaves the environment now: nothing this script runs later (the crew#426
     // npm preflight, git's commit machinery) can read it.
     `  unset ${[ADO_PAT_ENV, ...ADO_SP_ENV].join(' ')}`,
