@@ -24,11 +24,12 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { CoreAdapter } from '../src/core/adapter.js';
+import { RuleChangedError, ruleRevision } from '../src/governance/rule-revision.js';
 import { createServer } from '../src/api/server.js';
 import { steeringInboxDir } from '../src/api/governance-steering.js';
-import { steeringLandedMarkerPath, steeringProposalPath } from '../src/api/steering-landing.js';
+import { steeringLandedRecordPath, steeringProposalPath } from '../src/api/steering-landing.js';
 import type { ConformanceRule, SessionView } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
 import { withRunViews } from './support/run-views.js';
@@ -47,6 +48,10 @@ let transcript: string | null = null;
 let transcriptReads: string[] = [];
 /** Runs inside the stubbed confirm: a source that changes between the validation and the landing. */
 let onConfirm: (() => void) | null = null;
+/** crew#1846: the store read the landing makes before it writes refuses. */
+let listFails = false;
+/** crew#1846: rule ids the store refuses to write. */
+let failIds = new Set<string>();
 
 const PROBLEM =
   "Author steering rules for the 'operations' steering type (use it as the default steering_type for every proposed rule without a better fit).\n\nOperator intent:\nnever deploy on friday";
@@ -131,10 +136,22 @@ beforeAll(async () => {
     if (run) run.session.status = approve ? 'completed' : 'cancelled';
     return approve ? 'completed' : 'cancelled';
   };
-  adapter.upsertConformanceRule = async (rule: ConformanceRule) => {
+  // The store as the adapter keeps it: the latest write per id, and a write with an expected revision refused when
+  // the rule changed (core/adapter.ts upsertConformanceRule, crew#1846).
+  const latest = (): ConformanceRule[] => [...new Map(upserted.map((r) => [r.id, r])).values()];
+  adapter.upsertConformanceRule = async (rule: ConformanceRule, expectedRevision?: string) => {
+    if (failIds.has(rule.id)) throw new Error('store refused');
+    if (expectedRevision !== undefined) {
+      const current = latest().find((r) => r.id === rule.id);
+      const revision = current === undefined ? null : ruleRevision(current);
+      if (revision !== expectedRevision) throw new RuleChangedError(revision);
+    }
     upserted.push(rule);
   };
-  adapter.listConformanceRules = async () => upserted;
+  adapter.listConformanceRules = async () => {
+    if (listFails) throw new Error('store busy');
+    return latest();
+  };
   adapter.workOutput = async (unitId: string) => {
     transcriptReads.push(unitId);
     return transcript;
@@ -156,6 +173,8 @@ beforeEach(() => {
   transcript = null;
   transcriptReads = [];
   onConfirm = null;
+  listFails = false;
+  failIds = new Set();
 });
 
 afterAll(async () => {
@@ -295,10 +314,10 @@ describe('POST /runs/:id/gate on a steering-author propose gate (crew#388)', () 
   it('a marker from before M8 (no digest) does not stop a revised proposal from landing', async () => {
     const RUN = 'land-legacy-marker-1';
     views = [steeringRun(RUN)];
-    mkdirSync(steeringInboxDir(RUN), { recursive: true });
+    mkdirSync(dirname(steeringLandedRecordPath()), { recursive: true });
     writeFileSync(
-      steeringLandedMarkerPath(RUN),
-      JSON.stringify({ ruleIds: ['POL-0001'], source: 'deliverable', at: '2026-10-01T00:00:00Z' }),
+      steeringLandedRecordPath(),
+      JSON.stringify({ [RUN]: { ruleIds: ['POL-0001'], source: 'deliverable', at: '2026-10-01T00:00:00Z' } }),
       'utf8',
     );
     writeProposalFile(RUN, JSON.stringify([{ ...PROPOSAL[0]!, statement: 'revised after the upgrade' }]));
@@ -547,5 +566,180 @@ describe('steering-author draft read + keepRules (DES-LEARN §3.1)', () => {
     expect(repick.body['landing']).toMatchObject({ outcome: 'landed', ruleIds: ['POL-0002'], declinedIds: ['POL-0001'] });
     expect(repick.body['landing']).not.toHaveProperty('alreadyLanded');
     expect(upserted.map((r) => r.id)).toEqual(['POL-0001', 'POL-0002']);
+  });
+});
+
+// crew#1846: the landing's write is an upsert by rule id, and the worker numbers from PAT-001 like every
+// other author. A drafted id already in force must never replace the rule that holds it.
+describe('a drafted id already in force (crew#1846)', () => {
+  /** The rule in force, written through the product's own CRUD route (POST /governance/rules). */
+  async function ruleInForce(): Promise<void> {
+    const res = await send('POST', '/governance/rules', {
+      id: 'PAT-001',
+      rule_type: 'pattern',
+      statement: 'every handler validates its input with zod',
+      severity: 'error',
+      confidence: 1,
+      targets: {},
+      provenance: { source: 'ui', source_kinds: [] },
+      steering_type: 'development',
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+  }
+  const DRAFT = [{ ...PROPOSAL[0]!, id: 'PAT-001', rule_type: 'pattern', statement: 'never deploy on friday' }];
+
+  it('lands under the next free id and says so; the rule in force is untouched', async () => {
+    await ruleInForce();
+    const RUN = 'collide-1';
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify(DRAFT));
+    const { status, body } = await send('POST', `/runs/${RUN}/gate`, { approve: true });
+    expect(status).toBe(200);
+    expect(body['landing']).toMatchObject({ outcome: 'landed', ruleIds: ['PAT-002'], reminted: [{ from: 'PAT-001', to: 'PAT-002' }] });
+    expect(body['landing']).not.toHaveProperty('replacedIds');
+    // The store took one write for PAT-001 (the CRUD's) and the landing wrote PAT-002.
+    expect(upserted.filter((r) => r.id === 'PAT-001').map((r) => r.statement)).toEqual(['every handler validates its input with zod']);
+    expect(upserted.find((r) => r.id === 'PAT-002')?.statement).toBe('never deploy on friday');
+    const audited = await auditEntries(RUN, 'governance.rule.upserted');
+    expect(audited).toHaveLength(1);
+    expect(audited[0]!['detail']).toMatchObject({ id: 'PAT-002', draftedId: 'PAT-001' });
+    expect(audited[0]!['detail']).not.toHaveProperty('replaced');
+    // A replay reports what the landing did, and writes nothing.
+    views = [steeringRun(RUN)];
+    const replay = await send('POST', `/runs/${RUN}/gate`, { approve: true });
+    expect(replay.body['landing']).toMatchObject({ alreadyLanded: true, ruleIds: ['PAT-002'], reminted: [{ from: 'PAT-001', to: 'PAT-002' }] });
+    expect(upserted).toHaveLength(2);
+  });
+
+  it('two drafted rules with one taken id never land on each other', async () => {
+    await ruleInForce();
+    const RUN = 'collide-2';
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify([...DRAFT, { ...DRAFT[0]!, id: 'PAT-002', statement: 'every PR links an issue' }]));
+    const { body } = await send('POST', `/runs/${RUN}/gate`, { approve: true });
+    expect(body['landing']).toMatchObject({ outcome: 'landed', ruleIds: ['PAT-003', 'PAT-002'], reminted: [{ from: 'PAT-001', to: 'PAT-003' }] });
+    expect(new Set(upserted.map((r) => r.id))).toEqual(new Set(['PAT-001', 'PAT-002', 'PAT-003']));
+  });
+
+  it("a send-back re-approve updates the rule this run landed and names it replaced; it never mints a copy", async () => {
+    await ruleInForce();
+    const RUN = 'collide-revised-1';
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify(DRAFT));
+    await send('POST', `/runs/${RUN}/gate`, { approve: true });
+    writeProposalFile(RUN, JSON.stringify([{ ...DRAFT[0]!, statement: 'never deploy on friday or saturday' }]));
+    views = [steeringRun(RUN)];
+    const { body } = await send('POST', `/runs/${RUN}/gate`, { approve: true });
+    expect(body['landing']).toMatchObject({ outcome: 'landed', ruleIds: ['PAT-002'], replacedIds: ['PAT-002'] });
+    expect(body['landing']).not.toHaveProperty('reminted');
+    expect(upserted.filter((r) => r.id === 'PAT-001')).toHaveLength(1);
+    expect(upserted.filter((r) => r.id === 'PAT-002').map((r) => r.statement)).toEqual(['never deploy on friday', 'never deploy on friday or saturday']);
+    expect(upserted.some((r) => r.id === 'PAT-003')).toBe(false);
+    const audited = await auditEntries(RUN, 'governance.rule.upserted');
+    expect(audited).toHaveLength(2);
+    const details = audited.map((e) => e['detail'] as Record<string, unknown>);
+    expect(details.filter((d) => d['replaced'] === true)).toEqual([expect.objectContaining({ id: 'PAT-002', draftedId: 'PAT-001' })]);
+  });
+
+  it('a marker the run could write (its steering inbox) never makes another rule its own', async () => {
+    await ruleInForce();
+    const RUN = 'collide-forged-1';
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify([{ ...DRAFT[0]!, id: 'PAT-NEW' }]));
+    // The inbox is the run's write root: a worker writes a marker claiming PAT-001 as this run's.
+    writeFileSync(join(steeringInboxDir(RUN), 'landed.json'), JSON.stringify({ ruleIds: ['PAT-001'], source: 'deliverable', at: 'x', landedAs: { 'PAT-NEW': 'PAT-001' }, revisions: {} }));
+    const { body } = await send('POST', `/runs/${RUN}/gate`, { approve: true });
+    expect(body['landing']).toMatchObject({ outcome: 'landed', ruleIds: ['PAT-NEW'] });
+    expect(upserted.filter((r) => r.id === 'PAT-001').map((r) => r.statement)).toEqual(['every handler validates its input with zod']);
+    expect(steeringLandedRecordPath().startsWith(dirname(steeringInboxDir(RUN)))).toBe(false);
+  });
+
+  it("this run's rule edited by someone since it landed is left as they made it; the revision lands as a new rule", async () => {
+    await ruleInForce();
+    const RUN = 'collide-edited-1';
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify(DRAFT));
+    await send('POST', `/runs/${RUN}/gate`, { approve: true });
+    const edited = await send('POST', '/governance/rules', { ...upserted.find((r) => r.id === 'PAT-002')!, statement: 'edited by a person' });
+    expect(edited.status).toBe(200);
+    writeProposalFile(RUN, JSON.stringify([{ ...DRAFT[0]!, statement: 'never deploy on friday or saturday' }]));
+    views = [steeringRun(RUN)];
+    const { body } = await send('POST', `/runs/${RUN}/gate`, { approve: true });
+    expect(body['landing']).toMatchObject({ outcome: 'landed', ruleIds: ['PAT-003'], reminted: [{ from: 'PAT-001', to: 'PAT-003' }] });
+    expect(body['landing']).not.toHaveProperty('replacedIds');
+    expect(upserted.filter((r) => r.id === 'PAT-002').at(-1)!.statement).toBe('edited by a person');
+  });
+
+  it('a revised draft that names the id its rule landed under updates that rule', async () => {
+    await ruleInForce();
+    const RUN = 'collide-landed-id-1';
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify(DRAFT));
+    await send('POST', `/runs/${RUN}/gate`, { approve: true });
+    writeProposalFile(RUN, JSON.stringify([{ ...DRAFT[0]!, id: 'PAT-002', statement: 'revised under its landed id' }]));
+    views = [steeringRun(RUN)];
+    const { body } = await send('POST', `/runs/${RUN}/gate`, { approve: true });
+    expect(body['landing']).toMatchObject({ outcome: 'landed', ruleIds: ['PAT-002'], replacedIds: ['PAT-002'] });
+    expect(upserted.some((r) => r.id === 'PAT-003')).toBe(false);
+  });
+
+  it('after a partial landing the rules that landed stay this run\'s own', async () => {
+    await ruleInForce();
+    const RUN = 'collide-partial-1';
+    views = [steeringRun(RUN)];
+    const two = [DRAFT[0]!, { ...DRAFT[0]!, id: 'POL-0009', rule_type: 'policy', statement: 'every PR links an issue' }];
+    writeProposalFile(RUN, JSON.stringify(two));
+    failIds = new Set(['POL-0009']);
+    const first = await send('POST', `/runs/${RUN}/gate`, { approve: true });
+    expect(first.body['landing']).toMatchObject({ outcome: 'failed', ruleIds: ['PAT-002'], reminted: [{ from: 'PAT-001', to: 'PAT-002' }] });
+    failIds = new Set();
+    writeProposalFile(RUN, JSON.stringify(two.map((r) => ({ ...r, statement: `${r.statement} (revised)` }))));
+    views = [steeringRun(RUN)];
+    const second = await send('POST', `/runs/${RUN}/gate`, { approve: true });
+    expect(second.body['landing']).toMatchObject({ outcome: 'landed', ruleIds: ['PAT-002', 'POL-0009'], replacedIds: ['PAT-002'] });
+    expect(upserted.some((r) => r.id === 'PAT-003')).toBe(false);
+  });
+
+  it('a kept rule is never re-minted onto the id of a rule the person declined', async () => {
+    await ruleInForce();
+    const RUN = 'collide-keep-1';
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify([DRAFT[0]!, { ...DRAFT[0]!, id: 'PAT-002', statement: 'declined one' }]));
+    const { body } = await send('POST', `/runs/${RUN}/gate`, { approve: true, keepRules: ['PAT-001'] });
+    expect(body['landing']).toMatchObject({ outcome: 'landed', ruleIds: ['PAT-003'], declinedIds: ['PAT-002'], reminted: [{ from: 'PAT-001', to: 'PAT-003' }] });
+  });
+
+  it('two runs approved at once never pick the same free id', async () => {
+    await ruleInForce();
+    views = [steeringRun('collide-a'), steeringRun('collide-b')];
+    writeProposalFile('collide-a', JSON.stringify(DRAFT));
+    writeProposalFile('collide-b', JSON.stringify([{ ...DRAFT[0]!, statement: 'the other run' }]));
+    const [a, b] = await Promise.all([
+      send('POST', '/runs/collide-a/gate', { approve: true }),
+      send('POST', '/runs/collide-b/gate', { approve: true }),
+    ]);
+    const ids = [a, b].map((r) => (r.body['landing'] as { ruleIds: string[] }).ruleIds[0]);
+    expect(new Set(ids)).toEqual(new Set(['PAT-002', 'PAT-003']));
+  });
+
+  it('an id named like an Object.prototype key lands as itself', async () => {
+    const RUN = 'proto-id-1';
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify([{ ...DRAFT[0]!, id: 'constructor' }]));
+    const { body } = await send('POST', `/runs/${RUN}/gate`, { approve: true });
+    expect(body['landing']).toMatchObject({ outcome: 'landed', ruleIds: ['constructor'] });
+  });
+
+  it('a store it cannot read lands nothing, loudly', async () => {
+    const RUN = 'collide-unreadable-1';
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify(DRAFT));
+    listFails = true;
+    const { status, body } = await send('POST', `/runs/${RUN}/gate`, { approve: true });
+    expect(status).toBe(200);
+    expect(body['landing']).toMatchObject({ outcome: 'failed', ruleIds: [] });
+    expect(String((body['landing'] as Record<string, unknown>)['error'])).toMatch(/could not be read, so nothing was landed/u);
+    expect(upserted).toHaveLength(0);
+    expect(await auditEntries(RUN, 'governance.steering.landing_failed')).toHaveLength(1);
   });
 });
