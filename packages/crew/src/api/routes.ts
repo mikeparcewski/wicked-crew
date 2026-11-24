@@ -12093,7 +12093,7 @@ export function registerRoutes(
       // Bounded by what is left of the snapshot's budget too (a slow start must not push it past 8 s):
       // the assembly after the infra probes keeps about 1.5 s.
       const clusterP = (containerFloor ? clusterReader.read(Math.min(CLUSTER_TIMEOUT_MS, left() - 1_500)) : Promise.resolve(null))
-        .then((read) => clusterRows(read, containerFloor, clusterStarted));
+        .then((read) => clusterRows(read, containerFloor, clusterStarted, clusterReader.engine()));
       const infraP = Promise.all([
         clusterP.then((rows) => rows.gateway),
         brokerP,

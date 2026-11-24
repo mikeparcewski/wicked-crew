@@ -8,7 +8,7 @@ import type { SeatContainerLoginOutcome } from '../core/types.js';
 import type { RosterWithStanding } from './roster-standing.js';
 import type { SeatHealthTracker } from './seat-health.js';
 import { execCapped } from '../core/exec.js';
-import { publicText } from './cluster-status.js';
+import { CONTEXT_NOTE, clusterInstallCommand, engineCommand, publicText, type EngineSpot } from './cluster-status.js';
 import { canonicalize } from '../projects/state-home-preflight.js';
 import { crewStateHome, stateHomeOfDb } from '../projects/state-home.js';
 import { gatewayName, resolveContainerRuntime } from './system-snapshot.js';
@@ -110,12 +110,21 @@ type ClusterKind = (typeof CLUSTER_KINDS)[number];
 /** Anchored to a line the engine prints: `wicked-core seat-login: <kind>: <why>` (or a bare `<kind>: <why>`
  *  line); a kind word inside another refusal's explanation is not this refusal. */
 const CLUSTER_KIND_RE = new RegExp(`^(?:wicked-core seat-login: )?(${CLUSTER_KINDS.join('|')}): ?(.*)$`, 'm');
-const INSTALL_HINT = 'run `wicked-core cluster install --admin-context <your cluster context> --home <this daemon\'s state home>`';
+
+/** The engine CLI and state home a sign-in runs with ({@link runSeatLogin}): the commands its refusals name are filled in
+ *  with them, so they paste and run (crew#1844). */
+export function engineSpotOf(deps: SeatLoginDeps, env: NodeJS.ProcessEnv = process.env): EngineSpot {
+  return {
+    exe: (env['WICKED_CORE_EXE'] ?? '').trim() || null,
+    home: deps.gatewayDir !== undefined ? dirname(gatewayDirOf(deps.gatewayDir)) : crewStateHome(),
+  };
+}
 
 /** A sign-in refused by the cluster, in words the operator can act on; `null` for any other refusal. */
-export function clusterRefusal(stderr: string, cli: string, label: string): { code: ClusterKind; error: string } | null {
+export function clusterRefusal(stderr: string, cli: string, label: string, engine: EngineSpot = { exe: null, home: null }): { code: ClusterKind; error: string } | null {
   const m = CLUSTER_KIND_RE.exec(stderr);
   if (m === null) return null;
+  const INSTALL_HINT = `run \`${clusterInstallCommand(engine)}\` (${CONTEXT_NOTE})`;
   const code = m[1] as ClusterKind;
   // The engine's own why (credential shapes redacted, home paths spelled ~): what the kind alone
   // cannot say (a rollout still starting vs a missing controller, a refused vs an inconclusive probe).
@@ -128,20 +137,20 @@ export function clusterRefusal(stderr: string, cli: string, label: string): { co
     pids_unlimited: `The cluster could not show that it limits each pod's processes, so sign-ins and seats are refused.${why} Set the kubelet's pod-max-pids to 4096 (Rancher Desktop: a k3s argument), then try again.`,
     policy_refused: `The cluster refused the ${label} sign-in pod.${why} Fix what it names, then try again.`,
     admission_pending: `The ${label} sign-in pod could not start yet: the cluster has no room for it now, or it is still starting.${why} Try again in a minute.`,
-    image_unavailable: `The ${label} image isn't in the cluster's image store.${why} Build it (\`wicked-core seat-image build ${loginDetail(cli)}\`), then try again.`,
+    image_unavailable: `The ${label} image isn't in the cluster's image store.${why} Build it (\`${engineCommand(engine, `seat-image build ${loginDetail(cli)}`, false)}\`), then try again.`,
     exec_stream_lost: `The connection to the ${label} sign-in pod was lost before it finished. Nothing was saved; try again.`,
   };
   return { code, error: error[code] };
 }
 
 /** Stable refusal codes keep runtime repair, missing host CLIs and reattachment distinct. */
-export function signInFailure(stderr: string, cli: string): { code: SeatSignInFailureCode; error: string } {
+export function signInFailure(stderr: string, cli: string, engine?: EngineSpot): { code: SeatSignInFailureCode; error: string } {
   const label = ({ claude: 'Claude', codex: 'Codex', pi: 'Pi', opencode: 'OpenCode', copilot: 'Copilot', agy: 'Antigravity' } as Record<string, string>)[cli] ?? loginDetail(cli);
   if (stderr.includes('container_runtime_down')) return {
     code: 'container_runtime_down',
     error: "Docker isn't running, so the sign-in container can't start. Start Rancher Desktop, then try again.",
   };
-  const k8s = clusterRefusal(stderr, cli, label);
+  const k8s = clusterRefusal(stderr, cli, label, engine);
   if (k8s !== null) return k8s;
   if (/is not installed on this host/i.test(stderr)) {
     const command = stderr.match(/\b(?:npm (?:install|i) (?:-g |--global )?[@a-z0-9_./-]+|brew install [a-z0-9_./-]+|uv tool install [a-z0-9_./-]+)/i)?.[0];
@@ -353,7 +362,7 @@ export function registerSeatContainerLoginRoutes(app: FastifyInstance, input: Se
   const V = '/api/v1';
   const message = (err: unknown): string => err instanceof Error ? err.message : String(err);
   const failureBody = (stderr: string, cli: string): SeatSignInFailure => {
-    const failure = signInFailure(stderr, cli);
+    const failure = signInFailure(stderr, cli, engineSpotOf(seatLoginDeps));
     return { ...failure, ...(failure.code === 'cli_not_installed' ? { cli } : {}) };
   };
   const containerLoginOutcomes = new Map<string, SeatContainerLoginOutcome>();

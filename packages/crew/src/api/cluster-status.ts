@@ -9,6 +9,7 @@
  * rather than spelling kubectl itself. Reads are single-flight (each is several kubectl calls, and a
  * studio poll can read `/system` and `/diagnostics` at once), never cached: a Re-check is fresh.
  */
+import { homedir } from 'node:os';
 import type { SystemInfraRow } from '../core/types.js';
 import { redactString } from '../mcp/redact.js';
 import { homeless } from './seat-standing.js';
@@ -128,6 +129,12 @@ export class ClusterStatusReader {
 
   constructor(private readonly input: () => ClusterReadInput) {}
 
+  /** The engine CLI and state home this reader runs with, for the commands its rows name. */
+  engine(): EngineSpot {
+    const { exe, home } = this.input();
+    return { exe, home };
+  }
+
   /** Settle within `boundMs` (default and maximum: {@link CLUSTER_TIMEOUT_MS}). */
   read(boundMs: number = CLUSTER_TIMEOUT_MS): Promise<Settled<ClusterStatus>> {
     if (this.running === null) {
@@ -148,8 +155,48 @@ export function clusterDiagnostics(read: Settled<ClusterStatus>): (ClusterStatus
   return { read: 'error', detail: publicLine(read.full ?? read.error) ?? 'the cluster could not be read' };
 }
 
-const INSTALL = 'Run `wicked-core cluster install --admin-context <your cluster context> --home <this daemon\'s state home>`, then re-check.';
-const BY_HAND = 'Re-check; if it persists, run `wicked-core cluster status --home <this daemon\'s state home>` by hand.';
+/** Where the engine CLI and this daemon's state home are, so a command crew names can be pasted and run as it stands
+ *  (crew#1844): crew installs only its own `wicked-crew` bin, so a bare `wicked-core` is usually not on PATH. */
+export interface EngineSpot {
+  /** The engine CLI crew runs (`WICKED_CORE_EXE`); `null` when crew was started without one. */
+  exe: string | null;
+  /** The daemon's state home (the `--db` parent); `null` on a route set without a store. */
+  home: string | null;
+}
+
+/** The kube context `cluster install` is told to use: Rancher Desktop's, the local cluster studio's setup names. The engine
+ *  never falls back to the current context, so the command carries it; another cluster's context replaces it. */
+export const RANCHER_CONTEXT = 'rancher-desktop';
+
+/** One path as a shell word that pastes and runs: this user's home folder spelled `~/` (unquoted, so the shell expands
+ *  it, and no user name crosses the wire), the rest single-quoted only when it holds a character the shell would read. */
+export function shellPath(path: string, home: string = homedir()): string {
+  const h = home.replace(/[\\/]+$/, '');
+  let lead = '';
+  let rest = path;
+  if (h !== '' && path === h) return '~';
+  if (h !== '' && path.startsWith(`${h}/`)) { lead = '~/'; rest = path.slice(h.length + 1); }
+  if (rest === '') return lead;
+  return lead + (/^[A-Za-z0-9_./@%+=:,-]+$/.test(rest) ? rest : `'${rest.replace(/'/g, `'\\''`)}'`);
+}
+
+/** An engine command filled in for this daemon: the engine CLI crew runs and, with `home`, `--home <its state home>`. */
+export function engineCommand(engine: EngineSpot, args: string, home = true): string {
+  const exe = engine.exe !== null && engine.exe.trim() !== '' ? shellPath(engine.exe.trim()) : 'wicked-core';
+  return `${exe} ${args}${home && engine.home !== null ? ` --home ${shellPath(engine.home)}` : ''}`;
+}
+
+/** `cluster install` for this daemon, ready to paste. */
+export function clusterInstallCommand(engine: EngineSpot): string {
+  return engineCommand(engine, `cluster install --admin-context ${RANCHER_CONTEXT}`);
+}
+
+/** How the install command's context is chosen, said once beside it. */
+export const CONTEXT_NOTE = `${RANCHER_CONTEXT} is Rancher Desktop's cluster; for a different cluster, use its context`;
+
+const NO_ENGINE: EngineSpot = { exe: null, home: null };
+const install = (engine: EngineSpot): string => `Run \`${clusterInstallCommand(engine)}\` (${CONTEXT_NOTE}), then re-check.`;
+const byHand = (engine: EngineSpot): string => `Re-check; if it persists, run \`${engineCommand(engine, 'cluster status')}\` by hand.`;
 const START = 'Start Rancher Desktop with Kubernetes on, then re-check.';
 
 function detailsOf(s: ClusterStatus): Record<string, unknown> {
@@ -161,7 +208,9 @@ function detailsOf(s: ClusterStatus): Record<string, unknown> {
 }
 
 /** The `cluster` and `gateway` rows from one read. Off the container floor both are `off`. */
-export function clusterRows(read: Settled<ClusterStatus> | null, containerFloor: boolean, startedAt: number): { cluster: SystemInfraRow; gateway: SystemInfraRow } {
+export function clusterRows(read: Settled<ClusterStatus> | null, containerFloor: boolean, startedAt: number, engine: EngineSpot = NO_ENGINE): { cluster: SystemInfraRow; gateway: SystemInfraRow } {
+  const INSTALL = install(engine);
+  const BY_HAND = byHand(engine);
   if (!containerFloor || read === null) {
     const why = 'not used: seats run on the host floor, not in pods';
     return {
@@ -187,6 +236,13 @@ export function clusterRows(read: Settled<ClusterStatus> | null, containerFloor:
   }
   const s = read.value;
   const d = detailsOf(s);
+  if (!s.configured && /\bno kubectl\b/i.test(s.detail ?? '')) {
+    // The engine found no kubectl at all: Rancher Desktop is not installed or not started (it brings kubectl).
+    return {
+      cluster: infraRow('cluster', 'down', `kubectl wasn't found, so no seat can start${s.detail !== null ? ` (${s.detail})` : ''}`, START, startedAt, d),
+      gateway: infraRow('gateway', 'down', "kubectl wasn't found, so there is no gateway", START, startedAt, d),
+    };
+  }
   if (!s.configured) {
     return {
       cluster: infraRow('cluster', 'down', 'no Kubernetes cluster is configured for this daemon, so governed seats cannot start', INSTALL, startedAt, d),
