@@ -30,13 +30,14 @@ function rig(core: { shutdownEditorConformance?: () => string }) {
 describe('crew#1835 daemon shutdown stops the install-time conformance harness', () => {
   for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     it(`on ${signal}, the engine's conformance shutdown runs before the exit, once`, async () => {
-      const calls: string[] = [];
-      const { proc, order, done } = rig({ shutdownEditorConformance: () => { calls.push('stop'); return JSON.stringify({ stopped: 1, settled: true }); } });
-      proc.emit(signal);
-      proc.emit(signal); // a second signal while shutting down starts nothing new
-      await done;
-      expect(calls).toEqual(['stop']);
-      expect(order).toEqual([signal, signal, 'reap', 'close', 'exit 0']);
+      // The stop records what had already happened when it ran: only the signal, so it ran before the reap and the exit.
+      const seenAtStop: string[][] = [];
+      const r = rig({ shutdownEditorConformance: () => { seenAtStop.push([...r.order]); return JSON.stringify({ stopped: 1, settled: true }); } });
+      r.proc.emit(signal);
+      r.proc.emit(signal); // a second signal while shutting down starts nothing new
+      await r.done;
+      expect(seenAtStop).toEqual([[signal]]);
+      expect(r.order).toEqual([signal, 'reap', signal, 'close', 'exit 0']);
     });
   }
 
