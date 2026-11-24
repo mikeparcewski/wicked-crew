@@ -273,7 +273,7 @@ describe('pack install: the gate, crew\'s conformance run, then the registry', (
     expect(again.get('acme-terms')!.entryPath).toBe(join(root, 'editors', 'acme-terms', 'index.html'));
   });
 
-  it('a pack editor carries no visuals yet (garden’s gate refuses the keys): its digest and wire view are as before', async () => {
+  it('a pack editor that declares no description or visuals carries neither on the wire', async () => {
     const { reg } = registry();
     const root = makePack();
     const res = await installPack(root, undefined, { check: passCheck, conformance: conformant(), registry: reg });
@@ -306,6 +306,10 @@ describe('pack install: the gate, crew\'s conformance run, then the registry', (
     expect((err as PackInstallError).status).toBe(501);
     const body = (err as PackInstallError).body as unknown as InstallEditorRefusal;
     expect(body.code).toBe('pack_ships_skills_or_blocks');
+    // What the person installing reads: plain words and what to do, no internal design reference.
+    expect(body.error).toMatch(/nothing was installed/);
+    expect(body.error).toMatch(/install an editor-only copy/);
+    expect(body.error).not.toMatch(/DES-|§/);
     expect(body.pack.blocks).toEqual([{ id: 'acme-terms-review', label: 'Check our terms', produces_kind: 'document', skills: ['acme-terms-checker'] }]);
     expect(body.pack.skills).toEqual(['acme-terms-checker']);
     expect(conformance).not.toHaveBeenCalled();
