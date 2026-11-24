@@ -2,7 +2,7 @@
 // pruned after its PR opens; a cancelled/failed run's worktree (not passed to the sweep) is
 // left intact. Real-git test following the run-diff-branch-route.test.ts pattern.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -60,6 +60,26 @@ describe('sweepDeliveredWorktree (crew#620)', () => {
     // Branch still exists after sweep (GET /runs/:id/diff falls back to it — F-7R2-013).
     const branches = git(repo, 'branch', '--list', `wicked/${runId}`);
     expect(branches.trim()).toBe(`wicked/${runId}`);
+  });
+
+  it('removes a delivered run tree the engine minted BESIDE the checkout (wicked-core#1109)', async () => {
+    // The engine's layout since wicked-core#1109 (src/repo.rs `worktrees_root`): `<repo>.wicked/wicked-worktrees/<id>`,
+    // added the way the engine adds it (`git worktree add <path> <branch>`). Git finds it by its last two segments.
+    const runId = 'run-delivered-beside';
+    const branch = `wicked/${runId}`;
+    const wtPath = join(`${repo}.wicked`, 'wicked-worktrees', runId);
+    git(repo, 'branch', branch);
+    git(repo, 'worktree', 'add', wtPath, branch);
+    // Git lists paths with `/` on every platform (codex r1): compare one spelling.
+    const slashed = (p: string): string => p.replace(/\\/g, '/');
+    expect(slashed(worktreeList())).toContain(slashed(wtPath));
+    const logs: string[] = [];
+
+    await sweepDeliveredWorktree(runId, repo, (m) => logs.push(m));
+
+    expect(slashed(worktreeList())).not.toContain(slashed(wtPath));
+    expect(existsSync(wtPath)).toBe(false);
+    expect(logs).toContain(`[runs] worktree sweep: removed ${runId}`);
   });
 
   it('logs "not present" and resolves without throwing when the worktree does not exist', async () => {
