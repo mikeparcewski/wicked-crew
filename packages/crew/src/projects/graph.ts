@@ -1564,7 +1564,9 @@ function mergeFreshness(pages: BlastRadiusFreshness[]): BlastRadiusFreshness {
   let staleFilesTotal = 0;
   let checkedFiles = 0;
   let notFileBacked = 0;
+  let totalPartial = false;
   for (const page of pages) {
+    if (page.stale_files_total_partial === true) totalPartial = true;
     for (const row of page.stale_files ?? []) {
       if (!staleFiles.has(row.file) && staleFiles.size < STALE_FILES_CAP) staleFiles.set(row.file, row);
     }
@@ -1582,6 +1584,7 @@ function mergeFreshness(pages: BlastRadiusFreshness[]): BlastRadiusFreshness {
   const roots = pages.at(-1)?.roots;
   return {
     stale_files: [...staleFiles.values()], stale_files_total: staleFilesTotal,
+    ...(totalPartial ? { stale_files_total_partial: true as const } : {}),
     checked_files: checkedFiles, not_file_backed: notFileBacked,
     ...(commitsBehind === undefined ? {} : { commits_behind: commitsBehind }),
     unindexed_files: unindexedFiles, indexing: [...indexing],
@@ -1605,10 +1608,22 @@ function memberFreshness(raw: BlastRadiusFreshness, dependents: unknown, labels:
     if (typeof row?.file === 'string') removed.add(row.file);
     return false;
   });
-  for (const row of Array.isArray(dependents) ? (dependents as RawHit[]) : []) {
+  const rows = Array.isArray(dependents) ? (dependents as RawHit[]) : null;
+  let anyMarked = false;
+  let anyNonMember = rows === null;
+  for (const row of rows ?? []) {
     const marked = row?.stale === 'modified' || row?.stale === 'deleted';
-    if (marked && typeof row.file === 'string' && !member(row.file)) removed.add(row.file);
+    if (marked) anyMarked = true;
+    if (typeof row?.file === 'string' && !member(row.file)) {
+      anyNonMember = true;
+      if (marked) removed.add(row.file);
+    }
   }
+  // crew#1797: estate's budget can drop the row marks and empty the sample while it keeps the count. Then the page's
+  // count may hold files of a removed member that neither the sample nor a mark names, and crew cannot take them out:
+  // the total is marked partial (an upper bound) when such a page has rows outside the current members.
+  const sampled = raw.stale_files?.length ?? 0;
+  const partial = typeof raw.stale_files_total === 'number' && raw.stale_files_total > sampled && !anyMarked && anyNonMember;
   const { indexing, ...rest } = raw;
   delete rest.stale_files;
   return {
@@ -1616,6 +1631,7 @@ function memberFreshness(raw: BlastRadiusFreshness, dependents: unknown, labels:
     ...(typeof raw.stale_files_total === 'number'
       ? { stale_files_total: Math.max(kept?.length ?? 0, raw.stale_files_total - removed.size) }
       : {}),
+    ...(partial ? { stale_files_total_partial: true as const } : {}),
     ...(Array.isArray(indexing) ? { indexing: indexing.filter((label) => labels.has(label)) } : {}),
     ...(kept === undefined ? {} : { stale_files: kept }),
   };

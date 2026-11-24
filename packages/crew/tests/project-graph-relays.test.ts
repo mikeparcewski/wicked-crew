@@ -62,6 +62,33 @@ describe.skipIf(process.platform === 'win32')('blast-radius freshness names curr
     expect(out.freshness?.stale_files_total).toBe(1);
   });
 
+  it('a page whose stale evidence estate\'s budget dropped marks its total partial when it has rows outside the members (crew#1797)', async () => {
+    // As estate's R4 budget leaves a full page (freshness.rs, the end of FreshnessProbe::annotate): the row marks
+    // dropped, then the sample emptied, the count kept. Nothing names which counted file is `gone`'s.
+    const stripped = (raw: Doc): Doc => {
+      raw['freshness']['stale_files'] = [];
+      for (const row of raw['dependents'] as Doc[]) delete row['stale'];
+      return raw;
+    };
+    const out = await projectBlastRadius(q, 'charge', estate(stripped(fixture('blast-radius-removed-member.json'))));
+    expect(out.freshness).toMatchObject({ stale_files_total: 2, stale_files_total_partial: true });
+    // Across pages: one partial page makes the joined total partial.
+    const paged = await projectBlastRadius(q, 'charge', estate([
+      { ...fixture('blast-radius-removed-member.json'), next_cursor: 'c1' },
+      stripped(fixture('blast-radius-removed-member.json')),
+    ]));
+    expect(paged.freshness).toMatchObject({ stale_files_total: 3, stale_files_total_partial: true });
+    // The same stripped page with only current members' rows is exact: no other repository's file can be in the count.
+    const members = stripped(fixture('blast-radius-removed-member.json'));
+    members['dependents'] = (members['dependents'] as Doc[]).filter((r) => !String(r['file']).startsWith('gone/'));
+    const exact = await projectBlastRadius(q, 'charge', estate(members));
+    expect(exact.freshness?.stale_files_total).toBe(2);
+    expect(exact.freshness).not.toHaveProperty('stale_files_total_partial');
+    // Complete evidence (the marks are there) is exact too.
+    const marked = await projectBlastRadius(q, 'charge', estate(fixture('blast-radius-removed-member.json')));
+    expect(marked.freshness).not.toHaveProperty('stale_files_total_partial');
+  });
+
   it('per page: a removed member\'s file on two pages leaves both pages\' totals (codex r1)', async () => {
     // Each page counts its own files (crew#1556 sums them): `api` and `gone` are stale on both pages.
     const first = { ...fixture('blast-radius-removed-member.json'), next_cursor: 'c1' };
