@@ -27,7 +27,7 @@ function blob(path: string, bytes: number): void {
 
 const stores: DiskStore[] = [
   { kind: 'check_cache', label: 'the checks cache', path: '~/.wicked-worker/repo-checks', bytes: 16.9 * GiB, partial: false, clear: 'safe to delete while no job and no check is running: the next check rebuilds it' },
-  { kind: 'run_worktrees', label: '3 job worktrees of wicked-core', path: '~/src/wicked-core.wicked/wicked-worktrees', bytes: 3.2 * GiB, partial: true, clear: 'remove a finished job’s tree with git -C ~/src/wicked-core worktree remove <tree>' },
+  { kind: 'run_worktrees', label: '3 job worktrees of core-repo', path: '~/src/core-repo.wicked/wicked-worktrees', bytes: 3.2 * GiB, partial: true, clear: 'remove a finished job’s tree with git -C ~/src/core-repo worktree remove <tree>' },
 ];
 
 describe('crew#1126: the disk row names what wicked holds on the volume', () => {
@@ -40,7 +40,7 @@ describe('crew#1126: the disk row names what wicked holds on the volume', () => 
     expect(low.state).toBe('degraded');
     for (const r of [row, low]) {
       expect(r.remedy).toContain('the checks cache (~/.wicked-worker/repo-checks, 16.9 GiB)');
-      expect(r.remedy).toContain('3 job worktrees of wicked-core (~/src/wicked-core.wicked/wicked-worktrees, at least 3.2 GiB)');
+      expect(r.remedy).toContain('3 job worktrees of core-repo (~/src/core-repo.wicked/wicked-worktrees, at least 3.2 GiB)');
       expect(r.remedy!.indexOf('checks cache')).toBeLessThan(r.remedy!.indexOf('job worktrees'));
       expect(r.remedy).toMatch(/safe to delete while no job and no check is running/);
       expect(r.remedy).not.toMatch(/cargo target dirs/);
@@ -113,8 +113,8 @@ describe('crew#1126: readDiskStores over a real layout', () => {
     expect(reader).not.toBeNull();
     const worker = join(root, 'home', '.wicked-worker');
     process.env['WICKED_WORKER_HOME'] = worker;
-    blob(join(worker, 'repo-checks', 'wicked-core-0a1b2c', 'run-a', 'target', 'big'), 3 * MiB);
-    const repo = join(root, 'home', 'src', 'wicked-core');
+    blob(join(worker, 'repo-checks', 'core-repo-0a1b2c', 'run-a', 'target', 'big'), 3 * MiB);
+    const repo = join(root, 'home', 'src', 'core-repo');
     mkdirSync(repo, { recursive: true });
     blob(join(`${repo}.wicked`, 'wicked-worktrees', 'run-1', 'src', 'a.ts'), 2 * MiB);
     blob(join(`${repo}.wicked`, 'wicked-worktrees', 'run-2', 'b.ts'), 1 * MiB);
@@ -127,17 +127,17 @@ describe('crew#1126: readDiskStores over a real layout', () => {
       deadline: Date.now() + 10_000,
       minBytes: MiB,
       floorCache: () => floor.getRaw(),
-      repos: [{ name: 'wicked-core', root_path: repo }, { name: 'empty', root_path: empty }],
+      repos: [{ name: 'core-repo', root_path: repo }, { name: 'empty', root_path: empty }],
       home: join(root, 'home'),
     });
     expect(got.map((s) => [s.kind, s.path, s.bytes])).toEqual([
       ['check_cache', '~/.wicked-worker/repo-checks', 3 * MiB],
-      ['run_worktrees', '~/src/wicked-core.wicked/wicked-worktrees', 3 * MiB],
-      ['run_worktrees', '~/src/wicked-core/wicked-worktrees', 1 * MiB],
+      ['run_worktrees', '~/src/core-repo.wicked/wicked-worktrees', 3 * MiB],
+      ['run_worktrees', '~/src/core-repo/wicked-worktrees', 1 * MiB],
     ]);
-    expect(got[1]!.label).toBe('2 job worktrees of wicked-core');
-    expect(got[2]!.label).toBe('1 job worktree of wicked-core');
-    expect(got[1]!.clear).toContain('git -C ~/src/wicked-core worktree remove ~/src/wicked-core.wicked/wicked-worktrees/<job id>');
+    expect(got[1]!.label).toBe('2 job worktrees of core-repo');
+    expect(got[2]!.label).toBe('1 job worktree of core-repo');
+    expect(got[1]!.clear).toContain('git -C ~/src/core-repo worktree remove ~/src/core-repo.wicked/wicked-worktrees/<job id>');
     expect(storesWords(got)).toContain('the checks cache (~/.wicked-worker/repo-checks, 3 MiB)');
     expect(got.every((s) => s.partial === false)).toBe(true);
   });
