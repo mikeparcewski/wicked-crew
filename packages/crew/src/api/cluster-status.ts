@@ -9,9 +9,10 @@
  * rather than spelling kubectl itself. Reads are single-flight (each is several kubectl calls, and a
  * studio poll can read `/system` and `/diagnostics` at once), never cached: a Re-check is fresh.
  */
+import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import type { SystemInfraRow } from '../core/types.js';
 import { redactString } from '../mcp/redact.js';
 import { homeless } from './seat-standing.js';
@@ -211,7 +212,42 @@ export function clusterInstallCommand(engine: EngineSpot): string {
 /** How the install command's context is chosen, said once beside it. */
 export const CONTEXT_NOTE = `${RANCHER_CONTEXT} is Rancher Desktop's cluster; for a different cluster, use its context`;
 
-const NO_ENGINE: EngineSpot = { exe: null, home: null };
+export const NO_ENGINE: EngineSpot = { exe: null, home: null };
+/** `path` canonical, the way the engine reads a state home (wicked-core `worker_sandbox::canon_lenient`): resolved when
+ *  it exists, else its nearest existing ancestor resolved and the missing tail kept. */
+function canonLenient(path: string): string {
+  const missing: string[] = [];
+  let cur = resolve(path);
+  for (;;) {
+    try { return join(realpathSync(cur), ...missing.reverse()); } catch { /* not there yet: try its parent */ }
+    const up = dirname(cur);
+    if (up === cur) return resolve(path);
+    missing.push(basename(cur));
+    cur = up;
+  }
+}
+
+/** The namespace the engine runs this daemon's gateway in (wicked-core src/k8s/mod.rs `owner_id` and
+ *  `daemon_namespace_name`): `wicked-sys-w` and the first 12 hex digits of the sha256 of the canonical state home. */
+export function gatewayNamespace(home: string): string {
+  return `wicked-sys-w${createHash('sha256').update(canonLenient(home)).digest('hex').slice(0, 12)}`;
+}
+
+/** The gateway Deployment's name and its pods' role label (wicked-core src/k8s/render.rs `GATEWAY_NAME`, mod.rs `ROLE_LABEL`). */
+const GATEWAY_DEPLOYMENT = 'agw';
+const GATEWAY_SELECTOR = 'wicked.dev/role=gateway';
+
+/** (crew#1851) What to do about a gateway pod that never becomes ready, every command filled in for this daemon: the
+ *  pod's events and log (in its namespace, through the admin context), then the cluster row's own install command. */
+export function gatewayNotReadyFix(engine: EngineSpot): string {
+  const kubectl = `kubectl --context ${RANCHER_CONTEXT}`;
+  const look = engine.home !== null
+    ? `\`${kubectl} -n ${gatewayNamespace(engine.home)} describe pods -l ${GATEWAY_SELECTOR}\` shows the gateway pod's events, and ` +
+      `\`${kubectl} -n ${gatewayNamespace(engine.home)} logs deploy/${GATEWAY_DEPLOYMENT} --all-containers --tail 50\` its log`
+    : `\`${kubectl} describe pods -A -l ${GATEWAY_SELECTOR}\` shows the gateway pod's events`;
+  return `See why in the cluster: ${look} (${CONTEXT_NOTE}). If its image is broken or missing, run \`${clusterInstallCommand(engine)}\`, then re-check.`;
+}
+
 const install = (engine: EngineSpot): string => `Run \`${clusterInstallCommand(engine)}\` (${CONTEXT_NOTE}), then re-check.`;
 const byHand = (engine: EngineSpot): string => `Re-check; if it persists, run \`${engineCommand(engine, 'cluster status')}\` by hand.`;
 const START = 'Start Rancher Desktop with Kubernetes on, then re-check.';

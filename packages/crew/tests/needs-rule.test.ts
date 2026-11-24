@@ -506,7 +506,7 @@ describe('a gateway that never serves and a failing credential refresh (crew#184
     const item = later.attention.find((a) => a.id === 'infra:gateway');
     expect(item).toMatchObject({ kind: 'prevents', severity: 'red', source: 'infra', title: 'Model gateway: not ready', blockedRunIds: ['st'] });
     expect(item!.reason).toMatch(/^Its pod has not become ready in 11 min, so seats have no route to their models/);
-    expect(item!.remedy).toMatch(/gateway pod's events and log/);
+    expect(item!.remedy).toMatch(/gateway pod's events/);
     expect(item!.remedy).toMatch(/wicked-core cluster install/);
     // The stalled run is the gateway's, not an item of its own.
     expect(later.attention.find((a) => a.id === 'run:st')).toBeUndefined();

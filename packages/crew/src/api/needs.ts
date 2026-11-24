@@ -39,6 +39,7 @@ import type {
   SystemTarget,
   SystemUnresolvedItem,
 } from '../core/types.js';
+import { gatewayNotReadyFix, NO_ENGINE, type EngineSpot } from './cluster-status.js';
 import { HOST_FLOOR_BENCH_COPY, HOST_FLOOR_UNKNOWN_COPY, isHostFloorBenchCopy } from './seat-standing.js';
 
 const DAY_MS = 86_400_000;
@@ -63,7 +64,6 @@ const CITES: Partial<Record<SystemInfraKey, RegExp>> = {
  *  engine reads a pod that keeps crashing, or one whose image cannot be pulled, as `starting` for ever. A first image
  *  pull on a slow network fits inside it. */
 export const GATEWAY_START_BOUND_MS = 10 * 60_000;
-const GATEWAY_FIX = 'See why in the cluster: the gateway pod\'s events and log say what stops it. If its image is broken or missing, reinstall the cluster pieces with `wicked-core cluster install --admin-context <your cluster context> --home <this daemon\'s state home>`, then re-check.';
 
 /**
  * crew#1845: since when the model gateway has read `starting`, across this daemon's reads. A read that says the
@@ -152,6 +152,8 @@ export interface NeedsInput {
   costOf?: (runId: string) => RunCost | undefined;
   /** How long the gateway has read `starting` (crew#1845); this daemon's own watch when absent. */
   gatewayWatch?: GatewayStartWatch;
+  /** (crew#1851) The engine CLI and state home the cluster rows were read with, so a fix names commands that run. */
+  engine?: EngineSpot;
 }
 
 export interface Needs {
@@ -483,7 +485,7 @@ export function buildNeeds(input: NeedsInput): Needs {
             ...row,
             state: 'down',
             reason: `Its pod has not become ready${minutes > 0 ? ` in ${minutes} min` : ''}, so seats have no route to their models (a pod that keeps crashing, or an image the cluster cannot pull, stays like this)`,
-            remedy: GATEWAY_FIX,
+            remedy: gatewayNotReadyFix(input.engine ?? NO_ENGINE),
           },
           kind: 'prevents',
           word: 'not ready',
