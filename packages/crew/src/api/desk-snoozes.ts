@@ -93,8 +93,10 @@ export class DeskSnoozes {
   snooze(key: string, until: string, severity: number | null, actor: Actor): Promise<DeskSnooze> {
     return this.exclusive(async () => {
       const map = await this.load();
-      const s: DeskSnooze = { key, until: new Date(Date.parse(until)).toISOString(), severity, at: new Date(this.now()).toISOString(), by: actor.id };
-      await this.audit.recordDurable(DESK_SNOOZED, actor, { detail: { key: s.key, until: s.until, severity: s.severity } });
+      const end = new Date(Date.parse(until)).toISOString();
+      // `at` is the trail entry's own stamp, so a restart replays exactly the snooze this answer returns.
+      const ts = await this.audit.recordDurable(DESK_SNOOZED, actor, { detail: { key, until: end, severity } });
+      const s: DeskSnooze = { key, until: end, severity, at: new Date(ts).toISOString(), by: actor.id };
       map.set(key, s);
       return s;
     });

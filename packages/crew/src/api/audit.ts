@@ -13,7 +13,7 @@
  * promise chain so concurrent handlers never interleave partial lines.
  */
 
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, open, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { crewStateHome } from '../projects/state-home.js';
 import type { Actor, AuditEntry } from '../core/types.js';
@@ -54,6 +54,8 @@ export class AuditLog {
   constructor(
     readonly path: string = defaultAuditPath(),
     private readonly warn: (msg: string) => void = (m) => console.warn(m),
+    /** The entry clock (unix millis). Injectable so a caller with its own clock stamps and replays on one time. */
+    private readonly now: () => number = Date.now,
   ) {}
 
   /**
@@ -85,52 +87,97 @@ export class AuditLog {
   }
 
   /**
-   * (crew#1124) Record one action and wait until it is on disk: resolves with its `ts` once appended, REJECTS when the
-   * append failed. For the facts whose only durable copy is this trail (a Desk snooze): an answer of success must
-   * mean it survives a restart. The same serialized chain as {@link record}, so lines never interleave.
+   * (crew#1124) Record one action and wait until it is on disk: resolves with its `ts` once appended AND flushed
+   * (fsync), REJECTS when it was not. For the facts whose only durable copy is this trail (a Desk snooze): an answer of
+   * success must mean it survives a restart, a host crash included. A trail whose last line was torn (a crash mid-line)
+   * gets the line ended first, so the new entry is never glued onto the fragment and lost with it. The same serialized
+   * chain as {@link record}, so lines never interleave; listeners hear the entry only once it is on disk.
    */
   async recordDurable(action: string, actor: Actor, fields?: { runId?: string; detail?: Record<string, unknown> }): Promise<number> {
     if (this.disabled) throw new Error('the audit trail is disabled, so nothing can be recorded durably');
-    const entry = this.entryOf(action, actor, fields);
-    await this.append(entry);
+    const entry = this.entryOf(action, actor, fields, false);
+    await this.append(entry, true);
+    this.notify(entry);
     return entry.ts;
   }
 
-  private entryOf(action: string, actor: Actor, fields?: { runId?: string; detail?: Record<string, unknown> }): AuditEntry {
+  private entryOf(action: string, actor: Actor, fields?: { runId?: string; detail?: Record<string, unknown> }, notify = true): AuditEntry {
     const entry: AuditEntry = {
-      ts: Date.now(),
+      ts: this.now(),
       action,
       actor,
       ...(fields?.runId !== undefined ? { runId: fields.runId } : {}),
       ...(fields?.detail !== undefined ? { detail: fields.detail } : {}),
     };
+    if (notify) this.notify(entry);
+    return entry;
+  }
+
+  private notify(entry: AuditEntry): void {
     for (const l of this.listeners) {
       try {
         l(entry);
       } catch (err) {
-        this.warn(`[audit] a listener failed on ${action}: ${err instanceof Error ? err.message : String(err)}`);
+        this.warn(`[audit] a listener failed on ${entry.action}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    return entry;
   }
 
   /** Append one entry on the chain; the returned promise rejects when the append failed (the chain itself never does). */
-  private append(entry: AuditEntry): Promise<void> {
+  private append(entry: AuditEntry, durable = false): Promise<void> {
     const write = this.chain.then(async () => {
       if (!this.dirReady) {
         await mkdir(dirname(this.path), { recursive: true });
         this.dirReady = true;
       }
-      await appendFile(this.path, `${JSON.stringify(entry)}\n`, 'utf8');
+      const line = `${JSON.stringify(entry)}\n`;
+      if (!durable) {
+        await appendFile(this.path, line, 'utf8');
+        return;
+      }
+      await this.appendSynced(line);
     });
     this.chain = write.catch((err) => {
       this.warn(
         `[audit] FAILED to record ${entry.action} by ${entry.actor.id} at ${this.path}: ${
           err instanceof Error ? err.message : String(err)
-        } — the action itself succeeded; the trail has a hole`,
+        } — ${durable ? 'the action was refused, so nothing changed' : 'the action itself succeeded; the trail has a hole'}`,
       );
     });
     return write;
+  }
+
+  /** Append `line` after ending a torn last line, then fsync the file (and its directory when this created it). */
+  private async appendSynced(line: string): Promise<void> {
+    const fh = await open(this.path, 'a+');
+    let created = false;
+    try {
+      const { size } = await fh.stat();
+      created = size === 0;
+      let text = line;
+      if (size > 0) {
+        const last = Buffer.alloc(1);
+        await fh.read(last, 0, 1, size - 1);
+        if (last[0] !== 0x0a) text = `\n${line}`;
+      }
+      await fh.appendFile(text, 'utf8');
+      await fh.sync();
+    } finally {
+      await fh.close();
+    }
+    if (created) {
+      // The new file's directory entry is durable too. A platform that cannot open a directory (Windows) skips it.
+      const dir = await open(dirname(this.path), 'r').catch(() => null);
+      if (dir !== null) {
+        try {
+          await dir.sync();
+        } catch {
+          // a directory fsync is best effort where the platform refuses it
+        } finally {
+          await dir.close();
+        }
+      }
+    }
   }
 
   /** (workdoc-all-runs) Hear each entry as it is recorded (the working document's person-notes index). Returns the

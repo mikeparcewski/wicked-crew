@@ -3,7 +3,7 @@
 // defer it. A snooze is a durable fact in the audit trail (`desk.need.snoozed` / `desk.need.woken`): it survives a
 // restart, it ends by itself, and only a human operator sets or ends one (an agent cannot hide a need from a person).
 
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -33,12 +33,15 @@ async function serve(log: AuditLog): Promise<FastifyInstance> {
   return a;
 }
 
+/** A trail on the test's clock, as the daemon's is on its own. */
+const trailAt = (path: string): AuditLog => new AuditLog(path, () => undefined, () => clock);
+
 const key = 'run:290a7fee';
 const url = (k: string): string => `/api/v1/desk/snoozes/${encodeURIComponent(k)}`;
 
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'desk-snoozes-'));
-  audit = new AuditLog(join(dir, 'audit.log'));
+  audit = trailAt(join(dir, 'audit.log'));
   clock = Date.parse('2026-11-24T12:00:00Z');
   actor = LOCAL_ACTOR;
   app = await serve(audit);
@@ -70,7 +73,7 @@ describe('crew#1124: snooze a Needs-you item', () => {
     await app.inject({ method: 'PUT', url: url('infra:disk'), payload: { until: '2026-11-24T12:30:00.000Z' } });
     await audit.flush();
     await app.close();
-    app = await serve(new AuditLog(join(dir, 'audit.log')));
+    app = await serve(trailAt(join(dir, 'audit.log')));
     clock = Date.parse('2026-11-24T13:00:00Z');
     const after = (await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse;
     expect(after.snoozes.map((s) => s.key)).toEqual([key]);
@@ -125,12 +128,12 @@ describe('crew#1124: snooze a Needs-you item', () => {
     await put('c', '2026-11-24T14:00:00.000Z');
     await app.inject({ method: 'DELETE', url: url('c') });
     await put('c', '2026-11-24T15:00:00.000Z');
-    const live = ((await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse).snoozes.map((x) => [x.key, x.until]);
-    expect(live).toEqual([['b', '2026-11-24T12:20:00.000Z'], ['c', '2026-11-24T15:00:00.000Z']]);
+    const live = ((await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse).snoozes;
+    expect(live.map((x) => [x.key, x.until])).toEqual([['b', '2026-11-24T12:20:00.000Z'], ['c', '2026-11-24T15:00:00.000Z']]);
     await app.close();
-    app = await serve(new AuditLog(join(dir, 'audit.log')));
-    const replay = ((await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse).snoozes.map((x) => [x.key, x.until]);
-    expect(replay).toEqual(live);
+    app = await serve(trailAt(join(dir, 'audit.log')));
+    const replay = ((await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse).snoozes;
+    expect(replay).toEqual(live); // every field, `at` included
     clock = Date.parse('2026-11-24T12:30:00Z'); // b's replacement ended; its first, longer snooze does not come back
     expect(((await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse).snoozes.map((x) => x.key)).toEqual(['c']);
   });
@@ -138,28 +141,83 @@ describe('crew#1124: snooze a Needs-you item', () => {
   it('review r1: a wake and a re-snooze racing the first load agree with the replay', async () => {
     await app.inject({ method: 'PUT', url: url(key), payload: { until: '2026-11-24T14:00:00.000Z' } });
     await app.close();
-    app = await serve(new AuditLog(join(dir, 'audit.log')));
+    app = await serve(trailAt(join(dir, 'audit.log')));
     await Promise.all([
       app.inject({ method: 'DELETE', url: url(key) }),
       app.inject({ method: 'PUT', url: url(key), payload: { until: '2026-11-24T13:00:00.000Z' } }),
     ]);
     const live = ((await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse).snoozes;
     await app.close();
-    app = await serve(new AuditLog(join(dir, 'audit.log')));
+    app = await serve(trailAt(join(dir, 'audit.log')));
     const replay = ((await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse).snoozes;
-    expect(replay.map((x) => [x.key, x.until])).toEqual(live.map((x) => [x.key, x.until]));
+    expect(replay).toEqual(live);
   });
 
-  it('review r1: a snooze or wake the trail could not record is a 500 and changes nothing', async () => {
+  it('review r1: a snooze the trail could not record is a 500 and changes nothing', async () => {
     if (process.platform === 'win32' || process.getuid?.() === 0) return;
     const trail = join(dir, 'read-only.log');
     writeFileSync(trail, '');
     chmodSync(trail, 0o444); // readable, but no append lands
     await app.close();
-    app = await serve(new AuditLog(trail));
+    app = await serve(trailAt(trail));
     const put = await app.inject({ method: 'PUT', url: url(key), payload: { until: '2026-11-24T13:00:00.000Z' } });
     expect(put.statusCode).toBe(500);
     expect(put.json()).toMatchObject({ code: 'desk_snooze_unsaved' });
     expect(((await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse).snoozes).toEqual([]);
+  });
+
+  it('review r2: a wake the trail could not record is a 500, the snooze stays (live and after a restart), and the next change works', async () => {
+    await app.inject({ method: 'PUT', url: url(key), payload: { until: '2026-11-24T14:00:00.000Z' } });
+    const before = ((await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse).snoozes;
+    await app.close();
+    // A deterministic failure seam: the real trail, whose durable append fails while `failing` is set.
+    const real = trailAt(join(dir, 'audit.log'));
+    let failing = true;
+    const seam = {
+      readAll: real.readAll.bind(real),
+      recordDurable: async (...args: Parameters<AuditLog['recordDurable']>): Promise<number> => {
+        if (failing) throw new Error('disk full');
+        return real.recordDurable(...args);
+      },
+    } as unknown as AuditLog;
+    app = await serve(seam);
+    const del = await app.inject({ method: 'DELETE', url: url(key) });
+    expect(del.statusCode).toBe(500);
+    expect(del.json()).toMatchObject({ code: 'desk_snooze_unsaved' });
+    expect(((await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse).snoozes).toEqual(before);
+    failing = false; // the chain recovers: the next change lands
+    expect((await app.inject({ method: 'DELETE', url: url(key) })).json()).toEqual({ key, woken: true });
+    await app.close();
+    app = await serve(trailAt(join(dir, 'audit.log')));
+    expect(((await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse).snoozes).toEqual([]);
+  });
+
+  it('review r2: a snooze after a torn last line (a crash mid-write) is not lost with the fragment', async () => {
+    const trail = join(dir, 'audit.log');
+    await app.inject({ method: 'PUT', url: url('a'), payload: { until: '2026-11-24T14:00:00.000Z' } });
+    await app.close();
+    writeFileSync(trail, `${readFileSync(trail, 'utf8')}{"ts":1,"action":"desk.need.sno`); // no newline: a torn tail
+    app = await serve(trailAt(trail));
+    expect((await app.inject({ method: 'PUT', url: url('b'), payload: { until: '2026-11-24T15:00:00.000Z' } })).statusCode).toBe(200);
+    await app.close();
+    app = await serve(trailAt(trail));
+    const replay = ((await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse).snoozes;
+    expect(replay.map((s) => s.key)).toEqual(['a', 'b']);
+  });
+
+  it('review r2: a durable entry is heard by listeners only once it is on disk', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const trail = join(dir, 'read-only.log');
+    writeFileSync(trail, '');
+    chmodSync(trail, 0o444);
+    const log = trailAt(trail);
+    const heard: string[] = [];
+    log.onRecord((e) => heard.push(e.action));
+    await expect(log.recordDurable('desk.need.snoozed', LOCAL_ACTOR, { detail: { key } })).rejects.toThrow();
+    expect(heard).toEqual([]);
+    const ok = trailAt(join(dir, 'audit.log'));
+    ok.onRecord((e) => heard.push(e.action));
+    await ok.recordDurable('desk.need.snoozed', LOCAL_ACTOR, { detail: { key } });
+    expect(heard).toEqual(['desk.need.snoozed']);
   });
 });
