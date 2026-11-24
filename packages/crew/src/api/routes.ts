@@ -17,6 +17,7 @@ import {
   setRepoMinimum,
   getRequirement,
   patchRequirement,
+  retireRequirement,
   readRequirementsGraph,
   REQUIREMENTS_NOT_GENERATED,
 } from './requirements.js';
@@ -325,7 +326,7 @@ const BRIEF_COPY_MAX = 512 * 1024;
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
 import { crewStateHome, stateHomeOfDb, wickedWorkRoot } from '../projects/state-home.js';
-import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, jobLaunchRoster, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
+import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, jobLaunchRoster, jobRevisionLaunch, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
 import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, removeStagedDocuments, stagedDocumentsRemoved, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
 import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks, webScopeReason } from './run-sources.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
@@ -4603,6 +4604,8 @@ export function registerRoutes(
             ...(p.relaunch?.deliver !== undefined ? { deliver: p.relaunch.deliver } : {}),
             ...(p.relaunch?.deliverGate !== undefined && p.relaunch.deliver !== 'none' ? { deliverGate: p.relaunch.deliverGate } : {}),
             ...(p.relaunch?.revisesPr !== undefined && p.relaunch.deliver === 'pr' && p.repoRefs?.[0] !== undefined ? { revisesPr: p.relaunch.revisesPr } : {}),
+            // (crew#1840) A job asked to change a pull request this chat delivered updates it: no second PR.
+            ...jobRevisionLaunch(p),
           },
           { ...ctx, fromProposal: d.pid, ...(d.power === true ? { powerRequired: true } : {}) },
         );
@@ -9960,6 +9963,41 @@ export function registerRoutes(
     return { requirement: detail };
   });
 
+  // wicked-core#1698: retire a requirement whose code was deleted (the engine flags it `unindexed`), so a re-map
+  // stops listing it. The engine's own command does the write; the id is never reused.
+  app.post(`${V}/repos/:id/requirements/:key/retire`, async (req, reply) => {
+    const { id, key } = req.params as { id: string; key: string };
+    const repos = await adapter.listRepos();
+    const repo = repos.find((r) => r.id === id);
+    if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+    let decodedKey: string;
+    try {
+      decodedKey = decodeURIComponent(key);
+    } catch {
+      return reply.code(400).send({ error: 'Malformed requirement key encoding' });
+    }
+    let outcome: Awaited<ReturnType<typeof retireRequirement>>;
+    try {
+      outcome = await retireRequirement(repo, decodedKey, adapter);
+    } catch (err) {
+      const status = codeGraphErrorStatus(err);
+      if (status !== null) return reply.code(status).send({ error: message(err) });
+      return reply.code(500).send({ error: `${decodedKey} could not be retired: ${message(err)}` });
+    }
+    if (outcome === 'not_found') return reply.code(404).send({ error: 'Requirement not found' });
+    if (outcome === 'not_unindexed') {
+      return reply.code(409).send({
+        error: `${decodedKey} is not listed as no longer in the code, so it cannot be retired. Only a requirement whose code was deleted can be. If its code was deleted, map ${repo.name} again, then retire it.`,
+      });
+    }
+    if (outcome === 'engine_too_old') {
+      return reply.code(409).send({
+        error: 'The installed wicked-core cannot retire requirements yet. Update wicked-core, then try again.',
+      });
+    }
+    return { retired: decodedKey };
+  });
+
   app.get(
     `${V}/repos/:id/graph`,
     { config: { manifest: { responseType: 'RepoGraphResponse', statusCodes: [200, 404, 409, 500, 503] } } },
@@ -12091,7 +12129,7 @@ export function registerRoutes(
       // Bounded by what is left of the snapshot's budget too (a slow start must not push it past 8 s):
       // the assembly after the infra probes keeps about 1.5 s.
       const clusterP = (containerFloor ? clusterReader.read(Math.min(CLUSTER_TIMEOUT_MS, left() - 1_500)) : Promise.resolve(null))
-        .then((read) => clusterRows(read, containerFloor, clusterStarted));
+        .then((read) => clusterRows(read, containerFloor, clusterStarted, clusterReader.engine()));
       const infraP = Promise.all([
         clusterP.then((rows) => rows.gateway),
         brokerP,

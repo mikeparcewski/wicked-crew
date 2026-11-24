@@ -31,7 +31,7 @@ import { join } from 'node:path';
 import { API_PREFIX } from './api-prefix.js';
 import { DELIVER_PUSH_REJECTED_MARKER, deliverRunBranch } from '../core/deliver.js';
 import { SCRATCH_DIRS, TOOL_ARTIFACT_DIRS, deliverExclusionByName, deliverExclusionReason } from '../core/deliver-exclusions.js';
-import { childEnvWithBootEstateDb } from '../core/governance-store.js';
+import { gitChildEnv } from '../core/exec.js';
 import { crewStateHome } from '../projects/state-home.js';
 
 /** api-types `CodebaseArchive` (crew#720). */
@@ -107,7 +107,7 @@ function git(cwd: string, args: string[], extraEnv: Record<string, string> = {})
     execFile(
       'git',
       ['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', ...args],
-      { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, encoding: 'utf8', windowsHide: true, env: childEnvWithBootEstateDb({ ...archiverGitEnv(), ...extraEnv }) },
+      { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, encoding: 'utf8', windowsHide: true, env: gitChildEnv({ ...archiverGitEnv(), ...extraEnv }) },
       (err, stdout, stderr) => (err !== null ? reject(new Error(`git ${args[0]}: ${String(stderr || err.message).trim()}`)) : resolve(String(stdout))),
     );
   });

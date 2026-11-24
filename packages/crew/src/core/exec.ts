@@ -31,6 +31,52 @@ import { isDirectoryPresent } from './repoPaths.js';
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * (crew#1843) The daemon's raw Azure DevOps credential: a personal access token, or the service principal a header is
+ * minted from (`deliver-credentials.ts` `ADO_PAT_ENV` / `ADO_SP_ENV`, spelled here so this module imports nothing that
+ * imports it). Only the minting helper and the deliver script read them; a git never does, and a git hands its
+ * environment to every hook, filter and `fsmonitor--daemon` it starts.
+ */
+export const ADO_RAW_ENV = ['AZURE_DEVOPS_EXT_PAT', 'CREW_ADO_TENANT_ID', 'CREW_ADO_CLIENT_ID', 'CREW_ADO_CLIENT_SECRET'] as const;
+
+/** `env` without {@link ADO_RAW_ENV}. */
+export function withoutAdoCredential(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env };
+  // Windows names are case-insensitive: a child reads `Azure_Devops_Ext_Pat` as the same variable.
+  const named = (k: string): boolean => (ADO_RAW_ENV as readonly string[]).includes(platform === 'win32' ? k.toUpperCase() : k);
+  for (const k of Object.keys(out)) if (named(k)) delete out[k];
+  return out;
+}
+
+/** Whether `file` runs git itself (`git`, `/usr/bin/git`, `git.exe`). */
+export function isGitProgram(file: string): boolean {
+  return /^git(?:\.exe)?$/i.test(file.split(/[\\/]/).pop() ?? '');
+}
+
+/** The `-c` entry every crew git carries (crew#1843), in `GIT_CONFIG_PARAMETERS`' quoting. */
+const FSMONITOR_OFF_PARAMETER = "'core.fsmonitor=false'";
+
+/**
+ * (crew#1843) The environment of every git crew starts: a crew child's ({@link childEnvWithBootEstateDb}), without the
+ * raw Azure DevOps credential, and with `core.fsmonitor=false`. A host whose global config turns fsmonitor on would
+ * otherwise start a `git fsmonitor--daemon` per checkout crew reads, carrying this environment and outliving the
+ * daemon. The setting rides `GIT_CONFIG_PARAMETERS`, the channel `git -c` uses (the engine's `hardened()` does the
+ * same): git reads it after every config file and after the `GIT_CONFIG_COUNT` entries, and the last entry wins, so it
+ * is appended to what `env` carries and a caller's own entries (a scoped header, a redirect refusal) keep theirs.
+ */
+export function gitChildEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out = withoutAdoCredential(childEnvWithBootEstateDb(env));
+  // Always appended (applied twice, it is there twice): a check for "already last" could be fooled by a quoted value.
+  const current = (out['GIT_CONFIG_PARAMETERS'] ?? '').trim();
+  out['GIT_CONFIG_PARAMETERS'] = current === '' ? FSMONITOR_OFF_PARAMETER : `${current} ${FSMONITOR_OFF_PARAMETER}`;
+  return out;
+}
+
+/** A crew child's environment for `file`: {@link gitChildEnv} for git, else {@link childEnvWithBootEstateDb}. */
+export function childEnvFor(file: string, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return isGitProgram(file) ? gitChildEnv(env) : childEnvWithBootEstateDb(env);
+}
+
 /** 64 MiB. Chosen to clear the largest `blast-radius` output observed in the corpus by a wide
  *  margin while still bounding the daemon's heap. Raise it deliberately, not reflexively — if a
  *  tool needs more than this, streaming is the answer rather than a bigger buffer. */
@@ -136,11 +182,12 @@ export async function execCapped(
     // BOOT values (`childEnvWithBootEstateDb`): the daemon exports its governance store as
     // WICKED_ESTATE_DB for the in-process engine, and that is nobody else's business — not git's,
     // uv's, the estate CLI's or a version probe's. An explicit `opts.env` is scrubbed the same way,
-    // so a caller that spreads `process.env` is covered too.
+    // so a caller that spreads `process.env` is covered too. A git also loses the raw Azure DevOps credential and runs
+    // with fsmonitor off (`gitChildEnv`, crew#1843).
     return await execFileAsync(file, args, {
       ...opts,
       maxBuffer,
-      env: childEnvWithBootEstateDb(opts.env ?? process.env),
+      env: childEnvFor(file, opts.env ?? process.env),
     });
   } catch (err) {
     if (isMaxBufferError(err)) throw new ExecOutputTooLarge(file, maxBuffer);

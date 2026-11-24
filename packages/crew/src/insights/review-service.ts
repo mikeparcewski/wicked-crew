@@ -87,6 +87,14 @@ export type AcceptTarget =
  *  no usable seat). Nothing was written; every launch path answers it as a refusal (409), never an engine failure. */
 export class ReviewPreparationRefused extends Error {}
 
+/** How {@link NoIndependentReviewer}'s words start: a schedule row keeps a refusal only as its words (`lastNote`). */
+export const NO_INDEPENDENT_REVIEWER_LEAD = 'every seat that could interpret this review ';
+
+/** (crew#1837) Whether a schedule's last refusal was {@link NoIndependentReviewer}: reduced assurance would let it run. */
+export function isNoIndependentReviewerNote(note: string | null): boolean {
+  return note !== null && note.startsWith(NO_INDEPENDENT_REVIEWER_LEAD);
+}
+
 /**
  * (crew#1375, R≠) Every seat that could interpret the review ran some of the work it reviews: none can review it
  * independently. Refused like {@link ReviewPreparationRefused} (nothing written), and the launch answers it as
@@ -97,7 +105,7 @@ export class NoIndependentReviewer extends ReviewPreparationRefused {
   readonly code = 'no_independent_reviewer';
   constructor(readonly excluded: readonly string[]) {
     super(
-      `every seat that could interpret this review (${excluded.join(', ')}) ran some of the work it reviews, so none can ` +
+      `${NO_INDEPENDENT_REVIEWER_LEAD}(${excluded.join(', ')}) ran some of the work it reviews, so none can ` +
         'review it independently. Sign in another seat, or start it again in reduced assurance (a seat that ran the work ' +
         'interprets it, said in its brief and on the run)',
     );

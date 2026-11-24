@@ -2123,6 +2123,13 @@
       "statusCodes": []
     },
     {
+      "method": "POST",
+      "path": "/api/v1/repos/:id/requirements/:key/retire",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
       "method": "PUT",
       "path": "/api/v1/repos/:id/requirements/minimum",
       "requestType": "RequirementsMinimumBody",
@@ -2792,10 +2799,11 @@
     {
       "method": "POST",
       "path": "/api/v1/schedules/:id/run",
-      "requestType": null,
+      "requestType": "ScheduleRunBody",
       "responseType": "ScheduleRunResponse",
       "statusCodes": [
         200,
+        400,
         403,
         404,
         409,

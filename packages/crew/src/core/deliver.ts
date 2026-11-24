@@ -91,6 +91,7 @@ import { randomBytes } from 'node:crypto';
 import { devNull } from 'node:os';
 import type { GitIdent } from '../setup/known.js';
 import { childEnvWithBootEstateDb } from './governance-store.js';
+import { gitChildEnv } from './exec.js';
 import type { PhaseDef, WorkflowDef } from './types.js';
 import { ADO_HELPER_JS } from './ado-deliver-helper.js';
 import { prChecksJs } from './pr-checks-helper.js';
@@ -574,7 +575,7 @@ export async function readDeliverOriginUrl(rootPath: string): Promise<string | n
     execFile(
       'git',
       ['remote', 'get-url', '--push', 'origin'],
-      { cwd: rootPath, timeout: 5_000, encoding: 'utf8', env: childEnvWithBootEstateDb(process.env) },
+      { cwd: rootPath, timeout: 5_000, encoding: 'utf8', env: gitChildEnv(process.env) },
       (err, stdout, stderr) => {
         const code = err === null ? 0 : typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : null;
         resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), code });

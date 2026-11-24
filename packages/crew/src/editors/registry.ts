@@ -13,7 +13,8 @@
  *    install-time conformance run (garden `scripts/editor/conformance.py`, run by crew against its
  *    own conformance host page, §12.1 / EP-C8) both pass (`pack-install.ts`). The registry records
  *    the pack directory and each editor's pinned entry hash; it never writes into the pack. A pack
- *    that also ships skills or blocks is refused: their own "Add these" approval (§3.2) is not built.
+ *    that also ships skills or blocks is refused: their own "Add these" approval (§3.2) is not built
+ *    (crew#1703). A pack editor's description and card images are read like a first-party editor's.
  *
  * Persisted state is ONE file, `<state home>/daemon-editors.json`: the enable/disable flags the
  * operator sets in Settings (§6.4, human-only) and the installed packs. It sits under the `daemon-`
@@ -25,7 +26,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from '../zod.js';
 
@@ -171,8 +172,8 @@ export const PluginManifestSchema = z.strictObject({
     const ids = list.map((p) => p.id);
     if (new Set(ids).size !== ids.length) ctx.addIssue({ code: 'custom', message: 'panel ids must be unique' });
   }),
-  // Accepted (CS7 C1) but not surfaced yet: a pack's images need descriptor-anchored reads (post-mvp, as for
-  // pack editors), and samples/limits do not reach the wire view.
+  // Accepted (CS7 C1) but not surfaced yet for a run plugin (pack editors' are, crew#1702), and samples/limits do
+  // not reach the wire view.
   visuals: z.object({ color: z.string().regex(/^#[0-9a-fA-F]{6}$/u).optional(), icon: z.string().optional() }).optional(),
   samples: z.string().optional(),
   limits: z.object({ bundleBytes: z.int().min(1).max(HOST_BUNDLE_CAP_BYTES) }).optional(),
@@ -248,12 +249,15 @@ export function sha256Of(buf: Buffer): string {
 
 /**
  * Read a file holding at most `cap` bytes, never allocating more than `cap + 1` (codex r1 on X3: a
- * file swapped for a huge one is refused before it is read whole). `null` = over the cap.
+ * file swapped for a huge one is refused before it is read whole). The open never waits (O_NONBLOCK): a FIFO
+ * swapped in for a checked file would otherwise block the daemon until something writes to it (crew#1702 review).
+ * `null` = over the cap, or not a regular file.
  */
 export function readCapped(path: string, cap: number): Buffer | null {
-  const fd = openSync(path, 'r');
+  const fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
   try {
-    if (fstatSync(fd).size > cap) return null;
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.size > cap) return null;
     const buf = Buffer.alloc(cap + 1);
     let n = 0;
     for (;;) {
@@ -379,14 +383,29 @@ export function discoverStudioEditors(
   return out;
 }
 
-/** A pack editor's manifest entry: the shared shape plus its pinned hash and a pack-relative entry. */
-/** A pack editor's manifest entry. No `description` / `visuals` yet: garden's pack gate (spec 2) refuses both keys
- *  (PK060), and a pack is another party's directory, so its images would need descriptor-anchored reads; studio-bundle
- *  editors only for now (post-mvp: garden pack schema + anchored reads). */
-export const PackEditorSchema = EditorManifestFields.omit({ description: true, visuals: true }).extend({
+/**
+ * A pack editor's manifest entry: the shared shape plus its pinned hash and a pack-relative entry. Its `description`
+ * and `visuals` (garden's pack gate accepts both, warn-only, and install.py stages the declared images at their
+ * manifest paths) are fail-open as for a studio-bundle editor; the images are read with {@link resolveVisuals}
+ * against the installed pack's root (crew#1702).
+ */
+export const PackEditorSchema = EditorManifestFields.extend({
   entry: z.string().regex(/\.html$/u),
   sha256: z.string().regex(/^[0-9a-f]{64}$/u),
 }).superRefine(surfacesMatchProtocol);
+export type PackEditorManifest = z.infer<typeof PackEditorSchema>;
+
+/**
+ * The digest a pack editor is installed and read back under: {@link editorEntryDigest} of its admitted entry WITHOUT
+ * `description` and `visuals`. They are cosmetic: a new line or icon is not a new build needing consent, and an
+ * editor installed before crew read them keeps the digest it was recorded with.
+ */
+export function packEditorDigest(entry: PackEditorManifest): string {
+  const rest: Partial<PackEditorManifest> = { ...entry };
+  delete rest.description;
+  delete rest.visuals;
+  return editorEntryDigest(rest);
+}
 
 /**
  * Read one pack editor at serve-time quality: the manifest entry for `id` in `<root>/wicked-pack.json`,
@@ -416,7 +435,7 @@ export function readPackEditor(pack: InstalledPack, id: string, log?: (msg: stri
   if (!parsed.success) return why(`its manifest entry is refused (${parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')})`);
   const m = parsed.data;
   if (FIRST_PARTY_ID.test(m.id) || m.id === 'wicked') return why('a pack may not declare a wicked-* editor');
-  if (editorEntryDigest(m) !== pack.manifestSha256) return why('its manifest entry changed since it was installed');
+  if (packEditorDigest(m) !== pack.manifestSha256) return why('its manifest entry changed since it was installed');
   if (m.entry !== pack.entry) return why(`its entry moved (${pack.entry} → ${m.entry})`);
   const entryPath = resolve(pack.root, m.entry);
   const rel = relative(resolve(pack.root), entryPath);
@@ -442,8 +461,11 @@ export function readPackEditor(pack: InstalledPack, id: string, log?: (msg: stri
   if (outside.length > 0) return why(`entry loads from outside itself (${outside.slice(0, 3).join(', ')})`);
   const sha = sha256Of(buf);
   if (sha !== m.sha256 || sha !== pack.sha256) return why('its entry no longer matches the hash it was installed with');
-  const manifest: EditorManifest = { id: m.id, title: m.title, version: m.version, protocol: m.protocol, kinds: m.kinds, entry: m.entry, sizes: m.sizes, permissions: m.permissions, ...(m.panels !== undefined ? { panels: m.panels } : {}), ...(m.limits !== undefined ? { limits: m.limits } : {}), ...(m.surfaces !== undefined ? { surfaces: m.surfaces } : {}) };
-  return { kind: 'editor', manifest, sha256: sha, bytes: buf.byteLength, entryPath, firstParty: false, source: 'pack', pack };
+  const manifest: EditorManifest = { id: m.id, title: m.title, version: m.version, protocol: m.protocol, kinds: m.kinds, entry: m.entry, sizes: m.sizes, permissions: m.permissions, ...(m.panels !== undefined ? { panels: m.panels } : {}), ...(m.limits !== undefined ? { limits: m.limits } : {}), ...(m.surfaces !== undefined ? { surfaces: m.surfaces } : {}), ...(m.description !== undefined ? { description: m.description } : {}), ...(m.visuals !== undefined ? { visuals: m.visuals } : {}) };
+  // Image paths are pack-root relative (garden install.py stages them there); the same anchored, no-follow, capped
+  // reads as a studio-bundle editor's. A bad image is left out with its reason; the editor still serves.
+  const visuals = resolveVisuals(pack.root, m.visuals, (msg) => log?.(`[editors] ${id} (pack ${pack.name}): visual ${msg}; left out`));
+  return { kind: 'editor', manifest, sha256: sha, bytes: buf.byteLength, entryPath, firstParty: false, source: 'pack', pack, ...(visuals !== undefined ? { visuals } : {}) };
 }
 
 /**

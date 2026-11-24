@@ -400,7 +400,9 @@ export async function probeBroker(input: BrokerProbeInput): Promise<SystemInfraR
     return infraRow('broker', 'unknown', why, 'Re-check; if it persists, the engine binary (WICKED_CORE_EXE) may be missing.', started, details, timeoutMs);
   }
   if (failing.length > 0) {
-    return infraRow('broker', 'degraded', `credential refresh failing: ${failing.join(', ')}; the credential is served until it expires`, 'Sign the CLI in again before its credential expires.', started, details, timeoutMs);
+    // crew#1845: the remedy names the CLI to sign in again, as the reason names it.
+    const who = failing.map((f) => f.split(' (', 1)[0]!).join(' and ');
+    return infraRow('broker', 'degraded', `credential refresh failing: ${failing.join(', ')}; the credential is served until it expires`, `Sign ${who} in again on the Helpers page before its credential expires.`, started, details, timeoutMs);
   }
   if (signedIn.length === 0) {
     return infraRow('broker', 'degraded', `no CLI is signed in to the broker (${answered.join(', ')} answered signed out)`, 'Sign a CLI in on the Helpers page.', started, details, timeoutMs);

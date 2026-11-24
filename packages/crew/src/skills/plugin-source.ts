@@ -33,7 +33,7 @@ import { fileURLToPath } from 'node:url';
 import type { SkillSourceKind } from '../core/types.js';
 import { PLUGIN_NAME } from './frontmatter.js';
 import { readFileNoFollow } from './tree.js';
-import { childEnvWithBootEstateDb } from '../core/governance-store.js';
+import { gitChildEnv } from '../core/exec.js';
 
 /** Explicit plugin-source override — the seam tests and proof scripts aim at a fixture plugin. */
 export const SKILLS_SOURCE_ENV = 'WICKED_CREW_SKILLS_SOURCE';
@@ -589,14 +589,14 @@ export function gitStateOf(source: PluginSource): GitState {
       encoding: 'utf8',
       timeout: GIT_TIMEOUT_MS,
       stdio: ['ignore', 'pipe', 'ignore'],
-      env: childEnvWithBootEstateDb(),
+      env: gitChildEnv(),
     }).trim();
     const status = execFileSync('git', ['status', '--porcelain'], {
       cwd: source.path,
       encoding: 'utf8',
       timeout: GIT_TIMEOUT_MS,
       stdio: ['ignore', 'pipe', 'ignore'],
-      env: childEnvWithBootEstateDb(),
+      env: gitChildEnv(),
     });
     return { git_sha: sha, git_dirty: status.trim() !== '' };
   } catch (err) {
@@ -612,7 +612,7 @@ export function gitStateOf(source: PluginSource): GitState {
 export async function gitStateOfAsync(source: PluginSource): Promise<GitState> {
   if (source.kind !== 'checkout') return { git_sha: null, git_dirty: false };
   const git = promisify(execFile);
-  const options = { cwd: source.path, timeout: GIT_TIMEOUT_MS, env: childEnvWithBootEstateDb() };
+  const options = { cwd: source.path, timeout: GIT_TIMEOUT_MS, env: gitChildEnv() };
   try {
     const sha = await git('git', ['rev-parse', 'HEAD'], options);
     const status = await git('git', ['status', '--porcelain'], options);

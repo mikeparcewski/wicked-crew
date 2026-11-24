@@ -1652,6 +1652,9 @@ export async function createServer(
       clisJson: '[]',
       workflow: row.workflow,
       ...(projectId !== undefined ? { projectId } : {}),
+      // crew#1837: the person accepted reduced assurance for this schedule (a one-seat daemon): its review may be read
+      // by a seat that ran the work, said in the brief and on the run, instead of being refused every time.
+      ...(row.reducedAssurance ? { reducedAssurance: true } : {}),
     };
     const review = row.workflow === REVIEW_WORKFLOW;
     if (row.workflow === RUN_EVALS_WORKFLOW) {

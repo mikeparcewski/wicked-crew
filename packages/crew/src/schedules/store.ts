@@ -35,6 +35,9 @@ export interface WorkflowSchedule {
   repoRef: string | null;
   /** The intent the launch carries; `null` = the workflow's own default. */
   problem: string | null;
+  /** (crew#1837) The person accepted reduced assurance for this schedule: when every seat that could review the work
+   *  ran some of it (a one-seat daemon), one of them reviews it, said in its brief and on the run. False until accepted. */
+  reducedAssurance: boolean;
   nextDueAt: string;
   lastRunId: string | null;
   lastRunAt: string | null;
@@ -83,6 +86,7 @@ export interface ScheduleInput {
   projectIds?: string[] | undefined;
   repoRef?: string | null | undefined;
   problem?: string | null | undefined;
+  reducedAssurance?: boolean | undefined;
 }
 
 export function defaultSchedulesPath(env: NodeJS.ProcessEnv = process.env): string {
@@ -107,6 +111,7 @@ function parseRow(id: string, raw: unknown): WorkflowSchedule | null {
     projectIds: Array.isArray(r['projectIds']) ? r['projectIds'].filter(str) : [],
     repoRef: strOrNull(r['repoRef']),
     problem: strOrNull(r['problem']),
+    reducedAssurance: r['reducedAssurance'] === true,
     nextDueAt: r['nextDueAt'],
     lastRunId: strOrNull(r['lastRunId']),
     lastRunAt: strOrNull(r['lastRunAt']),
@@ -177,6 +182,7 @@ export class ScheduleStore {
       projectIds: input.projectIds ?? prev?.projectIds ?? [],
       repoRef: input.repoRef !== undefined ? input.repoRef : (prev?.repoRef ?? null),
       problem: input.problem !== undefined ? input.problem : (prev?.problem ?? null),
+      reducedAssurance: input.reducedAssurance ?? prev?.reducedAssurance ?? false,
       nextDueAt: prev === undefined || prev.everyHours !== input.everyHours ? due : prev.nextDueAt,
       lastRunId: prev?.lastRunId ?? null,
       lastRunAt: prev?.lastRunAt ?? null,
@@ -187,8 +193,7 @@ export class ScheduleStore {
       createdAt: prev?.createdAt ?? iso,
       updatedAt: iso,
     };
-    this.rows.set(id, row);
-    this.persist();
+    this.commit(id, row, prev);
     return { ...row };
   }
 
@@ -196,8 +201,7 @@ export class ScheduleStore {
     const prev = this.rows.get(id);
     if (prev === undefined) return undefined;
     const row: WorkflowSchedule = { ...prev, ...patch, updatedAt: now.toISOString() };
-    this.rows.set(id, row);
-    this.persist();
+    this.commit(id, row, prev);
     return { ...row };
   }
 
@@ -205,6 +209,19 @@ export class ScheduleStore {
     const had = this.rows.delete(id);
     if (had) this.persist();
     return had;
+  }
+
+  /** (crew#1837) Set the row and write the file; a write that fails puts the row back, so memory never holds what
+   *  the file (and the audit trail, written after a save) does not. */
+  private commit(id: string, row: WorkflowSchedule, prev: WorkflowSchedule | undefined): void {
+    this.rows.set(id, row);
+    try {
+      this.persist();
+    } catch (err) {
+      if (prev === undefined) this.rows.delete(id);
+      else this.rows.set(id, prev);
+      throw err;
+    }
   }
 
   private persist(): void {

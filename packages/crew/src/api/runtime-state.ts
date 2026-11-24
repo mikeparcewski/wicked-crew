@@ -1,6 +1,6 @@
 import { execCapped } from '../core/exec.js';
 import { crewStateHome } from '../projects/state-home.js';
-import { readClusterStatus } from './cluster-status.js';
+import { clusterInstallCommand, readClusterStatus, type EngineSpot } from './cluster-status.js';
 import type { ExecLike } from './seat-container-login.js';
 
 /**
@@ -19,6 +19,13 @@ export const CHECK_TIMEOUT_MS = 45_000;
 /** The words a bench carries for each reason the seats cannot run. */
 export const RUNTIME_DOWN_REASON = "Kubernetes isn't running";
 export const CONTROLLER_DOWN_REASON = "The cluster's sandbox controller isn't ready";
+/** How a bench for a cluster that was never set up for this daemon starts (crew#1844): a distinct reason, never
+ *  {@link RUNTIME_DOWN_REASON}, since starting Kubernetes does not help. Studio reads this lead. */
+export const NO_CLUSTER_LEAD = 'No Kubernetes cluster is set up for these helpers yet';
+/** The bench words for no cluster: the lead and the install command filled in for this daemon (crew#1844). */
+export function noClusterReason(engine: EngineSpot): string {
+  return `${NO_CLUSTER_LEAD}. Set one up: \`${clusterInstallCommand(engine)}\``;
+}
 
 export type ContainerRuntimeState = 'up' | 'down' | 'unknown';
 export interface RuntimeStateReader {
@@ -84,8 +91,11 @@ export class RuntimeState implements RuntimeStateReader {
         // A reachable cluster whose controller is known not ready cannot create a seat either; one whose
         // controller could not be read proves neither (it never clears a known controller outage).
         if (doc.configured && doc.reachable && doc.controller === null) return;
-        if (doc.configured && doc.reachable && !doc.controller?.ready) why = CONTROLLER_DOWN_REASON;
-        else if (doc.configured && doc.reachable) next = 'up';
+        // Not configured: no cluster was set up for this state home (starting Kubernetes would not help), unless the
+        // engine found no kubectl at all, which is Rancher Desktop not installed or not started.
+        if (!doc.configured) why = /\bno kubectl\b/i.test(doc.detail ?? '') ? RUNTIME_DOWN_REASON : noClusterReason({ exe, home });
+        else if (doc.reachable && !doc.controller?.ready) why = CONTROLLER_DOWN_REASON;
+        else if (doc.reachable) next = 'up';
       } catch { /* No engine CLI, a timeout or no status document is unavailable. */ }
       // Down takes three misses in a row (a check on a loaded laptop can time out with Docker up, and
       // a false "down" benches every container seat); up takes one answer.

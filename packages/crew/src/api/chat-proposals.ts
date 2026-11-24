@@ -107,6 +107,9 @@ import {
   inputLines,
   repoNamedIn,
   SELF_SEATED,
+  mentionsPullRequest,
+  prNumberOfUrl,
+  type DeliveredPr,
   type JobChat,
   type JobContext,
   type JobFacts,
@@ -2632,6 +2635,26 @@ export class ChatProposals {
     return { chatId, pid, turnId, seat, chat, served, roster, pool, projectLabel, qeOff, powerPresets, ...(this.deps.coverage !== undefined ? { coverage: (keys: readonly string[], bound: boolean) => this.deps.coverage!(keys, bound) } : {}), ...extra, ...(refusal !== undefined ? { seatsUnread: true } : {}) };
   }
 
+  /** (crew#1840) The pull requests this chat's runs delivered (a run record's `deliverUrl`), newest run last. A failed
+   *  read is none: the job then opens its own pull request, and its card says so when the words asked otherwise. */
+  private async deliveredPrs(chatId: string): Promise<DeliveredPr[]> {
+    try {
+      const out: DeliveredPr[] = [];
+      for (const v of await this.deps.runs()) {
+        if (this.deps.chatOfRun(v.session.id) !== chatId) continue;
+        const url = (v.session as { deliverUrl?: unknown }).deliverUrl;
+        const number = typeof url === 'string' ? prNumberOfUrl(url) : null;
+        if (number === null) continue;
+        const repo = (v.session as { repo_ref?: unknown }).repo_ref;
+        out.push({ number, url: url as string, runId: v.session.id, repoRef: typeof repo === 'string' ? repo : null });
+      }
+      return out;
+    } catch (err) {
+      this.log(`[proposals] chat ${chatId}: its runs could not be read for a delivered pull request: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
+  }
+
   /** Source availability matters only to a card that shows this input. Keep a failed read a named refusal. */
   private async loadJobSources(facts: Pick<JobFacts, 'card' | 'option'>, ctx: JobContext): Promise<void> {
     const card = CATALOG_V2_CARDS.find((c) => c.id === facts.card);
@@ -2798,6 +2821,9 @@ export class ChatProposals {
       ctx = { ...ctx, coverage: (keys, bound) => this.deps.coverage!(keys, bound, relaunch) };
     }
     ctx = await this.reviewRoster(facts, ctx);
+    // (crew#1840) Words that name a pull request: the ones this chat's runs delivered, so a job asked to change one
+    // updates it (the resolution decides; it is pure).
+    if (ctx.deliveredPrs === undefined && mentionsPullRequest(facts.words)) ctx = { ...ctx, deliveredPrs: await this.deliveredPrs(chatId) };
     if (r?.resolved.inputs.some((i) => i.id === 'documents')) {
       if (facts.inputs['documents'] === undefined) {
         const { binding } = bindingOf(records, ctx.turnId ?? '\u0000');

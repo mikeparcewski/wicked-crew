@@ -30,6 +30,7 @@ import {
   type DeliverScriptOptions,
 } from '../core/deliver.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
+import { gitChildEnv } from '../core/exec.js';
 
 /** What one spawn of the deliver script produced: its exit status and merged output. */
 export interface DeliverScriptResult {
@@ -87,7 +88,7 @@ export const gitReprovisionWorktree: WorktreeReprovisioner = async (repoRoot, ru
   const branch = `wicked/${runId}`;
   const run = (args: string[]): Promise<void> =>
     new Promise((resolve, reject) => {
-      execFile('git', ['-C', repoRoot, ...args], { windowsHide: true, env: childEnvWithBootEstateDb() }, (err) =>
+      execFile('git', ['-C', repoRoot, ...args], { windowsHide: true, env: gitChildEnv() }, (err) =>
         err === null ? resolve() : reject(err),
       );
     });

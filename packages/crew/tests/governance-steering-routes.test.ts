@@ -454,6 +454,28 @@ describe('POST /api/v1/governance/steering/author — "add with chat" as a gover
     expect(existsSync(inbox)).toBe(true); // created for every authoring run, documents or not
   });
 
+  // crew#1846: the worker numbers its rules; the problem names the ids already used so its draft does not collide.
+  it('lists the rule ids already in use and the next free numbers in the problem', async () => {
+    steeringSupported = true;
+    launches = [];
+    const prior = listedRules;
+    listedRules = [
+      { ...RULES[0]!, id: 'PAT-001' },
+      { ...RULES[0]!, id: 'PAT-007', retired: true },
+      { ...RULES[0]!, id: 'POL-0002' },
+    ];
+    try {
+      const { status } = await send('POST', '/api/v1/governance/steering/author', { instructions: 'Codify the deploy rules.', sessionId: 'steer-ids-1' });
+      expect(status).toBe(201);
+    } finally {
+      listedRules = prior;
+    }
+    const problem = launches[0]!.problem;
+    expect(problem).toContain('Rule ids already in use (never reuse one; a reused id is landed under a new id): PAT-001, PAT-007, POL-0002.');
+    expect(problem).toContain('Number new rules from PAT-008 (patterns) and POL-0003 (policies).');
+    expect(problem.startsWith("Author steering rules for the 'architecture' steering type")).toBe(true);
+  });
+
   it('writes inline documents into the per-run steering inbox and names their PATHS in the problem', async () => {
     steeringSupported = true;
     launches = [];
