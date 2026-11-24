@@ -557,6 +557,46 @@ describe('voice locks (committed data)', () => {
     }
   });
 
+  it('crew#1563: each lock says what the engine install downloads: one wheel per pin, summed', () => {
+    const norm = (n: string): string => n.toLowerCase().replace(/[-_.]+/g, '-');
+    for (const n of names) {
+      const text = readFileSync(join(real, n), 'utf8');
+      const pins = text.replace(/\\\n/g, ' ').split('\n').map((l) => l.trim()).filter((l) => l !== '' && !l.startsWith('#')).map((l) => l.split(' ')[0]!);
+      const wheels = [...text.matchAll(/^# wheel: (\S+\.whl) (\d+)$/gm)].map((m) => ({ file: m[1]!, bytes: Number(m[2]) }));
+      const total = /^# engine-bytes: (\d+)$/m.exec(text);
+      expect(total, n).not.toBeNull();
+      expect(wheels.map((w) => { const [name, version] = w.file.split('-'); return `${norm(name!)}==${version}`; }).sort(), n).toEqual(pins.map((p) => { const [name, version] = p.split('=='); return `${norm(name!)}==${version}`; }).sort());
+      expect(Number(total![1]), n).toBe(wheels.reduce((t, w) => t + w.bytes, 0));
+    }
+  });
+
+  it('crew#1563: the wheels named for darwin-arm64-cp312 are the ones pip itself picks there', () => {
+    // pip install --dry-run --report over this lock for macosx_14_0_arm64 / 3.12 (2026-11-24, the one probe run):
+    // its download_info names exactly these files.
+    const text = readFileSync(join(real, 'darwin-arm64-cp312.txt'), 'utf8');
+    expect([...text.matchAll(/^# wheel: (\S+)/gm)].map((m) => m[1])).toEqual([
+      'flatbuffers-25.12.19-py2.py3-none-any.whl',
+      'numpy-2.5.4-cp312-cp312-macosx_14_0_arm64.whl',
+      'onnxruntime-1.31.1-cp312-cp312-macosx_14_0_arm64.whl',
+      'packaging-26.3-py3-none-any.whl',
+      'pathvalidate-3.3.1-py3-none-any.whl',
+      'piper_tts-1.8.0-cp39-abi3-macosx_11_0_arm64.whl',
+      'protobuf-7.36.2-cp310-abi3-macosx_10_9_universal2.whl',
+    ]);
+    expect(/^# engine-bytes: (\d+)$/m.exec(text)![1]).toBe('61090584');
+  });
+
+  it('crew#1563: GET /voice/tts says the engine download size from the lock, null where there is no lock', async () => {
+    const mac = await service({ platform: 'darwin', osRelease: () => '23.6.0', probe: () => ({ ...PY, machine: 'arm64' }), locksDir: real }).status();
+    expect(mac.supported.ok).toBe(true);
+    expect(mac.engine).toEqual({ found: false, version: null, bytes: 61090584 });
+    const intel = await service({ platform: 'darwin', osRelease: () => '23.6.0', probe: () => ({ ...PY, version: '3.14.0', minor: 14 }), locksDir: real }).status();
+    expect(intel.supported.ok).toBe(false);
+    expect(intel.engine.bytes).toBeNull();
+    const win = await service({ platform: 'win32', locksDir: real }).status();
+    expect(win.engine.bytes).toBeNull();
+  });
+
   it('the npm package includes the locks, and the code finds them where the package puts them', () => {
     const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')) as { files: string[] };
     expect(pkg.files).toContain('voice-locks');
