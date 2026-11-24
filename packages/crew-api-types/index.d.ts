@@ -17909,8 +17909,9 @@ export interface VoiceTtsStatus {
  * Snooze a Needs-you item (crew#1124, DES-desk-v2 §6 item 6). `GET /desk/snoozes` → {@link DeskSnoozesResponse};
  * `PUT /desk/snoozes/:key` {@link PutDeskSnoozeBody} → {@link DeskSnooze} (audited `desk.need.snoozed`; 400
  * `desk_snooze_invalid` for a time not in the future, more than 7 days ahead, or a key over 200 characters);
- * `DELETE /desk/snoozes/:key` → {@link DeskSnoozeWakeResponse} (audited `desk.need.woken`). Setting or ending one is
- * a human operator's (403 `human_operator_only`). A snooze only defers the item on the Desk: it stays in
+ * `DELETE /desk/snoozes/:key` → {@link DeskSnoozeWakeResponse} (audited `desk.need.woken`). Both are on disk before
+ * the answer (500 `desk_snooze_unsaved` when the trail could not take them; nothing changed). Setting or ending one
+ * is a human operator's (403 `human_operator_only`; an observer token gets the auth boundary's own trust 403). A snooze only defers the item on the Desk: it stays in
  * `/system.attention[]`, and the skin brings it back when `until` passes or its rank rises above `severity`.
  */
 export interface DeskSnooze {

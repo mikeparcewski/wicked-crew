@@ -79,6 +79,24 @@ export class AuditLog {
    *  from the trail rather than drift by a second off a second `Date.now()`. */
   record(action: string, actor: Actor, fields?: { runId?: string; detail?: Record<string, unknown> }): number {
     if (this.disabled) return 0;
+    const entry = this.entryOf(action, actor, fields);
+    void this.append(entry).catch(() => undefined); // `append` has warned; the chain carries on
+    return entry.ts;
+  }
+
+  /**
+   * (crew#1124) Record one action and wait until it is on disk: resolves with its `ts` once appended, REJECTS when the
+   * append failed. For the facts whose only durable copy is this trail (a Desk snooze): an answer of success must
+   * mean it survives a restart. The same serialized chain as {@link record}, so lines never interleave.
+   */
+  async recordDurable(action: string, actor: Actor, fields?: { runId?: string; detail?: Record<string, unknown> }): Promise<number> {
+    if (this.disabled) throw new Error('the audit trail is disabled, so nothing can be recorded durably');
+    const entry = this.entryOf(action, actor, fields);
+    await this.append(entry);
+    return entry.ts;
+  }
+
+  private entryOf(action: string, actor: Actor, fields?: { runId?: string; detail?: Record<string, unknown> }): AuditEntry {
     const entry: AuditEntry = {
       ts: Date.now(),
       action,
@@ -93,21 +111,26 @@ export class AuditLog {
         this.warn(`[audit] a listener failed on ${action}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    this.chain = this.chain.then(async () => {
+    return entry;
+  }
+
+  /** Append one entry on the chain; the returned promise rejects when the append failed (the chain itself never does). */
+  private append(entry: AuditEntry): Promise<void> {
+    const write = this.chain.then(async () => {
       if (!this.dirReady) {
         await mkdir(dirname(this.path), { recursive: true });
         this.dirReady = true;
       }
       await appendFile(this.path, `${JSON.stringify(entry)}\n`, 'utf8');
     });
-    this.chain = this.chain.catch((err) => {
+    this.chain = write.catch((err) => {
       this.warn(
-        `[audit] FAILED to record ${action} by ${actor.id} at ${this.path}: ${
+        `[audit] FAILED to record ${entry.action} by ${entry.actor.id} at ${this.path}: ${
           err instanceof Error ? err.message : String(err)
         } — the action itself succeeded; the trail has a hole`,
       );
     });
-    return entry.ts;
+    return write;
   }
 
   /** (workdoc-all-runs) Hear each entry as it is recorded (the working document's person-notes index). Returns the

@@ -1976,7 +1976,7 @@ export function registerRoutes(
     service: new VoiceService({ dir: defaultVoiceDir() }),
     dashboard: (() => { try { return VoiceDashboardStore.under(crewStateHome()); } catch { return null; } })(),
   };
-  registerDeskSnoozeRoutes(app, { snoozes: new DeskSnoozes(audit), audit });
+  registerDeskSnoozeRoutes(app, { snoozes: new DeskSnoozes(audit) });
   registerVoiceRoutes(app, { voice: voice.service, tts: voice.tts ?? new TtsService({ dir: defaultVoiceDir() }), dashboard: voice.dashboard, audit });
   const voiceInputs = runtime.voiceInputs ?? new VoiceInjectInputs();
   const openWithOs = runtime.openWithOs ?? openWithSystemDefault;

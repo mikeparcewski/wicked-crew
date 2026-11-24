@@ -21,7 +21,6 @@ import type { Actor, DeskSnooze, DeskSnoozesResponse, DeskSnoozeWakeResponse } f
 import { z } from '../zod.js';
 import { API_PREFIX } from './api-prefix.js';
 import type { AuditLog } from './audit.js';
-import { LOCAL_ACTOR } from './auth.js';
 import { isHumanOperator } from './watch-routes.js';
 
 const V = API_PREFIX;
@@ -42,9 +41,11 @@ export const PutDeskSnoozeSchema = z.strictObject({
 export class DeskSnoozes {
   private map: Map<string, DeskSnooze> | null = null;
   private loading: Promise<Map<string, DeskSnooze>> | null = null;
+  /** Every change runs one at a time: what is in memory and what the trail replays always agree. */
+  private serial: Promise<unknown> = Promise.resolve();
 
   constructor(
-    private readonly audit: Pick<AuditLog, 'readAll'>,
+    private readonly audit: Pick<AuditLog, 'readAll' | 'recordDurable'>,
     private readonly now: () => number = Date.now,
   ) {}
 
@@ -74,6 +75,12 @@ export class DeskSnoozes {
     return this.loading;
   }
 
+  private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.serial.then(fn, fn);
+    this.serial = run.catch(() => undefined);
+    return run;
+  }
+
   /** The snoozes still in force, soonest to end first. */
   async list(): Promise<DeskSnooze[]> {
     const map = await this.load();
@@ -82,21 +89,31 @@ export class DeskSnoozes {
     return [...map.values()].sort((a, b) => Date.parse(a.until) - Date.parse(b.until) || a.key.localeCompare(b.key));
   }
 
-  async snooze(key: string, until: string, severity: number | null, actor: Actor, record: (s: DeskSnooze) => void): Promise<DeskSnooze> {
-    const map = await this.load();
-    const s: DeskSnooze = { key, until: new Date(Date.parse(until)).toISOString(), severity, at: new Date(this.now()).toISOString(), by: actor.id };
-    record(s);
-    map.set(key, s);
-    return s;
+  /** Snooze `key`: on disk first (a failed append rejects and changes nothing), then in memory. */
+  snooze(key: string, until: string, severity: number | null, actor: Actor): Promise<DeskSnooze> {
+    return this.exclusive(async () => {
+      const map = await this.load();
+      const s: DeskSnooze = { key, until: new Date(Date.parse(until)).toISOString(), severity, at: new Date(this.now()).toISOString(), by: actor.id };
+      await this.audit.recordDurable(DESK_SNOOZED, actor, { detail: { key: s.key, until: s.until, severity: s.severity } });
+      map.set(key, s);
+      return s;
+    });
   }
 
-  /** Ends a snooze in force; `false` when there was none. */
-  async wake(key: string): Promise<boolean> {
-    const map = await this.load();
-    const s = map.get(key);
-    if (s === undefined) return false;
-    map.delete(key);
-    return Date.parse(s.until) > this.now();
+  /** End a snooze in force (on disk first); `false` when there was none. */
+  wake(key: string, actor: Actor): Promise<boolean> {
+    return this.exclusive(async () => {
+      const map = await this.load();
+      const s = map.get(key);
+      if (s === undefined) return false;
+      if (Date.parse(s.until) <= this.now()) {
+        map.delete(key); // it had ended by itself; nothing to record
+        return false;
+      }
+      await this.audit.recordDurable(DESK_WOKEN, actor, { detail: { key } });
+      map.delete(key);
+      return true;
+    });
   }
 
   /** The bound a PUT is judged against. */
@@ -107,13 +124,20 @@ export class DeskSnoozes {
 
 export interface DeskSnoozeRouteDeps {
   snoozes: DeskSnoozes;
-  audit: Pick<AuditLog, 'record'>;
 }
 
 export function registerDeskSnoozeRoutes(app: FastifyInstance, deps: DeskSnoozeRouteDeps): void {
-  const actorOf = (req: FastifyRequest): Actor => (req as { actor?: Actor }).actor ?? LOCAL_ACTOR;
-  const refusal = (actor: Actor): { error: string; code: string } | null =>
-    isHumanOperator(actor) ? null : { error: `Snoozing a need is a person's choice (you are ${actor.kind}/${actor.trust}).`, code: 'human_operator_only' };
+  // Fail closed: the auth boundary sets the actor on every API request (the local actor when auth is off), so a
+  // request that reaches here with none is refused, never treated as the local person.
+  const actorOf = (req: FastifyRequest): Actor | null => (req as { actor?: Actor | null }).actor ?? null;
+  const refusal = (actor: Actor | null): { error: string; code: string } | null =>
+    actor !== null && isHumanOperator(actor)
+      ? null
+      : { error: `Snoozing a need is a person's choice (you are ${actor === null ? 'not signed in' : `${actor.kind}/${actor.trust}`}).`, code: 'human_operator_only' };
+  const unsaved = (e: unknown): { error: string; code: string } => ({
+    error: `It could not be recorded, so nothing changed: ${e instanceof Error ? e.message : String(e)}`,
+    code: 'desk_snooze_unsaved',
+  });
   const keyProblem = (key: string): string | null =>
     key.trim() === '' ? 'the item key is empty' : key.length > DESK_SNOOZE_KEY_MAX ? `the item key is over ${DESK_SNOOZE_KEY_MAX} characters` : null;
 
@@ -123,7 +147,7 @@ export function registerDeskSnoozeRoutes(app: FastifyInstance, deps: DeskSnoozeR
 
   app.put<{ Params: { key: string } }>(
     `${V}/desk/snoozes/:key`,
-    { config: { manifest: { requestType: 'PutDeskSnoozeBody', responseType: 'DeskSnooze', statusCodes: [200, 400, 403] } } },
+    { config: { manifest: { requestType: 'PutDeskSnoozeBody', responseType: 'DeskSnooze', statusCodes: [200, 400, 403, 500] } } },
     async (req, reply) => {
       const actor = actorOf(req);
       const refused = refusal(actor);
@@ -138,24 +162,28 @@ export function registerDeskSnoozeRoutes(app: FastifyInstance, deps: DeskSnoozeR
       const now = deps.snoozes.nowMs();
       if (until <= now) return reply.code(400).send({ error: 'The snooze must end in the future.', code: 'desk_snooze_invalid' });
       if (until - now > DESK_SNOOZE_MAX_MS) return reply.code(400).send({ error: 'A need can be snoozed for a week at most.', code: 'desk_snooze_invalid' });
-      return deps.snoozes.snooze(req.params.key, parsed.data.until, parsed.data.severity ?? null, actor, (s) =>
-        deps.audit.record(DESK_SNOOZED, actor, { detail: { key: s.key, until: s.until, severity: s.severity } }),
-      );
+      try {
+        return await deps.snoozes.snooze(req.params.key, parsed.data.until, parsed.data.severity ?? null, actor!);
+      } catch (e) {
+        return reply.code(500).send(unsaved(e));
+      }
     },
   );
 
   app.delete<{ Params: { key: string } }>(
     `${V}/desk/snoozes/:key`,
-    { config: { manifest: { responseType: 'DeskSnoozeWakeResponse', statusCodes: [200, 400, 403] } } },
+    { config: { manifest: { responseType: 'DeskSnoozeWakeResponse', statusCodes: [200, 400, 403, 500] } } },
     async (req, reply): Promise<DeskSnoozeWakeResponse | typeof reply> => {
       const actor = actorOf(req);
       const refused = refusal(actor);
       if (refused !== null) return reply.code(403).send(refused);
       const bad = keyProblem(req.params.key);
       if (bad !== null) return reply.code(400).send({ error: `Cannot wake it: ${bad}.`, code: 'desk_snooze_invalid' });
-      const woken = await deps.snoozes.wake(req.params.key);
-      if (woken) deps.audit.record(DESK_WOKEN, actor, { detail: { key: req.params.key } });
-      return { key: req.params.key, woken };
+      try {
+        return { key: req.params.key, woken: await deps.snoozes.wake(req.params.key, actor!) };
+      } catch (e) {
+        return reply.code(500).send(unsaved(e));
+      }
     },
   );
 }

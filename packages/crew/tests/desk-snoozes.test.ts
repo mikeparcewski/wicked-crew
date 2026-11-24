@@ -3,7 +3,7 @@
 // defer it. A snooze is a durable fact in the audit trail (`desk.need.snoozed` / `desk.need.woken`): it survives a
 // restart, it ends by itself, and only a human operator sets or ends one (an agent cannot hide a need from a person).
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Actor, DeskSnooze, DeskSnoozesResponse } from 'wicked-crew-api-types';
 
 import { AuditLog } from '../src/api/audit.js';
+import { LOCAL_ACTOR } from '../src/api/auth.js';
 import { DESK_SNOOZE_MAX_MS, DeskSnoozes, registerDeskSnoozeRoutes } from '../src/api/desk-snoozes.js';
 
 const AGENT: Actor = { id: 'seat-1', kind: 'agent', trust: 'operator' } as Actor;
@@ -19,14 +20,15 @@ let dir: string;
 let audit: AuditLog;
 let clock: number;
 let app: FastifyInstance;
-let actor: Actor | undefined;
+let actor: Actor | null;
 
 async function serve(log: AuditLog): Promise<FastifyInstance> {
   const a = Fastify({ routerOptions: { maxParamLength: 256 } }); // as server.ts
   a.addHook('onRequest', async (req) => {
-    if (actor !== undefined) (req as { actor?: Actor }).actor = actor;
+    // As the auth boundary does: every API request carries an actor (the local one when auth is off), or none.
+    (req as { actor?: Actor | null }).actor = actor;
   });
-  registerDeskSnoozeRoutes(a, { snoozes: new DeskSnoozes(log, () => clock), audit: log });
+  registerDeskSnoozeRoutes(a, { snoozes: new DeskSnoozes(log, () => clock) });
   await a.ready();
   return a;
 }
@@ -38,7 +40,7 @@ beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'desk-snoozes-'));
   audit = new AuditLog(join(dir, 'audit.log'));
   clock = Date.parse('2026-11-24T12:00:00Z');
-  actor = undefined;
+  actor = LOCAL_ACTOR;
   app = await serve(audit);
 });
 afterEach(async () => {
@@ -104,5 +106,60 @@ describe('crew#1124: snooze a Needs-you item', () => {
     expect(put.statusCode).toBe(403);
     expect(put.json()).toMatchObject({ code: 'human_operator_only' });
     expect((await app.inject({ method: 'DELETE', url: url(key) })).statusCode).toBe(403);
+  });
+
+  it('review r1: a request with no actor is refused, never taken for the local person', async () => {
+    actor = null;
+    const put = await app.inject({ method: 'PUT', url: url(key), payload: { until: '2026-11-24T13:00:00.000Z' } });
+    expect(put.statusCode).toBe(403);
+    expect(put.json()).toMatchObject({ code: 'human_operator_only' });
+    expect((await app.inject({ method: 'DELETE', url: url(key) })).statusCode).toBe(403);
+  });
+
+  it('review r1: what a restart replays is what the routes answered (wake, re-snooze, wake then snooze)', async () => {
+    const put = (k: string, until: string) => app.inject({ method: 'PUT', url: url(k), payload: { until } });
+    await put('a', '2026-11-24T14:00:00.000Z');
+    await app.inject({ method: 'DELETE', url: url('a') });
+    await put('b', '2026-11-25T12:00:00.000Z');
+    await put('b', '2026-11-24T12:20:00.000Z'); // the replacement ends sooner than the first
+    await put('c', '2026-11-24T14:00:00.000Z');
+    await app.inject({ method: 'DELETE', url: url('c') });
+    await put('c', '2026-11-24T15:00:00.000Z');
+    const live = ((await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse).snoozes.map((x) => [x.key, x.until]);
+    expect(live).toEqual([['b', '2026-11-24T12:20:00.000Z'], ['c', '2026-11-24T15:00:00.000Z']]);
+    await app.close();
+    app = await serve(new AuditLog(join(dir, 'audit.log')));
+    const replay = ((await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse).snoozes.map((x) => [x.key, x.until]);
+    expect(replay).toEqual(live);
+    clock = Date.parse('2026-11-24T12:30:00Z'); // b's replacement ended; its first, longer snooze does not come back
+    expect(((await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse).snoozes.map((x) => x.key)).toEqual(['c']);
+  });
+
+  it('review r1: a wake and a re-snooze racing the first load agree with the replay', async () => {
+    await app.inject({ method: 'PUT', url: url(key), payload: { until: '2026-11-24T14:00:00.000Z' } });
+    await app.close();
+    app = await serve(new AuditLog(join(dir, 'audit.log')));
+    await Promise.all([
+      app.inject({ method: 'DELETE', url: url(key) }),
+      app.inject({ method: 'PUT', url: url(key), payload: { until: '2026-11-24T13:00:00.000Z' } }),
+    ]);
+    const live = ((await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse).snoozes;
+    await app.close();
+    app = await serve(new AuditLog(join(dir, 'audit.log')));
+    const replay = ((await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse).snoozes;
+    expect(replay.map((x) => [x.key, x.until])).toEqual(live.map((x) => [x.key, x.until]));
+  });
+
+  it('review r1: a snooze or wake the trail could not record is a 500 and changes nothing', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const trail = join(dir, 'read-only.log');
+    writeFileSync(trail, '');
+    chmodSync(trail, 0o444); // readable, but no append lands
+    await app.close();
+    app = await serve(new AuditLog(trail));
+    const put = await app.inject({ method: 'PUT', url: url(key), payload: { until: '2026-11-24T13:00:00.000Z' } });
+    expect(put.statusCode).toBe(500);
+    expect(put.json()).toMatchObject({ code: 'desk_snooze_unsaved' });
+    expect(((await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as DeskSnoozesResponse).snoozes).toEqual([]);
   });
 });

@@ -313,7 +313,7 @@ engine without power mode, runs **phased**, and the launch answer says so.
 
 `GET /api/v1/runs` and `GET /api/v1/runs/:id` include `session.person_needed: { liveness: 'waiting_on_you', reason }` at a paused Power checkpoint, matching `/system`; the field is absent otherwise and the run's status stays unchanged.
 
-A person can snooze a Needs-you item for up to a week: `PUT /api/v1/desk/snoozes/:key` with `{"until": "<ISO time>"}`. The item comes back at that time, or sooner if it gets worse. `GET /api/v1/desk/snoozes` lists the snoozes in force, and `DELETE` ends one early. Each snooze and early end is recorded in the audit trail, so a snooze survives a restart. Only a human operator can snooze an item or end a snooze; an agent cannot hide a need. The item stays in `/system`.
+A person can snooze a Needs-you item for up to a week: `PUT /api/v1/desk/snoozes/:key` with `{"until": "<ISO time>", "severity": <the skin's rank of the item>}`. The daemon ends the snooze at that time. Bringing an item back sooner when it gets worse is the skin's job: it compares the item's rank now with the `severity` stored on the snooze. `GET /api/v1/desk/snoozes` lists the snoozes in force, and `DELETE` ends one early. Each snooze and early end is written to the audit trail before the answer, so a snooze survives a restart. A write that fails returns a 500 `desk_snooze_unsaved` and changes nothing. Only a human operator can snooze an item or end a snooze; an agent cannot hide a need. The item stays in `/system`.
 
 Phased, one run token moves through the workflow's phases with a gate between every one — e.g. for
 `feature`:
