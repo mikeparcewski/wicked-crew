@@ -17905,6 +17905,44 @@ export interface VoiceTtsStatus {
   install: { state: 'running' | 'failed'; step: string; error: string | null } | null;
 }
 
+/**
+ * Snooze a Needs-you item (crew#1124, DES-desk-v2 §6 item 6). `GET /desk/snoozes` → {@link DeskSnoozesResponse};
+ * `PUT /desk/snoozes/:key` {@link PutDeskSnoozeBody} → {@link DeskSnooze} (audited `desk.need.snoozed`; 400
+ * `desk_snooze_invalid` for a time not in the future, more than 7 days ahead, or a key over 200 characters);
+ * `DELETE /desk/snoozes/:key` → {@link DeskSnoozeWakeResponse} (audited `desk.need.woken`). Setting or ending one is
+ * a human operator's (403 `human_operator_only`). A snooze only defers the item on the Desk: it stays in
+ * `/system.attention[]`, and the skin brings it back when `until` passes or it gets worse than `severity`.
+ */
+export interface DeskSnooze {
+  /** The skin's own id for the item (`run:<id>`, `infra:disk`, a need-row key); opaque to the daemon. */
+  key: string;
+  /** ISO-8601: when the snooze ends by itself. */
+  until: string;
+  /** What the person saw when they snoozed it; `null` when not said. */
+  severity: 'red' | 'yellow' | null;
+  /** ISO-8601: when it was snoozed. */
+  at: string;
+  /** The actor id that snoozed it. */
+  by: string;
+}
+
+export interface DeskSnoozesResponse {
+  /** The snoozes still in force, soonest to end first. */
+  snoozes: DeskSnooze[];
+}
+
+export interface PutDeskSnoozeBody {
+  /** ISO-8601 with an offset; in the future, at most 7 days ahead. */
+  until: string;
+  severity?: 'red' | 'yellow';
+}
+
+export interface DeskSnoozeWakeResponse {
+  key: string;
+  /** `false` when no snooze was in force for the key. */
+  woken: boolean;
+}
+
 /** `POST /voice/tts`: the person's consent and the voices to install (202 = started, with the engine first when missing;
  *  400 `voice_consent_required` / `voice_unknown`; 409 `voice_install_running` / `voice_tts_unsupported`). Audited
  *  `voice.tts.install_started`. `DELETE /voice/tts` removes the engine and voices (audited `voice.tts.removed`). */

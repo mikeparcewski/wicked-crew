@@ -22,7 +22,7 @@ let app: FastifyInstance;
 let actor: Actor | undefined;
 
 async function serve(log: AuditLog): Promise<FastifyInstance> {
-  const a = Fastify();
+  const a = Fastify({ routerOptions: { maxParamLength: 256 } }); // as server.ts
   a.addHook('onRequest', async (req) => {
     if (actor !== undefined) (req as { actor?: Actor }).actor = actor;
   });
@@ -66,6 +66,7 @@ describe('crew#1124: snooze a Needs-you item', () => {
   it('a snooze ends by itself at its time, and survives a restart until then', async () => {
     await app.inject({ method: 'PUT', url: url(key), payload: { until: '2026-11-24T14:00:00.000Z' } });
     await app.inject({ method: 'PUT', url: url('infra:disk'), payload: { until: '2026-11-24T12:30:00.000Z' } });
+    await audit.flush();
     await app.close();
     app = await serve(new AuditLog(join(dir, 'audit.log')));
     clock = Date.parse('2026-11-24T13:00:00Z');
@@ -89,7 +90,7 @@ describe('crew#1124: snooze a Needs-you item', () => {
     expect(await bad(key, { until: new Date(clock + DESK_SNOOZE_MAX_MS + 60_000).toISOString() })).toBe(400);
     expect(await bad(key, { until: 'tomorrow' })).toBe(400);
     expect(await bad(key, { until: '2026-11-24T13:00:00.000Z', hide: true })).toBe(400);
-    expect(await bad('x'.repeat(301), { until: '2026-11-24T13:00:00.000Z' })).toBe(400);
+    expect(await bad('x'.repeat(201), { until: '2026-11-24T13:00:00.000Z' })).toBe(400);
     expect(await bad(key, { until: new Date(clock + DESK_SNOOZE_MAX_MS).toISOString() })).toBe(200);
   });
 
