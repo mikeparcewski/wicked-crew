@@ -8,17 +8,19 @@
  * canonical URL (`http.<url>.extraHeader`) after an empty entry resets any ambient extra header. Redirects are refused,
  * hooks are off, git's own credential helpers are off for it, the raw credential variables are not in its environment,
  * and only the URL's own protocol is allowed. The working tree is checked out after, by a git without the header, so no
- * filter or hook the repository selects runs beside it. The header is never in argv, never written to the clone's
- * `.git/config` (environment config is not persisted) and never in an error: a message that could carry it is
- * redacted. The clone is of the canonical URL, so the registered `origin` carries no userinfo.
+ * filter or hook the repository selects runs beside it. (crew#1842) That checkout leaves Git LFS files as pointers
+ * (`GIT_LFS_SKIP_SMUDGE=1`: an uncached object would need the credential the checkout does not carry); `git lfs pull`,
+ * a host tool and not one the repository selects, then downloads them with the same scoped header, hooks off. The
+ * header is never in argv, never written to the clone's `.git/config` (environment config is not persisted) and never
+ * in an error: a message that could carry it is redacted. The clone is of the canonical URL, so the registered
+ * `origin` carries no userinfo. Every git here runs on `gitChildEnv` (crew#1843): fsmonitor off, no raw credential.
  */
 
 import { adoCredentials, adoRepoOf, ADO_PAT_ENV, ADO_SP_ENV, type AdoRepo } from './deliver-credentials.js';
 import { defaultAdoHelperExec, type AdoHelperExec } from './deliver.js';
 import { spawn } from 'node:child_process';
 
-import { execCapped } from './exec.js';
-import { childEnvWithBootEstateDb } from './governance-store.js';
+import { ADO_RAW_ENV, execCapped, gitChildEnv, withoutAdoCredential } from './exec.js';
 
 /** How a clone reaches Azure DevOps. Injectable so a test points it at a loopback server; production reads the URL. */
 export interface AdoCloneSeam {
@@ -51,9 +53,6 @@ function redact(text: string, secrets: readonly string[]): string {
 /** Where git looks for hooks when it must run none (an empty place: git finds no hook in it). */
 const NO_HOOKS = process.platform === 'win32' ? 'NUL' : '/dev/null';
 
-/** The raw Azure DevOps credential variables: the header is minted from them, so the clone's git never needs them. */
-const ADO_RAW_ENV = [ADO_PAT_ENV, ...ADO_SP_ENV] as const;
-
 /**
  * The environment of the ONE credential-bearing `git clone`: the header scoped to the repository's canonical URL (after
  * an empty entry resets any ambient extra header, globally and for that URL), redirects refused globally AND for that
@@ -62,8 +61,7 @@ const ADO_RAW_ENV = [ADO_PAT_ENV, ...ADO_SP_ENV] as const;
  * and the daemon's raw credential variables removed (the header is minted already). Exported for its test.
  */
 export function adoCloneEnv(base: NodeJS.ProcessEnv, gitUrl: string, header: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...base };
-  for (const n of ADO_RAW_ENV) delete env[n];
+  const env = withoutAdoCredential(base);
   const config: Array<[string, string]> = [
     ['http.extraHeader', ''],
     [`http.${gitUrl}.extraHeader`, ''],
@@ -103,10 +101,10 @@ const STDERR_KEEP = 64 * 1024;
  * of the `git` pid alone leaves them running, re-parented, until the connection dies. Rejects with git's stderr in the
  * message (the caller redacts it). Windows has no process groups: there the tree is ended with `taskkill /T`.
  */
-function runContained(args: string[], env: NodeJS.ProcessEnv, timeoutMs: number): Promise<void> {
+function runContained(what: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs: number): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const posix = process.platform !== 'win32';
-    const child = spawn('git', args, { env: childEnvWithBootEstateDb(env), stdio: ['ignore', 'ignore', 'pipe'], detached: posix, windowsHide: true });
+    const child = spawn('git', args, { env: gitChildEnv(env), stdio: ['ignore', 'ignore', 'pipe'], detached: posix, windowsHide: true });
     let stderr = '';
     child.stderr.on('data', (c: Buffer) => {
       stderr = (stderr + c.toString('utf8')).slice(-STDERR_KEEP);
@@ -133,7 +131,7 @@ function runContained(args: string[], env: NodeJS.ProcessEnv, timeoutMs: number)
       clearTimeout(timer);
       // Whatever the outcome, nothing of this group outlives it (Windows: the tree ends with git; a timeout ended it).
       if (posix) killTree();
-      if (timedOut) reject(new Error(`git clone timed out after ${Math.round(timeoutMs / 1000)} s and was stopped. ${stderr.trim()}`.trim()));
+      if (timedOut) reject(new Error(`git ${what} timed out after ${Math.round(timeoutMs / 1000)} s and was stopped. ${stderr.trim()}`.trim()));
       else if (code === 0) resolve();
       else reject(new Error(`Command failed: git ${args.join(' ')} (${code !== null ? `exit ${code}` : `signal ${signal ?? 'unknown'}`})\n${stderr.trim()}`));
     });
@@ -148,7 +146,8 @@ function runContained(args: string[], env: NodeJS.ProcessEnv, timeoutMs: number)
 export async function cloneRepository(gitUrl: string, cloneDir: string, opts: { allowProtocols?: string; ado?: AdoCloneSeam } = {}): Promise<void> {
   const env = opts.ado?.env ?? process.env;
   const base: NodeJS.ProcessEnv = { ...env, GIT_TERMINAL_PROMPT: '0', ...(opts.allowProtocols !== undefined ? { GIT_ALLOW_PROTOCOL: opts.allowProtocols } : {}) };
-  // (coord F4) No git this module runs needs the raw Azure DevOps credential: a plain clone's filters and hooks never see it.
+  // (coord F4) No git this module runs needs the raw Azure DevOps credential: a plain clone's filters and hooks never see
+  // it (`gitChildEnv` drops it from every git too; here it is gone before any header is minted).
   for (const n of ADO_RAW_ENV) delete base[n];
   const ado = (opts.ado?.target ?? adoRepoOf)(gitUrl);
   if (ado === null || adoCredentials(env).status !== 'configured') {
@@ -173,14 +172,42 @@ export async function cloneRepository(gitUrl: string, cloneDir: string, opts: { 
   try {
     // The header rides ONLY the fetch: `--no-checkout`, so no smudge/process filter, hook or other repository-selected
     // command runs while it is in the environment (a filter the host's config names would inherit it).
-    await runContained(['-c', 'credential.helper=', 'clone', '--no-checkout', '--', ado.gitUrl, cloneDir], adoCloneEnv(base, ado.gitUrl, header), opts.ado?.timeoutMs ?? CLONE_TIMEOUT_MS);
+    await runContained('clone', ['-c', 'credential.helper=', 'clone', '--no-checkout', '--', ado.gitUrl, cloneDir], adoCloneEnv(base, ado.gitUrl, header), opts.ado?.timeoutMs ?? CLONE_TIMEOUT_MS);
   } catch (err) {
     const message = redact(err instanceof Error ? err.message : String(err), secrets);
     if (!CLONE_DENIED.test(message)) throw new Error(message);
     throw new Error(`${ADO_CLONE_REFUSED} ${ado.webUrl} (it has no access to it, or the URL is wrong). Git said: ${message}`);
   }
   // The working tree, in a second git with no header and no raw credential (an empty repository has nothing to check out).
+  // Git LFS files stay pointers here (crew#1842): an object this host has not cached needs the credential.
   const plain = base;
   const born = await execCapped('git', ['-C', cloneDir, 'rev-parse', '--verify', '--quiet', 'HEAD'], { timeout: 30_000, env: plain }).then(() => true, () => false);
-  if (born) await execCapped('git', ['-C', cloneDir, 'checkout', '--quiet', '--force', 'HEAD'], { timeout: CLONE_TIMEOUT_MS, env: plain });
+  if (!born) return;
+  await execCapped('git', ['-C', cloneDir, 'checkout', '--quiet', '--force', 'HEAD'], { timeout: CLONE_TIMEOUT_MS, env: { ...plain, GIT_LFS_SKIP_SMUDGE: '1' } });
+  if (!(await usesGitLfs(cloneDir, plain))) return;
+  try {
+    // `git lfs pull` is the host's tool: it downloads the checked-out commit's LFS objects from the repository's own LFS
+    // endpoint (`<url>.git/info/lfs`, which the header's URL scope covers) and drops the header on a redirect to
+    // another origin. Hooks, credential helpers and fsmonitor stay off, as for the clone.
+    await runContained('lfs pull', ['-C', cloneDir, '-c', 'credential.helper=', 'lfs', 'pull'], adoCloneEnv(base, ado.gitUrl, header), opts.ado?.timeoutMs ?? CLONE_TIMEOUT_MS);
+  } catch (err) {
+    const message = redact(err instanceof Error ? err.message : String(err), secrets);
+    throw new Error(`${ADO_CLONE_LFS_FAILED} ${ado.webUrl} with the daemon's Azure DevOps credential. Check that the credential can read the repository, then add it again. Git said: ${message}`);
+  }
+}
+
+/** The start of the sentence a clone whose Git LFS files could not be downloaded carries (crew#1842). */
+export const ADO_CLONE_LFS_FAILED = 'Could not download the Git LFS files of';
+
+/**
+ * Whether the checked-out commit stores files in Git LFS, and this host has Git LFS to fetch them with. Without it the
+ * files stay pointers, as any clone on this host leaves them.
+ */
+async function usesGitLfs(cloneDir: string, env: NodeJS.ProcessEnv): Promise<boolean> {
+  const tracked = await execCapped('git', ['-C', cloneDir, 'ls-files', '-z', '--', ':(attr:filter=lfs)'], { timeout: 30_000, env }).then(
+    (r) => r.stdout !== '',
+    () => false,
+  );
+  if (!tracked) return false;
+  return execCapped('git', ['lfs', 'version'], { timeout: 30_000, env }).then(() => true, () => false);
 }

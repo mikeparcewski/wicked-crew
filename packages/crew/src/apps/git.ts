@@ -31,7 +31,7 @@ import { devNull } from 'node:os';
 import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
 
-import { childEnvWithBootEstateDb } from '../core/governance-store.js';
+import { gitChildEnv } from '../core/exec.js';
 
 /** A full object id (SHA-1 repositories only). */
 export const SHA_RE = /^[0-9a-f]{40}$/;
@@ -121,7 +121,7 @@ export function gitProblem(): Promise<string | null> {
 export function runGit(gitDir: string, args: string[], input?: Buffer | string, extraEnv: Record<string, string> = {}, cap = OUTPUT_CAP): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     // The daemon's exported governance store (it may hold a credential) never reaches git (crew#495).
-    const child = spawn('git', [...SAFE_CONFIG, ...args], { env: childEnvWithBootEstateDb({ ...gitEnv(gitDir), ...extraEnv }), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawn('git', [...SAFE_CONFIG, ...args], { env: gitChildEnv({ ...gitEnv(gitDir), ...extraEnv }), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     const out: Buffer[] = [];
     let size = 0;
     let err = '';
