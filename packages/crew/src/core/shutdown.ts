@@ -78,18 +78,28 @@ function stopConformance(core: ConformanceStopper): void {
 }
 
 /**
- * The daemon's SIGTERM / SIGINT / exit handlers (`serve`). A signal runs the graceful steps once, under
- * {@link shutdownWithDeadline}: the conformance harness is stopped first (it is the longest-lived child and the call is
- * quick when nothing is in flight), then the bridge children are reaped and the engine subscription closed. A plain
- * exit stops the harness too, beside the synchronous bridge sweep.
+ * The daemon's SIGTERM / SIGINT / exit handlers (`serve`). A signal stops the conformance harness first (the
+ * longest-lived child; quick when nothing is in flight), then runs the graceful steps once under
+ * {@link shutdownWithDeadline}: the bridge children are reaped and the engine subscription closed. A plain exit stops the
+ * harness too, beside the synchronous bridge sweep; the stop runs at most once per process.
  */
 export function installDaemonShutdown(deps: DaemonShutdownDeps): void {
   let shuttingDown = false;
+  // Once per process (review r1): the graceful path's stop is followed by `process.exit`, whose 'exit' handler must not
+  // wait on the engine a second time.
+  let conformanceStopped = false;
+  const stopOnce = (): void => {
+    if (conformanceStopped) return;
+    conformanceStopped = true;
+    stopConformance(deps.core);
+  };
   const shutdown = (): void => {
     if (shuttingDown) return;
     shuttingDown = true;
+    // Before the deadline is armed (review r1): the stop is synchronous native work no JS timer can bound, so it must not
+    // eat the reap's budget (its ~2 s grace before SIGKILL) or the subscription close.
+    stopOnce();
     shutdownWithDeadline(async () => {
-      stopConformance(deps.core);
       // Reap bridge children BEFORE this process goes away — the last actor that can still find them. Best-effort.
       try {
         await deps.reap();
@@ -106,14 +116,18 @@ export function installDaemonShutdown(deps: DaemonShutdownDeps): void {
   };
   for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     deps.on(signal, () => {
-      deps.onSignal?.(signal);
+      try {
+        deps.onSignal?.(signal);
+      } catch {
+        /* the signal log is best-effort: a failed write (stderr gone) never skips the shutdown */
+      }
       shutdown();
     });
   }
   // Normal exit (`process.exit` anywhere, main() falling off): an 'exit' handler cannot await, so this is the synchronous
   // sweep. After the graceful path above it is a no-op re-scan; on a plain exit it is the only reaping that happens.
   deps.on('exit', () => {
-    stopConformance(deps.core);
+    stopOnce();
     deps.sweepSync();
   });
 }
