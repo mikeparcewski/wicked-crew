@@ -707,8 +707,9 @@ export function chatSearchLines(paths: readonly string[]): string[] {
 /**
  * (crew#1795) A seat that starts outside the repositories tends to `cd` into one. The repositories are read-only to the
  * job, and the engine's input governance (wicked-core gate_hook.rs `bash_cd_escape_targets`) refuses a `cd` into one in
- * a command that may write there: a script interpreter or shell whose writes it cannot see, a git command that changes
- * something. Say where to stay and hand the form that works: the repository's path named in the command. `.` (the
+ * a command that may write there: any write target (a redirect, even into the seat's own folder), a script interpreter
+ * or shell whose writes it cannot see, a git command that changes something (crew#1854: every one is named, so a seat
+ * that keeps its output with `> notes.txt` is not told that only interpreters are refused). Say where to stay and hand the form that works: the repository's path named in the command. `.` (the
  * working directory itself, a container-floor checkout) needs no such line.
  */
 export function chatStayLines(paths: readonly string[]): string[] {
@@ -717,8 +718,9 @@ export function chatStayLines(paths: readonly string[]): string[] {
   const one = shellWord(outside[0]!);
   return [
     "Do NOT `cd` into a repository: run every command from where you start, and name the repository's path in it instead,",
-    `e.g. \`git -C ${one} log -5\` or \`ls ${one}\`. The repositories are read-only: a command that \`cd\`s into one and also`,
-    'runs a script interpreter (python, node, a shell script) or a git command that changes something is refused.',
+    `e.g. \`git -C ${one} log -5\` or \`ls ${one}\`. The repositories are read-only: a command that \`cd\`s into one is refused when`,
+    'it also writes anywhere (a `>` redirect or any other write target, even one in your own folder), runs a script',
+    'interpreter (python, node, a shell script) or runs a git command that changes something.',
   ];
 }
 
