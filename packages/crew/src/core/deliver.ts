@@ -785,10 +785,12 @@ export const GITHUB_CREDENTIAL_LINES: readonly string[] = [
  * (crew#1862) The first lines of the deliver and redeliver scripts: what `gitChildEnv` gives the gits crew starts itself,
  * for the gits a script starts. The raw Azure DevOps variables lose their export (they stay readable here, for the
  * credential preflight) and only the header mint exports them again, in its own subshell; every git, and every hook,
- * filter or fsmonitor daemon of one, reads `core.fsmonitor=false` last.
+ * filter or fsmonitor daemon of one, reads `core.fsmonitor=false` last. Every spelling of the names is unexported, in
+ * any letter case: a Windows child reads `Azure_Devops_Ext_Pat` as the same variable (`withoutAdoCredential`).
  */
 export const SCRIPT_GIT_ENV_LINES: readonly string[] = [
   `export -n ${ADO_RAW_ENV.join(' ')}`,
+  `for _v in $(compgen -e); do case "$_v" in ${ADO_RAW_ENV.map((n) => n.replace(/[A-Za-z]/g, (c) => `[${c.toLowerCase()}${c.toUpperCase()}]`)).join('|')}) export -n "$_v";; esac; done`,
   `export GIT_CONFIG_PARAMETERS="\${GIT_CONFIG_PARAMETERS:+\$GIT_CONFIG_PARAMETERS }${FSMONITOR_OFF_PARAMETER}"`,
 ];
 

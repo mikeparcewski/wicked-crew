@@ -19,7 +19,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { registerFailure } from '../src/api/repo-input.js';
 import { adoRepoOf } from '../src/core/deliver-credentials.js';
 import { defaultAdoHelperExec, type AdoHelperExec } from '../src/core/deliver.js';
-import { ADO_CLONE_LFS_FAILED, ADO_CLONE_NO_CREDENTIAL, ADO_CLONE_REFUSED, adoCloneEnv, cloneRepository, type AdoCloneSeam } from '../src/core/repo-clone.js';
+import { ADO_CLONE_LFS_FAILED, ADO_CLONE_NO_CREDENTIAL, ADO_CLONE_REFUSED, adoCloneEnv, cloneRepository, lfsFetchScope, type AdoCloneSeam } from '../src/core/repo-clone.js';
 
 const PAT = 'pat-SECRET-0123456789abcdef'; // ggignore: a made-up test value, never a real token
 const BASIC = `Basic ${Buffer.from(`:${PAT}`).toString('base64')}`;
@@ -403,6 +403,28 @@ describe('crew#1839 From a URL on Azure DevOps', () => {
     expect(readFileSync(join(dir, 'big.bin'), 'utf8')).toBe(LFS_CONTENT);
     expect(readFileSync(join(dir, 'skipped.bin'), 'utf8')).toBe(LFS_EXCLUDED_POINTER);
   }, 120_000);
+
+  // (crew#1863 review r1) The filters are read as git-lfs reads them, in the environment the fetch ran in.
+  it('the pointer check reads the fetch filters as git-lfs does: .lfsconfig includes, an empty git setting, no inherited GIT_CONFIG_* (crew#1863)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'crew-1863-scope-'));
+    roots.push(root);
+    const home = join(root, 'home');
+    const repo = join(root, 'repo');
+    mkdirSync(home);
+    execFileSync('git', ['init', '-q', repo]);
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, XDG_CONFIG_HOME: home, GIT_CONFIG_NOSYSTEM: '1' };
+    for (const k of Object.keys(env)) if (/^GIT_CONFIG_(?:COUNT|PARAMETERS|KEY_\d+|VALUE_\d+)$/.test(k)) delete env[k];
+    // `.lfsconfig` names its exclusion through an include, which git-lfs follows (`config --includes`).
+    writeFileSync(join(repo, '.lfsconfig'), '[include]\n\tpath = lfs-extra.config\n[lfs]\n\tfetchinclude = assets/**\n');
+    writeFileSync(join(repo, 'lfs-extra.config'), '[lfs]\n\tfetchexclude = skipped.bin\n');
+    expect(await lfsFetchScope(repo, env)).toEqual(['--include=assets/**', '--exclude=skipped.bin']);
+    // git's own config wins over `.lfsconfig`, even set empty (git-lfs reads the last value).
+    writeFileSync(join(home, '.gitconfig'), '[lfs]\n\tfetchinclude =\n');
+    expect(await lfsFetchScope(repo, env)).toEqual(['--exclude=skipped.bin']);
+    // An entry the daemon inherited never reached the fetch (`adoCloneEnv` drops them), so it does not count here.
+    const inherited = { ...env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'lfs.fetchexclude', GIT_CONFIG_VALUE_0: 'other.bin', GIT_CONFIG_PARAMETERS: "'lfs.fetchinclude=else/**'" };
+    expect(await lfsFetchScope(repo, inherited)).toEqual(['--exclude=skipped.bin']);
+  });
 
   // (crew#1864) git translates "is not a git command" (help.c `_()`). This git answers in German, as gettext would for its
   // locale, and has no git-lfs: the clone keeps the pointers, as on any host without git-lfs.

@@ -135,8 +135,8 @@ function stubGh(fx: Fx): void {
 }
 
 /**
- * (crew#1862) A git on the script's PATH that records, for every call, the raw Azure DevOps variables it inherited (names
- * only, never a value) and the `core.fsmonitor` it reads, then runs the real git. A hook, filter or fsmonitor daemon a
+ * (crew#1862) A git on the script's PATH that records, for every call, the raw Azure DevOps variables it inherited, in any
+ * letter case (names only, never a value) and the `core.fsmonitor` it reads, then runs the real git. A hook, filter or fsmonitor daemon a
  * git starts inherits exactly this environment.
  */
 function recordGitEnv(fx: Fx): string {
@@ -146,7 +146,7 @@ function recordGitEnv(fx: Fx): string {
     join(fx.bin, 'git'),
     [
       '#!/bin/sh',
-      `N=$(env | sed -n -E 's/^(AZURE_DEVOPS_EXT_PAT|CREW_ADO_[A-Z_]+)=.*/\\1/p' | sort | tr '\\n' ' ')`,
+      `N=$(env | grep -ioE '^(azure_devops_ext_pat|crew_ado_[a-z_]+)=' | tr -d '=' | sort | tr '\\n' ' ')`,
       `M=$('${realGit}' config --get core.fsmonitor || true)`,
       `printf '%s|%s|%s\\n' "$1" "$N" "$M" >> '${log}'`,
       `exec '${realGit}' "$@"`,
@@ -766,7 +766,8 @@ describe('crew#720 deliver, driven for real — GitHub parity', () => {
     const fx = fixture();
     stubGh(fx);
     const log = recordGitEnv(fx);
-    const r = await runDeliver(fx, {}, { AZURE_DEVOPS_EXT_PAT: PAT, CREW_ADO_TENANT_ID: 'tenant-1', CREW_ADO_CLIENT_ID: 'client-1', CREW_ADO_CLIENT_SECRET: SP_SECRET });
+    // A Windows child reads another letter case as the same variable (review r1): those spellings are dropped too.
+    const r = await runDeliver(fx, {}, { AZURE_DEVOPS_EXT_PAT: PAT, CREW_ADO_TENANT_ID: 'tenant-1', CREW_ADO_CLIENT_ID: 'client-1', CREW_ADO_CLIENT_SECRET: SP_SECRET, Azure_Devops_Ext_Pat: PAT, crew_ado_client_secret: SP_SECRET });
     expect(r.status, r.output).toBe(0);
     expectHardenedGits(log);
     expectNoSecret(readFileSync(log, 'utf8'));

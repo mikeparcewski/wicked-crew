@@ -219,11 +219,7 @@ export async function cloneRepository(gitUrl: string, cloneDir: string, opts: { 
     // was to download is checked after: one still a pointer fails the clone. (crew#1863) Files the repository's
     // `lfs.fetchinclude` / `lfs.fetchexclude` leave out stay pointers on purpose, so the check takes the same filters.
     await execCapped('git', ['-C', cloneDir, 'lfs', 'checkout'], { timeout: CLONE_TIMEOUT_MS, env: plain });
-    const scope: string[] = [];
-    for (const [key, flag] of [['lfs.fetchinclude', '--include'], ['lfs.fetchexclude', '--exclude']] as const) {
-      const value = await lfsSetting(cloneDir, key, plain);
-      if (value !== '') scope.push(`${flag}=${value}`);
-    }
+    const scope = await lfsFetchScope(cloneDir, plain);
     // git-lfs marks each line `<oid> <*|-> <path>`: `-` is a pointer. A path may itself hold " - ".
     const pointers = (await execCapped('git', ['-C', cloneDir, 'lfs', 'ls-files', ...scope], { timeout: 30_000, env: plain })).stdout
       .split('\n')
@@ -240,14 +236,22 @@ export async function cloneRepository(gitUrl: string, cloneDir: string, opts: { 
 }
 
 /**
- * (crew#1863) A git-lfs fetch filter as git-lfs reads it: git's own config first, then the repository's `.lfsconfig`
- * (git-lfs `config.go`); '' when neither sets it.
+ * (crew#1863) The `git lfs ls-files` filters (`--include=` / `--exclude=`) for what `git lfs fetch` left out on purpose:
+ * `lfs.fetchinclude` / `lfs.fetchexclude` as git-lfs reads them (git-lfs `git/config.go`, `config --includes`). git's
+ * own config wins, even when it sets a key empty, then the repository's `.lfsconfig`. They are read as the fetch read
+ * them: its environment drops every inherited GIT_CONFIG_* entry (`adoCloneEnv`).
  */
-async function lfsSetting(cloneDir: string, key: string, env: NodeJS.ProcessEnv): Promise<string> {
-  const read = (file: string[]): Promise<string> =>
-    execCapped('git', ['-C', cloneDir, 'config', ...file, '--get', key], { timeout: 30_000, env }).then((r) => r.stdout.trim(), () => '');
-  const own = await read([]);
-  return own !== '' ? own : read(['--file', join(cloneDir, '.lfsconfig')]);
+export async function lfsFetchScope(cloneDir: string, env: NodeJS.ProcessEnv): Promise<string[]> {
+  const asFetched: NodeJS.ProcessEnv = { ...env, GIT_CONFIG_PARAMETERS: '', GIT_CONFIG_COUNT: '0' };
+  for (const k of Object.keys(asFetched)) if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(k)) delete asFetched[k];
+  const read = (key: string, file: string[]): Promise<string | null> =>
+    execCapped('git', ['-C', cloneDir, 'config', '--includes', ...file, '--get', key], { timeout: 30_000, env: asFetched }).then((r) => r.stdout.trim(), () => null);
+  const scope: string[] = [];
+  for (const [key, flag] of [['lfs.fetchinclude', '--include'], ['lfs.fetchexclude', '--exclude']] as const) {
+    const value = (await read(key, [])) ?? (await read(key, ['--file', join(cloneDir, '.lfsconfig')])) ?? '';
+    if (value !== '') scope.push(`${flag}=${value}`);
+  }
+  return scope;
 }
 
 /** The `filter.lfs` keys `git lfs install` writes (git-lfs `lfs/attribute.go`). */

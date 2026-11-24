@@ -54,7 +54,7 @@ function fixture(conflict = 'CHANGELOG.md', o: { settings?: Record<string, unkno
   // GitHub URL is mapped to the bare local origin; no GitHub connection is possible.
   // (crew#1862) Each git also records the raw Azure DevOps variables it inherited (names only) and the fsmonitor it reads.
   const gitEnvLog = join(root, 'git-env.log');
-  writeFileSync(join(bin, 'git'), `#!/bin/bash\nprintf '%s|%s|%s\\n' "$1" "$(env | sed -n -E 's/^(AZURE_DEVOPS_EXT_PAT|CREW_ADO_[A-Z_]+)=.*/\\1/p' | sort | tr '\\n' ' ')" "$('${realGit}' config --get core.fsmonitor || true)" >> '${gitEnvLog}'\nunset GIT_ALLOW_PROTOCOL GIT_CONFIG_COUNT\na=()\nfor x in "$@"; do [ "$x" != 'https://github.com/o/r.git' ] || x='${origin}'; a+=("$x"); done\nprintf '%s\\n' "$*" >> '${pushLog}'\nexec '${realGit}' "\${a[@]}"\n`);
+  writeFileSync(join(bin, 'git'), `#!/bin/bash\nprintf '%s|%s|%s\\n' "$1" "$(env | grep -ioE '^(azure_devops_ext_pat|crew_ado_[a-z_]+)=' | tr -d '=' | sort | tr '\\n' ' ')" "$('${realGit}' config --get core.fsmonitor || true)" >> '${gitEnvLog}'\nunset GIT_ALLOW_PROTOCOL GIT_CONFIG_COUNT\na=()\nfor x in "$@"; do [ "$x" != 'https://github.com/o/r.git' ] || x='${origin}'; a+=("$x"); done\nprintf '%s\\n' "$*" >> '${pushLog}'\nexec '${realGit}' "\${a[@]}"\n`);
   writeFileSync(join(bin, 'gh'), `#!/bin/bash\nif [ \"\${GH_FAIL_MUTATIONS:-}\" = 1 ] && { [ \"$2\" = comment ] || [ \"$2\" = edit ]; }; then echo 'fixture mutation failure' >&2; exit 1; fi\ncase "$1 $2" in\n'auth status') exit 0;;\n'pr view') if [[ "$*" == *'--json body'* ]]; then echo 'Original body'; else cat '${join(root, 'pr.json')}'; fi;;\n'pr comment') printf '%s\\n' "$*" >> '${log}';;\n'pr edit') cat "\${@: -1}" >> '${log}';;\n*) echo "unexpected gh: $*" >&2; exit 1;;\nesac\n`);
   chmodSync(join(bin, 'git'), 0o755); chmodSync(join(bin, 'gh'), 0o755);
   writeFileSync(join(home, '.bash_profile'), `export PATH='${bin}':$PATH\n`);
@@ -102,7 +102,7 @@ it('T1/T5 rebases CHANGELOG only, checks the exact tree, leases the push and dis
 it('(crew#1862) the refresh scripts run no git with the raw Azure DevOps credential or with fsmonitor on', async () => {
   const f = fixture();
   // A daemon that also holds an Azure DevOps credential (re-delivery never needs it).
-  Object.assign(f.env, { AZURE_DEVOPS_EXT_PAT: 'pat-SECRET-0123456789abcdef', CREW_ADO_TENANT_ID: 't', CREW_ADO_CLIENT_ID: 'c', CREW_ADO_CLIENT_SECRET: 'sp-SECRET-value' }); // ggignore: made-up test values
+  Object.assign(f.env, { AZURE_DEVOPS_EXT_PAT: 'pat-SECRET-0123456789abcdef', CREW_ADO_TENANT_ID: 't', CREW_ADO_CLIENT_ID: 'c', CREW_ADO_CLIENT_SECRET: 'sp-SECRET-value', Azure_Devops_Ext_Pat: 'pat-SECRET-0123456789abcdef' }); // ggignore: made-up test values
   const res = await post(f.app);
   expect(res.statusCode, res.body).toBe(200);
   const calls = readFileSync(f.gitEnvLog, 'utf8').split('\n').filter(Boolean);
