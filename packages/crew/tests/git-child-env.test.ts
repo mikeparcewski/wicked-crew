@@ -114,8 +114,8 @@ describe('crew#1843 STATIC: every git crew starts outside execCapped builds its 
     const uncovered: string[] = [];
     const covered = (text: string): boolean => text.includes('gitChildEnv(') || text.includes('childEnvFor(');
     for (const file of tsFiles(SRC)) {
-      const rel = relative(SRC, file);
-      if (rel === join('core', 'exec.ts')) continue; // the wrapper: execCapped applies childEnvFor itself
+      const rel = relative(SRC, file).split('\\').join('/');
+      if (rel === 'core/exec.ts') continue; // the wrapper: execCapped applies childEnvFor itself
       const src = readFileSync(file, 'utf8');
       for (const lit of src.matchAll(/['"]git['"]\s*,/g)) {
         // The literal is a call's first argument: `callee(` right before it.

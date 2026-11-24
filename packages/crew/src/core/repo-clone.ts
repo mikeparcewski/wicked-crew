@@ -189,23 +189,42 @@ export async function cloneRepository(gitUrl: string, cloneDir: string, opts: { 
   try {
     await execCapped('git', ['-C', cloneDir, 'checkout', '--quiet', '--force', 'HEAD'], { timeout: CLONE_TIMEOUT_MS, env: { ...plain, GIT_LFS_SKIP_SMUDGE: '1' } });
     if (!(await usesGitLfs(cloneDir, plain))) return;
+    // The repository keeps the LFS filter in its own config, as `git lfs install` writes it, so a host that installed
+    // git-lfs without running that still gets real files now and pointers when a file is staged later.
+    for (const [k, v] of LFS_FILTER_CONFIG) await execCapped('git', ['-C', cloneDir, 'config', '--local', k, v], { timeout: 30_000, env: plain });
+    const lfsUrl = `${ado.gitUrl}.git/info/lfs`;
+    const lfsStore = join(cloneDir, '.git', 'lfs');
     try {
       // ONLY the download carries the header: `git lfs fetch` (the host's tool) stores the checked-out commit's objects
-      // under `.git/lfs` and runs no filter, extension or hook. Its endpoint is pinned to the repository's own
-      // (`<url>.git/info/lfs`, which the header's URL scope covers), so a `.lfsconfig` the repository carries cannot aim
-      // it elsewhere; git-lfs drops the header on a redirect to another origin. Credential helpers stay off.
-      await runContained('lfs fetch', ['-C', cloneDir, '-c', 'credential.helper=', '-c', `lfs.url=${ado.gitUrl}.git/info/lfs`, 'lfs', 'fetch'], adoCloneEnv(base, ado.gitUrl, header), opts.ado?.timeoutMs ?? CLONE_TIMEOUT_MS);
+      // in the clone's own LFS store and runs no filter, extension or hook. Its endpoint is pinned to the repository's
+      // own (`<url>.git/info/lfs`, which the header's URL scope covers), so a `.lfsconfig` cannot aim it elsewhere, and
+      // git-lfs drops the header on a redirect to another origin. Pinned too, against this host's git config: the
+      // store (its error log, which records the environment, stays in the clone), TLS verification (git-lfs reads the
+      // global and host keys, not the URL one the clone pins), no standalone transfer program, no credential helper.
+      await runContained('lfs fetch', [
+        '-C', cloneDir, '-c', 'credential.helper=', '-c', `lfs.url=${lfsUrl}`, '-c', `lfs.storage=${lfsStore}`,
+        '-c', 'http.sslVerify=true', '-c', `http.${new URL(lfsUrl).origin}/.sslVerify=true`,
+        '-c', 'lfs.standalonetransferagent=', '-c', `lfs.${lfsUrl}.standalonetransferagent=`,
+        'lfs', 'fetch',
+      ], adoCloneEnv(base, ado.gitUrl, header), opts.ado?.timeoutMs ?? CLONE_TIMEOUT_MS);
     } catch (err) {
       const message = redact(err instanceof Error ? err.message : String(err), secrets);
       throw new Error(`${ADO_CLONE_LFS_FAILED} ${ado.webUrl} with the daemon's Azure DevOps credential. Check that the credential can read the repository, then add it again. Git said: ${message}`);
     } finally {
       // git-lfs writes its environment (the header's GIT_CONFIG_* entries among it) into an error log here.
-      await rm(join(cloneDir, '.git', 'lfs', 'logs'), { recursive: true, force: true });
+      await rm(join(lfsStore, 'logs'), { recursive: true, force: true });
     }
     // The files themselves, from the local store, in a git with no header: whatever filter or extension the checkout
-    // runs sees no credential. The LFS filter is named here as `git lfs install` names it, so a host that installed
-    // git-lfs without running that still gets real files and a clean tree.
-    await execCapped('git', ['-C', cloneDir, ...LFS_FILTER_CONFIG, 'lfs', 'checkout'], { timeout: CLONE_TIMEOUT_MS, env: plain });
+    // runs sees no credential. git-lfs reports a file it could not write without failing, so every LFS file is
+    // checked after: one still a pointer fails the clone.
+    await execCapped('git', ['-C', cloneDir, 'lfs', 'checkout'], { timeout: CLONE_TIMEOUT_MS, env: plain });
+    const pointers = (await execCapped('git', ['-C', cloneDir, 'lfs', 'ls-files'], { timeout: 30_000, env: plain })).stdout
+      .split('\n')
+      .filter((line) => / - /.test(line))
+      .map((line) => line.replace(/^\S+ - /, ''));
+    if (pointers.length > 0) {
+      throw new Error(`${ADO_CLONE_LFS_FAILED} ${ado.webUrl}: ${pointers.length} of them could not be written (${pointers.slice(0, 3).join(', ')}${pointers.length > 3 ? ', …' : ''}). Check the disk has room, then add it again.`);
+    }
   } catch (err) {
     // Leave the folder as git found it (empty), so adding the repository again can clone into it.
     await emptyDir(cloneDir);
@@ -213,12 +232,12 @@ export async function cloneRepository(gitUrl: string, cloneDir: string, opts: { 
   }
 }
 
-/** The `filter.lfs` keys `git lfs install` writes to a host's global config (git-lfs `lfs/attribute.go`). */
-const LFS_FILTER_CONFIG = [
-  '-c', 'filter.lfs.clean=git-lfs clean -- %f',
-  '-c', 'filter.lfs.smudge=git-lfs smudge -- %f',
-  '-c', 'filter.lfs.process=git-lfs filter-process',
-  '-c', 'filter.lfs.required=true',
+/** The `filter.lfs` keys `git lfs install` writes (git-lfs `lfs/attribute.go`). */
+const LFS_FILTER_CONFIG: ReadonlyArray<[string, string]> = [
+  ['filter.lfs.clean', 'git-lfs clean -- %f'],
+  ['filter.lfs.smudge', 'git-lfs smudge -- %f'],
+  ['filter.lfs.process', 'git-lfs filter-process'],
+  ['filter.lfs.required', 'true'],
 ];
 
 async function emptyDir(dir: string): Promise<void> {

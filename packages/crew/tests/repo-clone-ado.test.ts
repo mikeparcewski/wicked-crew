@@ -329,11 +329,17 @@ describe('crew#1839 From a URL on Azure DevOps', () => {
   it.skipIf(!HAS_GIT_LFS && process.env['CI'] === undefined)('a Git LFS file this host has not cached is downloaded with the header, which reaches only the repository\'s own LFS endpoint (crew#1842)', async () => {
     // The repository names another LFS endpoint: an unreachable one, so following it would fail the clone.
     const fx = await fixture({ lfs: true, lfsconfig: 'http://127.0.0.1:9/elsewhere/info/lfs' });
-    // The host ran `git lfs install`: a checkout smudges LFS files, and the filter is required.
-    writeFileSync(join(fx.env['HOME']!, '.gitconfig'), LFS_INSTALL_CONFIG);
+    // The host ran `git lfs install`: a checkout smudges LFS files, and the filter is required. Its config also names a
+    // standalone transfer program, which would be handed the header's environment if the download used it.
+    const spy = join(fx.root, 'transfer-spy.sh');
+    const spied = join(fx.root, 'transfer-spy-ran.txt');
+    writeFileSync(spy, `#!/bin/sh\n${RECORD(spied)}exit 1\n`);
+    chmodSync(spy, 0o755);
+    writeFileSync(join(fx.env['HOME']!, '.gitconfig'), `${LFS_INSTALL_CONFIG}[lfs]\n\tstandalonetransferagent = spy\n[lfs "customtransfer.spy"]\n\tpath = ${spy}\n`);
     const dir = join(fx.root, 'clone');
     await cloneRepository('https://dev.azure.com/org/proj/_git/repo', dir, { ado: seam(fx) });
     expect(readFileSync(join(dir, 'big.bin'), 'utf8')).toBe(LFS_CONTENT);
+    expect(existsSync(spied)).toBe(false);
     expect(readFileSync(join(dir, 'README.md'), 'utf8')).toBe('tiny-math\n');
     // The batch request carried the header; the object store, at a path outside the header's scope, never saw it.
     expect(fx.lfsBatchAuths.length).toBeGreaterThan(0);
@@ -348,12 +354,17 @@ describe('crew#1839 From a URL on Azure DevOps', () => {
     expect(existsSync(join(dir, '.git', 'lfs', 'logs'))).toBe(false);
   }, 120_000);
 
-  it.skipIf(!HAS_GIT_LFS && process.env['CI'] === undefined)('a host with git-lfs but no `git lfs install` still gets the real file and a clean tree (review r1)', async () => {
+  it.skipIf(!HAS_GIT_LFS && process.env['CI'] === undefined)('a host with git-lfs but no `git lfs install` still gets the real file, a clean tree, and a pointer when the file is staged again (review r1, r2)', async () => {
     const fx = await fixture({ lfs: true });
     const dir = join(fx.root, 'clone');
     await cloneRepository('https://dev.azure.com/org/proj/_git/repo', dir, { ado: seam(fx) });
     expect(readFileSync(join(dir, 'big.bin'), 'utf8')).toBe(LFS_CONTENT);
-    expect(execFileSync('git', ['-c', 'core.fsmonitor=false', 'status', '--porcelain'], { cwd: dir, env: { ...process.env, ...fx.env }, encoding: 'utf8' }).trim()).toBe('');
+    const run = (...args: string[]): string => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: dir, env: { ...process.env, ...fx.env }, encoding: 'utf8' });
+    expect(run('status', '--porcelain').trim()).toBe('');
+    // The filter lives in the repository's own config, so a later edit is stored in LFS, not as the binary.
+    writeFileSync(join(dir, 'big.bin'), 'an edited large file\n');
+    run('add', 'big.bin');
+    expect(run('cat-file', '-p', ':big.bin').startsWith('version https://git-lfs.github.com/spec/v1')).toBe(true);
   }, 120_000);
 
   it.skipIf(!HAS_GIT_LFS && process.env['CI'] === undefined)('an LFS download that fails says what to check, carries no token, and leaves the folder empty for another try (review r1)', async () => {
