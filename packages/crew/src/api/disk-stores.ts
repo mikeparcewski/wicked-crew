@@ -46,19 +46,18 @@ export function sizeWords(n: number): string {
   return n >= 2 ** 30 ? `${Math.round((n / 2 ** 30) * 10) / 10} GiB` : `${Math.max(1, Math.round(n / 2 ** 20))} MiB`;
 }
 
-function untilde(p: string, home: string): string {
-  return p === '~' || p.startsWith('~/') ? join(home, p.slice(2)) : p;
-}
-
-/** A real directory (never a link) on device `dev`. */
-async function dirOn(p: string, dev: number): Promise<boolean> {
+/** A real directory (never a link) on device `dev`: `yes`, `no` (gone, a link, not a directory, another device), or
+ *  `error` (it could not be read: the size that leaves it out is a lower bound). */
+async function dirOn(p: string, dev: number): Promise<'yes' | 'no' | 'error'> {
   try {
     const st = await fsp.lstat(p);
-    return st.isDirectory() && st.dev === dev;
-  } catch {
-    return false;
+    return st.isDirectory() && st.dev === dev ? 'yes' : 'no';
+  } catch (err) {
+    return GONE.has((err as NodeJS.ErrnoException).code ?? '') ? 'no' : 'error';
   }
 }
+
+const spent = (walk: Walk): boolean => walk.left <= 0 || Date.now() >= walk.deadline;
 
 interface Walk {
   left: number;
@@ -76,9 +75,15 @@ async function treeBytes(dir: string, walk: Walk): Promise<{ bytes: number; tree
   let partial = false;
   const stack: Array<{ path: string; top: boolean }> = [{ path: dir, top: true }];
   while (stack.length > 0) {
+    // The bounds hold between directories too: a budget spent on empty directories queues no more I/O.
+    if (spent(walk)) return { bytes, trees, partial: true };
     const d = stack.pop()!;
     // Checked again when it is read: a directory swapped for a link after it was queued is not followed.
-    if (!d.top && !(await dirOn(d.path, walk.dev))) continue;
+    if (!d.top) {
+      const ok = await dirOn(d.path, walk.dev);
+      if (ok === 'error') partial = true;
+      if (ok !== 'yes') continue;
+    }
     let handle;
     try {
       handle = await fsp.opendir(d.path);
@@ -88,7 +93,7 @@ async function treeBytes(dir: string, walk: Walk): Promise<{ bytes: number; tree
     }
     try {
       for await (const e of handle) {
-        if (walk.left <= 0 || Date.now() >= walk.deadline) return { bytes, trees, partial: true };
+        if (spent(walk)) return { bytes, trees, partial: true };
         walk.left -= 1;
         if (e.isSymbolicLink()) continue;
         const child = join(d.path, e.name);
@@ -114,7 +119,7 @@ async function treeBytes(dir: string, walk: Walk): Promise<{ bytes: number; tree
 export interface DiskStoresInput {
   /** The volume the disk row measures (the state home). */
   volumePath: string;
-  /** The engine's floor-cache usage (`FloorCacheCache.get`), `null` without the addon static. */
+  /** The engine's floor-cache usage with its real paths (`FloorCacheCache.getRaw`), `null` without the addon static. */
   floorCache: () => Promise<Record<string, unknown> | null>;
   repos: ReadonlyArray<{ name: string; root_path: string }>;
   /** Absolute ms: the walk stops here and says "at least". */
@@ -142,17 +147,21 @@ export async function readDiskStores(input: DiskStoresInput): Promise<DiskStore[
   if (volume === null) throw new Error(`the state-home volume (${show(input.volumePath)}) could not be read`);
   const out: DiskStore[] = [];
 
-  const usage = await input.floorCache().catch(() => null);
+  // Given half of what is left: an engine read that never answers leaves the worktrees still measured.
+  const usage = await Promise.race([
+    input.floorCache().catch(() => null),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), Math.max(0, (input.deadline - Date.now()) / 2)).unref()),
+  ]);
   if (usage !== null && typeof usage['path'] === 'string' && typeof usage['bytes'] === 'number') {
-    const cache = untilde(usage['path'], home);
+    const cache = usage['path'];
     if ((await devOf(cache)) === volume) {
       out.push({ kind: 'check_cache', label: 'the checks cache', path: show(cache), bytes: usage['bytes'], partial: false, clear: 'safe to delete while no job and no check is running: the next check rebuilds it' });
     }
     const logs = usage['logs'];
     if (logs !== null && typeof logs === 'object') {
       const { path, bytes } = logs as { path?: unknown; bytes?: unknown };
-      if (typeof path === 'string' && typeof bytes === 'number' && (await devOf(untilde(path, home))) === volume) {
-        out.push({ kind: 'floor_logs', label: 'the past checks’ logs', path: show(untilde(path, home)), bytes, partial: false, clear: 'safe to delete while no job and no check is running' });
+      if (typeof path === 'string' && typeof bytes === 'number' && (await devOf(path)) === volume) {
+        out.push({ kind: 'floor_logs', label: 'the past checks’ logs', path: show(path), bytes, partial: false, clear: 'safe to delete while no job and no check is running' });
       }
     }
   }
@@ -160,8 +169,8 @@ export async function readDiskStores(input: DiskStoresInput): Promise<DiskStore[
   const walk: Walk = { left: input.budget ?? DISK_STORES_WALK_BUDGET, deadline: input.deadline, dev: volume };
   for (const repo of input.repos) {
     for (const dir of [join(`${repo.root_path}.wicked`, 'wicked-worktrees'), join(repo.root_path, 'wicked-worktrees')]) {
-      if (walk.left <= 0 || Date.now() >= walk.deadline) break;
-      if (!(await dirOn(dir, volume))) continue;
+      if (spent(walk)) break;
+      if ((await dirOn(dir, volume)) !== 'yes') continue;
       const size = await treeBytes(dir, walk);
       if (size.trees === 0) continue;
       out.push({

@@ -2777,7 +2777,7 @@ export function registerRoutes(
   const floorCacheCache = new FloorCacheCache();
   // crew#1126: what wicked holds on the state-home volume, read only when the disk row is low (60 s cache).
   const diskStoresCache = new DiskStoreCache(async (volumePath, deadline) =>
-    readDiskStores({ volumePath, deadline, floorCache: () => floorCacheCache.get(), repos: await adapter.listRepos() }),
+    readDiskStores({ volumePath, deadline, floorCache: () => floorCacheCache.getRaw(), repos: await adapter.listRepos() }),
   );
   // The governance block (crew#495): the store the engine's emit seam writes to (as the adapter
   // exported it — `null` on a boot that resolved none), its record count through the engine

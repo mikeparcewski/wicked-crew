@@ -56,7 +56,11 @@ describe('crew#1126: the disk row names what wicked holds on the volume', () => 
     const failed = await diskRow('/s', fs(3, 460), 1000, async () => null, async () => { throw new Error('EACCES'); });
     expect(failed.state).toBe('down');
     expect(failed.remedy).toMatch(/^Free disk space/);
-    const hung = await diskRow('/s', fs(3, 460), 30, async () => null, () => new Promise(() => {}));
+    let asked = 0;
+    const t0 = Date.now();
+    const hung = await diskRow('/s', fs(3, 460), 300, async () => null, () => { asked += 1; return new Promise(() => {}); });
+    expect(asked).toBe(1);
+    expect(Date.now() - t0).toBeLessThan(550);
     expect(hung.state).toBe('down');
     expect(hung.remedy).toMatch(/^Free disk space/);
   });
@@ -122,7 +126,7 @@ describe('crew#1126: readDiskStores over a real layout', () => {
       volumePath: root,
       deadline: Date.now() + 10_000,
       minBytes: MiB,
-      floorCache: () => floor.get(),
+      floorCache: () => floor.getRaw(),
       repos: [{ name: 'wicked-core', root_path: repo }, { name: 'empty', root_path: empty }],
       home: join(root, 'home'),
     });
@@ -236,5 +240,36 @@ describe('crew#1126: readDiskStores over a real layout', () => {
     expect(sizeWords(16.94 * GiB)).toBe('16.9 GiB');
     expect(sizeWords(300 * MiB)).toBe('300 MiB');
     expect(sizeWords(3 * MiB)).toBe('3 MiB');
+  });
+
+  it('review r2: a budget spent on empty directories opens no more; a hung engine read leaves the worktrees measured', async () => {
+    const repo = join(root, 'r');
+    for (let i = 0; i < 6; i++) mkdirSync(join(`${repo}.wicked`, 'wicked-worktrees', 'run-1', `d${i}`, 'deeper'), { recursive: true });
+    const fsMod = await import('node:fs');
+    const opendir = vi.spyOn(fsMod.promises, 'opendir');
+    try {
+      await readDiskStores({ volumePath: root, floorCache: async () => null, repos: [{ name: 'r', root_path: repo }], home: '/nowhere', deadline: Date.now() + 10_000, budget: 7, minBytes: 0 });
+      // the store root, run-1, then nothing: the 6 queued d* directories spent the budget of 7.
+      expect(opendir.mock.calls.length).toBe(2);
+    } finally {
+      opendir.mockRestore();
+    }
+    blob(join(`${repo}.wicked`, 'wicked-worktrees', 'run-2', 'a'), 2 * MiB);
+    const t0 = Date.now();
+    const got = await readDiskStores({ volumePath: root, floorCache: () => new Promise(() => {}), repos: [{ name: 'r', root_path: repo }], home: '/nowhere', deadline: Date.now() + 1_500, minBytes: MiB });
+    expect(got.map((s) => s.kind)).toEqual(['run_worktrees']);
+    expect(Date.now() - t0).toBeLessThan(3_000);
+  });
+
+  it('review r2: the check cache is found by its real path even when the home is a prefix of it', async () => {
+    const reader = CoreAdapter.floorCacheReader()!;
+    const home = join(root, 'al');
+    const worker = join(root, 'alice', '.wicked-worker');
+    process.env['WICKED_WORKER_HOME'] = worker;
+    blob(join(worker, 'repo-checks', 'k', 'run-a', 'big'), 2 * MiB);
+    const floor = new FloorCacheCache(reader, 60_000, home);
+    expect(String((await floor.get())!['path'])).not.toContain(root); // the response copy is tildified (lossily)
+    const got = await readDiskStores({ volumePath: root, floorCache: () => floor.getRaw(), repos: [], home, deadline: Date.now() + 10_000, minBytes: MiB });
+    expect(got.map((s) => [s.kind, s.bytes])).toEqual([['check_cache', 2 * MiB]]);
   });
 });
