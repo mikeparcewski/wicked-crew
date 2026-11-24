@@ -1,7 +1,7 @@
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   CLUSTER_TIMEOUT_MS,
@@ -167,7 +167,7 @@ describe('clusterRows', () => {
     const base = mkdtempSync(join(tmpdir(), 'crew-1851-ns-'));
     try {
       const real = realpathSync(base);
-      const want = (p: string): string => `wicked-sys-w${createHash('sha256').update(p).digest('hex').slice(0, 12)}`;
+      const want = (p: string): string => `wicked-sys-w${createHash('sha256').update(rustCanonicalSpelling(p)).digest('hex').slice(0, 12)}`;
       mkdirSync(join(real, 'home'));
       symlinkSync(join(real, 'home'), join(real, 'link'));
       expect(gatewayNamespace(join(real, 'home'))).toBe(want(join(real, 'home')));
@@ -184,7 +184,7 @@ describe('clusterRows', () => {
       symlinkSync(join(base, 'srv', 'nested'), join(base, 'work', 'alias'));
       // The target spelled with its `..` (join would fold it away before the OS sees the link).
       symlinkSync(`${join(base, 'work', 'alias')}/../state`, join(base, 'work', 'home'));
-      const want = (p: string): string => `wicked-sys-w${createHash('sha256').update(p).digest('hex').slice(0, 12)}`;
+      const want = (p: string): string => `wicked-sys-w${createHash('sha256').update(rustCanonicalSpelling(p)).digest('hex').slice(0, 12)}`;
       expect(gatewayNamespace(join(base, 'work', 'home'))).toBe(want(join(base, 'srv', 'state')));
       expect(gatewayNamespace(join(base, 'work', 'home', 'not-yet'))).toBe(want(join(base, 'srv', 'state', 'not-yet')));
     } finally { rmSync(base, { recursive: true, force: true }); }
@@ -201,13 +201,19 @@ describe('clusterRows', () => {
     try {
       const home = join(base, 'home');
       const exe = (dir: string): string => { mkdirSync(dir, { recursive: true }); const p = join(dir, 'kubectl'); writeFileSync(p, '#!/bin/sh\n'); chmodSync(p, 0o755); return p; };
-      expect(kubectlWord({ PATH: join(base, 'none') }, home)).toBe('kubectl');
+      // Nothing on PATH or in ~/.rd/bin: the desktops' install folders (as the engine), else the bare name.
+      const desktop = ['/usr/local/bin/kubectl', '/opt/homebrew/bin/kubectl', '/Applications/Docker.app/Contents/Resources/bin/kubectl'].find((p) => existsSync(p));
+      expect(kubectlWord({ PATH: join(base, 'none') }, home)).toBe(desktop ?? 'kubectl');
       exe(join(home, '.rd', 'bin'));
       expect(kubectlWord({ PATH: join(base, 'none') }, home)).toBe('~/.rd/bin/kubectl');
       const onPath = exe(join(base, 'tools bin'));
       expect(kubectlWord({ PATH: `${join(base, 'none')}:${join(base, 'tools bin')}` }, home)).toBe(shellPath(onPath, home));
       expect(kubectlWord({ PATH: join(base, 'tools bin'), WICKED_KUBECTL: '/opt/k/kubectl' }, home)).toBe('/opt/k/kubectl');
       expect(kubectlWord({ WICKED_KUBECTL: 'kubectl-1.31' }, home)).toBe('kubectl-1.31');
+      // A configured bare name is looked up on the daemon's PATH, as the engine looks it up (codex r1 delta).
+      expect(kubectlWord({ PATH: join(base, 'tools bin'), WICKED_KUBECTL: 'kubectl' }, home)).toBe(shellPath(onPath, home));
+      // A relative PATH entry is the daemon's, resolved against its working directory.
+      expect(kubectlWord({ PATH: relative(process.cwd(), join(base, 'tools bin')) }, join(base, 'nohome'))).toBe(shellPath(onPath, join(base, 'nohome')));
     } finally { rmSync(base, { recursive: true, force: true }); }
   });
   it('each row from its own evidence: a known failure is never hidden by an unread neighbour', () => {

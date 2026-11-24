@@ -241,17 +241,20 @@ export function gatewayNamespace(home: string): string {
   return `wicked-sys-w${createHash('sha256').update(canonLenient(home)).digest('hex').slice(0, 12)}`;
 }
 
-/** The kubectl a person's terminal can run, found the way the engine finds its own (wicked-core src/k8s/mod.rs
- *  `kubectl_candidates`): `WICKED_KUBECTL`, else the first on the daemon's PATH (which carries Rancher Desktop's
- *  `~/.rd/bin`, `setup/tool-path.ts`), else `~/.rd/bin/kubectl`; a path is written as a shell word, a bare name stays. */
+/** The kubectl a person's terminal can run: the one the engine runs, found by its own rules (wicked-core src/k8s/mod.rs
+ *  `kubectl_candidates`): `WICKED_KUBECTL` alone when set (an absolute path, else looked up on PATH); else the first
+ *  `kubectl` on the daemon's PATH (which carries Rancher Desktop's `~/.rd/bin`, `setup/tool-path.ts`), `~/.rd/bin`, then
+ *  the desktops' install folders. Written as a shell word; the bare name when none is found. */
 export function kubectlWord(env: NodeJS.ProcessEnv = process.env, home: string = homedir(), platform: NodeJS.Platform = process.platform): string {
   const isFile = (p: string): boolean => { try { return statSync(p).isFile(); } catch { return false; } };
-  const choice = (env['WICKED_KUBECTL'] ?? '').trim();
-  if (choice !== '') return /[\\/]/.test(choice) ? shellPath(resolve(choice), home) : choice;
-  const exe = platform === 'win32' ? 'kubectl.exe' : 'kubectl';
   const dirs = (env['PATH'] ?? (platform === 'win32' ? env['Path'] : undefined) ?? '').split(platform === 'win32' ? ';' : ':').filter((d) => d !== '');
-  for (const p of [...dirs.map((d) => join(d, exe)), join(home, '.rd', 'bin', exe)]) if (isAbsolute(p) && isFile(p)) return shellPath(p, home);
-  return 'kubectl';
+  const onPath = (name: string): string | undefined => dirs.map((d) => resolve(d, name)).find(isFile);
+  const word = (p: string | undefined, bare: string): string => (p === undefined ? bare : shellPath(p, home));
+  const choice = (env['WICKED_KUBECTL'] ?? '').trim();
+  if (choice !== '') return isAbsolute(choice) ? word(isFile(choice) ? choice : undefined, shellPath(choice, home)) : word(onPath(choice), choice);
+  const exe = platform === 'win32' ? 'kubectl.exe' : 'kubectl';
+  const desktops = [join(home, '.rd', 'bin', exe), '/usr/local/bin/kubectl', '/opt/homebrew/bin/kubectl', '/Applications/Docker.app/Contents/Resources/bin/kubectl'];
+  return word(onPath(exe) ?? desktops.find(isFile), 'kubectl');
 }
 
 /** The gateway Deployment's name and its pods' role label (wicked-core src/k8s/render.rs `GATEWAY_NAME`, mod.rs `ROLE_LABEL`). */
