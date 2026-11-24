@@ -192,10 +192,15 @@ it.skipIf(!REQUIRED && !garden)('a refused rewording of a carried citation says 
     const duplicated = await guard(`${carried}<p data-source="docs/perf.md:3">The API serves 9999 requests per second.</p>`);
     expect(duplicated.ok).toBe(false);
     expect(duplicated.ok ? '' : duplicated.reason).not.toContain('changed since the draft');
-    // A reworded carrier beside a new paragraph on the same citation: one base finding explains one refused finding.
-    const both = await guard(`${carried.replace('450 requests per second.', '450 requests per second at peak.')}<p data-source="docs/perf.md:3">The API serves 9999 requests per second.</p>`);
-    expect(both.ok ? '' : both.reason).toContain('at peak');
-    expect(both.ok ? '' : both.reason).not.toContain('9999');
+    // A reworded carrier beside a new paragraph on the same citation, in either order: the scan cannot tell which one is
+    // the reword, so neither is attributed to the repository (review r1 delta).
+    const reworded2 = carried.replace('450 requests per second.', '450 requests per second at peak.');
+    const extra = '<p data-source="docs/perf.md:3">The API serves 9999 requests per second.</p>';
+    for (const body of [`${reworded2}${extra}`, `${extra}${reworded2}`]) {
+      const both = await guard(body);
+      expect(both.ok).toBe(false);
+      expect(both.ok ? '' : both.reason).not.toContain('changed since the draft');
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

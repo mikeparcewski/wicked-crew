@@ -133,8 +133,10 @@ function citeOffSpec(f: ClaimFinding): string | null {
  * refine started from, with other element text: that paragraph's citation was checked when it was written, so the
  * repository has most likely changed under it since. The refine writer has no repository folder to correct the line
  * from, so asking again would be refused again: say which citation, the nearest line the scan found, and what to do.
- * Matching is one to one (review r1): the findings carried over unchanged are set aside first, from both sides, and each
- * base finding explains at most one refused one, so a citation the refine adds itself is never blamed on the repository.
+ * Matching is one to one (review r1): the findings carried over unchanged are set aside first, from both sides, and a
+ * citation is explained only when its refused carriers match its changed base carriers in number, so a carrier the
+ * refine adds beside a reworded one is never blamed on the repository. (A carrier deleted and another added on the same
+ * citation is indistinguishable from a reword: the citation itself does fail against the repository as it is now.)
  */
 function movedCitationsNote(revision: readonly ClaimFinding[], base: readonly ClaimFinding[]): string {
   const key = (f: ClaimFinding): string => JSON.stringify([f.kind, f.text, f.detail]);
@@ -156,13 +158,15 @@ function movedCitationsNote(revision: readonly ClaimFinding[], base: readonly Cl
     const spec = citeOffSpec(f);
     if (spec !== null) byCite.set(spec, (byCite.get(spec) ?? 0) + 1);
   }
-  // 3. Each refused cite-off on one of those citations takes one of them.
+  // 3. A refused cite-off is explained only when its citation has exactly as many refused carriers as changed base ones
+  //    (review r1 delta): with more, the scan cannot tell the reworded carrier from one the refine added (document order
+  //    is no correspondence), so none of them is attributed.
+  const refusedByCite = new Map<string, number>();
+  for (const f of refused) { const spec = citeOffSpec(f); if (spec !== null) refusedByCite.set(spec, (refusedByCite.get(spec) ?? 0) + 1); }
   const moved: string[] = [];
   for (const f of refused) {
     const spec = citeOffSpec(f);
-    const n = spec === null ? 0 : (byCite.get(spec) ?? 0);
-    if (spec === null || n === 0) continue;
-    byCite.set(spec, n - 1);
+    if (spec === null || (byCite.get(spec) ?? 0) === 0 || refusedByCite.get(spec) !== byCite.get(spec)) continue;
     const nearest = /nearest match: line (\d+)/.exec(f.detail)?.[1];
     moved.push(`${spec}${nearest !== undefined ? ` (the nearest matching line is now ${nearest})` : ''} in "${oneLine(f.text, 80)}"`);
   }
