@@ -101,7 +101,8 @@ async function fixture(opts: { lfs?: boolean; lfsRefuse?: boolean; lfsconfig?: s
   if (opts.lfsconfig !== undefined) writeFileSync(join(seed, '.lfsconfig'), `[lfs]\n\turl = ${opts.lfsconfig}\n`);
   git(seed, 'add', '-A');
   git(seed, 'commit', '-qm', 'base');
-  git(seed, 'push', '-q', bare, 'main');
+  // No hook: a host that ran `git lfs install` has a pre-push hook that would try to upload the LFS object to the bare repo.
+  git(seed, '-c', `core.hooksPath=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`, 'push', '-q', bare, 'main');
   const auths: string[] = [];
   const paths: string[] = [];
   const lfsBatchAuths: string[] = [];
@@ -340,7 +341,7 @@ describe('crew#1839 From a URL on Azure DevOps', () => {
     expect(fx.lfsDownloadAuths).toEqual(['']);
     // The working tree is clean (the LFS file is the object, not a pointer git sees as modified) and nothing was kept:
     // not in .git/config, and no git-lfs log (which records its environment) is left.
-    expect(execFileSync('git', ['-c', 'core.fsmonitor=false', 'status', '--porcelain'], { cwd: dir, env: fx.env, encoding: 'utf8' }).trim()).toBe('');
+    expect(execFileSync('git', ['-c', 'core.fsmonitor=false', 'status', '--porcelain'], { cwd: dir, env: { ...process.env, ...fx.env }, encoding: 'utf8' }).trim()).toBe('');
     const config = readFileSync(join(dir, '.git', 'config'), 'utf8');
     expect(config.toLowerCase()).not.toContain('extraheader');
     expectNoSecret(config);
@@ -352,7 +353,7 @@ describe('crew#1839 From a URL on Azure DevOps', () => {
     const dir = join(fx.root, 'clone');
     await cloneRepository('https://dev.azure.com/org/proj/_git/repo', dir, { ado: seam(fx) });
     expect(readFileSync(join(dir, 'big.bin'), 'utf8')).toBe(LFS_CONTENT);
-    expect(execFileSync('git', ['-c', 'core.fsmonitor=false', 'status', '--porcelain'], { cwd: dir, env: fx.env, encoding: 'utf8' }).trim()).toBe('');
+    expect(execFileSync('git', ['-c', 'core.fsmonitor=false', 'status', '--porcelain'], { cwd: dir, env: { ...process.env, ...fx.env }, encoding: 'utf8' }).trim()).toBe('');
   }, 120_000);
 
   it.skipIf(!HAS_GIT_LFS && process.env['CI'] === undefined)('an LFS download that fails says what to check, carries no token, and leaves the folder empty for another try (review r1)', async () => {
