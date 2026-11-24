@@ -26,27 +26,15 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { withoutAdoCredential } from './ado-env.js';
 import { childEnvWithBootEstateDb } from './governance-store.js';
 import { isDirectoryPresent } from './repoPaths.js';
 
 const execFileAsync = promisify(execFile);
 
-/**
- * (crew#1843) The daemon's raw Azure DevOps credential: a personal access token, or the service principal a header is
- * minted from (`deliver-credentials.ts` `ADO_PAT_ENV` / `ADO_SP_ENV`, spelled here so this module imports nothing that
- * imports it). Only the minting helper and the deliver script read them; a git never does, and a git hands its
- * environment to every hook, filter and `fsmonitor--daemon` it starts.
- */
-export const ADO_RAW_ENV = ['AZURE_DEVOPS_EXT_PAT', 'CREW_ADO_TENANT_ID', 'CREW_ADO_CLIENT_ID', 'CREW_ADO_CLIENT_SECRET'] as const;
-
-/** `env` without {@link ADO_RAW_ENV}. */
-export function withoutAdoCredential(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
-  const out: NodeJS.ProcessEnv = { ...env };
-  // Windows names are case-insensitive: a child reads `Azure_Devops_Ext_Pat` as the same variable.
-  const named = (k: string): boolean => (ADO_RAW_ENV as readonly string[]).includes(platform === 'win32' ? k.toUpperCase() : k);
-  for (const k of Object.keys(out)) if (named(k)) delete out[k];
-  return out;
-}
+// (crew#1843) The raw Azure DevOps credential's names and the two env helpers live in a leaf module (governance-store.ts
+// drops the credential from every crew child, and this module imports governance-store.ts).
+export { ADO_RAW_ENV, withAdoCredential, withoutAdoCredential } from './ado-env.js';
 
 /** Whether `file` runs git itself (`git`, `/usr/bin/git`, `git.exe`). */
 export function isGitProgram(file: string): boolean {
