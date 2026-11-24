@@ -9987,7 +9987,12 @@ export function registerRoutes(
     if (outcome === 'not_found') return reply.code(404).send({ error: 'Requirement not found' });
     if (outcome === 'not_unindexed') {
       return reply.code(409).send({
-        error: `${decodedKey} still has code in ${repo.name}, so it cannot be retired. Only a requirement whose code was deleted (listed as no longer in the code) can be retired.`,
+        error: `${decodedKey} is not listed as no longer in the code, so it cannot be retired. Only a requirement whose code was deleted can be. If its code was deleted, map ${repo.name} again, then retire it.`,
+      });
+    }
+    if (outcome === 'engine_too_old') {
+      return reply.code(409).send({
+        error: 'The installed wicked-core cannot retire requirements yet. Update wicked-core, then try again.',
       });
     }
     return { retired: decodedKey };

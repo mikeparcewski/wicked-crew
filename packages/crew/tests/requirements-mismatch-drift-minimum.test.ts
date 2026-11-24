@@ -158,12 +158,56 @@ describe('requirements: mismatches, code age and the minimum in force (operator 
   it('retireRequirement sends only a row whose code was deleted to the engine (wicked-core#1698)', async () => {
     const r = await repo();
     const calls: string[][] = [];
-    const run = async (args: string[]) => { calls.push(args); };
-    const gone = engine({ rows: { src: { ...rows.src, 'REQ-003': { real: false, uncounted: 'unindexed', code_mismatch: null } } } });
+    const HELP = 'wicked-core domain-graph [--db <path>] --retire <domain>::<REQ-NNN>';
+    const run = async (args: string[]) => { calls.push(args); return args.includes('--help') ? HELP : ''; };
+    let reads = 0;
+    let retired = false;
+    const gone: RequirementsGraphReader = {
+      async getRequirementsGraphForRepo() {
+        reads += 1;
+        const src = { ...graph.domains.src.requirements };
+        if (retired) delete (src as Record<string, unknown>)['REQ-003'];
+        return {
+          graph: { ...graph, domains: { src: { requirements: src } } },
+          coverage: live,
+          rows: { src: { ...rows.src, 'REQ-003': { real: false, uncounted: 'unindexed', code_mismatch: null } } },
+        } as EstateRequirementsRead;
+      },
+    };
     expect(await retireRequirement(r, 'src::REQ-001', gone, run)).toBe('not_unindexed');
     expect(await retireRequirement(r, 'src::REQ-404', gone, run)).toBe('not_found');
     expect(calls).toEqual([]);
-    expect(await retireRequirement(r, 'src::REQ-003', gone, run)).toBe('retired');
-    expect(calls).toEqual([['domain-graph', '--db', r.code_graph_db, '--retire', 'src::REQ-003']]);
+    const okRun = async (args: string[]) => { await run(args); if (!args.includes('--help')) retired = true; return args.includes('--help') ? HELP : ''; };
+    expect(await retireRequirement(r, 'src::REQ-003', gone, okRun)).toBe('retired');
+    expect(calls).toEqual([['domain-graph', '--help'], ['domain-graph', '--db', r.code_graph_db, '--retire', 'src::REQ-003']]);
+    // The next read asks the engine again and no longer lists it.
+    const before = reads;
+    const page = await listRequirements(r, { offset: 0, limit: 50 }, gone);
+    expect(reads).toBe(before + 1);
+    expect(page?.items.map((i) => i.key)).not.toContain('src::REQ-003');
+  });
+
+  it('retireRequirement never sends --retire to an engine that does not know it, and reads a refusal again', async () => {
+    const r = await repo();
+    const gone = engine({ rows: { src: { ...rows.src, 'REQ-003': { real: false, uncounted: 'unindexed', code_mismatch: null } } } });
+    const calls: string[][] = [];
+    const old = async (args: string[]) => { calls.push(args); return 'wicked-core domain-graph [--db <path>] [--out <F>]'; };
+    expect(await retireRequirement(r, 'src::REQ-003', gone, old)).toBe('engine_too_old');
+    expect(calls).toEqual([['domain-graph', '--help']]);
+    // Another request retired it meanwhile: the engine refuses, the fresh read says it is gone.
+    forgetRequirementsReads();
+    let first = true;
+    const raced: RequirementsGraphReader = {
+      async getRequirementsGraphForRepo() {
+        const read = await gone.getRequirementsGraphForRepo('tiny');
+        if (first) { first = false; return read; }
+        return { ...read, rows: { src: { ...rows.src } }, graph: { ...graph, domains: { src: { requirements: { 'REQ-001': graph.domains.src.requirements['REQ-001'] } } } } } as EstateRequirementsRead;
+      },
+    };
+    const refusing = async (args: string[]) => {
+      if (args.includes('--help')) return '--retire';
+      throw new Error('domain-graph: src::REQ-003 not retired: the requirements graph has no src::REQ-003');
+    };
+    expect(await retireRequirement(r, 'src::REQ-003', raced, refusing)).toBe('not_found');
   });
 });
