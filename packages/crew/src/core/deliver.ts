@@ -915,6 +915,15 @@ export const CHANGELOG_REBASE_LINES: readonly string[] = [
  * from (`core/deliver-text.ts`); `opts` carries the rest of the launch-time facts and the daemon
  * origin the script asks for the run-derived text (crew#524).
  */
+/**
+ * (crew#720) The Azure DevOps repository a delivery composed with `opts` pushes to: `opts.adoTarget` when given, else the
+ * one `opts.originUrl` names; `null` ⇒ not an Azure DevOps delivery. (crew#1843) The post-hoc deliver shell decides from
+ * this same answer whether the script gets the raw credential, so the env and the script never disagree.
+ */
+export function deliverAdoTarget(opts: DeliverScriptOptions = {}): AdoRepo | null {
+  return opts.adoTarget !== undefined ? opts.adoTarget : adoRepoOf(opts.originUrl);
+}
+
 export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}): string {
   const commitEnv = opts.commitIdents == null ? '' :
     `GIT_AUTHOR_NAME=${shellSingleQuote(opts.commitIdents.author.name)} GIT_AUTHOR_EMAIL=${shellSingleQuote(opts.commitIdents.author.email)} GIT_COMMITTER_NAME=${shellSingleQuote(opts.commitIdents.committer.name)} GIT_COMMITTER_EMAIL=${shellSingleQuote(opts.commitIdents.committer.email)} `;
@@ -981,7 +990,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
   // the daemon's own credential. (crew#933) A revision pushes onto the PR's head branch and comments
   // the run record as a thread, as on GitHub; the intent's Azure Boards work items (`AB#<id>`) are
   // linked on the PR it opens. Digits only, so the literal is safe.
-  const ado = opts.adoTarget !== undefined ? opts.adoTarget : adoRepoOf(opts.originUrl);
+  const ado = deliverAdoTarget(opts);
   const adoWorkItems = ado === null ? '' : adoWorkItemIds(intent ?? '').join(',');
   // The revised PR must be THIS delivery's pull request: on Azure DevOps its URL names the target
   // repository and the number (an origin re-pointed between resolution and composition must not
@@ -2171,7 +2180,7 @@ export function deliverGateInstructions(opts: DeliverScriptOptions): string {
   // BEFORE approval, on the card, in the same words the phase refuses with.
   const cred = opts.credentials ?? null;
   const credSentence = cred !== null && cred.status === 'missing' ? `${cred.message} ` : '';
-  const ado = opts.adoTarget !== undefined ? opts.adoTarget : adoRepoOf(opts.originUrl);
+  const ado = deliverAdoTarget(opts);
   if (ado !== null) {
     // gh plays no part in an Azure DevOps delivery: the card names the credential instead.
     const how =

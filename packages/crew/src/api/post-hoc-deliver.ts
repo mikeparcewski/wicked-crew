@@ -25,12 +25,11 @@ import {
   DELIVER_POSTHOC_ENV,
   DELIVER_VERIFIED_BASE_ENV,
   DELIVER_PR_CHECKS_DETAIL_MARKER,
+  deliverAdoTarget,
   deliverChecksTimeoutSecs,
   deliverPrScript,
-  readDeliverOriginUrl,
   type DeliverScriptOptions,
 } from '../core/deliver.js';
-import { adoRepoOf } from '../core/deliver-credentials.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { gitChildEnv, withAdoCredential } from '../core/exec.js';
 
@@ -177,15 +176,15 @@ export function deliverShellEnv(env?: Record<string, string>, adoOrigin = false)
  * overlays the daemon's own environment; tests use it to substitute HOME (whose `.bash_profile`
  * prepends a stub `gh`), production passes none.
  */
-export async function runDeliverScript(
+export function runDeliverScript(
   workdir: string,
   intent?: string,
   opts?: DeliverScriptOptions,
   env?: Record<string, string>,
 ): Promise<DeliverScriptResult> {
-  // Only an Azure DevOps origin needs the raw credential (review r1 on #1869); an unreadable origin fails the script's
-  // own origin check first.
-  const shellEnv = deliverShellEnv(env, adoRepoOf(await readDeliverOriginUrl(workdir).catch(() => null)) !== null);
+  // Only an Azure DevOps delivery needs the raw credential (review r1 on #1869), and it is the one the script itself
+  // targets (`deliverAdoTarget`, from the same options), so the env never disagrees with the push (review r1 delta).
+  const shellEnv = deliverShellEnv(env, deliverAdoTarget(opts) !== null);
   // A post-hoc lift has NO engine verification to pin to — the daemon runs the script itself, no
   // deliver lift preceded it — so the script's verified-base refusal (wicked-core#431,
   // `WICKED_DELIVER_VERIFIED_BASE`) must not fire off a stray pin in the daemon's own environment:
