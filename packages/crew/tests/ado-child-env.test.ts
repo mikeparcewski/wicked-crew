@@ -340,6 +340,8 @@ describe('crew#1843 STATIC (AST): every crew child-process call passes an env bu
 
   it('sees aliases, namespaces, requires and injected seams, and an env that is only partly built (review r1 delta)', () => {
     const H = 'childEnvWithBootEstateDb(process.env)';
+    // Spelled through S so harness-hygiene's text scan of test files does not read these fixture lines as this test's own spawns.
+    const S = 'spawn';
     const { calls, uncovered } = uncoveredChildCalls([{ rel: 'x.ts', text: [
       "import * as cp from 'node:child_process';",
       "import { spawn } from 'node:child_process';",
@@ -351,10 +353,10 @@ describe('crew#1843 STATIC (AST): every crew child-process call passes an env bu
       "cp.spawn('a', [], { env: { ...process.env } });",
       "runGh('a', [], { env: process.env });",
       "launch('a', [], { env: { ..." + H + ', ...process.env } });',
-      "spawn('a', [], { env: x ? " + H + ' : process.env });',
-      "spawn('a', [], { env: { AZURE_DEVOPS_EXT_PAT: 'v', ..." + H + ' } });',
-      'function late() { let env = ' + H + "; env = process.env; spawn('a', [], { env }); }",
-      "spawn('ok', [], { env: { ..." + H + ", EXTRA: '1' } });",
+      S + "('a', [], { env: x ? " + H + ' : process.env });',
+      S + "('a', [], { env: { AZURE_DEVOPS_EXT_PAT: 'v', ..." + H + ' } });',
+      'function late() { let env = ' + H + "; env = process.env; " + S + "('a', [], { env }); }",
+      S + "('ok', [], { env: { ..." + H + ", EXTRA: '1' } });",
       "launch('ok', [], { env: x ? " + H + ' : gitChildEnv(process.env) });',
     ].join('\n') }]);
     expect(calls).toBe(10);
