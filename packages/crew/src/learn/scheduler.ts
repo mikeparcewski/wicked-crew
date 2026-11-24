@@ -20,7 +20,7 @@ import { randomUUID } from 'node:crypto';
 import type { SessionStatus } from 'wicked-crew-api-types';
 import type { CoreAdapter } from '../core/adapter.js';
 import { ensureEstateStoreDirs } from '../core/estate-mcp-client.js';
-import { childEnvWithBootEstateDb } from '../core/governance-store.js';
+import { childEnvFor } from '../core/exec.js';
 import { gardenPluginRoot } from '../interactive/draft-skill.js';
 import type { Actor, CoreEvent } from '../core/types.js';
 import type { AuditLog } from '../api/audit.js';
@@ -46,7 +46,7 @@ export type Exec = (cmd: string, args: string[], opts: { cwd?: string; env?: Nod
 export const defaultExec: Exec = (cmd, args, opts) =>
   new Promise((resolve) => {
     // crew#495: a child never inherits a daemon-exported governance store.
-    execFile(cmd, args, { cwd: opts.cwd, env: childEnvWithBootEstateDb(opts.env ?? process.env), timeout: opts.timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(cmd, args, { cwd: opts.cwd, env: childEnvFor(cmd, opts.env ?? process.env), timeout: opts.timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
       const code = err === null ? 0 : typeof (err as { code?: unknown }).code === 'number' ? ((err as { code: number }).code) : 1;
       resolve({ code, stdout: String(stdout), stderr: String(stderr) });
     });

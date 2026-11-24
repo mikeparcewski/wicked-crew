@@ -7,8 +7,9 @@
 // Basic header, as in deliver-provider-credentials.test.ts. The production URL is re-pointed at it through the clone's
 // `target` seam (the rest of `adoRepoOf`'s answer, the canonical shape, is kept).
 
+import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createServer as createTcpServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -18,7 +19,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { registerFailure } from '../src/api/repo-input.js';
 import { adoRepoOf } from '../src/core/deliver-credentials.js';
 import { defaultAdoHelperExec, type AdoHelperExec } from '../src/core/deliver.js';
-import { ADO_CLONE_NO_CREDENTIAL, ADO_CLONE_REFUSED, adoCloneEnv, cloneRepository, type AdoCloneSeam } from '../src/core/repo-clone.js';
+import { ADO_CLONE_LFS_FAILED, ADO_CLONE_NO_CREDENTIAL, ADO_CLONE_REFUSED, adoCloneEnv, cloneRepository, type AdoCloneSeam } from '../src/core/repo-clone.js';
 
 const PAT = 'pat-SECRET-0123456789abcdef'; // ggignore: a made-up test value, never a real token
 const BASIC = `Basic ${Buffer.from(`:${PAT}`).toString('base64')}`;
@@ -53,14 +54,36 @@ interface Fx {
   paths: string[];
   /** A HOME with no git config, so no host credential helper answers for the loopback. */
   env: NodeJS.ProcessEnv;
+  /** (crew#1842) The Authorization header of each LFS batch request, and of each object download. */
+  lfsBatchAuths: string[];
+  lfsDownloadAuths: string[];
 }
+
+/** (crew#1842) The one Git LFS object the LFS fixture stores, as git-lfs's pointer spec (v1) names it. */
+const LFS_CONTENT = 'a large binary file, stored in Git LFS\n';
+const LFS_OID = createHash('sha256').update(LFS_CONTENT).digest('hex');
+const LFS_POINTER = `version https://git-lfs.github.com/spec/v1\noid sha256:${LFS_OID}\nsize ${Buffer.byteLength(LFS_CONTENT)}\n`;
+/** The object store's own per-download token, handed out in the batch answer (as Azure DevOps hands one out). */
+const LFS_OBJECT_TOKEN = 'object-token-0123'; // ggignore: a made-up test value
+/** What `git lfs install` writes to a host's global git config (git-lfs `lfs/attribute.go`, the `filter.lfs` keys). */
+const LFS_INSTALL_CONFIG = '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n\tsmudge = git-lfs smudge -- %f\n\tprocess = git-lfs filter-process\n\trequired = true\n';
+const HAS_GIT_LFS = (() => {
+  try {
+    execFileSync('git', ['lfs', 'version'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8' });
 }
 
-/** A bare repo served at `<loopback>/org/proj/_git/repo`, refusing any request without the PAT's header. */
-async function fixture(): Promise<Fx> {
+/** A bare repo served at `<loopback>/org/proj/_git/repo`, refusing any request without the PAT's header. With `lfs`, its
+ *  commit stores `big.bin` in Git LFS: the batch endpoint (`<repo>.git/info/lfs/objects/batch`, behind the header too)
+ *  sends downloads to an object path of its own that takes only the batch answer's token. */
+async function fixture(opts: { lfs?: boolean; lfsRefuse?: boolean; lfsconfig?: string } = {}): Promise<Fx> {
   const root = mkdtempSync(join(tmpdir(), 'crew-1839-'));
   roots.push(root);
   const bare = join(root, 'srv', 'org', 'proj', '_git', 'repo');
@@ -72,12 +95,19 @@ async function fixture(): Promise<Fx> {
   git(seed, 'config', 'user.name', 'seed');
   writeFileSync(join(seed, 'README.md'), 'tiny-math\n');
   // The repository selects a filter for its README (a host whose config defines `leak` runs it at checkout).
-  writeFileSync(join(seed, '.gitattributes'), 'README.md filter=leak\n');
+  writeFileSync(join(seed, '.gitattributes'), `README.md filter=leak\n${opts.lfs === true ? 'big.bin filter=lfs diff=lfs merge=lfs -text\n' : ''}`);
+  if (opts.lfs === true) writeFileSync(join(seed, 'big.bin'), LFS_POINTER);
+  // A repository may carry its own LFS endpoint (`.lfsconfig`); the credentialed download must not follow it.
+  if (opts.lfsconfig !== undefined) writeFileSync(join(seed, '.lfsconfig'), `[lfs]\n\turl = ${opts.lfsconfig}\n`);
   git(seed, 'add', '-A');
   git(seed, 'commit', '-qm', 'base');
-  git(seed, 'push', '-q', bare, 'main');
+  // No hook: a host that ran `git lfs install` has a pre-push hook that would try to upload the LFS object to the bare repo.
+  git(seed, '-c', `core.hooksPath=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`, 'push', '-q', bare, 'main');
   const auths: string[] = [];
   const paths: string[] = [];
+  const lfsBatchAuths: string[] = [];
+  const lfsDownloadAuths: string[] = [];
+  let base = '';
   const closed: Promise<void>[] = [];
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const u = new URL(req.url ?? '/', 'http://x');
@@ -93,9 +123,33 @@ async function fixture(): Promise<Fx> {
         res.end();
         return;
       }
+      if (u.pathname === `/lfs-objects/${LFS_OID}`) {
+        lfsDownloadAuths.push(auth);
+        if (opts.lfs !== true || opts.lfsRefuse === true || req.headers['x-object-token'] !== LFS_OBJECT_TOKEN) {
+          res.writeHead(403);
+          res.end('no token');
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'application/octet-stream' });
+        res.end(LFS_CONTENT);
+        return;
+      }
+      if (u.pathname.endsWith('/info/lfs/objects/batch')) lfsBatchAuths.push(auth);
       if (auth !== BASIC) {
         res.writeHead(401, { 'www-authenticate': 'Basic realm="ado"' });
         res.end('unauthorized');
+        return;
+      }
+      if (opts.lfs === true && u.pathname === '/org/proj/_git/repo.git/info/lfs/objects/batch') {
+        const asked = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { objects: Array<{ oid: string; size: number }> };
+        res.writeHead(200, { 'content-type': 'application/vnd.git-lfs+json' });
+        res.end(JSON.stringify({
+          transfer: 'basic',
+          objects: asked.objects.map((o) => ({
+            oid: o.oid, size: o.size, authenticated: true,
+            actions: { download: { href: `${base}/lfs-objects/${o.oid}`, header: { 'X-Object-Token': LFS_OBJECT_TOKEN }, expires_in: 3600 } },
+          })),
+        }));
         return;
       }
       const cgi = spawn('git', ['http-backend'], {
@@ -140,12 +194,13 @@ async function fixture(): Promise<Fx> {
   servers.push({ server, closed });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  base = url;
   const home = join(root, 'home');
   mkdirSync(home, { recursive: true });
   // No Azure DevOps credential in it: a test hands its own.
   const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: '1', XDG_CONFIG_HOME: home };
   for (const n of ENV) delete env[n];
-  return { root, url, gitUrl: `${url}/org/proj/_git/repo`, auths, paths, env };
+  return { root, url, gitUrl: `${url}/org/proj/_git/repo`, auths, paths, env, lfsBatchAuths, lfsDownloadAuths };
 }
 
 /** The production reading of the URL, its git URL and login base re-pointed at the loopback. */
@@ -268,6 +323,61 @@ describe('crew#1839 From a URL on Azure DevOps', () => {
     expect(seen).not.toContain('Authorization');
     for (const n of ENV) expect(seen).not.toContain(`${n}=`);
   }, 60_000);
+
+  // (crew#1842) Runs wherever git-lfs is installed, and always in CI (whose runners carry it): there a missing git-lfs
+  // fails the test instead of skipping it.
+  it.skipIf(!HAS_GIT_LFS && process.env['CI'] === undefined)('a Git LFS file this host has not cached is downloaded with the header, which reaches only the repository\'s own LFS endpoint (crew#1842)', async () => {
+    // The repository names another LFS endpoint: an unreachable one, so following it would fail the clone.
+    const fx = await fixture({ lfs: true, lfsconfig: 'http://127.0.0.1:9/elsewhere/info/lfs' });
+    // The host ran `git lfs install`: a checkout smudges LFS files, and the filter is required. Its config also names a
+    // standalone transfer program, which would be handed the header's environment if the download used it.
+    const spy = join(fx.root, 'transfer-spy.sh');
+    const spied = join(fx.root, 'transfer-spy-ran.txt');
+    writeFileSync(spy, `#!/bin/sh\n${RECORD(spied)}exit 1\n`);
+    chmodSync(spy, 0o755);
+    writeFileSync(join(fx.env['HOME']!, '.gitconfig'), `${LFS_INSTALL_CONFIG}[lfs]\n\tstandalonetransferagent = spy\n[lfs "customtransfer.spy"]\n\tpath = ${spy}\n`);
+    const dir = join(fx.root, 'clone');
+    await cloneRepository('https://dev.azure.com/org/proj/_git/repo', dir, { ado: seam(fx) });
+    expect(readFileSync(join(dir, 'big.bin'), 'utf8')).toBe(LFS_CONTENT);
+    expect(existsSync(spied)).toBe(false);
+    expect(readFileSync(join(dir, 'README.md'), 'utf8')).toBe('tiny-math\n');
+    // The batch request carried the header; the object store, at a path outside the header's scope, never saw it.
+    expect(fx.lfsBatchAuths.length).toBeGreaterThan(0);
+    expect(fx.lfsBatchAuths.every((a) => a === BASIC)).toBe(true);
+    expect(fx.lfsDownloadAuths).toEqual(['']);
+    // The working tree is clean (the LFS file is the object, not a pointer git sees as modified) and nothing was kept:
+    // not in .git/config, and no git-lfs log (which records its environment) is left.
+    expect(execFileSync('git', ['-c', 'core.fsmonitor=false', 'status', '--porcelain'], { cwd: dir, env: { ...process.env, ...fx.env }, encoding: 'utf8' }).trim()).toBe('');
+    const config = readFileSync(join(dir, '.git', 'config'), 'utf8');
+    expect(config.toLowerCase()).not.toContain('extraheader');
+    expectNoSecret(config);
+    expect(existsSync(join(dir, '.git', 'lfs', 'logs'))).toBe(false);
+  }, 120_000);
+
+  it.skipIf(!HAS_GIT_LFS && process.env['CI'] === undefined)('a host with git-lfs but no `git lfs install` still gets the real file, a clean tree, and a pointer when the file is staged again (review r1, r2)', async () => {
+    const fx = await fixture({ lfs: true });
+    const dir = join(fx.root, 'clone');
+    await cloneRepository('https://dev.azure.com/org/proj/_git/repo', dir, { ado: seam(fx) });
+    expect(readFileSync(join(dir, 'big.bin'), 'utf8')).toBe(LFS_CONTENT);
+    const run = (...args: string[]): string => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: dir, env: { ...process.env, ...fx.env }, encoding: 'utf8' });
+    expect(run('status', '--porcelain').trim()).toBe('');
+    // The filter lives in the repository's own config, so a later edit is stored in LFS, not as the binary.
+    writeFileSync(join(dir, 'big.bin'), 'an edited large file\n');
+    run('add', 'big.bin');
+    expect(run('cat-file', '-p', ':big.bin').startsWith('version https://git-lfs.github.com/spec/v1')).toBe(true);
+  }, 120_000);
+
+  it.skipIf(!HAS_GIT_LFS && process.env['CI'] === undefined)('an LFS download that fails says what to check, carries no token, and leaves the folder empty for another try (review r1)', async () => {
+    const fx = await fixture({ lfs: true, lfsRefuse: true });
+    const dir = join(fx.root, 'clone');
+    mkdirSync(dir);
+    const err = await cloneRepository('https://dev.azure.com/org/proj/_git/repo', dir, { ado: seam(fx) }).catch((e: unknown) => e as Error);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message.startsWith(`${ADO_CLONE_LFS_FAILED} https://dev.azure.com/org/proj/_git/repo with the daemon's Azure DevOps credential. Check that`)).toBe(true);
+    expectNoSecret((err as Error).message);
+    expect(existsSync(dir)).toBe(true);
+    expect(readdirSync(dir)).toEqual([]);
+  }, 120_000);
 
   it('an empty repository clones, with nothing to check out', async () => {
     const fx = await fixture();

@@ -263,6 +263,26 @@ describe('the spawn env + the sidecar (F-042 / F-043)', () => {
     expect(existsSync(join(root, CREW_SIDECAR_NAME))).toBe(true);
   }, 30_000);
 
+  it('crew#1843: the bridge gets none of the daemon\'s raw Azure DevOps credential', async () => {
+    const names = ['AZURE_DEVOPS_EXT_PAT', 'CREW_ADO_TENANT_ID', 'CREW_ADO_CLIENT_ID', 'CREW_ADO_CLIENT_SECRET'];
+    const saved = Object.fromEntries(names.map((n) => [n, process.env[n]]));
+    for (const n of names) process.env[n] = 'made-up-ado-value'; // ggignore: a made-up test value
+    try {
+      const root = join(dir, 'root-ado');
+      const before = spawns.length;
+      await poolWith({ origin: 'http://127.0.0.1:60785', bus: join(dir, 'state', 'bus') }).ensure(root);
+      expect(spawns.length).toBe(before + 1);
+      const env = spawns.at(-1)!.env;
+      for (const n of names) expect(env[n], n).toBeUndefined();
+      expect(env.PATH).toBe(process.env.PATH);
+    } finally {
+      for (const n of names) {
+        if (saved[n] === undefined) delete process.env[n];
+        else process.env[n] = saved[n];
+      }
+    }
+  }, 30_000);
+
   it('ADOPTS a crew-started bridge whose recorded pair matches (no spawn); a DIFFERENT pair whose owner daemon is GONE is recycled — killed, restarted with the right env, sidecar rewritten', async () => {
     const root = join(dir, 'root-b');
     const first = poolWith({ origin: 'http://127.0.0.1:60785', bus: join(dir, 'state', 'bus') });
