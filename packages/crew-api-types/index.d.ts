@@ -7909,6 +7909,12 @@ export interface BlastRadiusFreshness {
   stale_files?: Array<{ file: string; status: 'modified' | 'deleted' }>;
   /** Per-page counts summed; a file spanning pages counts once per page (crew#1556). */
   stale_files_total: number;
+  /**
+   * (crew#1797) Project blast radius only: `stale_files_total` may still count files of a repository that left the
+   * project and has not been refreshed since, because a page's stale-file evidence was cut to fit estate's reply budget.
+   * The total is then at most this many. ABSENT when the total is exact.
+   */
+  stale_files_total_partial?: true;
   unindexed_files?: number | null;
   checked_files: number;
   not_file_backed: number;
