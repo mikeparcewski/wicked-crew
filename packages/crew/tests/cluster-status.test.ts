@@ -1,5 +1,6 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -10,6 +11,7 @@ import {
   clusterInstallCommand,
   clusterRows,
   engineCommand,
+  gatewayNamespace,
   parseClusterStatus,
   shellPath,
   readClusterStatus,
@@ -156,6 +158,21 @@ describe('clusterRows', () => {
     expect(engineCommand({ exe: 'bin/engine', home: null }, 'cluster status')).not.toMatch(/^bin\//);
     expect(engineCommand({ exe: 'engine', home: null }, 'cluster status')).toBe('engine cluster status');
     expect(clusterInstallCommand({ exe: '/opt/wc', home: '/var/crew' })).toBe('/opt/wc cluster install --admin-context rancher-desktop --home /var/crew');
+  });
+  it("names the gateway's namespace the way the engine derives it from the state home (crew#1851)", () => {
+    // wicked-core src/k8s/mod.rs: owner_id = "w" + the first 12 hex of sha256(the canonical home, missing tail kept);
+    // daemon_namespace_name = "wicked-sys-" + owner_id.
+    const base = mkdtempSync(join(tmpdir(), 'crew-1851-ns-'));
+    try {
+      const real = realpathSync(base);
+      const want = (p: string): string => `wicked-sys-w${createHash('sha256').update(p).digest('hex').slice(0, 12)}`;
+      mkdirSync(join(real, 'home'));
+      symlinkSync(join(real, 'home'), join(real, 'link'));
+      expect(gatewayNamespace(join(real, 'home'))).toBe(want(join(real, 'home')));
+      // A symlinked spelling is the same daemon (canonicalized), and a home not made yet keeps its missing tail.
+      expect(gatewayNamespace(join(real, 'link'))).toBe(want(join(real, 'home')));
+      expect(gatewayNamespace(join(real, 'link', 'not-yet', 'x'))).toBe(want(join(real, 'home', 'not-yet', 'x')));
+    } finally { rmSync(base, { recursive: true, force: true }); }
   });
   it('each row from its own evidence: a known failure is never hidden by an unread neighbour', () => {
     const noGw = clusterRows(ok({ configured: true, reachable: true, context: 'rd', controller: { ready: false, detail: 'rolling out' } }), true, at);
