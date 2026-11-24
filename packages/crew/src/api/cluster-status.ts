@@ -9,7 +9,9 @@
  * rather than spelling kubectl itself. Reads are single-flight (each is several kubectl calls, and a
  * studio poll can read `/system` and `/diagnostics` at once), never cached: a Re-check is fresh.
  */
+import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { isAbsolute, resolve } from 'node:path';
 import type { SystemInfraRow } from '../core/types.js';
 import { redactString } from '../mcp/redact.js';
 import { homeless } from './seat-standing.js';
@@ -168,21 +170,36 @@ export interface EngineSpot {
  *  never falls back to the current context, so the command carries it; another cluster's context replaces it. */
 export const RANCHER_CONTEXT = 'rancher-desktop';
 
-/** One path as a shell word that pastes and runs: this user's home folder spelled `~/` (unquoted, so the shell expands
- *  it, and no user name crosses the wire), the rest single-quoted only when it holds a character the shell would read. */
-export function shellPath(path: string, home: string = homedir()): string {
+/** The spellings of the home folder a path can start with: as `HOME` says it and as the filesystem resolves it (a
+ *  symlinked home, and the canonical state home crew derives from it), longest first. */
+function homeSpellings(home: string): string[] {
   const h = home.replace(/[\\/]+$/, '');
+  if (h === '') return [];
+  let real = h;
+  try { real = realpathSync(h); } catch { /* A home that does not exist resolves to itself. */ }
+  return [...new Set([h, real])].sort((a, b) => b.length - a.length);
+}
+
+/** One path as a shell word that pastes and runs: this user's home folder (either spelling) written `~/` (unquoted, so
+ *  the shell expands it, and no user name crosses the wire), the rest single-quoted only when it holds a character the
+ *  shell would read. */
+export function shellPath(path: string, home: string = homedir()): string {
   let lead = '';
   let rest = path;
-  if (h !== '' && path === h) return '~';
-  if (h !== '' && path.startsWith(`${h}/`)) { lead = '~/'; rest = path.slice(h.length + 1); }
+  for (const h of homeSpellings(home)) {
+    if (path === h) return '~';
+    if (path.startsWith(`${h}/`)) { lead = '~/'; rest = path.slice(h.length + 1); break; }
+  }
   if (rest === '') return lead;
   return lead + (/^[A-Za-z0-9_./@%+=:,-]+$/.test(rest) ? rest : `'${rest.replace(/'/g, `'\\''`)}'`);
 }
 
 /** An engine command filled in for this daemon: the engine CLI crew runs and, with `home`, `--home <its state home>`. */
 export function engineCommand(engine: EngineSpot, args: string, home = true): string {
-  const exe = engine.exe !== null && engine.exe.trim() !== '' ? shellPath(engine.exe.trim()) : 'wicked-core';
+  const raw = (engine.exe ?? '').trim();
+  // A relative engine path is the daemon's own (its working directory), so it is made absolute; a bare name is found on
+  // PATH by the daemon and the terminal alike.
+  const exe = raw === '' ? 'wicked-core' : shellPath(/[\\/]/.test(raw) && !isAbsolute(raw) ? resolve(raw) : raw);
   return `${exe} ${args}${home && engine.home !== null ? ` --home ${shellPath(engine.home)}` : ''}`;
 }
 

@@ -1,4 +1,5 @@
-import { homedir } from 'node:os';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -130,6 +131,19 @@ describe('clusterRows', () => {
     const noKubectl = clusterRows(ok({ configured: false, reachable: false, kind: 'no_cluster', detail: 'no kubectl was found (set WICKED_KUBECTL to its path)' }), true, at, engine);
     expect(noKubectl.cluster).toMatchObject({ state: 'down', remedy: 'Start Rancher Desktop with Kubernetes on, then re-check.' });
   });
+  it('a symlinked home is ~ in either spelling, and the tilde stays outside the quotes (codex r1)', () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'crew-1844-')));
+    try {
+      const real = join(base, 'homes', 'alice');
+      mkdirSync(join(real, 'State Dir'), { recursive: true });
+      const link = join(base, 'home-alice');
+      symlinkSync(real, link);
+      expect(shellPath(join(real, 'State Dir'), link)).toBe("~/'State Dir'");
+      expect(shellPath(join(link, 'State Dir'), link)).toBe("~/'State Dir'");
+      expect(shellPath(join(real, '.wicked-crew'), link)).toBe('~/.wicked-crew');
+      expect(shellPath(join(real, '.wicked-crew'), link)).not.toContain('alice');
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
   it('a command names the engine path and state home as shell words', () => {
     expect(shellPath('/opt/homebrew/bin/wicked-core', '/home/a')).toBe('/opt/homebrew/bin/wicked-core');
     expect(shellPath('/home/a', '/home/a')).toBe('~');
@@ -137,6 +151,10 @@ describe('clusterRows', () => {
     expect(shellPath("/srv/it's/core", '/home/a')).toBe("'/srv/it'\\''s/core'");
     expect(shellPath('/home/ab/core', '/home/a')).toBe('/home/ab/core');
     expect(engineCommand({ exe: null, home: null }, 'cluster status')).toBe('wicked-core cluster status');
+    // A relative engine path is the daemon's, made absolute; a bare name stays for PATH.
+    expect(engineCommand({ exe: 'bin/wicked-core', home: null }, 'cluster status')).toBe(`${shellPath(join(process.cwd(), 'bin', 'wicked-core'))} cluster status`);
+    expect(engineCommand({ exe: 'bin/wicked-core', home: null }, 'cluster status')).not.toMatch(/^bin\//);
+    expect(engineCommand({ exe: 'wicked-core', home: null }, 'cluster status')).toBe('wicked-core cluster status');
     expect(clusterInstallCommand({ exe: '/opt/wc', home: '/var/crew' })).toBe('/opt/wc cluster install --admin-context rancher-desktop --home /var/crew');
   });
   it('each row from its own evidence: a known failure is never hidden by an unread neighbour', () => {
