@@ -3,6 +3,8 @@
 // protected request that reaches a handler always carries an actor. Auth off (the local loopback default) is unchanged.
 
 import { mkdtempSync, writeFileSync } from 'node:fs';
+import { request } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -30,6 +32,9 @@ async function serve(mode: 'required' | 'off'): Promise<FastifyInstance> {
   a.put('/api/v1/desk/snoozes/:key', who);
   a.get('/api/v1/runs', who);
   a.post('/api/v1/governance/rules', who);
+  a.put('/api/v1/settings', who);
+  a.patch('/api/v1/projects/:id', who);
+  a.get('/api/v1/sources/:name/catalog', who);
   a.post('/api/v1/mcp/call', async (req) => ({ unit: true, actor: (req as { actor?: Actor | null }).actor ?? null }));
   a.get('/ws', who);
   a.get('/', async () => ({ shell: true }));
@@ -104,7 +109,6 @@ describe('auth: protection is decided on the matched route', () => {
     for (const url of odd) {
       const r = await app.inject({ method: 'GET', url });
       expect([400, 401, 404], url).toContain(r.statusCode);
-      if (r.statusCode === 200) expect(r.json().actor, url).not.toBeNull();
     }
   });
 
@@ -156,14 +160,73 @@ describe('auth: protection is decided on the matched route', () => {
   });
 });
 
-describe('auth: the daemon route table, each route under another spelling of its prefix', () => {
+/** One request over a real socket, the target sent exactly as given (an inject would normalise it). */
+async function send(
+  port: number,
+  method: string,
+  target: string,
+  headers: Record<string, string> = {},
+  body?: unknown,
+): Promise<{ status: number; body: string }> {
+  const data = body === undefined ? undefined : JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const req = request(
+      { host: '127.0.0.1', port, method, path: target, headers: { ...headers, ...(data === undefined ? {} : { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(data)) }) } },
+      (res) => {
+        let text = '';
+        res.setEncoding('utf8');
+        res.on('data', (c: string) => (text += c));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: text }));
+      },
+    );
+    req.on('error', reject);
+    req.end(data);
+  });
+}
+
+describe('auth: a request target in absolute form is judged on the route it matched', () => {
+  let port: number;
+  beforeAll(async () => {
+    app = await serve('required');
+    await app.listen({ host: '127.0.0.1', port: 0 });
+    port = (app.server.address() as AddressInfo).port;
+  });
+  afterAll(async () => {
+    await app.close();
+  });
+  const abs = (path: string): string => `http://127.0.0.1${path}`;
+
+  it('no token is 401, and the admin rules hold for an operator token', async () => {
+    expect((await send(port, 'GET', abs('/api/v1/runs'))).status).toBe(401);
+    expect((await send(port, 'PUT', abs('/api/v1/settings'), {}, {})).status).toBe(401);
+    const op = { authorization: 'Bearer operator' };
+    expect((await send(port, 'PUT', abs('/api/v1/settings'), op, {})).status).toBe(403);
+    expect((await send(port, 'POST', abs('/api/v1/governance/rules'), op, {})).status).toBe(403);
+    expect((await send(port, 'PATCH', abs('/api/v1/projects/p1'), op, { status: 'archived' })).status).toBe(403);
+    expect((await send(port, 'PATCH', abs('/api/v1/projects/p1'), op, { name: 'n' })).status).toBe(200);
+    const admin = { authorization: 'Bearer admin' };
+    expect((await send(port, 'PUT', abs('/api/v1/settings'), admin, {})).status).toBe(200);
+    expect(JSON.parse((await send(port, 'GET', abs('/api/v1/runs'), { authorization: 'Bearer agent' })).body)).toEqual({ actor: AGENT });
+  });
+
+  it('the human-only rules and the unit-token routes read the matched route too', async () => {
+    const agent = { authorization: 'Bearer agent' };
+    const human = await send(port, 'GET', abs('/api/v1/sources/s1/catalog'), agent);
+    expect(human.status).toBe(403);
+    expect(JSON.parse(human.body)).toMatchObject({ code: 'human_only' });
+    expect(JSON.parse((await send(port, 'POST', abs('/api/v1/mcp/call'), {}, {})).body)).toEqual({ unit: true, actor: null });
+  });
+});
+
+describe('auth: the daemon route table, each route under other spellings', () => {
   let daemon: FastifyInstance;
+  let port: number;
   let scratch: string;
   let savedLogLevel: string | undefined;
   beforeAll(async () => {
     scratch = mkdtempSync(join(tmpdir(), 'auth-matched-route-'));
     const tokens = join(scratch, 'tokens.json');
-    writeFileSync(tokens, JSON.stringify({ tokens: [{ sha256: tokenHash('agent-token'), actor: AGENT }] }));
+    writeFileSync(tokens, JSON.stringify({ tokens: [{ sha256: tokenHash('agent-token'), actor: AGENT }, { sha256: tokenHash('admin-token'), actor: ADMIN }] }));
     savedLogLevel = process.env['LOG_LEVEL'];
     process.env['LOG_LEVEL'] = 'silent';
     const adapter = { stub: true, projectsSupported: () => false, getSettings: async () => ({}), onLaunch: (): (() => void) => () => undefined, onEvent: () => () => {} } as unknown as CoreAdapter;
@@ -175,7 +238,8 @@ describe('auth: the daemon route table, each route under another spelling of its
       stallWatchdog: { enabled: false },
       studioRoot: join(scratch, 'no-studio'),
     });
-    await daemon.ready();
+    await daemon.listen({ host: '127.0.0.1', port: 0 });
+    port = (daemon.server.address() as AddressInfo).port;
   });
   afterAll(async () => {
     await daemon.close();
@@ -184,29 +248,47 @@ describe('auth: the daemon route table, each route under another spelling of its
     removeScratch(scratch);
   });
 
-  it('no protected route answers without a token, and none of the admin or human-only ones lets an agent through', async () => {
-    const routes = (daemon.endpointManifest ?? []).filter((e) => e.path.startsWith('/api/v1/') && e.method !== 'HEAD');
+  const UNIT = new Set(['POST /api/v1/mcp/call', 'POST /api/v1/mcp/tools', 'POST /api/v1/mcp/ask', 'GET /api/v1/mcp/ask', 'DELETE /api/v1/mcp/ask', 'POST /api/v1/apps/check', 'POST /api/v1/apps/produce', 'POST /api/v1/insights/facts']);
+  const respell = (path: string): string => `/%61${path.slice(2)}`; // the prefix's first letter, percent-encoded
+  const abs = (path: string): string => `http://127.0.0.1${path}`;
+  const concrete = (path: string): string => path.replace(/:[A-Za-z0-9_]+/g, 'x1').replace(/\*$/, 'x1');
+
+  it('every protected route is 401 without a token under its own spelling and every other one', async () => {
+    const routes = (daemon.endpointManifest ?? []).filter((e) => e.path.startsWith('/api/v1/'));
     expect(routes.length).toBeGreaterThan(100);
-    const respell = (path: string): string => `/%61${path.slice(2)}`; // the prefix's first letter, percent-encoded
-    const concrete = (path: string): string => path.replace(/:[A-Za-z0-9_]+/g, 'x1').replace(/\*$/, 'x1');
-    let served = 0;
+    let checked = 0;
     for (const { method, path } of routes) {
-      const url = respell(concrete(path));
-      const unit = ['POST /api/v1/mcp/call', 'POST /api/v1/mcp/tools', 'POST /api/v1/mcp/ask', 'GET /api/v1/mcp/ask', 'DELETE /api/v1/mcp/ask', 'POST /api/v1/apps/check', 'POST /api/v1/apps/produce', 'POST /api/v1/insights/facts'].includes(`${method} ${path}`);
-      if (unit) continue; // their own credential is the unit token in the body, checked by the route
-      const payload = method === 'GET' || method === 'DELETE' || method === 'OPTIONS' ? undefined : {};
-      const plain = await daemon.inject({ method: method as 'GET', url: concrete(path), payload });
-      if (plain.statusCode !== 401) continue; // answered before the boundary under its own spelling too (a preflight)
-      const none = await daemon.inject({ method: method as 'GET', url, payload });
-      if (none.statusCode !== 404) served++;
-      expect([401, 404], `${method} ${url}`).toContain(none.statusCode);
+      if (UNIT.has(`${method} ${path}`)) continue; // their credential is the unit token, checked by the route
+      const url = concrete(path);
+      const body = ['GET', 'DELETE', 'OPTIONS'].includes(method) ? undefined : {};
+      const expected = method === 'OPTIONS' ? 204 : 401; // a preflight is answered before the boundary
+      expect((await send(port, method, url, {}, body)).status, `${method} ${url}`).toBe(expected);
+      for (const other of [respell(url), abs(url), abs(respell(url))]) {
+        expect((await send(port, method, other, {}, body)).status, `${method} ${other}`).toBe(expected);
+        // Each GET's HEAD twin (Fastify adds it; the manifest lists only the GET) is judged the same way.
+        if (method === 'GET') expect((await send(port, 'HEAD', other)).status, `HEAD ${other}`).toBe(401);
+      }
+      checked++;
     }
-    expect(served).toBeGreaterThan(100); // the router does serve these spellings: the sweep is not vacuous
-    // An agent bearer on an admin route and on a human-only route, under the other spelling.
-    const auth = { authorization: 'Bearer agent-token' };
-    expect((await daemon.inject({ method: 'POST', url: respell('/api/v1/governance/rules'), payload: {}, headers: auth })).statusCode).toBe(403);
-    const human = await daemon.inject({ method: 'GET', url: respell('/api/v1/sources/x1/catalog'), headers: auth });
-    expect(human.statusCode).toBe(403);
-    expect(human.json()).toMatchObject({ code: 'human_only' });
-  }, 60_000);
+    expect(checked).toBeGreaterThan(100);
+  }, 80_000);
+
+  it('the other spellings reach the same route (so the sweep is not vacuous), and the admin and human-only rules hold', async () => {
+    const admin = { authorization: 'Bearer admin-token' };
+    for (const url of ['/api/v1/settings', '/api/v1/governance/rules', '/api/v1/health']) {
+      const plain = await send(port, 'GET', url, admin);
+      expect(plain.status, url).not.toBe(404);
+      for (const other of [respell(url), abs(url), abs(respell(url))]) {
+        expect((await send(port, 'GET', other, admin)).status, other).toBe(plain.status);
+      }
+    }
+    const agent = { authorization: 'Bearer agent-token' };
+    for (const other of [respell, abs, (p: string) => abs(respell(p))]) {
+      expect((await send(port, 'POST', other('/api/v1/governance/rules'), agent, {})).status).toBe(403);
+      expect((await send(port, 'PUT', other('/api/v1/settings'), agent, {})).status).toBe(403);
+      const human = await send(port, 'GET', other('/api/v1/sources/x1/catalog'), agent);
+      expect(human.status).toBe(403);
+      expect(JSON.parse(human.body)).toMatchObject({ code: 'human_only' });
+    }
+  });
 });

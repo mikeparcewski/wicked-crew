@@ -746,9 +746,10 @@ function rawPathOf(req: FastifyRequest): string {
 }
 
 /**
- * The path as the router reads it: percent-decoded the way find-my-way decodes a path before it matches (decodeURI,
- * which keeps the reserved characters such as `/` encoded, and `%25` kept as it is). Null when the path does not
- * decode, which the router also refuses.
+ * A request path percent-decoded as the router decodes a path before it matches: `decodeURI`, which leaves the
+ * reserved characters such as `/` encoded, except that `%25` stays `%25` (the router keeps it too; plain `decodeURI`
+ * would turn it into `%`). Null when the path does not decode, which the router also refuses. Used only to decide
+ * whether an UNMATCHED request is protected; a matched request is judged on its route.
  */
 export function routedPath(raw: string): string | null {
   try {
@@ -761,18 +762,26 @@ export function routedPath(raw: string): string | null {
   }
 }
 
+/** A matched route pattern with each parameter (and a trailing wildcard) filled by one plain segment. */
+function routeShape(route: string): string {
+  return route.replace(/:[A-Za-z0-9_]+/g, 'x').replace(/\*/g, 'x');
+}
+
 /**
- * What the boundary judges a request on. Protection is decided on every reading of the request a route could be
- * served under (the route the router matched, the path as the router decoded it, and the raw path), so no spelling of
- * a protected route skips the check; the trust rules read the decoded path, the one the router matched against.
+ * What the boundary judges a request on.
+ * - **Protected** when any reading of the request a route could be served under is a protected path: the route the
+ *   router matched, the path as the router decodes it, or the raw path. So no spelling of a protected route (an
+ *   encoded character, an absolute-form target) skips the check, and an unmatched protected path still needs a token.
+ * - **The rules** (trust, human-only, unit-token, token extraction) read the matched route's own shape whenever a route
+ *   matched, never the request's spelling of it; only an unmatched request (nothing is served) is read by its path.
  */
 function boundaryOf(req: FastifyRequest): { guarded: boolean; path: string | null } {
   const raw = rawPathOf(req);
-  const path = routedPath(raw);
+  const decoded = routedPath(raw);
   const route = req.routeOptions?.url;
   const guarded =
-    isProtectedPath(raw) || (path !== null && isProtectedPath(path)) || (route !== undefined && isProtectedPath(route));
-  return { guarded, path };
+    isProtectedPath(raw) || (decoded !== null && isProtectedPath(decoded)) || (route !== undefined && isProtectedPath(route));
+  return { guarded, path: route !== undefined ? routeShape(route) : decoded };
 }
 
 /** True for the paths the auth boundary covers: the API and the WS upgrades. */
