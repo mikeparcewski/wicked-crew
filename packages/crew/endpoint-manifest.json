@@ -2123,6 +2123,13 @@
       "statusCodes": []
     },
     {
+      "method": "POST",
+      "path": "/api/v1/repos/:id/requirements/:key/retire",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
       "method": "PUT",
       "path": "/api/v1/repos/:id/requirements/minimum",
       "requestType": "RequirementsMinimumBody",

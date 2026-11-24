@@ -18,6 +18,7 @@ import {
   listRequirementsRead,
   minimumOf,
   setRepoMinimum,
+  retireRequirement,
   type EstateRequirementsRead,
   type RequirementsGraphReader,
 } from '../src/api/requirements.js';
@@ -152,5 +153,17 @@ describe('requirements: mismatches, code age and the minimum in force (operator 
     const bare: RepoEntry = { ...r, code_graph_db: join(r.root_path, 'none', 'estate.db') };
     expect(await setRepoMinimum(bare, 90, run)).toBe(false);
     expect(calls).toHaveLength(2);
+  });
+
+  it('retireRequirement sends only a row whose code was deleted to the engine (wicked-core#1698)', async () => {
+    const r = await repo();
+    const calls: string[][] = [];
+    const run = async (args: string[]) => { calls.push(args); };
+    const gone = engine({ rows: { src: { ...rows.src, 'REQ-003': { real: false, uncounted: 'unindexed', code_mismatch: null } } } });
+    expect(await retireRequirement(r, 'src::REQ-001', gone, run)).toBe('not_unindexed');
+    expect(await retireRequirement(r, 'src::REQ-404', gone, run)).toBe('not_found');
+    expect(calls).toEqual([]);
+    expect(await retireRequirement(r, 'src::REQ-003', gone, run)).toBe('retired');
+    expect(calls).toEqual([['domain-graph', '--db', r.code_graph_db, '--retire', 'src::REQ-003']]);
   });
 });

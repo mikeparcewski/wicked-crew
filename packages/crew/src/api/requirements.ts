@@ -206,6 +206,31 @@ export async function setRepoMinimum(
   return true;
 }
 
+/** What {@link retireRequirement} did. */
+export type RetireOutcome = 'retired' | 'not_found' | 'not_unindexed';
+
+/**
+ * Retire one requirement whose code was deleted (wicked-core#1698). Such a row is kept across re-maps and flagged
+ * `unindexed` until its code returns, so a deleted feature stays listed for ever without this. The engine's own
+ * command does the write (`wicked-core domain-graph --retire <domain>::<REQ-NNN>`): the row leaves the stored
+ * graph, no later build carries it, and its id is never given to other code. Only a row the engine flags
+ * `unindexed` is sent; any other is `not_unindexed` (its code is still indexed, or the engine does not say).
+ */
+export async function retireRequirement(
+  repo: RepoEntry,
+  key: string,
+  reader: RequirementsGraphReader,
+  run: CoreCliRunner = runCoreCli,
+): Promise<RetireOutcome> {
+  const index = await buildIndex(repo, reader);
+  const entry = index?.byKey.get(key);
+  if (entry === undefined) return 'not_found';
+  if (entry.summary.uncounted !== 'unindexed') return 'not_unindexed';
+  await run(['domain-graph', '--db', codeGraphDb(repo), '--retire', key]);
+  forgetRequirementsReads(repo);
+  return 'retired';
+}
+
 export interface RequirementOverride {
   title?: string | undefined;
   notes?: string | undefined;
