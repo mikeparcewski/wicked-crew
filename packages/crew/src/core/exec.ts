@@ -54,7 +54,7 @@ export function isGitProgram(file: string): boolean {
 }
 
 /** The `-c` entry every crew git carries (crew#1843), in `GIT_CONFIG_PARAMETERS`' quoting. */
-const FSMONITOR_OFF_PARAMETER = "'core.fsmonitor=false'";
+export const FSMONITOR_OFF_PARAMETER = "'core.fsmonitor=false'";
 
 /**
  * (crew#1843) The environment of every git crew starts: a crew child's ({@link childEnvWithBootEstateDb}), without the

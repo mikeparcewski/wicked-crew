@@ -134,6 +134,39 @@ function stubGh(fx: Fx): void {
   chmodSync(join(fx.bin, 'gh'), 0o755);
 }
 
+/**
+ * (crew#1862) A git on the script's PATH that records, for every call, the raw Azure DevOps variables it inherited, in any
+ * letter case (names only, never a value) and the `core.fsmonitor` it reads, then runs the real git. A hook, filter or fsmonitor daemon a
+ * git starts inherits exactly this environment.
+ */
+function recordGitEnv(fx: Fx): string {
+  const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  const log = join(fx.root, 'git-env.log');
+  writeFileSync(
+    join(fx.bin, 'git'),
+    [
+      '#!/bin/sh',
+      `N=$(env | grep -ioE '^(azure_devops_ext_pat|crew_ado_[a-z_]+)=' | tr -d '=' | sort | tr '\\n' ' ')`,
+      `M=$('${realGit}' config --get core.fsmonitor || true)`,
+      `printf '%s|%s|%s\\n' "$1" "$N" "$M" >> '${log}'`,
+      `exec '${realGit}' "$@"`,
+    ].join('\n'),
+  );
+  chmodSync(join(fx.bin, 'git'), 0o755);
+  return log;
+}
+
+/** Every git the script ran saw no raw Azure DevOps variable and read `core.fsmonitor=false`. */
+function expectHardenedGits(log: string): void {
+  const calls = readFileSync(log, 'utf8').split('\n').filter(Boolean);
+  expect(calls.length).toBeGreaterThan(3);
+  for (const call of calls) {
+    const [arg, names, fsmonitor] = call.split('|');
+    expect(names!.trim(), `git ${arg}: inherited`).toBe('');
+    expect(fsmonitor, `git ${arg}: core.fsmonitor`).toBe('false');
+  }
+}
+
 interface Run {
   status: number;
   output: string;
@@ -540,6 +573,19 @@ describe('crew#720 deliver, driven for real — Azure DevOps', () => {
     expect(readFileSync(join(fx.clone, '.git', 'config'), 'utf8')).not.toContain('extraHeader');
   }, 60_000);
 
+  it('(crew#1862) no git the script runs, before or after the header is minted, inherits the raw credential or runs with fsmonitor on', async () => {
+    const fx = fixture();
+    const auth = `Basic ${Buffer.from(`:${PAT}`).toString('base64')}`;
+    const ado = await mockAdo(fx, { auth });
+    const log = recordGitEnv(fx);
+    const r = await runDeliver(fx, { adoTarget: ado.target }, { AZURE_DEVOPS_EXT_PAT: PAT });
+    expect(r.status, r.output).toBe(0);
+    expect(r.outcome).toBe('pr');
+    expect(ado.authSeen.every((a) => a === auth)).toBe(true);
+    expectHardenedGits(log);
+    expectNoSecret(readFileSync(log, 'utf8'));
+  }, 60_000);
+
   it('SERVICE PRINCIPAL: mints an Entra token (secret only in the form body) and uses it as Bearer for git and REST', async () => {
     const fx = fixture();
     const ado = await mockAdo(fx, { auth: `Bearer ${JWT}` });
@@ -714,6 +760,17 @@ describe('crew#720 deliver, driven for real — GitHub parity', () => {
     expect(rec).toMatchObject({ source: 'branch', trigger: 'run_end', tree: first.rec.tree });
     // And the record survives a restart (read back from disk).
     expect(new CodebaseArchiveStore(join(fx.root, 'artifacts2')).get(RUN_ID)).toEqual(rec);
+  }, 60_000);
+
+  it('(crew#1862) a delivery that is not to Azure DevOps hands no git the raw Azure DevOps credential the daemon holds, and turns fsmonitor off', async () => {
+    const fx = fixture();
+    stubGh(fx);
+    const log = recordGitEnv(fx);
+    // A Windows child reads another letter case as the same variable (review r1): those spellings are dropped too.
+    const r = await runDeliver(fx, {}, { AZURE_DEVOPS_EXT_PAT: PAT, CREW_ADO_TENANT_ID: 'tenant-1', CREW_ADO_CLIENT_ID: 'client-1', CREW_ADO_CLIENT_SECRET: SP_SECRET, Azure_Devops_Ext_Pat: PAT, crew_ado_client_secret: SP_SECRET });
+    expect(r.status, r.output).toBe(0);
+    expectHardenedGits(log);
+    expectNoSecret(readFileSync(log, 'utf8'));
   }, 60_000);
 
   it('LIFT CONFLICT (rebase hit a conflict outside the changelog): stranded; the zip holds the run branch\'s work', async () => {

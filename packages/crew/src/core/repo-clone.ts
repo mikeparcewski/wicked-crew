@@ -215,12 +215,16 @@ export async function cloneRepository(gitUrl: string, cloneDir: string, opts: { 
       await rm(join(lfsStore, 'logs'), { recursive: true, force: true });
     }
     // The files themselves, from the local store, in a git with no header: whatever filter or extension the checkout
-    // runs sees no credential. git-lfs reports a file it could not write without failing, so every LFS file is
-    // checked after: one still a pointer fails the clone.
+    // runs sees no credential. git-lfs reports a file it could not write without failing, so every LFS file the fetch
+    // was to download is checked after: one still a pointer fails the clone. (crew#1863) Files the repository's
+    // `lfs.fetchinclude` / `lfs.fetchexclude` leave out stay pointers on purpose, so the check takes the same filters.
     await execCapped('git', ['-C', cloneDir, 'lfs', 'checkout'], { timeout: CLONE_TIMEOUT_MS, env: plain });
-    const pointers = (await execCapped('git', ['-C', cloneDir, 'lfs', 'ls-files'], { timeout: 30_000, env: plain })).stdout
+    const scope = await lfsFetchScope(cloneDir, plain);
+    // git-lfs marks each line `<oid> <*|-> <path>`: `-` is a pointer. A path may itself hold " - ". Matched in the
+    // fetch's config too (`core.ignorecase` decides how the filters match).
+    const pointers = (await execCapped('git', ['-C', cloneDir, 'lfs', 'ls-files', ...scope], { timeout: 30_000, env: asFetchedEnv(plain) })).stdout
       .split('\n')
-      .filter((line) => / - /.test(line))
+      .filter((line) => /^\S+ - /.test(line))
       .map((line) => line.replace(/^\S+ - /, ''));
     if (pointers.length > 0) {
       throw new Error(`${ADO_CLONE_LFS_FAILED} ${ado.webUrl}: ${pointers.length} of them could not be written (${pointers.slice(0, 3).join(', ')}${pointers.length > 3 ? ', …' : ''}). Check the disk has room, then add it again.`);
@@ -230,6 +234,36 @@ export async function cloneRepository(gitUrl: string, cloneDir: string, opts: { 
     await emptyDir(cloneDir);
     throw err;
   }
+}
+
+/** (crew#1863) `env` as the credentialed fetch's git saw config: no inherited GIT_CONFIG_* entry (`adoCloneEnv`). */
+export function asFetchedEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env, GIT_CONFIG_PARAMETERS: '', GIT_CONFIG_COUNT: '0' };
+  for (const k of Object.keys(out)) if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(k)) delete out[k];
+  return out;
+}
+
+/**
+ * (crew#1863) The `git lfs ls-files` filters (`--include=` / `--exclude=`) for what `git lfs fetch` left out on purpose:
+ * `lfs.fetchinclude` / `lfs.fetchexclude` as git-lfs reads them (git-lfs `git/config.go`: `config --includes -l -z`,
+ * the repository's `.lfsconfig` first and git's own config after it, the last value winning, a valueless entry
+ * skipped), in the fetch's environment ({@link asFetchedEnv}).
+ */
+export async function lfsFetchScope(cloneDir: string, env: NodeJS.ProcessEnv): Promise<string[]> {
+  const values = new Map<string, string>();
+  for (const file of [['--file', join(cloneDir, '.lfsconfig')], []]) {
+    const out = await execCapped('git', ['-C', cloneDir, 'config', '--includes', '-l', '-z', ...file], { timeout: 30_000, env: asFetchedEnv(env) }).then((r) => r.stdout, () => '');
+    for (const entry of out.split('\0')) {
+      const at = entry.indexOf('\n');
+      if (at > 0) values.set(entry.slice(0, at).toLowerCase(), entry.slice(at + 1));
+    }
+  }
+  const scope: string[] = [];
+  for (const [key, flag] of [['lfs.fetchinclude', '--include'], ['lfs.fetchexclude', '--exclude']] as const) {
+    const value = (values.get(key) ?? '').trim();
+    if (value !== '') scope.push(`${flag}=${value}`);
+  }
+  return scope;
 }
 
 /** The `filter.lfs` keys `git lfs install` writes (git-lfs `lfs/attribute.go`). */
@@ -257,7 +291,8 @@ async function usesGitLfs(cloneDir: string, env: NodeJS.ProcessEnv): Promise<boo
   const tracked = await execCapped('git', ['-C', cloneDir, 'ls-files', '-z', '--', ':(attr:filter=lfs)'], { timeout: 30_000, env });
   if (tracked.stdout === '') return false;
   try {
-    await execCapped('git', ['lfs', 'version'], { timeout: 30_000, env });
+    // (crew#1864) In git's own words: the answer below is matched in English, and git translates it (help.c `_()`).
+    await execCapped('git', ['lfs', 'version'], { timeout: 30_000, env: { ...env, LC_ALL: 'C', LANGUAGE: '' } });
     return true;
   } catch (err) {
     // git's own answer for a subcommand it does not have.
