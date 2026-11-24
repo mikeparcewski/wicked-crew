@@ -86,7 +86,7 @@ function git(cwd: string, ...args: string[]): string {
 /** A bare repo served at `<loopback>/org/proj/_git/repo`, refusing any request without the PAT's header. With `lfs`, its
  *  commit stores `big.bin` in Git LFS: the batch endpoint (`<repo>.git/info/lfs/objects/batch`, behind the header too)
  *  sends downloads to an object path of its own that takes only the batch answer's token. */
-async function fixture(opts: { lfs?: boolean; lfsRefuse?: boolean; lfsconfig?: string; lfsName?: string; lfsExcluded?: string } = {}): Promise<Fx> {
+async function fixture(opts: { lfs?: boolean; lfsRefuse?: boolean; lfsconfig?: string; lfsName?: string; lfsExcluded?: string; lfsUnserved?: string; lfsFetchInclude?: string } = {}): Promise<Fx> {
   const root = mkdtempSync(join(tmpdir(), 'crew-1839-'));
   roots.push(root);
   const bare = join(root, 'srv', 'org', 'proj', '_git', 'repo');
@@ -102,10 +102,16 @@ async function fixture(opts: { lfs?: boolean; lfsRefuse?: boolean; lfsconfig?: s
   if (opts.lfs === true) writeFileSync(join(seed, opts.lfsName ?? 'big.bin'), LFS_POINTER);
   // (crew#1863) A second LFS file, whose object the server does not have, that the repository's `.lfsconfig` leaves out.
   if (opts.lfsExcluded !== undefined) writeFileSync(join(seed, opts.lfsExcluded), LFS_EXCLUDED_POINTER);
+  // The same unserved object, at a path only a fetch filter (`lfsFetchInclude`) can leave out.
+  if (opts.lfsUnserved !== undefined) {
+    mkdirSync(join(seed, opts.lfsUnserved, '..'), { recursive: true });
+    writeFileSync(join(seed, opts.lfsUnserved), LFS_EXCLUDED_POINTER);
+  }
   // A repository may carry its own LFS endpoint (`.lfsconfig`); the credentialed download must not follow it.
   const lfsconfig = [
     ...(opts.lfsconfig !== undefined ? [`\turl = ${opts.lfsconfig}`] : []),
     ...(opts.lfsExcluded !== undefined ? [`\tfetchexclude = ${opts.lfsExcluded}`] : []),
+    ...(opts.lfsFetchInclude !== undefined ? [`\tfetchinclude = ${opts.lfsFetchInclude}`] : []),
   ];
   if (lfsconfig.length > 0) writeFileSync(join(seed, '.lfsconfig'), `[lfs]\n${lfsconfig.join('\n')}\n`);
   git(seed, 'add', '-A');
@@ -404,6 +410,17 @@ describe('crew#1839 From a URL on Azure DevOps', () => {
     expect(readFileSync(join(dir, 'skipped.bin'), 'utf8')).toBe(LFS_EXCLUDED_POINTER);
   }, 120_000);
 
+  // (crew#1863 review r1b) git-lfs matches the filters under `core.ignorecase`. The fetch's environment drops the one the
+  // daemon inherited, so the check must too; Linux only, where a clone's own `core.ignorecase` is false.
+  it.skipIf(process.platform !== 'linux' || (!HAS_GIT_LFS && process.env['CI'] === undefined))('the pointer check matches the fetch filters under the fetch\'s own config, not an inherited core.ignorecase (crew#1863)', async () => {
+    const fx = await fixture({ lfs: true, lfsUnserved: 'assets/skipped.bin', lfsFetchInclude: 'big.bin,ASSETS/**' });
+    const s = seam(fx);
+    const dir = join(fx.root, 'clone');
+    await cloneRepository('https://dev.azure.com/org/proj/_git/repo', dir, { ado: { ...s, env: { ...s.env, GIT_CONFIG_PARAMETERS: "'core.ignorecase=true'" } } });
+    expect(readFileSync(join(dir, 'big.bin'), 'utf8')).toBe(LFS_CONTENT);
+    expect(readFileSync(join(dir, 'assets', 'skipped.bin'), 'utf8')).toBe(LFS_EXCLUDED_POINTER);
+  }, 120_000);
+
   // (crew#1863 review r1) The filters are read as git-lfs reads them, in the environment the fetch ran in.
   it('the pointer check reads the fetch filters as git-lfs does: .lfsconfig includes, an empty git setting, no inherited GIT_CONFIG_* (crew#1863)', async () => {
     const root = mkdtempSync(join(tmpdir(), 'crew-1863-scope-'));
@@ -418,12 +435,15 @@ describe('crew#1839 From a URL on Azure DevOps', () => {
     writeFileSync(join(repo, '.lfsconfig'), '[include]\n\tpath = lfs-extra.config\n[lfs]\n\tfetchinclude = assets/**\n');
     writeFileSync(join(repo, 'lfs-extra.config'), '[lfs]\n\tfetchexclude = skipped.bin\n');
     expect(await lfsFetchScope(repo, env)).toEqual(['--include=assets/**', '--exclude=skipped.bin']);
-    // git's own config wins over `.lfsconfig`, even set empty (git-lfs reads the last value).
-    writeFileSync(join(home, '.gitconfig'), '[lfs]\n\tfetchinclude =\n');
+    // git's own config wins over `.lfsconfig`, even set empty (git-lfs reads the last value); a valueless entry is no
+    // value at all, so `.lfsconfig`'s stands (git-lfs skips it, review r1b).
+    writeFileSync(join(home, '.gitconfig'), '[lfs]\n\tfetchinclude =\n\tfetchexclude\n');
     expect(await lfsFetchScope(repo, env)).toEqual(['--exclude=skipped.bin']);
     // An entry the daemon inherited never reached the fetch (`adoCloneEnv` drops them), so it does not count here.
     const inherited = { ...env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'lfs.fetchexclude', GIT_CONFIG_VALUE_0: 'other.bin', GIT_CONFIG_PARAMETERS: "'lfs.fetchinclude=else/**'" };
     expect(await lfsFetchScope(repo, inherited)).toEqual(['--exclude=skipped.bin']);
+    writeFileSync(join(home, '.gitconfig'), '[lfs]\n\tfetchexclude =\n');
+    expect(await lfsFetchScope(repo, env)).toEqual(['--include=assets/**']);
   });
 
   // (crew#1864) git translates "is not a git command" (help.c `_()`). This git answers in German, as gettext would for its
