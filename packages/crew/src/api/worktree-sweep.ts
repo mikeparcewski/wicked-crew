@@ -5,9 +5,13 @@ import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 /**
  * Best-effort post-delivery worktree sweep (crew#620 — Acceptance 3).
  *
- * Removes the run's worktree (`<repoRoot>/wicked-worktrees/<runId>`) and prunes stale
- * worktree entries from the registered repo. Called ONLY when the run is confirmed delivered
- * (PR open); never for cancelled or failed runs.
+ * Removes the run's worktree and prunes stale worktree entries from the registered repo. Called ONLY when the run is
+ * confirmed delivered (PR open); never for cancelled or failed runs.
+ *
+ * The tree is named by its last two segments, `wicked-worktrees/<runId>`, which git resolves among the repository's
+ * own worktrees when they are unique: the engine mints new run trees BESIDE the checkout
+ * (`<repo>.wicked/wicked-worktrees/<runId>`, wicked-core#1109), and a run an earlier engine minted keeps its tree
+ * inside it (`<repo>/wicked-worktrees/<runId>`). Both are found.
  *
  * Never throws — all outcomes (removed / not-present / git-error) are logged. The diff
  * endpoint falls back to the run branch when the worktree is gone (F-7R2-013).

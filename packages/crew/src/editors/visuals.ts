@@ -2,8 +2,8 @@
  * How an editor looks on studio's Plugins page (program DES-LEARN §2): one line (`description`) and its `visuals`
  * — an icon on its colour, a preview image (light and dark), and whether studio may draw a live preview.
  *
- * The manifest names image FILES beside it, in the studio bundle's `editors/<id>/` directory (studio-bundle editors
- * only for now: garden's pack gate refuses the keys, and a pack's images would need descriptor-anchored reads). The
+ * The manifest names image FILES relative to its own directory: a studio-bundle editor's `editors/<id>/`, or an
+ * installed pack's root (where garden's install.py stages the declared images, crew#1702). The
  * registry reads each once, bounded, never through a link, and puts it on the wire as a `data:`
  * URL: no path and no remote URL ever reaches the browser, and an image is never served from crew's own origin (an SVG
  * opened there could run script; as an `<img src="data:…">` it cannot).
@@ -82,6 +82,14 @@ export function imageDataUrl(root: string, name: string, cap: number, why: (m: s
   const path = resolve(root, name);
   const rel = relative(resolve(root), path);
   if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) { why(`${name} is outside its directory`); return null; }
+  // The file's identity is taken BEFORE its directories are checked, and the open must land on it: a directory on the
+  // way swapped for a link after its check opens some other file, which is refused (crew#1702 review).
+  let pinned: { ino: number; dev: number } | null = null;
+  try {
+    pinned = lstatSync(path);
+  } catch {
+    pinned = null;
+  }
   let at = resolve(root);
   for (const part of rel.split(sep).slice(0, -1)) {
     at = join(at, part);
@@ -89,10 +97,10 @@ export function imageDataUrl(root: string, name: string, cap: number, why: (m: s
     if (p !== null) { why(`${name}: directory ${part} is ${p}`); return null; }
   }
   const problem = notRealEntry(path, 'file');
-  if (problem !== null) { why(`${name} is ${problem}`); return null; }
+  if (problem !== null || pinned === null) { why(`${name} is ${problem ?? 'missing'}`); return null; }
   let buf: Buffer | null;
   try {
-    buf = readNoFollow(path, cap);
+    buf = readNoFollow(path, cap, pinned);
   } catch (err) {
     why(`${name} is unreadable (${err instanceof Error ? (err as NodeJS.ErrnoException).code ?? err.message : String(err)})`);
     return null;
@@ -106,10 +114,11 @@ export function imageDataUrl(root: string, name: string, cap: number, why: (m: s
 /**
  * Read at most `cap` bytes of a file, never through a link (codex on crew#1234): the open refuses a link swapped in
  * for the file after the check (O_NOFOLLOW where the platform has it), and the open file must be the regular file
- * that was checked (same device and inode). Null = over the cap, or not the checked file.
+ * that was checked (same device and inode). The open never waits (O_NONBLOCK): a FIFO swapped in for the file would
+ * otherwise block the daemon until something writes to it. Null = over the cap, or not the checked file.
  */
 export function readNoFollow(path: string, cap: number, checked: { ino: number; dev: number } = lstatSync(path)): Buffer | null {
-  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.ino !== checked.ino || st.dev !== checked.dev || st.size > cap) return null;
