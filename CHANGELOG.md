@@ -10,9 +10,11 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
-## [0.18.21] — 2026-11-23
+## [0.18.21] — 2026-11-24
 
-Patch release on the train-12 re-cut 4 c14af846, carrying 58 PRs since 0.18.20: #1733, #1734, #1735, #1749, #1746, #1748, #1755, #1757, #1759, #1747, #1756, #1758, #1711, #1754, #1765, #1770, #1769, #1772, #1768, #1773, #1771, #1776, #1778, #1777, #1785, #1783, #1789, #1784, #1786, #1781, #1782, #1799, #1796, #1798. wicked-crew-api-types 0.224.0 releases with it: 0.223.0 plus the type changes from #1758, #1765, #1773, #1776, #1778, #1782, #1783, #1784, #1789, #1796 and #1798 (it stays a workspace link in this repository), #1809, #1801, #1811, #1805, #1808, #1810, #1807, #1806, #1817, #1816, #1815, #1821, #1820, #1824, #1830, #1827, #1829, #1826, #1828, #1825, #1831, #1833, #1834, #1836.
+Patch release on the train-13 cut befdbec0, carrying 69 PRs since 0.18.20: #1733, #1734, #1735, #1749, #1746, #1748, #1755, #1757, #1759, #1747, #1756, #1758, #1711, #1754, #1765, #1770, #1769, #1772, #1768, #1773, #1771, #1776, #1778, #1777, #1785, #1783, #1789, #1784, #1786, #1781, #1782, #1799, #1796, #1798. wicked-crew-api-types 0.224.0 releases with it: 0.223.0 plus the type changes from #1758, #1765, #1773, #1776, #1778, #1782, #1783, #1784, #1789, #1796 and #1798 (it stays a workspace link in this repository), #1809, #1801, #1811, #1805, #1808, #1810, #1807, #1806, #1817, #1816, #1815, #1821, #1820, #1824, #1830, #1827, #1829, #1826, #1828, #1825, #1831, #1833, #1834, #1836, #1841, #1850, #1847, #1848, #1849, #1852, #1853, #1858, #1859, #1861, #1860.
+
+Known limitation (domain mapping accuracy): `/analyze domain` keeps its current mapping loop (wicked-garden 12.68.6). On the train-12 certification an independent codex judge read 30 of its statements against the CardDemo source: 21 accurate, 9 overreached (the statement claims more than the code shows, most often by dropping a guarding condition; wicked-garden#1544) and 0 wrong. Its coverage figure (80.6% on CardDemo) counts the behaviours that were given a statement, not whether each statement is accurate. A redesigned mapping, measured at 2 of 30 overreached on the same judge, replaces this loop in a later release.
 
 ### Added
 
@@ -23,6 +25,7 @@ Patch release on the train-12 re-cut 4 c14af846, carrying 58 PRs since 0.18.20: 
 - The launch card names a seat seen sharing a provider (#1821)
 - A pause answer names the pause it answers (#1820)
 - GET /settings/start-on-login reads whether this daemon starts at login (studio#1324) (#1829)
+- Retire a requirement whose code was deleted (wicked-core#1698) (#1858)
 
 ### Changed
 
@@ -80,6 +83,16 @@ Patch release on the train-12 re-cut 4 c14af846, carrying 58 PRs since 0.18.20: 
 - The review seat ran none of the work it reviews; run-cost facts scoped to the run's project (#1833)
 - A named-source knowledge recall requires the source before estate ranks (crew#1362 item 4) (#1834)
 - A person's profile writes its data shapes into knowledge, and a re-profile replaces them (crew#1625) (#1836)
+- Read AB# work items at launch, clone ADO URLs with the daemon's credential, revise a delivered PR from chat (crew#1838, crew#1839, crew#1840) (#1841)
+- A gateway that never serves and a failing credential refresh are needs, not "All clear" (crew#1845) (#1850)
+- A drafted rule never replaces one in force; a one-seat review schedule takes reduced assurance (crew#1846, crew#1837) (#1847)
+- A shipped process rule (RVWL-*) is only reported, never fails review (core#1316) (#1848)
+- The stay-in-place line says only what the engine refuses; pin the run-tree sweep for trees beside the checkout (#1849)
+- A pack editor's description and card images reach GET /editors (crew#1702) (#1852)
+- A chat refine's landing check verifies its citations against the records and the document's repositories (#1853)
+- A cluster never set up reads its own reason, and every engine hint is a command that runs (crew#1844) (#1859)
+- A blast-radius page whose stale evidence was budgeted out marks its total partial (crew#1797) (#1861)
+- Every crew git runs without the Azure DevOps token and with fsmonitor off; From a URL on Azure DevOps fetches Git LFS files (crew#1843, crew#1842) (#1860)
 
 ## [0.18.20] — 2026-11-22
 
