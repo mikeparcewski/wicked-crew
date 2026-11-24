@@ -82,3 +82,60 @@ it.skipIf(!REQUIRED && !garden)('the refine floor refuses a wrong or made-up rec
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// coord r2 on crew#1853: the repository moves on between the draft and the refine (a line inserted above a cited line,
+// a cited file renamed). The citations the revision carries over unchanged were checked when they were written; the
+// refine judges only the ones it adds or changes, so a repository-grounded document can still be refined.
+it.skipIf(!REQUIRED && !garden)('a refine lands when the repository changed under the citations it carries over, and still refuses one it adds', async () => {
+  if (!garden) throw new Error('WICKED_CLAIMS_FLOOR=required but WICKED_GARDEN_ROOT is missing (expected a wicked-garden checkout)');
+  const dir = mkdtempSync(join(tmpdir(), 'crew-refine-carried-'));
+  try {
+    const repo = join(dir, 'widgets');
+    mkdirSync(join(repo, 'docs'), { recursive: true });
+    // The repository as the draft saw it: both citations below were right then.
+    writeFileSync(join(repo, 'docs', 'perf.md'), '# Perf\n\nThe API serves 450 requests per second.\n');
+    writeFileSync(join(repo, 'docs', 'uptime.md'), 'Uptime was 99.9% last quarter.\n');
+    const carried =
+      '<p data-source="docs/perf.md:3">The API serves 450 requests per second.</p>' +
+      '<p data-source="docs/uptime.md:1">Uptime was 99.9% last quarter.</p>';
+    const docsRoot = join(dir, 'docs');
+    mkdirSync(join(docsRoot, 'deck'), { recursive: true });
+    writeFileSync(join(docsRoot, 'deck', '_v0.html'), `<html><body>${carried}</body></html>`);
+    writeFileSync(join(docsRoot, 'deck', 'versions.json'), JSON.stringify({ head: 0, versions: [{ version: 0, parent: null, html_file: '_v0.html' }] }));
+    // Then the repository moved on: one line above the cited one, and the uptime file renamed.
+    writeFileSync(join(repo, 'docs', 'perf.md'), '# Perf\n\nMeasured on the staging cluster.\nThe API serves 450 requests per second.\n');
+    rmSync(join(repo, 'docs', 'uptime.md'));
+    writeFileSync(join(repo, 'docs', 'availability.md'), 'Uptime was 99.9% last quarter.\n');
+    const out = join(dir, 'revised.html');
+    const notes = join(dir, 'revised.notes.json');
+    writeFileSync(notes, JSON.stringify({ left_out: [], sources: [], assumptions: [] }));
+    const keep = {
+      gardenRoot: () => '/garden',
+      run: async (argv: string[]) => (argv.includes('map')
+        ? { stdout: JSON.stringify({ ok: true, map: { texts: {}, attrs: {}, gone: [], added: [], order: null, labels: {} }, entries: [] }), code: 0 }
+        : { stdout: JSON.stringify({ ok: true, kept: 0, violations: [] }), code: 0 }),
+    };
+    const guard = async (body: string) => {
+      writeFileSync(out, `<html><body>${body}</body></html>`);
+      return guardRefine({
+        outPath: out, notesPath: notes, runId: RUN, docsRoot, doc: 'deck', base: 0, allow: [], allowOf: () => [],
+        claims: { files: [], packetBytes: () => Buffer.alloc(0), repos: [{ name: 'widgets', rootPath: repo }] },
+      }, { floor: { gardenRoot: () => garden }, garden: keep });
+    };
+    // The refine rewrote the heading and carried both citations over as they were: it lands, and the check says so.
+    const landed = await guard(`<h1>Platform health</h1>${carried}`);
+    expect(landed, landed.ok ? '' : landed.reason).toMatchObject({ ok: true });
+    if (landed.ok) expect(landed.floor.summary).toContain('carried over');
+    // A citation the refine adds is judged against the repository as it is now: a wrong line is refused.
+    const added = await guard(`${carried}<p data-source="docs/perf.md:1">The API serves 450 requests per second.</p>`);
+    expect(added).toMatchObject({ ok: false, reason: expect.stringContaining('cite-off') });
+    // So is a carried citation whose text the refine changed.
+    const changed = await guard(carried.replace('450 requests per second.', '450 requests per second at peak.'));
+    expect(changed).toMatchObject({ ok: false, reason: expect.stringContaining('cite-off') });
+    // And a file the refine newly cites that is not there.
+    const gone = await guard(`${carried}<p data-source="docs/latency.md:1">Latency held at 120 ms.</p>`);
+    expect(gone).toMatchObject({ ok: false, reason: expect.stringContaining('dangling-source') });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

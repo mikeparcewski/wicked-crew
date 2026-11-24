@@ -8,7 +8,9 @@
  *     the run id, check names, `[S]` markers, "I used …") are in the document — the same rules the writer was told to
  *     run, re-derived — and every `data-source="<file>:<line>"` is checked against the folders the document may cite
  *     (crew#1727): crew's own copy of the refine's records, and a snapshot of each repository the document is grounded
- *     on, the same inputs the first draft's floor had;
+ *     on, the same inputs the first draft's floor had. A citation the revision carries over unchanged from the version
+ *     it started from is not judged again (the repository may have moved on since it was checked); one it adds or
+ *     changes is;
  *  2. the keep check: the person's protected edits, recomputed from the document's lineage at the head the refine
  *     started from (interactive's versions, which no worker can write), minus exactly the entries the person let this
  *     refine change.
@@ -23,7 +25,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync }
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { DraftFloorIo, DraftFloorVerdict } from './draft-skill.js';
+import type { ClaimFinding, DraftFloorIo, DraftFloorVerdict } from './draft-skill.js';
 import { oneLine } from './draft-events.js';
 import { runDraftFloor } from './draft-skill.js';
 import { keepCheck, lineageSteps, protectedEdits, type GardenIo } from './protected-edits.js';
@@ -137,7 +139,17 @@ async function refineFloor(input: RefineGuardInput, io: RefineGuardIo): Promise<
           `applied (${oneLine(err instanceof Error ? err.message : String(err), 300)}); ask again`,
       };
     }
-    const floor = await runDraftFloor(input.outPath, { pages: null, exact: false, source: 'unknown' }, folders.dirs, { notes: input.notesPath, runId: input.runId }, io.floor ?? {});
+    const budget = { pages: null, exact: false, source: 'unknown' } as const;
+    // The citations the revision carries over unchanged were checked when they were written, against the repository
+    // as it was then; it may have moved on since (a line inserted above a cited one, a file renamed). Only what the
+    // revision adds or changes is judged: the version it started from is scanned against the same folders, and the
+    // repository-dependent findings it already had are set aside (coord r2 on crew#1853). Asked only on a failure.
+    const carried = async (): Promise<ClaimFinding[] | null> => {
+      const base = lineageSteps(input.docsRoot, input.doc, input.base, input.allowOf)?.at(-1)?.html;
+      if (base === undefined) return null;
+      return (await runDraftFloor(base, budget, folders.dirs, {}, io.floor ?? {})).claimFindings ?? null;
+    };
+    const floor = await runDraftFloor(input.outPath, budget, folders.dirs, { notes: input.notesPath, runId: input.runId, carried }, io.floor ?? {});
     return { floor, missing: folders.missing };
   } finally {
     removeFolder(root);

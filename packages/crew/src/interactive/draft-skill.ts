@@ -287,6 +287,77 @@ export interface DraftFloorVerdict {
   /** (PLAN G12) The page count the check reported: `measured` when a renderer printed it (else a structural lower
    *  bound). `null` = no count in the report (no budget, or a floor that could not run). */
   pages?: { count: number; measured: boolean; budget: number | null; exact: boolean } | null;
+  /** The claims scan's findings, as the report listed them (before any {@link withoutCarriedClaims}); absent when the
+   *  report carried none it could read. */
+  claimFindings?: ClaimFinding[];
+}
+
+/** One finding of garden's claims scan (`claims_scan.py` `Finding.as_dict`), as the floor compares them. */
+export interface ClaimFinding {
+  kind: string;
+  text: string;
+  detail: string;
+}
+
+/**
+ * The claims findings that depend on the repository's contents rather than on the document alone: a cited line whose
+ * text moved, a cited file that is gone, a URL no file mentions any more. The repository can change under a citation
+ * after it was checked; every other kind (an uncited number, a placeholder, an escaped path) is about the document.
+ */
+export const REPO_DEPENDENT_CLAIM_KINDS: ReadonlySet<string> = new Set(['cite-off', 'dangling-source', 'unsourced-url']);
+
+/** The report's claims findings, every well-formed one (`kind`, `text`, `detail` strings). */
+export function claimFindingsOf(report: unknown): ClaimFinding[] | null {
+  const claims = (report as SelfCheckReport | null)?.checks?.claims;
+  if (typeof claims !== 'object' || claims === null || !Array.isArray(claims.findings)) return null;
+  return claims.findings.flatMap((f: unknown) => {
+    const r = f as Record<string, unknown> | null;
+    return r !== null && typeof r === 'object' && typeof r['kind'] === 'string' && typeof r['text'] === 'string' && typeof r['detail'] === 'string'
+      ? [{ kind: r['kind'], text: r['text'], detail: r['detail'] }]
+      : [];
+  });
+}
+
+/**
+ * The report with the repository-dependent claims findings ({@link REPO_DEPENDENT_CLAIM_KINDS}) that `carried` already
+ * has set aside — the same kind, element text and detail, counted (two copies of a finding the base had once leave one).
+ * `carried` is the claims scan of the version a refine started from, judged against the SAME folders: what it already
+ * had, the revision carried over unchanged, and was checked when it was written. What the revision adds or changes is
+ * still judged. When no claims finding is left, `claims` passes and the report's `failed` / `verdict` are recomputed by
+ * `self_check.py`'s own rules (`run`); any other finding, and a malformed one, stays.
+ */
+export function withoutCarriedClaims(report: unknown, carried: readonly ClaimFinding[]): { report: unknown; dropped: number } {
+  const rep = report as { checks?: { claims?: Record<string, unknown> }; failed?: unknown; unverified?: unknown; verdict?: unknown } | null;
+  const claims = rep?.checks?.claims;
+  if (rep === null || typeof rep !== 'object' || typeof claims !== 'object' || claims === null || !Array.isArray(claims['findings'])) {
+    return { report, dropped: 0 };
+  }
+  const key = (f: ClaimFinding): string => JSON.stringify([f.kind, f.text, f.detail]);
+  const left = new Map<string, number>();
+  for (const f of carried) if (REPO_DEPENDENT_CLAIM_KINDS.has(f.kind)) left.set(key(f), (left.get(key(f)) ?? 0) + 1);
+  const kept: unknown[] = [];
+  let dropped = 0;
+  for (const f of claims['findings'] as unknown[]) {
+    const one = claimFindingsOf({ checks: { claims: { findings: [f] } } })?.[0];
+    const n = one !== undefined ? (left.get(key(one)) ?? 0) : 0;
+    if (one !== undefined && n > 0) {
+      left.set(key(one), n - 1);
+      dropped += 1;
+    } else kept.push(f);
+  }
+  if (dropped === 0) return { report, dropped: 0 };
+  const byKind: Record<string, number> = {};
+  for (const f of kept) {
+    const kind = typeof (f as { kind?: unknown } | null)?.kind === 'string' ? (f as { kind: string }).kind : 'finding';
+    byKind[kind] = (byKind[kind] ?? 0) + 1;
+  }
+  const ok = kept.length === 0;
+  const nextClaims = { ...claims, ok, by_kind: byKind, findings: kept };
+  const failed = Array.isArray(rep.failed) ? rep.failed.filter((n) => !(ok && n === 'claims')) : rep.failed;
+  const unverified = Array.isArray(rep.unverified) ? rep.unverified : [];
+  const verdict =
+    rep.verdict !== 'FAIL' || !Array.isArray(failed) ? rep.verdict : failed.length > 0 ? 'FAIL' : unverified.length > 0 ? 'UNVERIFIED' : 'PASS';
+  return { report: { ...rep, checks: { ...rep.checks, claims: nextClaims }, failed, verdict, ok: verdict === 'PASS' }, dropped };
 }
 
 interface SelfCheckReport {
@@ -692,7 +763,15 @@ export async function runDraftFloor(
   outPath: string,
   budget: PageBudget,
   snapshotDirs: readonly string[],
-  opts: { style?: string; notes?: string; runId?: string } = {},
+  opts: {
+    style?: string;
+    notes?: string;
+    runId?: string;
+    /** A refine's: the claims findings the version it started from already has (that version's own claims scan,
+     *  against the same folders), asked only when this document's claims check fails. Those it carries over are set
+     *  aside ({@link withoutCarriedClaims}); `null` = not known, nothing is set aside. */
+    carried?: () => Promise<ClaimFinding[] | null>;
+  } = {},
   io: DraftFloorIo = {},
 ): Promise<DraftFloorVerdict> {
   const root = (io.gardenRoot ?? gardenPluginRoot)();
@@ -736,7 +815,8 @@ export async function runDraftFloor(
   }
   // A reused count needs no browser: the self-check runs without its own render.
   if (reused !== null) chrome = null;
-  const argv = draftFloorArgv(root, outPath, budget, snapshotDirs, { ...opts, render: chrome !== null });
+  const { carried: carriedOf, ...argvOpts } = opts;
+  const argv = draftFloorArgv(root, outPath, budget, snapshotDirs, { ...argvOpts, render: chrome !== null });
   let answer: { stdout: string; code: number | null };
   try {
     answer = await (io.run ?? runNode)(argv, io.timeoutMs ?? DRAFT_FLOOR_TIMEOUT_MS, chrome ?? undefined);
@@ -759,9 +839,29 @@ export async function runDraftFloor(
         `JSON report (is Python 3 installed for the wicked-garden launcher?)`,
     };
   }
-  if (reused === null) return draftFloorVerdict(report, budget, { notes: opts.notes !== undefined });
-  const verdict = draftFloorVerdict(withMeasuredPages(report, reused, budget), budget, { notes: opts.notes !== undefined });
+  const claimFindings = claimFindingsOf(report);
+  // A refine: the claims findings the version it started from already had are set aside (coord r2 on crew#1853).
+  let judged = report;
+  let dropped = 0;
+  if (carriedOf !== undefined && (report as SelfCheckReport).checks?.claims?.ok === false) {
+    let carried: ClaimFinding[] | null;
+    try {
+      carried = await carriedOf();
+    } catch {
+      carried = null;
+    }
+    if (carried !== null) ({ report: judged, dropped } = withoutCarriedClaims(report, carried));
+  }
+  const carriedNote =
+    dropped > 0
+      ? ` (${dropped} citation finding(s) the revision carried over unchanged from the version it started from were not ` +
+        `judged again: the repository changed after they were checked)`
+      : '';
+  const withFindings = (v: DraftFloorVerdict): DraftFloorVerdict =>
+    v.verdict === 'unavailable' ? v : { ...v, summary: `${v.summary}${carriedNote}`, ...(claimFindings !== null ? { claimFindings } : {}) };
+  if (reused === null) return withFindings(draftFloorVerdict(judged, budget, { notes: opts.notes !== undefined }));
+  const verdict = draftFloorVerdict(withMeasuredPages(judged, reused, budget), budget, { notes: opts.notes !== undefined });
   return verdict.verdict === 'unavailable'
     ? verdict
-    : { ...verdict, summary: `${verdict.summary} (pages: ${reused}, printed by the run's own draft_render step on these exact bytes)` };
+    : withFindings({ ...verdict, summary: `${verdict.summary} (pages: ${reused}, printed by the run's own draft_render step on these exact bytes)` });
 }
