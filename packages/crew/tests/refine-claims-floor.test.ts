@@ -187,6 +187,15 @@ it.skipIf(!REQUIRED && !garden)('a refused rewording of a carried citation says 
     const added = await guard(`${carried}<p data-source="docs/perf.md:1">The API serves 450 requests per second.</p>`);
     expect(added.ok).toBe(false);
     expect(added.ok ? '' : added.reason).not.toContain('changed since the draft');
+    // Nor is a second paragraph the refine adds on the very citation it carried over unchanged (review r1): the one base
+    // finding is the carried paragraph's, set aside, and explains nothing else.
+    const duplicated = await guard(`${carried}<p data-source="docs/perf.md:3">The API serves 9999 requests per second.</p>`);
+    expect(duplicated.ok).toBe(false);
+    expect(duplicated.ok ? '' : duplicated.reason).not.toContain('changed since the draft');
+    // A reworded carrier beside a new paragraph on the same citation: one base finding explains one refused finding.
+    const both = await guard(`${carried.replace('450 requests per second.', '450 requests per second at peak.')}<p data-source="docs/perf.md:3">The API serves 9999 requests per second.</p>`);
+    expect(both.ok ? '' : both.reason).toContain('at peak');
+    expect(both.ok ? '' : both.reason).not.toContain('9999');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

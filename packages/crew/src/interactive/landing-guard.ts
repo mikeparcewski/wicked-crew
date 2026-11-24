@@ -121,41 +121,57 @@ function missingReposNote(missing: readonly MissingRepo[]): string {
     .join('');
 }
 
-/** The citation a repository-dependent finding is about: a `cite-off`'s `data-source` spec (its detail starts with it),
- *  a `dangling-source`'s or `unsourced-url`'s own text (the scan reports the path or URL as the text). */
-function citationOf(f: ClaimFinding): string | null {
-  if (f.kind === 'cite-off') return /^data-source (\S+)/.exec(f.detail)?.[1] ?? null;
-  return f.kind === 'dangling-source' || f.kind === 'unsourced-url' ? f.text : null;
+/** The `data-source` spec a `cite-off` finding is about (its detail starts with it, `claims_scan.py` `_check_cite_off`). Only
+ *  a cite-off names both the citation (detail) and the element's text (text): a `dangling-source` or `unsourced-url`
+ *  reports the path or URL as its text, so a reworded carrier of one is the same finding and was set aside already. */
+function citeOffSpec(f: ClaimFinding): string | null {
+  return f.kind === 'cite-off' ? (/^data-source (\S+)/.exec(f.detail)?.[1] ?? null) : null;
 }
 
 /**
  * (crew#1857) The sentence a refused revision adds when a citation it was refused for also fails in the version the
- * refine started from (same kind and citation, other element text): that paragraph's citation was checked when it was
- * written, so the repository has changed under it since (or it never matched). The refine writer has no repository
- * folder to correct the line from, so asking again would be refused again: say which citation, the nearest line the scan
- * found, and what to do. The findings the revision carried over unchanged were set aside already and are not counted.
+ * refine started from, with other element text: that paragraph's citation was checked when it was written, so the
+ * repository has most likely changed under it since. The refine writer has no repository folder to correct the line
+ * from, so asking again would be refused again: say which citation, the nearest line the scan found, and what to do.
+ * Matching is one to one (review r1): the findings carried over unchanged are set aside first, from both sides, and each
+ * base finding explains at most one refused one, so a citation the refine adds itself is never blamed on the repository.
  */
 function movedCitationsNote(revision: readonly ClaimFinding[], base: readonly ClaimFinding[]): string {
   const key = (f: ClaimFinding): string => JSON.stringify([f.kind, f.text, f.detail]);
-  const unchanged = new Map<string, number>();
-  for (const f of base) unchanged.set(key(f), (unchanged.get(key(f)) ?? 0) + 1);
-  const baseCites = new Set(base.flatMap((f) => (REPO_DEPENDENT_CLAIM_KINDS.has(f.kind) && citationOf(f) !== null ? [`${f.kind}\u0000${citationOf(f)}`] : [])));
-  const moved: string[] = [];
+  const baseLeft = new Map<string, number>();
+  for (const f of base) if (REPO_DEPENDENT_CLAIM_KINDS.has(f.kind)) baseLeft.set(key(f), (baseLeft.get(key(f)) ?? 0) + 1);
+  // 1. Set aside what the revision carried over unchanged (as withoutCarriedClaims does), consuming those base findings.
+  const refused: ClaimFinding[] = [];
   for (const f of revision) {
-    const n = unchanged.get(key(f)) ?? 0;
-    if (n > 0) { unchanged.set(key(f), n - 1); continue; } // carried over unchanged: set aside, not this refusal
-    const cite = citationOf(f);
-    if (!REPO_DEPENDENT_CLAIM_KINDS.has(f.kind) || cite === null || !baseCites.has(`${f.kind}\u0000${cite}`)) continue;
+    const n = baseLeft.get(key(f)) ?? 0;
+    if (REPO_DEPENDENT_CLAIM_KINDS.has(f.kind) && n > 0) baseLeft.set(key(f), n - 1);
+    else refused.push(f);
+  }
+  // 2. The base's cite-offs left over (their carriers the revision changed), counted per citation.
+  const byCite = new Map<string, number>();
+  for (const f of base) {
+    const n = baseLeft.get(key(f)) ?? 0;
+    if (n === 0) continue;
+    baseLeft.set(key(f), n - 1);
+    const spec = citeOffSpec(f);
+    if (spec !== null) byCite.set(spec, (byCite.get(spec) ?? 0) + 1);
+  }
+  // 3. Each refused cite-off on one of those citations takes one of them.
+  const moved: string[] = [];
+  for (const f of refused) {
+    const spec = citeOffSpec(f);
+    const n = spec === null ? 0 : (byCite.get(spec) ?? 0);
+    if (spec === null || n === 0) continue;
+    byCite.set(spec, n - 1);
     const nearest = /nearest match: line (\d+)/.exec(f.detail)?.[1];
-    const what = f.kind === 'dangling-source' ? `${cite} (that file is no longer in the repository)` : `${cite}${nearest !== undefined ? ` (the nearest matching line is now ${nearest})` : ''}`;
-    const line = `${what} in "${oneLine(f.text, 80)}"`;
-    if (!moved.includes(line)) moved.push(line);
+    moved.push(`${spec}${nearest !== undefined ? ` (the nearest matching line is now ${nearest})` : ''} in "${oneLine(f.text, 80)}"`);
   }
   if (moved.length === 0) return '';
-  return ` The cited repository changed since the draft: the version this refine started from fails on the same citation ` +
-    `${moved.slice(0, 3).join('; ')}${moved.length > 3 ? ` and ${moved.length - 3} more` : ''}. A refine cannot re-check ` +
-    `the repository's lines, so asking again gives the same answer: keep that paragraph's wording as it was, or make a new ` +
-    `draft from the repository as it is now.`;
+  return ` The version this refine started from already fails on the same citation, so the cited repository has most ` +
+    `likely changed since the draft (or that citation never matched): ${moved.slice(0, 3).join('; ')}` +
+    `${moved.length > 3 ? ` and ${moved.length - 3} more` : ''}. A refine cannot re-check the repository's lines, so ` +
+    `asking again gives the same answer: keep that paragraph's wording as it was, or make a new draft from the ` +
+    `repository as it is now.`;
 }
 
 export type RefineGuardResult =
