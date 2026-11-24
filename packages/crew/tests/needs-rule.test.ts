@@ -6,14 +6,15 @@
 // ask refused by input governance (1). Everything else is either unresolved work (with what it
 // cost and how to resolve it) or not stuck at all.
 
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { SessionView, SystemCli, SystemInfraRow, SystemRun } from 'wicked-crew-api-types';
 
 import { buildNeeds, foldRunCost, GATEWAY_START_BOUND_MS, GatewayStartWatch, isAnsweredAsk, needsLevel, RunCostCache, supersession } from '../src/api/needs.js';
 import { judgeGaps, probeBroker, runLiveness } from '../src/api/system-snapshot.js';
-import { clusterRows, type ClusterStatus } from '../src/api/cluster-status.js';
+import { clusterInstallCommand, clusterRows, gatewayNamespace, kubectlWord, type ClusterStatus } from '../src/api/cluster-status.js';
 
 interface DumpRun {
   id: string;
@@ -505,11 +506,41 @@ describe('a gateway that never serves and a failing credential refresh (crew#184
     const item = later.attention.find((a) => a.id === 'infra:gateway');
     expect(item).toMatchObject({ kind: 'prevents', severity: 'red', source: 'infra', title: 'Model gateway: not ready', blockedRunIds: ['st'] });
     expect(item!.reason).toMatch(/^Its pod has not become ready in 11 min, so seats have no route to their models/);
-    expect(item!.remedy).toMatch(/gateway pod's events and log/);
+    expect(item!.remedy).toMatch(/gateway pod's events/);
     expect(item!.remedy).toMatch(/wicked-core cluster install/);
     // The stalled run is the gateway's, not an item of its own.
     expect(later.attention.find((a) => a.id === 'run:st')).toBeUndefined();
     expect(needsLevel(later.attention)).not.toBe('green');
+  });
+
+  // crew#1851: the fix named an install command with two placeholders and "the gateway pod's events and log" with no
+  // command or namespace. It is now the cluster row's own filled-in install command (one source) and the exact kubectl
+  // commands, in the namespace the engine puts this daemon's gateway in.
+  it('the not-ready fix is runnable as offered: the filled-in install command and the exact events and log commands (crew#1851)', () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'crew-1851-')));
+    try {
+      const engine = { exe: '/opt/wicked/bin/wicked-core', home };
+      const watch = new GatewayStartWatch();
+      needsAt(NOW, [gatewayRow('starting')], watch);
+      const item = buildNeeds({
+        now: NOW + GATEWAY_START_BOUND_MS + MIN, views: [], runs: [], infra: [gatewayRow('starting')], clis: signedIn, gaps: [],
+        infraHoldsLive: (k) => k === 'gateway', gatewayWatch: watch, engine,
+      }).attention.find((a) => a.id === 'infra:gateway');
+      expect(item?.title).toBe('Model gateway: not ready');
+      const remedy = item!.remedy!;
+      // No placeholder a person could paste as offered.
+      expect(remedy).not.toMatch(/<[^>]*>/);
+      expect(remedy).not.toMatch(/your cluster context|state home>/);
+      // The install command is the cluster row's, character for character.
+      expect(remedy).toContain(`\`${clusterInstallCommand(engine)}\``);
+      const ns = gatewayNamespace(home);
+      expect(ns).toMatch(/^wicked-sys-w[0-9a-f]{12}$/);
+      // The kubectl this host's terminal runs (the daemon's PATH, Rancher Desktop's ~/.rd/bin included).
+      const kubectl = kubectlWord();
+      expect(remedy).toContain(`\`${kubectl} --context rancher-desktop -n ${ns} describe pods -l wicked.dev/role=gateway\``);
+      // Every container's log, init containers included; one not started yet does not stop the others (codex r1).
+      expect(remedy).toContain(`\`${kubectl} --context rancher-desktop -n ${ns} logs deploy/agw --all-containers --ignore-errors --prefix --tail 50\``);
+    } finally { rmSync(home, { recursive: true, force: true }); }
   });
 
   it('a run already stalled behind a starting gateway makes it a need on the first read (Nerve Center opened late)', () => {

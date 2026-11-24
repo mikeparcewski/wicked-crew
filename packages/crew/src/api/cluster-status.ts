@@ -9,9 +9,10 @@
  * rather than spelling kubectl itself. Reads are single-flight (each is several kubectl calls, and a
  * studio poll can read `/system` and `/diagnostics` at once), never cached: a Re-check is fresh.
  */
-import { realpathSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import type { SystemInfraRow } from '../core/types.js';
 import { redactString } from '../mcp/redact.js';
 import { homeless } from './seat-standing.js';
@@ -211,7 +212,68 @@ export function clusterInstallCommand(engine: EngineSpot): string {
 /** How the install command's context is chosen, said once beside it. */
 export const CONTEXT_NOTE = `${RANCHER_CONTEXT} is Rancher Desktop's cluster; for a different cluster, use its context`;
 
-const NO_ENGINE: EngineSpot = { exe: null, home: null };
+export const NO_ENGINE: EngineSpot = { exe: null, home: null };
+/** A resolved path as Rust's `fs::canonicalize` spells it: on Windows it keeps the verbatim prefix (`\\?\C:\…`,
+ *  `\\?\UNC\server\share\…`) that Node's realpath strips; elsewhere it is the path itself. */
+export function rustCanonicalSpelling(resolved: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform !== 'win32' || resolved.startsWith('\\\\?\\')) return resolved;
+  return resolved.startsWith('\\\\') ? `\\\\?\\UNC\\${resolved.slice(2)}` : `\\\\?\\${resolved}`;
+}
+
+/** `path` canonical, the way the engine reads a state home (wicked-core `worker_sandbox::canon_lenient`): the OS's own
+ *  realpath when it exists (`realpathSync.native`, as Rust's `canonicalize`: a symlink is followed before a `..` after
+ *  it), else its nearest existing ancestor's, with the missing tail kept. */
+function canonLenient(path: string, real: (p: string) => string = realpathSync.native): string {
+  const missing: string[] = [];
+  let cur = resolve(path);
+  for (;;) {
+    try { return join(rustCanonicalSpelling(real(cur)), ...missing.reverse()); } catch { /* not there yet: try its parent */ }
+    const up = dirname(cur);
+    if (up === cur) return resolve(path);
+    missing.push(basename(cur));
+    cur = up;
+  }
+}
+
+/** The namespace the engine runs this daemon's gateway in (wicked-core src/k8s/mod.rs `owner_id` and
+ *  `daemon_namespace_name`): `wicked-sys-w` and the first 12 hex digits of the sha256 of the canonical state home. */
+export function gatewayNamespace(home: string): string {
+  return `wicked-sys-w${createHash('sha256').update(canonLenient(home)).digest('hex').slice(0, 12)}`;
+}
+
+/** The kubectl a person's terminal can run: the one the engine runs, found by its own rules (wicked-core src/k8s/mod.rs
+ *  `kubectl_candidates`): `WICKED_KUBECTL` alone when set (an absolute path, else looked up on PATH); else the first
+ *  `kubectl` on the daemon's PATH (which carries Rancher Desktop's `~/.rd/bin`, `setup/tool-path.ts`), `~/.rd/bin`, then
+ *  the desktops' install folders. Written as a shell word; the bare name when none is found. */
+export function kubectlWord(env: NodeJS.ProcessEnv = process.env, home: string = homedir(), platform: NodeJS.Platform = process.platform): string {
+  const isFile = (p: string): boolean => { try { return statSync(p).isFile(); } catch { return false; } };
+  const dirs = (env['PATH'] ?? (platform === 'win32' ? env['Path'] : undefined) ?? '').split(platform === 'win32' ? ';' : ':').filter((d) => d !== '');
+  const onPath = (name: string): string | undefined => dirs.map((d) => resolve(d, name)).find(isFile);
+  const word = (p: string | undefined, bare: string): string => (p === undefined ? bare : shellPath(p, home));
+  const choice = (env['WICKED_KUBECTL'] ?? '').trim();
+  if (choice !== '') return isAbsolute(choice) ? word(isFile(choice) ? choice : undefined, shellPath(choice, home)) : word(onPath(choice), choice);
+  const exe = platform === 'win32' ? 'kubectl.exe' : 'kubectl';
+  const desktops = [join(home, '.rd', 'bin', exe), '/usr/local/bin/kubectl', '/opt/homebrew/bin/kubectl', '/Applications/Docker.app/Contents/Resources/bin/kubectl'];
+  return word(onPath(exe) ?? desktops.find(isFile), 'kubectl');
+}
+
+/** The gateway Deployment's name and its pods' role label (wicked-core src/k8s/render.rs `GATEWAY_NAME`, mod.rs `ROLE_LABEL`). */
+const GATEWAY_DEPLOYMENT = 'agw';
+const GATEWAY_SELECTOR = 'wicked.dev/role=gateway';
+
+/** (crew#1851) What to do about a gateway pod that never becomes ready, every command filled in for this daemon: the
+ *  pod's events and log (in its namespace, through the admin context), then the cluster row's own install command. The
+ *  log reads every container, the init containers where a broken image usually stops the pod included, and one that has
+ *  not started yet does not stop the others' (`--ignore-errors`). */
+export function gatewayNotReadyFix(engine: EngineSpot, kubectlExe: string = kubectlWord()): string {
+  const kubectl = `${kubectlExe} --context ${RANCHER_CONTEXT}`;
+  const look = engine.home !== null
+    ? `\`${kubectl} -n ${gatewayNamespace(engine.home)} describe pods -l ${GATEWAY_SELECTOR}\` shows the gateway pod's events, and ` +
+      `\`${kubectl} -n ${gatewayNamespace(engine.home)} logs deploy/${GATEWAY_DEPLOYMENT} --all-containers --ignore-errors --prefix --tail 50\` its log`
+    : `\`${kubectl} describe pods -A -l ${GATEWAY_SELECTOR}\` shows the gateway pod's events`;
+  return `See why in the cluster: ${look} (${CONTEXT_NOTE}). If its image is broken or missing, run \`${clusterInstallCommand(engine)}\`, then re-check.`;
+}
+
 const install = (engine: EngineSpot): string => `Run \`${clusterInstallCommand(engine)}\` (${CONTEXT_NOTE}), then re-check.`;
 const byHand = (engine: EngineSpot): string => `Re-check; if it persists, run \`${engineCommand(engine, 'cluster status')}\` by hand.`;
 const START = 'Start Rancher Desktop with Kubernetes on, then re-check.';

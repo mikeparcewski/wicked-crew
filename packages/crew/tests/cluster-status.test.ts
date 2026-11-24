@@ -1,6 +1,7 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { join, relative } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   CLUSTER_TIMEOUT_MS,
@@ -10,6 +11,9 @@ import {
   clusterInstallCommand,
   clusterRows,
   engineCommand,
+  gatewayNamespace,
+  kubectlWord,
+  rustCanonicalSpelling,
   parseClusterStatus,
   shellPath,
   readClusterStatus,
@@ -156,6 +160,61 @@ describe('clusterRows', () => {
     expect(engineCommand({ exe: 'bin/engine', home: null }, 'cluster status')).not.toMatch(/^bin\//);
     expect(engineCommand({ exe: 'engine', home: null }, 'cluster status')).toBe('engine cluster status');
     expect(clusterInstallCommand({ exe: '/opt/wc', home: '/var/crew' })).toBe('/opt/wc cluster install --admin-context rancher-desktop --home /var/crew');
+  });
+  it("names the gateway's namespace the way the engine derives it from the state home (crew#1851)", () => {
+    // wicked-core src/k8s/mod.rs: owner_id = "w" + the first 12 hex of sha256(the canonical home, missing tail kept);
+    // daemon_namespace_name = "wicked-sys-" + owner_id.
+    const base = mkdtempSync(join(tmpdir(), 'crew-1851-ns-'));
+    try {
+      const real = realpathSync(base);
+      const want = (p: string): string => `wicked-sys-w${createHash('sha256').update(rustCanonicalSpelling(p)).digest('hex').slice(0, 12)}`;
+      mkdirSync(join(real, 'home'));
+      symlinkSync(join(real, 'home'), join(real, 'link'));
+      expect(gatewayNamespace(join(real, 'home'))).toBe(want(join(real, 'home')));
+      // A symlinked spelling is the same daemon (canonicalized), and a home not made yet keeps its missing tail.
+      expect(gatewayNamespace(join(real, 'link'))).toBe(want(join(real, 'home')));
+      expect(gatewayNamespace(join(real, 'link', 'not-yet', 'x'))).toBe(want(join(real, 'home', 'not-yet', 'x')));
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+  it('follows a symlink before a `..` after it, as the OS realpath (and Rust) do (codex r1)', () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'crew-1851-dotdot-')));
+    try {
+      // work/home -> work/alias/../state, work/alias -> srv/nested; both srv/state and work/state exist.
+      for (const d of ['srv/nested', 'srv/state', 'work/state']) mkdirSync(join(base, d), { recursive: true });
+      symlinkSync(join(base, 'srv', 'nested'), join(base, 'work', 'alias'));
+      // The target spelled with its `..` (join would fold it away before the OS sees the link).
+      symlinkSync(`${join(base, 'work', 'alias')}/../state`, join(base, 'work', 'home'));
+      const want = (p: string): string => `wicked-sys-w${createHash('sha256').update(rustCanonicalSpelling(p)).digest('hex').slice(0, 12)}`;
+      expect(gatewayNamespace(join(base, 'work', 'home'))).toBe(want(join(base, 'srv', 'state')));
+      expect(gatewayNamespace(join(base, 'work', 'home', 'not-yet'))).toBe(want(join(base, 'srv', 'state', 'not-yet')));
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+  it("spells a Windows home as Rust's canonicalize does, verbatim prefix kept (codex r1)", () => {
+    expect(rustCanonicalSpelling('C:\\Users\\Alice\\.wicked-crew', 'win32')).toBe('\\\\?\\C:\\Users\\Alice\\.wicked-crew');
+    expect(rustCanonicalSpelling('\\\\server\\share\\crew', 'win32')).toBe('\\\\?\\UNC\\server\\share\\crew');
+    expect(rustCanonicalSpelling('\\\\?\\C:\\crew', 'win32')).toBe('\\\\?\\C:\\crew');
+    expect(rustCanonicalSpelling('/home/a/.wicked-crew', 'linux')).toBe('/home/a/.wicked-crew');
+  });
+  it('names the kubectl a terminal can run: WICKED_KUBECTL, else the PATH, else ~/.rd/bin, else the bare name (codex r1)', () => {
+    if (process.platform === 'win32') return; // the executable lookup below is POSIX-shaped
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'crew-1851-kubectl-')));
+    try {
+      const home = join(base, 'home');
+      const exe = (dir: string): string => { mkdirSync(dir, { recursive: true }); const p = join(dir, 'kubectl'); writeFileSync(p, '#!/bin/sh\n'); chmodSync(p, 0o755); return p; };
+      // Nothing on PATH or in ~/.rd/bin: the desktops' install folders (as the engine), else the bare name.
+      const desktop = ['/usr/local/bin/kubectl', '/opt/homebrew/bin/kubectl', '/Applications/Docker.app/Contents/Resources/bin/kubectl'].find((p) => existsSync(p));
+      expect(kubectlWord({ PATH: join(base, 'none') }, home)).toBe(desktop ?? 'kubectl');
+      exe(join(home, '.rd', 'bin'));
+      expect(kubectlWord({ PATH: join(base, 'none') }, home)).toBe('~/.rd/bin/kubectl');
+      const onPath = exe(join(base, 'tools bin'));
+      expect(kubectlWord({ PATH: `${join(base, 'none')}:${join(base, 'tools bin')}` }, home)).toBe(shellPath(onPath, home));
+      expect(kubectlWord({ PATH: join(base, 'tools bin'), WICKED_KUBECTL: '/opt/k/kubectl' }, home)).toBe('/opt/k/kubectl');
+      expect(kubectlWord({ WICKED_KUBECTL: 'kubectl-1.31' }, home)).toBe('kubectl-1.31');
+      // A configured bare name is looked up on the daemon's PATH, as the engine looks it up (codex r1 delta).
+      expect(kubectlWord({ PATH: join(base, 'tools bin'), WICKED_KUBECTL: 'kubectl' }, home)).toBe(shellPath(onPath, home));
+      // A relative PATH entry is the daemon's, resolved against its working directory.
+      expect(kubectlWord({ PATH: relative(process.cwd(), join(base, 'tools bin')) }, join(base, 'nohome'))).toBe(shellPath(onPath, join(base, 'nohome')));
+    } finally { rmSync(base, { recursive: true, force: true }); }
   });
   it('each row from its own evidence: a known failure is never hidden by an unread neighbour', () => {
     const noGw = clusterRows(ok({ configured: true, reachable: true, context: 'rd', controller: { ready: false, detail: 'rolling out' } }), true, at);

@@ -12350,6 +12350,7 @@ export function registerRoutes(
         gaps,
         infraHoldsLive: (key) => (key === 'gateway' || key === 'broker' || key === 'cluster' ? containerFloor : key === 'skills' || key === 'state_home' || key === 'disk' || key === 'daemon'),
         costOf: (id) => runCosts.get(id),
+        engine: clusterReader.engine(),
       });
       if (typeof adapter.runEvents === 'function' && first.unresolved.length > 0) {
         const byId = new Map(allViews.map((v) => [v.session.id, v]));
@@ -12374,6 +12375,7 @@ export function registerRoutes(
         gaps,
         infraHoldsLive: (key) => (key === 'gateway' || key === 'broker' || key === 'cluster' ? containerFloor : key === 'skills' || key === 'state_home' || key === 'disk' || key === 'daemon'),
         costOf: (id) => runCosts.get(id),
+        engine: clusterReader.engine(),
       });
       const toReview = await toReviewP;
       // A run list that could not be read never reads green: the daemon row (degraded, "did not list
