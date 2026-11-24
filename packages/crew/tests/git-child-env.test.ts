@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ADO_PAT_ENV, ADO_SP_ENV } from '../src/core/deliver-credentials.js';
-import { ADO_RAW_ENV, childEnvFor, execCapped, gitChildEnv, isGitProgram } from '../src/core/exec.js';
+import { ADO_RAW_ENV, childEnvFor, execCapped, gitChildEnv, isGitProgram, withoutAdoCredential } from '../src/core/exec.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = join(HERE, '..', 'src');
@@ -48,10 +48,20 @@ describe('crew#1843 gitChildEnv', () => {
     // The caller's numbered entries are untouched; the -c channel, read after them, ends with fsmonitor off.
     expect([env['GIT_CONFIG_COUNT'], env['GIT_CONFIG_KEY_0'], env['GIT_CONFIG_VALUE_0']]).toEqual(['1', 'http.followRedirects', 'false']);
     expect(env['GIT_CONFIG_PARAMETERS']).toBe("'core.fsmonitor=true' 'core.fsmonitor=false'");
-    // Applied twice (a caller's env built by gitChildEnv, then execCapped's), it adds nothing more.
-    expect(gitChildEnv(env)['GIT_CONFIG_PARAMETERS']).toBe(env['GIT_CONFIG_PARAMETERS']);
+    // Applied twice (a caller's env built by gitChildEnv, then execCapped's), it is still the last entry.
+    expect(gitChildEnv(env)['GIT_CONFIG_PARAMETERS']).toBe("'core.fsmonitor=true' 'core.fsmonitor=false' 'core.fsmonitor=false'");
+    // A quoted VALUE that ends like the entry is not the entry (review r1): it is appended all the same.
+    expect(gitChildEnv({ GIT_CONFIG_PARAMETERS: "'review.note'='core.fsmonitor=false'" })['GIT_CONFIG_PARAMETERS'])
+      .toBe("'review.note'='core.fsmonitor=false' 'core.fsmonitor=false'");
     // A caller that cleared the channel (the Azure DevOps clone does) gets the entry alone.
     expect(gitChildEnv({ PATH: '/bin', GIT_CONFIG_PARAMETERS: '' })['GIT_CONFIG_PARAMETERS']).toBe("'core.fsmonitor=false'");
+  });
+
+  it('on Windows, drops the credential under any spelling of its name (names are case-insensitive there)', () => {
+    const env = withoutAdoCredential({ PATH: 'C:\\Windows', Azure_Devops_Ext_Pat: FAKE, crew_ado_client_secret: FAKE }, 'win32');
+    expect(Object.keys(env)).toEqual(['PATH']);
+    // Elsewhere a differently spelled name is another variable, which nothing reads.
+    expect(Object.keys(withoutAdoCredential({ Azure_Devops_Ext_Pat: FAKE }, 'linux'))).toEqual(['Azure_Devops_Ext_Pat']);
   });
 
   it('applies to git only: another program keeps the environment it was handed', () => {

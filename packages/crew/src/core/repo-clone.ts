@@ -9,8 +9,9 @@
  * hooks are off, git's own credential helpers are off for it, the raw credential variables are not in its environment,
  * and only the URL's own protocol is allowed. The working tree is checked out after, by a git without the header, so no
  * filter or hook the repository selects runs beside it. (crew#1842) That checkout leaves Git LFS files as pointers
- * (`GIT_LFS_SKIP_SMUDGE=1`: an uncached object would need the credential the checkout does not carry); `git lfs pull`,
- * a host tool and not one the repository selects, then downloads them with the same scoped header, hooks off. The
+ * (`GIT_LFS_SKIP_SMUDGE=1`: an uncached object would need the credential the checkout does not carry); `git lfs fetch`,
+ * a host tool that runs no filter or extension, downloads them with the same scoped header from the repository's own
+ * LFS endpoint, and `git lfs checkout`, again without the header, writes the files. The
  * header is never in argv, never written to the clone's `.git/config` (environment config is not persisted) and never
  * in an error: a message that could carry it is redacted. The clone is of the canonical URL, so the registered
  * `origin` carries no userinfo. Every git here runs on `gitChildEnv` (crew#1843): fsmonitor off, no raw credential.
@@ -19,6 +20,8 @@
 import { adoCredentials, adoRepoOf, ADO_PAT_ENV, ADO_SP_ENV, type AdoRepo } from './deliver-credentials.js';
 import { defaultAdoHelperExec, type AdoHelperExec } from './deliver.js';
 import { spawn } from 'node:child_process';
+import { readdir, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 
 import { ADO_RAW_ENV, execCapped, gitChildEnv, withoutAdoCredential } from './exec.js';
 
@@ -183,17 +186,44 @@ export async function cloneRepository(gitUrl: string, cloneDir: string, opts: { 
   const plain = base;
   const born = await execCapped('git', ['-C', cloneDir, 'rev-parse', '--verify', '--quiet', 'HEAD'], { timeout: 30_000, env: plain }).then(() => true, () => false);
   if (!born) return;
-  await execCapped('git', ['-C', cloneDir, 'checkout', '--quiet', '--force', 'HEAD'], { timeout: CLONE_TIMEOUT_MS, env: { ...plain, GIT_LFS_SKIP_SMUDGE: '1' } });
-  if (!(await usesGitLfs(cloneDir, plain))) return;
   try {
-    // `git lfs pull` is the host's tool: it downloads the checked-out commit's LFS objects from the repository's own LFS
-    // endpoint (`<url>.git/info/lfs`, which the header's URL scope covers) and drops the header on a redirect to
-    // another origin. Hooks, credential helpers and fsmonitor stay off, as for the clone.
-    await runContained('lfs pull', ['-C', cloneDir, '-c', 'credential.helper=', 'lfs', 'pull'], adoCloneEnv(base, ado.gitUrl, header), opts.ado?.timeoutMs ?? CLONE_TIMEOUT_MS);
+    await execCapped('git', ['-C', cloneDir, 'checkout', '--quiet', '--force', 'HEAD'], { timeout: CLONE_TIMEOUT_MS, env: { ...plain, GIT_LFS_SKIP_SMUDGE: '1' } });
+    if (!(await usesGitLfs(cloneDir, plain))) return;
+    try {
+      // ONLY the download carries the header: `git lfs fetch` (the host's tool) stores the checked-out commit's objects
+      // under `.git/lfs` and runs no filter, extension or hook. Its endpoint is pinned to the repository's own
+      // (`<url>.git/info/lfs`, which the header's URL scope covers), so a `.lfsconfig` the repository carries cannot aim
+      // it elsewhere; git-lfs drops the header on a redirect to another origin. Credential helpers stay off.
+      await runContained('lfs fetch', ['-C', cloneDir, '-c', 'credential.helper=', '-c', `lfs.url=${ado.gitUrl}.git/info/lfs`, 'lfs', 'fetch'], adoCloneEnv(base, ado.gitUrl, header), opts.ado?.timeoutMs ?? CLONE_TIMEOUT_MS);
+    } catch (err) {
+      const message = redact(err instanceof Error ? err.message : String(err), secrets);
+      throw new Error(`${ADO_CLONE_LFS_FAILED} ${ado.webUrl} with the daemon's Azure DevOps credential. Check that the credential can read the repository, then add it again. Git said: ${message}`);
+    } finally {
+      // git-lfs writes its environment (the header's GIT_CONFIG_* entries among it) into an error log here.
+      await rm(join(cloneDir, '.git', 'lfs', 'logs'), { recursive: true, force: true });
+    }
+    // The files themselves, from the local store, in a git with no header: whatever filter or extension the checkout
+    // runs sees no credential. The LFS filter is named here as `git lfs install` names it, so a host that installed
+    // git-lfs without running that still gets real files and a clean tree.
+    await execCapped('git', ['-C', cloneDir, ...LFS_FILTER_CONFIG, 'lfs', 'checkout'], { timeout: CLONE_TIMEOUT_MS, env: plain });
   } catch (err) {
-    const message = redact(err instanceof Error ? err.message : String(err), secrets);
-    throw new Error(`${ADO_CLONE_LFS_FAILED} ${ado.webUrl} with the daemon's Azure DevOps credential. Check that the credential can read the repository, then add it again. Git said: ${message}`);
+    // Leave the folder as git found it (empty), so adding the repository again can clone into it.
+    await emptyDir(cloneDir);
+    throw err;
   }
+}
+
+/** The `filter.lfs` keys `git lfs install` writes to a host's global config (git-lfs `lfs/attribute.go`). */
+const LFS_FILTER_CONFIG = [
+  '-c', 'filter.lfs.clean=git-lfs clean -- %f',
+  '-c', 'filter.lfs.smudge=git-lfs smudge -- %f',
+  '-c', 'filter.lfs.process=git-lfs filter-process',
+  '-c', 'filter.lfs.required=true',
+];
+
+async function emptyDir(dir: string): Promise<void> {
+  const entries = await readdir(dir).catch(() => [] as string[]);
+  await Promise.all(entries.map((e) => rm(join(dir, e), { recursive: true, force: true }).catch(() => undefined)));
 }
 
 /** The start of the sentence a clone whose Git LFS files could not be downloaded carries (crew#1842). */
@@ -201,13 +231,18 @@ export const ADO_CLONE_LFS_FAILED = 'Could not download the Git LFS files of';
 
 /**
  * Whether the checked-out commit stores files in Git LFS, and this host has Git LFS to fetch them with. Without it the
- * files stay pointers, as any clone on this host leaves them.
+ * files stay pointers, as any clone on this host leaves them. A failure to read either is the clone's failure, never a
+ * silent "no".
  */
 async function usesGitLfs(cloneDir: string, env: NodeJS.ProcessEnv): Promise<boolean> {
-  const tracked = await execCapped('git', ['-C', cloneDir, 'ls-files', '-z', '--', ':(attr:filter=lfs)'], { timeout: 30_000, env }).then(
-    (r) => r.stdout !== '',
-    () => false,
-  );
-  if (!tracked) return false;
-  return execCapped('git', ['lfs', 'version'], { timeout: 30_000, env }).then(() => true, () => false);
+  const tracked = await execCapped('git', ['-C', cloneDir, 'ls-files', '-z', '--', ':(attr:filter=lfs)'], { timeout: 30_000, env });
+  if (tracked.stdout === '') return false;
+  try {
+    await execCapped('git', ['lfs', 'version'], { timeout: 30_000, env });
+    return true;
+  } catch (err) {
+    // git's own answer for a subcommand it does not have.
+    if (/is not a git command/i.test(String((err as { stderr?: unknown }).stderr ?? (err as Error).message))) return false;
+    throw err;
+  }
 }

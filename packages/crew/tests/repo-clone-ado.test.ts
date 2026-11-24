@@ -9,7 +9,7 @@
 
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createServer as createTcpServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -19,7 +19,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { registerFailure } from '../src/api/repo-input.js';
 import { adoRepoOf } from '../src/core/deliver-credentials.js';
 import { defaultAdoHelperExec, type AdoHelperExec } from '../src/core/deliver.js';
-import { ADO_CLONE_NO_CREDENTIAL, ADO_CLONE_REFUSED, adoCloneEnv, cloneRepository, type AdoCloneSeam } from '../src/core/repo-clone.js';
+import { ADO_CLONE_LFS_FAILED, ADO_CLONE_NO_CREDENTIAL, ADO_CLONE_REFUSED, adoCloneEnv, cloneRepository, type AdoCloneSeam } from '../src/core/repo-clone.js';
 
 const PAT = 'pat-SECRET-0123456789abcdef'; // ggignore: a made-up test value, never a real token
 const BASIC = `Basic ${Buffer.from(`:${PAT}`).toString('base64')}`;
@@ -83,7 +83,7 @@ function git(cwd: string, ...args: string[]): string {
 /** A bare repo served at `<loopback>/org/proj/_git/repo`, refusing any request without the PAT's header. With `lfs`, its
  *  commit stores `big.bin` in Git LFS: the batch endpoint (`<repo>.git/info/lfs/objects/batch`, behind the header too)
  *  sends downloads to an object path of its own that takes only the batch answer's token. */
-async function fixture(opts: { lfs?: boolean } = {}): Promise<Fx> {
+async function fixture(opts: { lfs?: boolean; lfsRefuse?: boolean; lfsconfig?: string } = {}): Promise<Fx> {
   const root = mkdtempSync(join(tmpdir(), 'crew-1839-'));
   roots.push(root);
   const bare = join(root, 'srv', 'org', 'proj', '_git', 'repo');
@@ -97,6 +97,8 @@ async function fixture(opts: { lfs?: boolean } = {}): Promise<Fx> {
   // The repository selects a filter for its README (a host whose config defines `leak` runs it at checkout).
   writeFileSync(join(seed, '.gitattributes'), `README.md filter=leak\n${opts.lfs === true ? 'big.bin filter=lfs diff=lfs merge=lfs -text\n' : ''}`);
   if (opts.lfs === true) writeFileSync(join(seed, 'big.bin'), LFS_POINTER);
+  // A repository may carry its own LFS endpoint (`.lfsconfig`); the credentialed download must not follow it.
+  if (opts.lfsconfig !== undefined) writeFileSync(join(seed, '.lfsconfig'), `[lfs]\n\turl = ${opts.lfsconfig}\n`);
   git(seed, 'add', '-A');
   git(seed, 'commit', '-qm', 'base');
   git(seed, 'push', '-q', bare, 'main');
@@ -122,7 +124,7 @@ async function fixture(opts: { lfs?: boolean } = {}): Promise<Fx> {
       }
       if (u.pathname === `/lfs-objects/${LFS_OID}`) {
         lfsDownloadAuths.push(auth);
-        if (opts.lfs !== true || req.headers['x-object-token'] !== LFS_OBJECT_TOKEN) {
+        if (opts.lfs !== true || opts.lfsRefuse === true || req.headers['x-object-token'] !== LFS_OBJECT_TOKEN) {
           res.writeHead(403);
           res.end('no token');
           return;
@@ -324,7 +326,8 @@ describe('crew#1839 From a URL on Azure DevOps', () => {
   // (crew#1842) Runs wherever git-lfs is installed, and always in CI (whose runners carry it): there a missing git-lfs
   // fails the test instead of skipping it.
   it.skipIf(!HAS_GIT_LFS && process.env['CI'] === undefined)('a Git LFS file this host has not cached is downloaded with the header, which reaches only the repository\'s own LFS endpoint (crew#1842)', async () => {
-    const fx = await fixture({ lfs: true });
+    // The repository names another LFS endpoint: an unreachable one, so following it would fail the clone.
+    const fx = await fixture({ lfs: true, lfsconfig: 'http://127.0.0.1:9/elsewhere/info/lfs' });
     // The host ran `git lfs install`: a checkout smudges LFS files, and the filter is required.
     writeFileSync(join(fx.env['HOME']!, '.gitconfig'), LFS_INSTALL_CONFIG);
     const dir = join(fx.root, 'clone');
@@ -335,11 +338,33 @@ describe('crew#1839 From a URL on Azure DevOps', () => {
     expect(fx.lfsBatchAuths.length).toBeGreaterThan(0);
     expect(fx.lfsBatchAuths.every((a) => a === BASIC)).toBe(true);
     expect(fx.lfsDownloadAuths).toEqual(['']);
-    // The working tree is clean (the LFS file is the object, not a pointer git sees as modified) and nothing was kept.
+    // The working tree is clean (the LFS file is the object, not a pointer git sees as modified) and nothing was kept:
+    // not in .git/config, and no git-lfs log (which records its environment) is left.
     expect(execFileSync('git', ['-c', 'core.fsmonitor=false', 'status', '--porcelain'], { cwd: dir, env: fx.env, encoding: 'utf8' }).trim()).toBe('');
     const config = readFileSync(join(dir, '.git', 'config'), 'utf8');
     expect(config.toLowerCase()).not.toContain('extraheader');
     expectNoSecret(config);
+    expect(existsSync(join(dir, '.git', 'lfs', 'logs'))).toBe(false);
+  }, 120_000);
+
+  it.skipIf(!HAS_GIT_LFS && process.env['CI'] === undefined)('a host with git-lfs but no `git lfs install` still gets the real file and a clean tree (review r1)', async () => {
+    const fx = await fixture({ lfs: true });
+    const dir = join(fx.root, 'clone');
+    await cloneRepository('https://dev.azure.com/org/proj/_git/repo', dir, { ado: seam(fx) });
+    expect(readFileSync(join(dir, 'big.bin'), 'utf8')).toBe(LFS_CONTENT);
+    expect(execFileSync('git', ['-c', 'core.fsmonitor=false', 'status', '--porcelain'], { cwd: dir, env: fx.env, encoding: 'utf8' }).trim()).toBe('');
+  }, 120_000);
+
+  it.skipIf(!HAS_GIT_LFS && process.env['CI'] === undefined)('an LFS download that fails says what to check, carries no token, and leaves the folder empty for another try (review r1)', async () => {
+    const fx = await fixture({ lfs: true, lfsRefuse: true });
+    const dir = join(fx.root, 'clone');
+    mkdirSync(dir);
+    const err = await cloneRepository('https://dev.azure.com/org/proj/_git/repo', dir, { ado: seam(fx) }).catch((e: unknown) => e as Error);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message.startsWith(`${ADO_CLONE_LFS_FAILED} https://dev.azure.com/org/proj/_git/repo with the daemon's Azure DevOps credential. Check that`)).toBe(true);
+    expectNoSecret((err as Error).message);
+    expect(existsSync(dir)).toBe(true);
+    expect(readdirSync(dir)).toEqual([]);
   }, 120_000);
 
   it('an empty repository clones, with nothing to check out', async () => {

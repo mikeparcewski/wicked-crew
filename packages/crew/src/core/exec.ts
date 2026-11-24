@@ -40,9 +40,11 @@ const execFileAsync = promisify(execFile);
 export const ADO_RAW_ENV = ['AZURE_DEVOPS_EXT_PAT', 'CREW_ADO_TENANT_ID', 'CREW_ADO_CLIENT_ID', 'CREW_ADO_CLIENT_SECRET'] as const;
 
 /** `env` without {@link ADO_RAW_ENV}. */
-export function withoutAdoCredential(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function withoutAdoCredential(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = { ...env };
-  for (const n of ADO_RAW_ENV) delete out[n];
+  // Windows names are case-insensitive: a child reads `Azure_Devops_Ext_Pat` as the same variable.
+  const named = (k: string): boolean => (ADO_RAW_ENV as readonly string[]).includes(platform === 'win32' ? k.toUpperCase() : k);
+  for (const k of Object.keys(out)) if (named(k)) delete out[k];
   return out;
 }
 
@@ -64,10 +66,9 @@ const FSMONITOR_OFF_PARAMETER = "'core.fsmonitor=false'";
  */
 export function gitChildEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const out = withoutAdoCredential(childEnvWithBootEstateDb(env));
+  // Always appended (applied twice, it is there twice): a check for "already last" could be fooled by a quoted value.
   const current = (out['GIT_CONFIG_PARAMETERS'] ?? '').trim();
-  if (!current.endsWith(FSMONITOR_OFF_PARAMETER)) {
-    out['GIT_CONFIG_PARAMETERS'] = current === '' ? FSMONITOR_OFF_PARAMETER : `${current} ${FSMONITOR_OFF_PARAMETER}`;
-  }
+  out['GIT_CONFIG_PARAMETERS'] = current === '' ? FSMONITOR_OFF_PARAMETER : `${current} ${FSMONITOR_OFF_PARAMETER}`;
   return out;
 }
 
