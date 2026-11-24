@@ -1600,7 +1600,8 @@ function mergeFreshness(pages: BlastRadiusFreshness[]): BlastRadiusFreshness {
  * `indexing`. Per page, before the pages are summed (crew#1556 counts a file once per page). Paths
  * stay estate's; {@link attributeFreshness} attributes them.
  */
-function memberFreshness(raw: BlastRadiusFreshness, dependents: unknown, labels: Map<string, string>): BlastRadiusFreshness {
+function memberFreshness(raw: BlastRadiusFreshness, page: Record<string, unknown>, labels: Map<string, string>): BlastRadiusFreshness {
+  const dependents = page['dependents'];
   const member = (file: string) => attribute(file, labels) !== null;
   const removed = new Set<string>();
   const kept = raw.stale_files?.filter((row) => {
@@ -1608,22 +1609,26 @@ function memberFreshness(raw: BlastRadiusFreshness, dependents: unknown, labels:
     if (typeof row?.file === 'string') removed.add(row.file);
     return false;
   });
-  const rows = Array.isArray(dependents) ? (dependents as RawHit[]) : null;
+  const rows = Array.isArray(dependents) ? (dependents as RawHit[]) : [];
   let anyMarked = false;
-  let anyNonMember = rows === null;
-  for (const row of rows ?? []) {
+  const rowFiles = new Set<string>();
+  for (const row of rows) {
     const marked = row?.stale === 'modified' || row?.stale === 'deleted';
     if (marked) anyMarked = true;
-    if (typeof row?.file === 'string' && !member(row.file)) {
-      anyNonMember = true;
-      if (marked) removed.add(row.file);
-    }
+    if (typeof row?.file === 'string') rowFiles.add(row.file);
+    if (marked && typeof row.file === 'string' && !member(row.file)) removed.add(row.file);
   }
-  // crew#1797: estate's budget can drop the row marks and empty the sample while it keeps the count. Then the page's
-  // count may hold files of a removed member that neither the sample nor a mark names, and crew cannot take them out:
-  // the total is marked partial (an upper bound) when such a page has rows outside the current members.
-  const sampled = raw.stale_files?.length ?? 0;
-  const partial = typeof raw.stale_files_total === 'number' && raw.stale_files_total > sampled && !anyMarked && anyNonMember;
+  // crew#1797: estate's budget can drop the row marks and empty the sample while it keeps the count. A counted file
+  // that no sample entry or mark names may then be a removed member's, and crew cannot take it out: the total is
+  // marked partial (an upper bound). Only when the count is not explained by the named member files AND the page
+  // carries a file outside the members that is not accounted for: removed already, or a dependents row whose missing
+  // mark (with marks present on the page) says it is not stale. Every file the probe counted is looked at, the name
+  // miss's `suggestions` included.
+  const unexplained = typeof raw.stale_files_total === 'number' && raw.stale_files_total - removed.size > (kept?.length ?? 0);
+  const probed = new Set<string>();
+  probedFiles(page, probed);
+  const unknown = [...probed].some((file) => !member(file) && !removed.has(file) && !(anyMarked && rowFiles.has(file)));
+  const partial = unexplained && unknown;
   const { indexing, ...rest } = raw;
   delete rest.stale_files;
   return {
@@ -1635,6 +1640,30 @@ function memberFreshness(raw: BlastRadiusFreshness, dependents: unknown, labels:
     ...(Array.isArray(indexing) ? { indexing: indexing.filter((label) => labels.has(label)) } : {}),
     ...(kept === undefined ? {} : { stale_files: kept }),
   };
+}
+
+/**
+ * The files estate's freshness probe checks on a reply page: every non-empty `file` string, and every `files` /
+ * `*_files` path list, anywhere in it but the `freshness` block (wicked-estate `freshness.rs` `collect_files`).
+ */
+function probedFiles(v: unknown, out: Set<string>): void {
+  if (Array.isArray(v)) {
+    for (const item of v) probedFiles(item, out);
+    return;
+  }
+  if (v === null || typeof v !== 'object') return;
+  for (const [k, child] of Object.entries(v as Record<string, unknown>)) {
+    if (k === 'freshness') continue;
+    if (k === 'file' && typeof child === 'string') {
+      if (child !== '') out.add(child);
+    } else if ((k === 'files' || k.endsWith('_files')) && Array.isArray(child)) {
+      for (const item of child) {
+        if (typeof item === 'string') {
+          if (item !== '') out.add(item);
+        } else probedFiles(item, out);
+      }
+    } else probedFiles(child, out);
+  }
 }
 
 /** crew#1555: attribute the (member-scoped, {@link memberFreshness}) sample and remove host paths. */
@@ -1666,7 +1695,7 @@ export async function readBlastRadiusPages(
   dbPath: string,
   opts: { timeout: number; cwd?: string },
   /** Applied to each page's freshness before the pages merge (the project route scopes it to members). */
-  pageFreshness?: (freshness: BlastRadiusFreshness, dependents: unknown) => BlastRadiusFreshness,
+  pageFreshness?: (freshness: BlastRadiusFreshness, page: Record<string, unknown>) => BlastRadiusFreshness,
 ): Promise<Record<string, unknown>> {
   const dependents: unknown[] = [];
   const freshnessPages: BlastRadiusFreshness[] = [];
@@ -1679,7 +1708,7 @@ export async function readBlastRadiusPages(
     last = JSON.parse(stdout) as Record<string, unknown>;
     first ??= last;
     if (last['freshness'] !== null && typeof last['freshness'] === 'object') {
-      if (pageFreshness !== undefined) last['freshness'] = pageFreshness(last['freshness'] as BlastRadiusFreshness, last['dependents']);
+      if (pageFreshness !== undefined) last['freshness'] = pageFreshness(last['freshness'] as BlastRadiusFreshness, last);
       freshnessPages.push(last['freshness'] as BlastRadiusFreshness);
     }
     if (Array.isArray(last['dependents'])) dependents.push(...(last['dependents'] as unknown[]));
@@ -1706,7 +1735,7 @@ export async function projectBlastRadius(
 ): Promise<ProjectBlastRadius> {
   const raw = (await readProjectGraph(q.dbPath, () => readBlastRadiusPages(
     estateExe(env), name, q.dbPath, { timeout: QUERY_TIMEOUT_MS },
-    (freshness, dependents) => memberFreshness(freshness, dependents, q.labels),
+    (freshness, page) => memberFreshness(freshness, page, q.labels),
   ), env)) as {
     dependents?: RawHit[];
     resolved?: unknown;

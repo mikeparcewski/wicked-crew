@@ -89,6 +89,36 @@ describe.skipIf(process.platform === 'win32')('blast-radius freshness names curr
     expect(marked.freshness).not.toHaveProperty('stale_files_total_partial');
   });
 
+  it('a budgeted page whose sample already names every outside file stays exact (review r1)', async () => {
+    // Marks dropped, the sample kept (it names `gone`'s file), and more counted than sampled: every file outside the
+    // members is accounted for, so what the sample does not name is the members' own.
+    const raw = fixture('blast-radius-removed-member.json');
+    for (const row of raw['dependents'] as Doc[]) delete row['stale'];
+    raw['freshness']['stale_files_total'] = 22;
+    const out = await projectBlastRadius(q, 'charge', estate(raw));
+    expect(out.freshness?.stale_files_total).toBe(21);
+    expect(out.freshness).not.toHaveProperty('stale_files_total_partial');
+  });
+
+  it('a name miss counts its suggestions\' files: an outside one with budgeted evidence makes the total partial (review r1)', async () => {
+    // estate's name-miss rows (wicked-estate-retrieve suggest.rs `suggestions_json`); the freshness probe counts their
+    // files too (freshness.rs `collect_files`). The budget stripped the sample.
+    const suggestion = (file: string) => ({ symbol: `ts . ${file}/charge().`, name: 'charge', kind: 'Function', file, line_1based: 3, match_reason: 'fuzzy', distance: 1 });
+    const miss = (files: string[]) => {
+      const raw = fixture('blast-radius-removed-member.json');
+      raw['dependents'] = [];
+      raw['resolved'] = false;
+      raw['suggestions'] = files.map(suggestion);
+      raw['freshness']['stale_files'] = [];
+      raw['freshness']['stale_files_total'] = 1;
+      return raw;
+    };
+    const outside = await projectBlastRadius(q, 'charge', estate(miss(['api/src/index.ts', 'gone/src/index.ts'])));
+    expect(outside.freshness).toMatchObject({ stale_files_total: 1, stale_files_total_partial: true });
+    const inside = await projectBlastRadius(q, 'charge', estate(miss(['api/src/index.ts'])));
+    expect(inside.freshness).not.toHaveProperty('stale_files_total_partial');
+  });
+
   it('per page: a removed member\'s file on two pages leaves both pages\' totals (codex r1)', async () => {
     // Each page counts its own files (crew#1556 sums them): `api` and `gone` are stale on both pages.
     const first = { ...fixture('blast-radius-removed-member.json'), next_cursor: 'c1' };
