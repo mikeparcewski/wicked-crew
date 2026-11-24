@@ -17,6 +17,7 @@ import {
   setRepoMinimum,
   getRequirement,
   patchRequirement,
+  retireRequirement,
   readRequirementsGraph,
   REQUIREMENTS_NOT_GENERATED,
 } from './requirements.js';
@@ -9960,6 +9961,41 @@ export function registerRoutes(
     }
     if (detail === null) return reply.code(404).send({ error: 'Requirement not found' });
     return { requirement: detail };
+  });
+
+  // wicked-core#1698: retire a requirement whose code was deleted (the engine flags it `unindexed`), so a re-map
+  // stops listing it. The engine's own command does the write; the id is never reused.
+  app.post(`${V}/repos/:id/requirements/:key/retire`, async (req, reply) => {
+    const { id, key } = req.params as { id: string; key: string };
+    const repos = await adapter.listRepos();
+    const repo = repos.find((r) => r.id === id);
+    if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+    let decodedKey: string;
+    try {
+      decodedKey = decodeURIComponent(key);
+    } catch {
+      return reply.code(400).send({ error: 'Malformed requirement key encoding' });
+    }
+    let outcome: Awaited<ReturnType<typeof retireRequirement>>;
+    try {
+      outcome = await retireRequirement(repo, decodedKey, adapter);
+    } catch (err) {
+      const status = codeGraphErrorStatus(err);
+      if (status !== null) return reply.code(status).send({ error: message(err) });
+      return reply.code(500).send({ error: `${decodedKey} could not be retired: ${message(err)}` });
+    }
+    if (outcome === 'not_found') return reply.code(404).send({ error: 'Requirement not found' });
+    if (outcome === 'not_unindexed') {
+      return reply.code(409).send({
+        error: `${decodedKey} is not listed as no longer in the code, so it cannot be retired. Only a requirement whose code was deleted can be. If its code was deleted, map ${repo.name} again, then retire it.`,
+      });
+    }
+    if (outcome === 'engine_too_old') {
+      return reply.code(409).send({
+        error: 'The installed wicked-core cannot retire requirements yet. Update wicked-core, then try again.',
+      });
+    }
+    return { retired: decodedKey };
   });
 
   app.get(

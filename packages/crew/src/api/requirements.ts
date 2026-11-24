@@ -206,6 +206,52 @@ export async function setRepoMinimum(
   return true;
 }
 
+/** What {@link retireRequirement} did. `engine_too_old`: the installed wicked-core has no `--retire`. */
+export type RetireOutcome = 'retired' | 'not_found' | 'not_unindexed' | 'engine_too_old';
+
+/** Runs `wicked-core <args>` and returns its stdout; injectable for tests. */
+export type CoreCliReader = (args: string[]) => Promise<string>;
+
+const readCoreCli: CoreCliReader = async (args) => (await runCoreCli(args) as { stdout: string }).stdout;
+
+/** What a row is now, read afresh: `null` when it may be retired. */
+async function retireRefusal(repo: RepoEntry, key: string, reader: RequirementsGraphReader): Promise<RetireOutcome | null> {
+  const entry = (await buildIndex(repo, reader))?.byKey.get(key);
+  if (entry === undefined) return 'not_found';
+  return entry.summary.uncounted === 'unindexed' ? null : 'not_unindexed';
+}
+
+/**
+ * Retire one requirement whose code was deleted (wicked-core#1698). Such a row is kept across re-maps and flagged
+ * `unindexed` until its code returns, so a deleted feature stays listed for ever without this. The engine's own
+ * command does the write (`wicked-core domain-graph --retire <domain>::<REQ-NNN>`): the row leaves the stored
+ * graph, no later build carries it, and its id is never given to other code. Only a row the engine flags
+ * `unindexed` is sent. An engine whose `domain-graph --help` does not name `--retire` is never asked (an older one
+ * would read the unknown flag as a full build). When the engine refuses, the row is read again, so a row another
+ * request retired meanwhile, or whose code came back, answers as such; anything else is rethrown.
+ */
+export async function retireRequirement(
+  repo: RepoEntry,
+  key: string,
+  reader: RequirementsGraphReader,
+  run: CoreCliReader = readCoreCli,
+): Promise<RetireOutcome> {
+  const refused = await retireRefusal(repo, key, reader);
+  if (refused !== null) return refused;
+  if (!(await run(['domain-graph', '--help'])).includes('--retire')) return 'engine_too_old';
+  try {
+    await run(['domain-graph', '--db', codeGraphDb(repo), '--retire', key]);
+  } catch (err) {
+    forgetRequirementsReads(repo);
+    const now = await retireRefusal(repo, key, reader);
+    if (now !== null) return now;
+    throw err;
+  } finally {
+    forgetRequirementsReads(repo);
+  }
+  return 'retired';
+}
+
 export interface RequirementOverride {
   title?: string | undefined;
   notes?: string | undefined;
