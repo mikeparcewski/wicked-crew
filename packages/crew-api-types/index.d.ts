@@ -16825,6 +16825,12 @@ export interface EditorView {
   description?: string;
   /** Its icon, colour and preview (api-types 0.157.0). Absent when it declares none that read. */
   visuals?: EditorVisuals;
+  /** (api-types 0.226.0, crew#1703) The skills its pack added to the daemon skills root: the pack's own name and the
+   *  key it was installed under (`wicked-garden-<dir>`, what a worker invokes as `wicked-garden:<dir>`). Absent when
+   *  the pack shipped none. */
+  packSkills?: InstalledPackSkill[];
+  /** (api-types 0.226.0, crew#1703) The presets its pack's blocks were installed as (each named by its block id). */
+  packBlocks?: string[];
   /** A run plugin (CS7): `run-thread`. Absent for an artifact editor. */
   inline?: 'run-thread';
   /** A run plugin's asked topics, each with its reason (the install consent lists these). */
@@ -16849,6 +16855,18 @@ export interface InstallEditorBody {
   packRoot: string;
   /** Install it on (the default; an update keeps the editor's current switch) or off. */
   enabled?: boolean;
+  /**
+   * (api-types 0.226.0, crew#1703) The one consent for a pack that also ships skills or blocks: the person approves
+   * the pack's skill directories and block ids exactly as the refusal listed them (`InstallEditorRefusal.pack`),
+   * together with the editors' permissions. Absent, or not exactly that list, is a 409 that installs nothing.
+   */
+  approve?: { skills: string[]; blocks: string[] };
+}
+
+/** (api-types 0.226.0, crew#1703) A pack skill: its name in the pack, and the key it is installed under. */
+export interface InstalledPackSkill {
+  name: string;
+  key: string;
 }
 
 /** `POST /editors` → 200: the pack's editors are installed (or updated in place) and listed. */
@@ -16873,6 +16891,13 @@ export interface InstallEditorResponse {
    */
   granted?: string[];
   grantError?: string;
+  /** (api-types 0.226.0, crew#1703) The pack's skills, added to the daemon skills root. Absent when it ships none. */
+  skills?: InstalledPackSkill[];
+  /** (api-types 0.226.0, crew#1703) The presets written for the pack's blocks. Absent when it ships none. */
+  presets?: string[];
+  /** (api-types 0.226.0, crew#1703) Installed, but the skills root could not be published, so workers do not get the
+   *  new skills yet: the reason, and what to do (publish from Skills once it is fixed). */
+  skillsError?: string;
 }
 
 /**
@@ -16933,7 +16958,10 @@ export interface PackCheckResult {
  * Nothing was written. (`third_party_editors_not_available` before the install surface: every pack was refused.)
  */
 export interface InstallEditorRefusal {
-  code: 'pack_ships_skills_or_blocks' | 'third_party_editors_not_available';
+  /** `pack_needs_approval` (409, api-types 0.226.0): the pack also ships skills or blocks, and the install carried no
+   *  `approve`; `pack_approval_mismatch` (409): its `approve` is not exactly this list. Nothing was installed.
+   *  `pack_ships_skills_or_blocks`: the 501 of a daemon before crew#1703. */
+  code: 'pack_needs_approval' | 'pack_approval_mismatch' | 'pack_ships_skills_or_blocks' | 'third_party_editors_not_available';
   error: string;
   check: PackCheckResult;
   pack: {
@@ -16944,6 +16972,8 @@ export interface InstallEditorRefusal {
     blocks: Array<{ id: string; label: string; produces_kind: string; skills: string[] }>;
     /** The pack's skill directories, approved together with its editors and blocks. */
     skills: string[];
+    /** (api-types 0.226.0) Each skill's pack name and the key it would be installed under, so the person recognises it. */
+    installedSkills?: InstalledPackSkill[];
   };
 }
 

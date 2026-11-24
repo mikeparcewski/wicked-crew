@@ -19,8 +19,9 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { EditorConformanceSummary, InstallEditorRefusal, Preset, PresetStep } from '../src/core/types.js';
-import { CONFORMANCE_CASES, installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner, type PackPresetsPort } from '../src/editors/pack-install.js';
+import { installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner, type PackPresetsPort, requiredCases } from '../src/editors/pack-install.js';
 import { EditorRegistry, sha256Of } from '../src/editors/registry.js';
+import { removeScratch } from './setup/scratch.js';
 import { scaffold, type Scaffold } from './support/skills-fixture.js';
 
 const FIXTURE = join(import.meta.dirname, 'fixtures', 'editor-packs', 'acme-terms');
@@ -32,7 +33,7 @@ const scratches: string[] = [];
 const scaffolds: Scaffold[] = [];
 afterEach(() => {
   for (const d of scratches.splice(0)) rmSync(d, { recursive: true, force: true });
-  for (const s of scaffolds.splice(0)) rmSync(s.base, { recursive: true, force: true });
+  for (const s of scaffolds.splice(0)) removeScratch(s.base); // a published snapshot is locked read-only
 });
 
 function pack(phases?: string[]): string {
@@ -48,11 +49,11 @@ function pack(phases?: string[]): string {
 const passCheck: PackCheckRunner = async () => ({ ok: true, errors: [], warnings: [] });
 function conformant(): ConformanceRunner {
   return vi.fn(async (packRoot: string): Promise<EditorConformanceSummary> => {
-    const m = JSON.parse(readFileSync(join(packRoot, 'wicked-pack.json'), 'utf8')) as { editors: Array<{ id: string; version: string; entry: string }> };
+    const m = JSON.parse(readFileSync(join(packRoot, 'wicked-pack.json'), 'utf8')) as { editors: Array<Record<string, unknown> & { id: string; version: string; entry: string }> };
     return {
       ok: true,
       at: '2026-11-24T00:00:00.000Z',
-      editors: m.editors.map((e) => ({ id: e.id, version: e.version, sha256: sha256Of(readFileSync(join(packRoot, e.entry))), ok: true, cases: Object.fromEntries(CONFORMANCE_CASES.map((c) => [c, { ok: true }])), gaps: [] })),
+      editors: m.editors.map((e) => ({ id: e.id, version: e.version, sha256: sha256Of(readFileSync(join(packRoot, e.entry))), ok: true, cases: Object.fromEntries(requiredCases(e).map((c) => [c, { ok: true }])), gaps: [] })),
     };
   });
 }
@@ -85,7 +86,7 @@ function rig(opts: { seedPresets?: Preset[] } = {}) {
   const presets = presetStore(opts.seedPresets);
   const skills = { store: sc.store, publish: async () => sc.store.publish(sc.store.revision()) };
   const conformance = conformant();
-  return { registry, sc, presets, conformance, deps: { check: passCheck, conformance, registry, skills, presets } };
+  return { registry, home, studio, sc, presets, conformance, deps: { check: passCheck, conformance, registry, skills, presets } };
 }
 
 const keys = (sc: Scaffold): string[] => Object.keys(sc.store.manifest().skills).filter((k) => k.startsWith('wicked-garden-acme'));
@@ -161,6 +162,9 @@ describe('crew#1703: an editor pack with skills and a block', () => {
     const view = EditorRegistry.view(r.registry.get('acme-terms')!);
     expect(view.packSkills).toEqual(res.skills);
     expect(view.packBlocks).toEqual(['acme-terms-review']);
+    // …and still after a restart: the install record carries them.
+    const reread = new EditorRegistry({ stateHome: r.home, studioRoot: r.studio });
+    expect(EditorRegistry.view(reread.get('acme-terms')!)).toMatchObject({ packSkills: res.skills, packBlocks: ['acme-terms-review'] });
   });
 
   it('installing the same pack again updates its own skills and preset in place', async () => {

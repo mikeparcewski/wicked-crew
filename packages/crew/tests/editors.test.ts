@@ -299,19 +299,20 @@ describe('pack install: the gate, crew\'s conformance run, then the registry', (
     expect(() => readFileSync(join(home, EDITORS_STATE_FILENAME), 'utf8')).toThrow();
   });
 
-  it('a pack that also ships skills or blocks is refused (501) with its approval list; nothing runs or is written', async () => {
+  it('crew#1703: a pack that also ships skills or blocks needs their approval (409) with the list; nothing runs or is written', async () => {
     const { reg } = registry();
     const conformance = conformant();
     const err = await installPack(makePack({ blocks: true, skills: ['acme-terms-checker'] }), undefined, { check: passCheck, conformance, registry: reg }).catch((e: unknown) => e);
-    expect((err as PackInstallError).status).toBe(501);
+    expect((err as PackInstallError).status).toBe(409);
     const body = (err as PackInstallError).body as unknown as InstallEditorRefusal;
-    expect(body.code).toBe('pack_ships_skills_or_blocks');
+    expect(body.code).toBe('pack_needs_approval');
     // What the person installing reads: plain words and what to do, no internal design reference.
-    expect(body.error).toMatch(/nothing was installed/);
-    expect(body.error).toMatch(/install an editor-only copy/);
+    expect(body.error).toMatch(/Nothing was installed/);
+    expect(body.error).toMatch(/approve/);
     expect(body.error).not.toMatch(/DES-|§/);
     expect(body.pack.blocks).toEqual([{ id: 'acme-terms-review', label: 'Check our terms', produces_kind: 'document', skills: ['acme-terms-checker'] }]);
     expect(body.pack.skills).toEqual(['acme-terms-checker']);
+    expect(body.pack.installedSkills).toEqual([{ name: 'acme-terms-checker', key: 'wicked-garden-acme-terms-checker' }]);
     expect(conformance).not.toHaveBeenCalled();
     expect(reg.get('acme-terms')).toBeNull();
   });
@@ -905,15 +906,21 @@ describe('the routes', () => {
     expect(h.registry.get('acme-inspect')).not.toBeNull();
   });
 
-  it('a conformance failure through the route is a 422 carrying the report; a skills pack a 501 with the approval list', async () => {
+  it('a conformance failure through the route is a 422 carrying the report; a skills pack a 409 with the approval list', async () => {
     const failing: ConformanceRunner = async () => ({ ok: false, at: 'x', editors: [{ id: 'acme-terms', version: '0.1.0', sha256: sha256Of(Buffer.from(EDITOR_HTML)), ok: false, cases: { '3-no-network': { ok: false } }, gaps: [] }] });
     const h = await harness({ conformance: failing });
     const res = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: makePack() } });
     expect(res.statusCode).toBe(422);
     expect(res.json()).toMatchObject({ code: 'editor_not_conformant', conformance: { ok: false }, check: { ok: true } });
     const skills = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: makePack({ blocks: true, skills: ['acme-terms-checker'] }) } });
-    expect(skills.statusCode).toBe(501);
-    expect((skills.json() as InstallEditorRefusal).code).toBe('pack_ships_skills_or_blocks');
+    expect(skills.statusCode).toBe(409);
+    expect((skills.json() as InstallEditorRefusal).code).toBe('pack_needs_approval');
+    // crew#1703: approved, a daemon without a skills root says so (a 422 with the reason), and installs nothing.
+    const approved = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: makePack({ blocks: true, skills: ['acme-terms-checker'] }), approve: { skills: ['acme-terms-checker'], blocks: ['acme-terms-review'] } } });
+    expect(approved.statusCode).toBe(422);
+    expect(approved.json()).toMatchObject({ code: 'pack_skills_unavailable' });
+    const bad = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: HUMAN, payload: { packRoot: makePack(), approve: { skills: 'all' } } });
+    expect(bad.statusCode).toBe(400);
   });
 
   it('a failing gate is a 422 carrying the verdict', async () => {

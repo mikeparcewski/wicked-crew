@@ -273,13 +273,13 @@ describe('pack install admits run plugins (CS7 C4/C5)', () => {
     expect((err as PackInstallError).body).toMatchObject({ code: 'conformance_unavailable' });
   });
 
-  it('a pack with neither editors nor plugins is a 400; one that also ships blocks is a 501', async () => {
+  it('a pack with neither editors nor plugins is a 400; one that also ships blocks needs their approval (409, crew#1703)', async () => {
     const { reg } = registry();
     const empty = mkdtempSync(join(tmpdir(), 'run-plugin-empty-'));
     scratches.push(empty);
     writeFileSync(join(empty, 'wicked-pack.json'), JSON.stringify({ spec: 2, name: 'x', vendor: 'y', version: '0.1.0' }));
     await expect(installPack(empty, undefined, { check: passCheck, conformance: conformantPlugins(), registry: reg })).rejects.toMatchObject({ status: 400 });
-    await expect(installPack(makePluginPack({ blocks: true }), undefined, { check: passCheck, conformance: conformantPlugins(), registry: reg })).rejects.toMatchObject({ status: 501 });
+    await expect(installPack(makePluginPack({ blocks: true }), undefined, { check: passCheck, conformance: conformantPlugins(), registry: reg })).rejects.toMatchObject({ status: 409, body: { code: 'pack_needs_approval' } });
   });
 
   it('an editor-only pack needs no run cases (its report carries no plugins)', async () => {

@@ -233,6 +233,11 @@ export interface InstalledPack {
   installedAt: string;
   /** The conformance run that admitted it: when, and which cases ran. */
   conformance: { ok: true; at: string; cases: string[] };
+  /** (crew#1703) The pack's skills this install added to the daemon skills root: the pack's own name and the key it
+   *  was installed under (`wicked-garden-<dir>`). Absent for a pack with none. */
+  skills?: Array<{ name: string; key: string }>;
+  /** (crew#1703) The presets this install wrote for the pack's blocks (named by block id). Absent for none. */
+  presets?: string[];
 }
 
 /** An install the registry refuses: the id is taken, or the pack did not read back. */
@@ -537,6 +542,8 @@ const InstalledPackSchema = z.object({
   manifestSha256: z.string().regex(/^[0-9a-f]{64}$/u),
   installedAt: z.string(),
   conformance: z.object({ ok: z.literal(true), at: z.string(), cases: z.array(z.string()) }),
+  skills: z.array(z.object({ name: z.string(), key: z.string() })).optional(),
+  presets: z.array(z.string()).optional(),
 });
 
 /** An operator flag by editor id: own properties only (an id like `constructor` is not an inherited key, codex r5). */
@@ -593,8 +600,13 @@ export class EditorRegistry {
         // `kind` is absent in files written before run plugins existed: drop an undefined so the record stays
         // exactly shaped (exactOptionalPropertyTypes) — an absent kind reads back as an editor.
         if (EDITOR_ID.test(k) && parsed.success) {
-          const { kind, ...rest } = parsed.data;
-          installed[k] = kind === undefined ? rest : { kind, ...rest };
+          const { kind, skills, presets, ...rest } = parsed.data;
+          installed[k] = {
+            ...(kind === undefined ? {} : { kind }),
+            ...rest,
+            ...(skills === undefined ? {} : { skills }),
+            ...(presets === undefined ? {} : { presets }),
+          };
         } else this.log(`[editors] ${k}: its install record in ${EDITORS_STATE_FILENAME} is malformed; ignored`);
       }
       return { v: 1, enabled, installed };
@@ -768,6 +780,8 @@ export class EditorRegistry {
       entry_url: `/api/v1/editors/${encodeURIComponent(m.id)}/${encodeURIComponent(m.version)}/entry`,
       ...(m.description !== undefined ? { description: m.description } : {}),
       ...(r.visuals !== undefined ? { visuals: structuredClone(r.visuals) } : {}),
+      ...(r.pack?.skills !== undefined && r.pack.skills.length > 0 ? { packSkills: r.pack.skills.map((k) => ({ ...k })) } : {}),
+      ...(r.pack?.presets !== undefined && r.pack.presets.length > 0 ? { packBlocks: [...r.pack.presets] } : {}),
     };
   }
 }

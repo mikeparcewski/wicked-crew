@@ -49,7 +49,7 @@ import { z } from '../zod.js';
 import { LOCAL_ACTOR, trustAtLeast } from '../api/auth.js';
 import type { Actor, ConformanceRule, CoreEvent, EditorGrantsChangedFrame, EditorGrantsResponse, EditorView, ListEditorsResponse } from '../core/types.js';
 import { bundleHeaders } from './csp.js';
-import { installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from './pack-install.js';
+import { installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner, type PackPresetsPort, type PackSkillsPort } from './pack-install.js';
 import { EDITOR_ID, EDITOR_VERSION, EditorRegistry, HOST_BUNDLE_CAP_BYTES, notRealEntry, readCapped, type EditorRecord, type PluginRecord, type RegisteredRecord } from './registry.js';
 import { guardBundle, MAX_INLINE_SCRIPTS, type GuardedBundle } from './webrtc-guard.js';
 
@@ -207,6 +207,10 @@ export interface EditorRoutesDeps {
   conformance: ConformanceRunner;
   /** The §6.4 tripwire: is this bearer a governed unit's token? Absent = no engine to ask (nothing refused on it). */
   isUnitToken?: (token: string) => Promise<UnitTokenVerdict>;
+  /** (crew#1703) The daemon skills root a pack's skills join; absent = this daemon has none (such a pack is refused). */
+  skills?: PackSkillsPort | null;
+  /** (crew#1703) The engine's preset store and phase catalog, for a pack's blocks. */
+  presets?: PackPresetsPort | null;
   /** Tell open hosts to read the decided grants again after an editor-route change. */
   broadcast?: (frame: CoreEvent) => void;
   log?: (msg: string) => void;
@@ -281,17 +285,27 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
     },
   );
 
-  const InstallSchema = z.strictObject({ packRoot: z.string().min(1), enabled: z.boolean().optional() });
+  const InstallSchema = z.strictObject({
+    packRoot: z.string().min(1),
+    enabled: z.boolean().optional(),
+    // crew#1703: the one consent for a pack's skills and blocks (exactly the refusal's list).
+    approve: z.strictObject({ skills: z.array(z.string().max(200)).max(200), blocks: z.array(z.string().max(200)).max(200) }).optional(),
+  });
   app.post(
     `${V}/editors`,
-    { config: { manifest: { responseType: 'InstallEditorResponse', statusCodes: [200, 400, 403, 404, 409, 422, 501] } } },
+    { config: { manifest: { requestType: 'InstallEditorBody', responseType: 'InstallEditorResponse', statusCodes: [200, 400, 403, 404, 409, 422] } } },
     async (req, reply) => {
       if (!humanOnly(req, reply)) return reply;
       const parsed = InstallSchema.safeParse(req.body);
-      if (!parsed.success) return reply.code(400).send({ error: 'body must be { packRoot: <absolute path>, enabled?: boolean }' });
+      if (!parsed.success) return reply.code(400).send({ error: 'body must be { packRoot: <absolute path>, enabled?: boolean, approve?: { skills: string[], blocks: string[] } }' });
       try {
         return await serial(async () => {
-          const installed = await installPack(parsed.data.packRoot, parsed.data.enabled, { check: deps.packCheck, conformance: deps.conformance, registry });
+          const installed = await installPack(
+            parsed.data.packRoot,
+            parsed.data.enabled,
+            { check: deps.packCheck, conformance: deps.conformance, registry, skills: deps.skills ?? null, presets: deps.presets ?? null },
+            parsed.data.approve,
+          );
           const removed = installed.removed ?? [];
           deps.log?.(`[editors] installed ${installed.editors.map((e) => `${e.id}@${e.version}`).join(', ')}${installed.updated ? ' (update)' : ''}${removed.length > 0 ? `; removed ${removed.join(', ')}` : ''}`);
           // The install consent IS the grant (DES-MCP-INSPECTOR-001 §6; CS7 C3): this human-only call, after
