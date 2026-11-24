@@ -501,6 +501,8 @@ export function buildNeeds(input: NeedsInput): Needs {
       continue;
     }
     if (row.state === 'down') infraItems.push({ row, kind: 'prevents' });
+    // crew#1126: a disk running low is said while there is still room to clear, before a write fails.
+    else if (row.state === 'degraded' && row.key === 'disk') infraItems.push({ row, kind: 'slows', word: 'running low' });
     else if (row.state === 'degraded' && (row.key === 'load' || row.key === 'daemon' || row.key === 'seat_images' || (row.key === 'skills' && /launches wait/i.test(row.reason)))) infraItems.push({ row, kind: 'slows' });
     else if (row.state === 'unknown' && WORK_PATH.has(row.key)) infraItems.push({ row, kind: 'slows' });
   }
@@ -713,7 +715,8 @@ export function buildNeeds(input: NeedsInput): Needs {
     // The seat images warn ahead of the work: a missing image costs the next unit a build, and a
     // filling runtime disk is said before a kubelet's image cleanup runs.
     // A failing credential refresh (`cli`) warns before the credential expires and every seat of that CLI stops.
-    if (kind === 'slows' && held.length === 0 && !(row.key === 'daemon' && row.state === 'degraded') && row.key !== 'seat_images' && cli === undefined) continue;
+    // A disk running low (crew#1126) warns while there is still room to clear.
+    if (kind === 'slows' && held.length === 0 && !(row.key === 'daemon' && row.state === 'degraded') && row.key !== 'seat_images' && row.key !== 'disk' && cli === undefined) continue;
     const down = row.state === 'down';
     finish(
       { members: held },

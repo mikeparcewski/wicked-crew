@@ -48,6 +48,7 @@ import type {
   SystemUnresolvedItem,
 } from '../core/types.js';
 import { cliKeyOf, distinctJudgePair, needsLevel } from './needs.js';
+import { storesWords, type DiskStore } from './disk-stores.js';
 import { plainRuntimeCause, scrubHomePaths } from './ui-text.js';
 import { callEstateToolRaw, estateMcpExe, ESTATE_INSTALL_HINT } from '../core/estate-mcp-client.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
@@ -775,6 +776,7 @@ export async function diskRow(
   statfsFn: (p: string) => Promise<{ bavail: number | bigint; bsize: number | bigint; blocks: number | bigint }> = statfs,
   timeoutMs: number = PROBE_TIMEOUT_MS,
   availableFn: (p: string) => Promise<number | null> = statfsFn === statfs ? (p) => macAvailableBytes(p, timeoutMs) : async () => null,
+  storesFn: (() => Promise<DiskStore[]>) | null = null,
 ): Promise<SystemInfraRow> {
   const started = Date.now();
   if (path === null) return infraRow('disk', 'unknown', 'no state home to measure', null, started);
@@ -799,11 +801,19 @@ export async function diskRow(
   const said = both ? `${gib(free)} free now · ${gib(available)} available once macOS clears purgeable space` : `${gib(free)} free`;
   // crew#1145: red BEFORE a write can fail — a full disk once killed the daemon right after ready
   // (an ENOSPC on its log). Under 5 GiB or over 95% used is down; under 10 GiB or over 90% used is degraded.
-  if (basis < DISK_DOWN_BYTES || (total > 0 && basis / total < 0.05)) {
-    return infraRow('disk', 'down', `${said} on the state-home volume (${usedPercent(basis, total)}% used): writes (logs, stores, worktrees, installs) will start to fail`, 'Free disk space (old worktrees, cargo target dirs), then re-check.', started, details);
-  }
-  if (basis < DISK_DEGRADED_BYTES || (total > 0 && basis / total < 0.1)) {
-    return infraRow('disk', 'degraded', `${said} on the state-home volume`, 'Free disk space before the next large run.', started, details);
+  const down = basis < DISK_DOWN_BYTES || (total > 0 && basis / total < 0.05);
+  const degraded = !down && (basis < DISK_DEGRADED_BYTES || (total > 0 && basis / total < 0.1));
+  if (down || degraded) {
+    // crew#1126: a low disk names wicked's own largest stores on this volume (read only now, bounded like the rest).
+    const read = storesFn !== null ? await settleWithin(storesFn, timeoutMs) : null;
+    const stores = read !== null && read.kind === 'ok' ? [...read.value].sort((a, b) => b.bytes - a.bytes) : [];
+    const named = stores.length > 0 ? ` Wicked’s largest stores on it: ${storesWords(stores)}.` : '';
+    const rowDetails = stores.length > 0 ? { ...details, stores } : details;
+    if (down) {
+      const fix = named !== '' ? `Free disk space on this volume, then re-check.${named}` : 'Free disk space (old worktrees, cargo target dirs), then re-check.';
+      return infraRow('disk', 'down', `${said} on the state-home volume (${usedPercent(basis, total)}% used): writes (logs, stores, worktrees, installs) will start to fail`, fix, started, rowDetails);
+    }
+    return infraRow('disk', 'degraded', `${said} on the state-home volume`, `Free disk space before the next large run.${named}`, started, rowDetails);
   }
   return infraRow('disk', 'ok', both ? `${said} (of ${gib(total)})` : `${gib(free)} free of ${gib(total)}`, null, started, details);
 }
