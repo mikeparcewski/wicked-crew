@@ -2776,15 +2776,8 @@ export function registerRoutes(
   const engineVersionCache = new EngineVersionCache();
   const floorCacheCache = new FloorCacheCache();
   // crew#1126: what wicked holds on the state-home volume, read only when the disk row is low (60 s cache).
-  let diskStoresVolume: string | null = null;
-  const diskStoresCache = new DiskStoreCache(async () =>
-    diskStoresVolume === null
-      ? []
-      : readDiskStores({
-          volumePath: diskStoresVolume,
-          floorCache: () => floorCacheCache.get(),
-          repos: await adapter.listRepos(),
-        }),
+  const diskStoresCache = new DiskStoreCache(async (volumePath, deadline) =>
+    readDiskStores({ volumePath, deadline, floorCache: () => floorCacheCache.get(), repos: await adapter.listRepos() }),
   );
   // The governance block (crew#495): the store the engine's emit seam writes to (as the adapter
   // exported it — `null` on a boot that resolved none), its record count through the engine
@@ -12159,10 +12152,7 @@ export function registerRoutes(
           tailLagMs: watchHealth?.tail_lag_ms ?? null,
         }),
         probeVault({ vault: adapter.vaultBin != null ? vaultDiagnostics(adapter.vaultBin) : null, exec: systemExec }),
-        diskRow(stateHome, undefined, undefined, undefined, () => {
-          diskStoresVolume = stateHome;
-          return diskStoresCache.get();
-        }),
+        diskRow(stateHome, undefined, undefined, undefined, stateHome === null ? null : (deadline) => diskStoresCache.get(stateHome, deadline)),
         probeSeatImages({
           containerFloor,
           clis: rosterSeatClis(),

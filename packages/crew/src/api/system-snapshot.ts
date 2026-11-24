@@ -776,7 +776,7 @@ export async function diskRow(
   statfsFn: (p: string) => Promise<{ bavail: number | bigint; bsize: number | bigint; blocks: number | bigint }> = statfs,
   timeoutMs: number = PROBE_TIMEOUT_MS,
   availableFn: (p: string) => Promise<number | null> = statfsFn === statfs ? (p) => macAvailableBytes(p, timeoutMs) : async () => null,
-  storesFn: (() => Promise<DiskStore[]>) | null = null,
+  storesFn: ((deadline: number) => Promise<DiskStore[]>) | null = null,
 ): Promise<SystemInfraRow> {
   const started = Date.now();
   if (path === null) return infraRow('disk', 'unknown', 'no state home to measure', null, started);
@@ -805,7 +805,9 @@ export async function diskRow(
   const degraded = !down && (basis < DISK_DEGRADED_BYTES || (total > 0 && basis / total < 0.1));
   if (down || degraded) {
     // crew#1126: a low disk names wicked's own largest stores on this volume (read only now, bounded like the rest).
-    const read = storesFn !== null ? await settleWithin(storesFn, timeoutMs) : null;
+    // One bound for the whole row: the store read gets only what is left of it, and its walk stops a little before.
+    const left = started + timeoutMs - Date.now();
+    const read = storesFn !== null && left > 50 ? await settleWithin(() => storesFn(Date.now() + Math.floor(left * 0.8)), left) : null;
     const stores = read !== null && read.kind === 'ok' ? [...read.value].sort((a, b) => b.bytes - a.bytes) : [];
     const named = stores.length > 0 ? ` Wicked’s largest stores on it: ${storesWords(stores)}.` : '';
     const rowDetails = stores.length > 0 ? { ...details, stores } : details;

@@ -716,7 +716,7 @@ export function buildNeeds(input: NeedsInput): Needs {
     // filling runtime disk is said before a kubelet's image cleanup runs.
     // A failing credential refresh (`cli`) warns before the credential expires and every seat of that CLI stops.
     // A disk running low (crew#1126) warns while there is still room to clear.
-    if (kind === 'slows' && held.length === 0 && !(row.key === 'daemon' && row.state === 'degraded') && row.key !== 'seat_images' && row.key !== 'disk' && cli === undefined) continue;
+    if (kind === 'slows' && held.length === 0 && !(row.key === 'daemon' && row.state === 'degraded') && row.key !== 'seat_images' && !(row.key === 'disk' && row.state === 'degraded') && cli === undefined) continue;
     const down = row.state === 'down';
     finish(
       { members: held },
