@@ -27,8 +27,10 @@ import {
   DELIVER_PR_CHECKS_DETAIL_MARKER,
   deliverChecksTimeoutSecs,
   deliverPrScript,
+  readDeliverOriginUrl,
   type DeliverScriptOptions,
 } from '../core/deliver.js';
+import { adoRepoOf } from '../core/deliver-credentials.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { gitChildEnv, withAdoCredential } from '../core/exec.js';
 
@@ -158,13 +160,14 @@ export function withoutCheckLogs(output: string): string {
 
 /**
  * The deliver shell's environment: a crew child's (`childEnvWithBootEstateDb`; the daemon's governance-store variables
- * never ride in, applied LAST so a caller overlay that spreads `process.env` cannot put them back), with the raw Azure
- * DevOps credential the script mints its header from (crew#1843: the script unexports it before any git runs and hands
- * it only to its header helper).
+ * never ride in, applied LAST so a caller overlay that spreads `process.env` cannot put them back). For a worktree whose
+ * origin is on Azure DevOps it carries the raw credential the script mints its header from (crew#1843: the script
+ * unexports it before any git runs and hands it only to its header helper); any other origin gets none.
  */
-export function deliverShellEnv(env?: Record<string, string>): NodeJS.ProcessEnv {
+export function deliverShellEnv(env?: Record<string, string>, adoOrigin = false): NodeJS.ProcessEnv {
   const from = { ...process.env, ...env };
-  return withAdoCredential(childEnvWithBootEstateDb(from), from);
+  const child = childEnvWithBootEstateDb(from);
+  return adoOrigin ? withAdoCredential(child, from) : child;
 }
 
 /**
@@ -174,13 +177,15 @@ export function deliverShellEnv(env?: Record<string, string>): NodeJS.ProcessEnv
  * overlays the daemon's own environment; tests use it to substitute HOME (whose `.bash_profile`
  * prepends a stub `gh`), production passes none.
  */
-export function runDeliverScript(
+export async function runDeliverScript(
   workdir: string,
   intent?: string,
   opts?: DeliverScriptOptions,
   env?: Record<string, string>,
 ): Promise<DeliverScriptResult> {
-  const shellEnv = deliverShellEnv(env);
+  // Only an Azure DevOps origin needs the raw credential (review r1 on #1869); an unreadable origin fails the script's
+  // own origin check first.
+  const shellEnv = deliverShellEnv(env, adoRepoOf(await readDeliverOriginUrl(workdir).catch(() => null)) !== null);
   // A post-hoc lift has NO engine verification to pin to — the daemon runs the script itself, no
   // deliver lift preceded it — so the script's verified-base refusal (wicked-core#431,
   // `WICKED_DELIVER_VERIFIED_BASE`) must not fire off a stray pin in the daemon's own environment:

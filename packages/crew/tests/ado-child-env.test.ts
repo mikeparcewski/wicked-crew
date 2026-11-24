@@ -17,6 +17,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { ADO_RAW_ENV, execCapped, withAdoCredential } from '../src/core/exec.js';
@@ -69,11 +70,14 @@ describe('crew#1843 every crew child but the header minters runs without the raw
     expect(seen.stdout + viaCaller.stdout).not.toContain(FAKE);
   }, 30_000);
 
-  it('the post-hoc deliver shell keeps the credential its header helper mints from, and nothing else comes back', () => {
-    const env = deliverShellEnv({ HOME: '/tmp/h' });
+  it('the post-hoc deliver shell keeps the credential for an Azure DevOps origin only, and nothing else comes back', () => {
+    const env = deliverShellEnv({ HOME: '/tmp/h' }, true);
     for (const n of ADO_RAW_ENV) expect(env[n] === FAKE, n).toBe(true);
     expect(env['HOME']).toBe('/tmp/h');
     expect(env['WICKED_CREW_GOVERNANCE_DB']).toBeUndefined();
+    // A GitHub (or any other) origin has no header to mint (review r1).
+    const other = deliverShellEnv({ HOME: '/tmp/h' });
+    for (const n of ADO_RAW_ENV) expect(other[n], n).toBeUndefined();
   });
 
   it('the Azure DevOps header helper still gets the PAT it mints from', async () => {
@@ -101,5 +105,84 @@ describe('crew#1843 STATIC: only the header helper and the post-hoc deliver scri
       }
     }
     expect(sites.sort()).toEqual(['api/post-hoc-deliver.ts deliverShellEnv', 'core/deliver.ts defaultAdoHelperExec']);
+  });
+});
+
+/**
+ * (review r1) The governance-child-env guard looks for a helper's name within 900 characters of a call, so a spawn beside
+ * a covered one passed, and a promisified alias was not seen at all. This one reads each call: every call of a
+ * child_process function, or of a `promisify(...)` alias of one, passes an options object whose `env` is built by a crew
+ * child-env helper (directly, or through a variable or parameter default in the same file).
+ */
+describe('crew#1843 STATIC (AST): every crew child-process call passes an env built by a crew child-env helper', () => {
+  const CHILD_PROCESS = new Set(['spawn', 'spawnSync', 'execFile', 'execFileSync', 'exec', 'execSync', 'fork']);
+  // Each builds on childEnvWithBootEstateDb (gitChildEnv / childEnvFor in core/exec.ts, deliverShellEnv in
+  // api/post-hoc-deliver.ts, runnerEnv in sources/drivers/sqlite.ts).
+  const HELPERS = ['childEnvWithBootEstateDb(', 'gitChildEnv(', 'childEnvFor(', 'deliverShellEnv(', 'runnerEnv('];
+  it('finds no call without one', () => {
+    const uncovered: string[] = [];
+    let calls = 0;
+    for (const file of tsFiles(SRC)) {
+      const rel = relative(SRC, file).split('\\').join('/');
+      if (rel === 'core/exec.ts') continue; // execCapped: it applies childEnvFor itself
+      const text = readFileSync(file, 'utf8');
+      if (!/child_process/.test(text)) continue;
+      const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+      const names = new Set<string>();
+      const inits = new Map<string, ts.Expression>();
+      const scan = (n: ts.Node): void => {
+        if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && /child_process$/.test(n.moduleSpecifier.text)) {
+          const b = n.importClause?.namedBindings;
+          if (b !== undefined && ts.isNamedImports(b)) for (const el of b.elements) if (CHILD_PROCESS.has((el.propertyName ?? el.name).text)) names.add(el.name.text);
+        }
+        if ((ts.isVariableDeclaration(n) || ts.isParameter(n)) && ts.isIdentifier(n.name) && n.initializer !== undefined) inits.set(n.name.text, n.initializer);
+        ts.forEachChild(n, scan);
+      };
+      scan(sf);
+      // `const exec = promisify(execFile)` is a child-process call too.
+      for (const [name, init] of inits) {
+        if (ts.isCallExpression(init) && init.expression.getText() === 'promisify' && names.has(init.arguments[0]?.getText() ?? '')) names.add(name);
+      }
+      // A name resolves in the innermost scope that declares it: a parameter (its default) or a const in a block above.
+      const resolveName = (at: ts.Node, name: string): ts.Expression | undefined => {
+        for (let a: ts.Node | undefined = at.parent; a !== undefined; a = a.parent) {
+          if (ts.isFunctionLike(a)) {
+            const p = a.parameters.find((q) => ts.isIdentifier(q.name) && q.name.text === name);
+            if (p !== undefined) return p.initializer;
+          }
+          const statements = ts.isBlock(a) || ts.isSourceFile(a) ? a.statements : undefined;
+          for (const st of statements ?? []) {
+            if (!ts.isVariableStatement(st)) continue;
+            const d = st.declarationList.declarations.find((x) => ts.isIdentifier(x.name) && x.name.text === name);
+            if (d !== undefined) return d.initializer;
+          }
+        }
+        return inits.get(name);
+      };
+      const built = (e: ts.Expression | undefined, depth = 0): boolean => {
+        if (e === undefined) return false;
+        if (HELPERS.some((h) => e.getText().includes(h))) return true;
+        return depth < 2 && ts.isIdentifier(e) && built(resolveName(e, e.text), depth + 1);
+      };
+      const optionsOf = (call: ts.CallExpression): ts.ObjectLiteralExpression | undefined => {
+        for (const a of call.arguments.slice(1)) {
+          if (ts.isObjectLiteralExpression(a)) return a;
+          if (ts.isIdentifier(a)) { const i = resolveName(a, a.text); if (i !== undefined && ts.isObjectLiteralExpression(i)) return i; }
+        }
+        return undefined;
+      };
+      const visit = (n: ts.Node): void => {
+        if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && names.has(n.expression.text)) {
+          calls += 1;
+          const env = optionsOf(n)?.properties.find((p) => p.name !== undefined && p.name.getText() === 'env');
+          const expr = env === undefined ? undefined : ts.isShorthandPropertyAssignment(env) ? env.name : ts.isPropertyAssignment(env) ? env.initializer : undefined;
+          if (!built(expr)) uncovered.push(`${rel}:${sf.getLineAndCharacterOfPosition(n.getStart()).line + 1} ${n.expression.text}`);
+        }
+        ts.forEachChild(n, visit);
+      };
+      visit(sf);
+    }
+    expect(calls, 'the scan saw the child-process calls').toBeGreaterThan(30);
+    expect(uncovered, 'these calls hand a child the daemon env (the raw Azure DevOps credential among it)').toEqual([]);
   });
 });
