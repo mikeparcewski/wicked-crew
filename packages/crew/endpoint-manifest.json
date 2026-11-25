@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.230.0",
+  "apiTypesVersion": "0.231.0",
   "endpoints": [
     {
       "method": "GET",
@@ -2272,6 +2272,7 @@
       "statusCodes": [
         201,
         400,
+        403,
         404,
         409,
         422,

@@ -1,0 +1,62 @@
+{
+  "id": "standin-consent",
+  "workflow_id": "wf-standin-consent",
+  "problem": "Build the thing.",
+  "entity_mode": "shared",
+  "collection_scope": "wicked-agent/standin-consent/shared",
+  "clis": [
+    "claude"
+  ],
+  "status": "completed",
+  "human_confirm": "none",
+  "auto_deliver": false,
+  "unit_ix": 2,
+  "attempt": 0,
+  "workdir": null,
+  "repo_ref": null,
+  "extra_write_roots": [],
+  "extra_read_roots": [],
+  "project_graph": null,
+  "project_id": null,
+  "archived_at": null,
+  "archive_note": null,
+  "finished_at": 1795568576877,
+  "assurance": {
+    "mode": "full",
+    "required": [
+      "distinct_evaluator",
+      "judge"
+    ],
+    "standInAware": true,
+    "standIn": {
+      "scope": "job",
+      "by": "operator",
+      "at": 1,
+      "via": "launch"
+    },
+    "standIns": [
+      {
+        "key": "claude~1",
+        "base": "claude",
+        "role": "evaluator",
+        "slot": 1,
+        "model": null,
+        "builderModel": null,
+        "lens": null,
+        "ord": 2,
+        "attempt": null,
+        "subject": null,
+        "evidence": null,
+        "invocation": "8375a247-99aa-42b3-99d9-3c0eb2ff893d",
+        "reason": {
+          "kind": "only_one_helper",
+          "cli": "Claude Code"
+        },
+        "state": "seated",
+        "display": "Claude Code"
+      }
+    ],
+    "roles": [],
+    "standInLabel": "Claude Code stood in for the review, using Claude Code's default model: only Claude Code was signed in"
+  }
+}

@@ -259,7 +259,7 @@ describe('crew#393 end to end — default-on delivery, stranded surfacing, post-
 
     const launch = await postJson('/api/v1/runs', {
       problem: 'e2e: write the work file and deliver it',
-      clisJson: SEATS,
+      clisJson: SEATS, standIns: true,
       workflow: WORK_WORKFLOW.id,
       repoRef: repoId,
       humanConfirm: 'none',
@@ -298,7 +298,7 @@ describe('crew#393 end to end — default-on delivery, stranded surfacing, post-
 
     const launch = await postJson('/api/v1/runs', {
       problem: 'e2e: write the work file but do not deliver',
-      clisJson: SEATS,
+      clisJson: SEATS, standIns: true,
       workflow: WORK_WORKFLOW.id,
       repoRef: repoId,
       humanConfirm: 'none',

@@ -185,6 +185,11 @@ seat and holds a gate whose judge has no distinct seat, so the run waits for a s
 answer says so (`assuranceNotice`). To proceed with one CLI, opt in explicitly:
 `"reducedAssurance": true` on `POST /runs`, or `wicked-crew start --reduced-assurance`. The creator's
 seat then evaluates its own work, and every receipt says `reduced`. crew never turns it on for you.
+On an engine with stand-ins (`GET /health` `capabilities.standIns`), a launch whose helpers can't check the job
+answers `409 stand_in_choice` before anything is created. A person consents for this job with `"standIns": true`
+(`wicked-crew start --stand-ins`), or for every job with the `standInReview: "always"` setting. A stand-in is a
+fresh session of a helper on the job, labelled on the job, every gate, the delivery and the pull request, and never
+counted as an independent review.
 
 **QE acceptance.** A run of a built-in workflow that makes application changes (`feature`, `bug`,
 `migration`, `mcp-server`, `editor-plugin`) requires real functional QE acceptance: garden's three-agent `wicked-garden-qe accept`
