@@ -7020,7 +7020,9 @@ export interface CoverageReport {
   unaccounted_nodes: UnaccountedNode[];
 }
 
-/** One entry of a repo's code-graph summary — a node kind and how many the graph holds (#122). */
+/** One entry of a repo's code-graph summary — a node kind and how many the graph holds (#122). The summary route
+ *  (`GET /governance/graph?repo=`) answers `{ kinds: GraphKind[] }`; for a registered repo with no code graph yet it is
+ *  `{ kinds: [], code: 'not_indexed', error }` with status 200 (studio#1402, a 404 before); an unknown repo is a 404. */
 export interface GraphKind {
   kind: string;
   count: number;

@@ -34,6 +34,8 @@ beforeAll(async () => {
       { id: 'unindexed', name: 'unindexed', root_path: scratch, default_branch: 'main', registered_at: 1, code_graph_db: join(scratch, 'repo-graphs', 'unindexed', 'estate.db') },
       { id: 'locked', name: 'locked', root_path: scratch, default_branch: 'main', registered_at: 1, code_graph_db: scratch },
       { id: 'sealed', name: 'sealed', root_path: scratch, default_branch: 'main', registered_at: 1, code_graph_db: join(scratch, 'sealed', 'estate.db') },
+      // Not indexed (no graph file) AND the engine fails for another reason: never "not indexed".
+      { id: 'unindexed-drift', name: 'unindexed-drift', root_path: scratch, default_branch: 'main', registered_at: 1, code_graph_db: join(scratch, 'repo-graphs', 'unindexed-drift', 'estate.db') },
     ],
     getCoverageReportForRepo: async () => {
       throw new Error(`storage error: unable to open database file: ${STATE}`);
@@ -41,7 +43,11 @@ beforeAll(async () => {
     getGraphKindsForRepo: async (repo: string) => {
       // The engine's own spelling for an id no repo is registered under (routes.ts repoReadStatus).
       if (repo === 'nope') throw new Error(`no registered repo '${repo}'`);
-      if (repo === 'unindexed' || repo === 'locked' || repo === 'sealed') throw new Error(`storage error: unable to open database file: ${STATE}`);
+      if (repo === 'unindexed-drift') throw new Error('Unexpected token < in JSON at position 0');
+      // The engine's own text for a registered repo whose graph file is missing (core-ts 0.15.49
+      // `getGraphKindsForRepo`, probed against a scratch store; repo.rs graph_kinds_for_repo -> graph_browser.rs:95).
+      if (repo === 'unindexed') throw new Error(`open graph ${STATE}: open estate store read-only at "${STATE}": storage error: unable to open database file: ${STATE}`);
+      if (repo === 'locked' || repo === 'sealed') throw new Error(`storage error: unable to open database file: ${STATE}`);
       throw new Error(`storage error: disk I/O error at ${STATE}`);
     },
   } as unknown as CoreAdapter;
@@ -103,6 +109,12 @@ describe('a server error body', () => {
     // `kinds: []` keeps every reader of `{ kinds }` working (studio 0.16.17 draws "Code graph: not built"); the code says why.
     expect(res.json()).toEqual({ kinds: [], code: 'not_indexed', error: 'this repository has no code graph yet: index it first' });
     expect(res.body).not.toMatch(ABSOLUTE);
+  });
+
+  it('(codex r1) a repo not indexed yet whose engine read fails for another reason is a server error, never "not indexed"', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/v1/governance/graph?repo=unindexed-drift' });
+    expect(res.statusCode).toBe(500);
+    expect((res.json() as { code?: unknown }).code).not.toBe('not_indexed');
   });
 
   it('an id no repo is registered under is still a plain 404 on the graph summary (no code), apart from "not indexed yet"', async () => {
