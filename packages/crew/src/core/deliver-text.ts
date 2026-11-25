@@ -141,10 +141,11 @@ export interface DeliverAssuranceFact {
 export interface DeliverStandInFact {
   /** Why they stood in, in words (the first binding's reason). */
   reason: string;
-  /** Some independent role was also filled by a real helper (`assurance.roles`): the checks were mixed. */
+  /** Some independent role was also filled by a real helper (the session's and the units' receipt `roles`): the
+   *  checks were mixed. */
   mixed: boolean;
-  /** One entry per stand-in, in the order they were seated. */
-  /** `failed`: the stand-in was seated and did not answer (rev 3 N6); it still took part. */
+  /** One entry per stand-in, in the order they were seated. `failed`: the stand-in was seated and did not answer
+   *  (rev 3 N6, its binding or a receipt says so); it still took part. */
   roles: Array<{ role: string; by: string; failed: boolean }>;
 }
 
