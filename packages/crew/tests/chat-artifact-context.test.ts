@@ -523,7 +523,7 @@ describe('buildTurnContext', () => {
     expect((await built({ context: { artifact: { ref: 'mikes/demo-8e0ffbece431', version: 2 } }, acceptsCut: true })).block).toContain("The latest version of this video isn't a cut");
     // A video tool that won't start (or is too old to adopt): the seat is told why; the message still goes.
     deps = { ...deps, cutBridge: async () => { throw new Error('the bridge on port 4100 is 0.16.2'); } };
-    expect((await built({ context: { artifact: { ref: 'mikes/demo-8e0ffbece431', version: 2 } }, acceptsCut: true })).block).toContain("this chat can't change it now: The video tool isn't running here: the bridge on port 4100 is 0.16.2");
+    expect((await built({ context: { artifact: { ref: 'mikes/demo-8e0ffbece431', version: 2 } }, acceptsCut: true })).block).toContain("this chat can't change it now: The video tool isn't running here: the bridge on port 4100 is 0.16.2.");
     deps = { ...deps, cutBridge: async () => async () => answer };
     // Deleted, or history from before kept cuts.
     answer = { status: 409, body: { error: 'cut_unverified' } };
