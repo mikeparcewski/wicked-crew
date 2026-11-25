@@ -12737,7 +12737,9 @@ export interface FileProposalBody {
   content: string;
   /** Becomes the `project` facet, so the preference is recalled on that project only. */
   project?: string;
-  /** (api-types 0.228.0, studio#1095) Becomes the `repo` facet: recalled on that repository only (1–256 chars). */
+  /** (api-types 0.228.0, studio#1095) Becomes the `repo` facet: recalled on that repository only (1–256 chars). It is a
+   *  registered repository's id (`GET /repos`, as a run's `repo_ref` names it); one no registry row carries is a 400
+   *  `repo_unknown`, and a registry that cannot be read a 503 (nothing is filed either way). */
   repo?: string;
   /** (api-types 0.228.0, studio#1095) The memory tier: a fact (`semantic`, the default), a how-to (`procedural`) or
    *  something that happened (`episodic`). Any other value is a 400. */
