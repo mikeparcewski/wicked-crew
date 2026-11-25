@@ -30,7 +30,7 @@ import type { EditorConformanceSummary, InstallEditorRefusal, InstallEditorRespo
 import { execCapped } from '../core/exec.js';
 import { EditorInstallConflict, EditorRegistry, PackEditorSchema, PluginManifestSchema, RUN_PLUGIN_CASES, editorEntryDigest, packEditorDigest, type InstalledPack } from './registry.js';
 import type { ConformanceProvisioner } from './conformance-runtime.js';
-import { approvalDiff, installedSkillsOf, PackExtrasRefusal, packSkillOrigin, planExtras, withdrawPackExtras, writePresets, writeSkills, type ExtrasPlan, type PackApproval, type PackPresetsPort, type PackSkillsPort } from './pack-extras.js';
+import { approvalDiff, installedSkillsOf, PackExtrasRefusal, packSkillOrigin, packStampedSkills, planExtras, withdrawPackExtras, writePresets, writeSkills, type ExtrasPlan, type PackApproval, type PackPresetsPort, type PackSkillsPort } from './pack-extras.js';
 
 export type { PackApproval, PackPresetsPort, PackSkillsPort } from './pack-extras.js';
 
@@ -392,7 +392,13 @@ export async function installPack(
   }
   // What an earlier install of this same pack added (every persisted record, one skipped at boot included, and what
   // the registry kept after the pack's last editor was removed): an update replaces those in place.
-  const earlier = deps.registry.packExtrasOwned(name);
+  // A skill stamped as the pack's that the record never came to name (a failed record write, or a restart between the
+  // publish and the record) is the pack's too (crew#1915): an update replaces it, and withdraws it when dropped. Read
+  // only when this version ships skills, as the plan reads the root (an editor-only pack never reads it; its removal
+  // takes every stamped skill).
+  const recorded = deps.registry.packExtrasOwned(name);
+  const stamped = pack.skills.length > 0 ? ((await packStampedSkills(deps.skills ?? null, name)) ?? []) : [];
+  const earlier = { ...recorded, skills: [...recorded.skills, ...stamped.filter((k) => !recorded.skills.some((r) => r.key === k.key))] };
   const owned = {
     skills: new Set(earlier.skills.map((k) => k.key)),
     presets: new Set(earlier.presets),

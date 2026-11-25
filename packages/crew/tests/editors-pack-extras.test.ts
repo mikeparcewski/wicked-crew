@@ -24,6 +24,7 @@ import type { EditorConformanceSummary, InstallEditorRefusal, InstallEditorRespo
 import { installPack, PackInstallError, type ConformanceRunner, type PackApproval, type PackCheckRunner, type PackPresetsPort, type PackSkillsPort, requiredCases } from '../src/editors/pack-install.js';
 import { packSkillsPort } from '../src/editors/pack-extras.js';
 import { SkillsRuntime } from '../src/skills/runtime.js';
+import { SkillsUnseededError } from '../src/skills/store.js';
 import { EditorRegistry, sha256Of } from '../src/editors/registry.js';
 import { registerEditorRoutes } from '../src/editors/routes.js';
 import { removeScratch } from './setup/scratch.js';
@@ -764,6 +765,44 @@ describe('crew#1877 delta follow-ups: a pack can always be installed again, and 
     expect(published(r)).not.toContain('wicked-garden-acme-terms');
     expect(published(r)).not.toContain('wicked-garden-acme-terms-checker');
     await app.close();
+  });
+
+  it('crew#1917 r1 delta: an editor-only pack is removed when the skills root is not seeded (nothing of the pack’s is there)', async () => {
+    const r = rig();
+    const root = pack(['critique']);
+    editManifest(root, (m) => ({ ...m, skills_dir: 'none', blocks: [] }));
+    const base = r.deps.skills;
+    const unseeded: PackSkillsPort = { ...base, store: new Proxy(base.store, { get: (t, p, rcv) => (p === 'manifest' ? () => { throw new SkillsUnseededError('skills-root'); } : Reflect.get(t, p, rcv)) }) };
+    expect((await installPack(root, undefined, { ...r.deps, skills: unseeded })).installed).toBe(true);
+    const app = await routes(r, unseeded);
+    const removed = await app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-terms' });
+    expect(removed.statusCode, removed.body).toBe(200);
+    expect(removed.json<RemoveEditorResponse>()).toEqual({ removed: true, id: 'acme-terms' });
+    expect(r.registry.isInstalled('acme-terms')).toBe(false);
+    await app.close();
+  });
+
+  it('crew#1917 r1 delta: after a failed record write and a restart, a slimmer update keeps what it ships and withdraws what it dropped', async () => {
+    const r = rig();
+    const root = pack(['critique']);
+    const ok = await approvalFor(root, r.deps);
+    const fail = vi.spyOn(r.registry, 'setPackExtras').mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+    await installPack(root, undefined, r.deps, ok);
+    fail.mockRestore();
+    const reread = new EditorRegistry({ stateHome: r.home, studioRoot: r.studio });
+    expect(reread.packExtrasOwned('acme-terms').skills).toEqual([]);
+    const deps = { ...r.deps, registry: reread };
+    const slimmer = pack(['critique']);
+    rmSync(join(slimmer, 'skills', 'acme-terms-checker'), { recursive: true });
+    const res = await installPack(slimmer, undefined, deps, await approvalFor(slimmer, deps));
+    expect(res.skills?.map((k) => k.key)).toEqual(['wicked-garden-acme-terms']);
+    expect(res.withdrawn?.skills).toEqual(['wicked-garden-acme-terms-checker']);
+    expect(published(r)).toContain('wicked-garden-acme-terms');
+    expect(published(r)).not.toContain('wicked-garden-acme-terms-checker');
+    // The record now owns both: the dropped one stays the pack's, so the full pack turns it back on.
+    expect(reread.packExtrasOwned('acme-terms').skills.map((k) => k.key)).toEqual(BOTH);
   });
 
   it('crew#1916: a removal whose withdrawal fails is a 503 that keeps the editor installed; the retry finishes it', async () => {
