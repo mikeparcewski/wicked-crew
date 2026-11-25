@@ -453,6 +453,7 @@ describe('GET /api/v1/system: snoozed items (studio#1416)', () => {
   it('a snooze read that fails holds nothing back, and the snapshot still answers', async () => {
     const item = gateItem((await snapshot()).body)!;
     expect((await put(item.snooze!.key, { until: hour(), severity: item.snooze!.rank })).statusCode).toBe(200);
+    expect(gateItem((await snapshot()).body)).toBeUndefined(); // held while the read answers
     try {
       vi.spyOn(DeskSnoozes.prototype, 'list').mockRejectedValueOnce(new Error('trail unreadable'));
       const body = (await snapshot()).body as SystemSnapshot & { snoozed?: Held[] };
@@ -464,9 +465,12 @@ describe('GET /api/v1/system: snoozed items (studio#1416)', () => {
   });
 
   it('a snooze read that never settles holds nothing back, inside the budget', async () => {
+    const item = gateItem((await snapshot()).body)!;
+    expect((await put(item.snooze!.key, { until: hour(), severity: item.snooze!.rank })).statusCode).toBe(200);
+    expect(gateItem((await snapshot()).body)).toBeUndefined(); // held while the read answers
     vi.spyOn(DeskSnoozes.prototype, 'list').mockImplementationOnce(() => new Promise(() => undefined));
     const { body, ms } = await snapshot();
-    expect(gateItem(body)).toBeDefined();
+    expect(gateItem(body)!.snooze).toEqual(item.snooze);
     expect((body as SystemSnapshot & { snoozed?: Held[] }).snoozed).toEqual([]);
     expect(ms).toBeLessThan(SYSTEM_BUDGET_MS + 1_000);
   }, 20_000);

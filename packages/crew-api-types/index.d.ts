@@ -18207,7 +18207,8 @@ export interface VoiceTtsStatus {
  * the Desk: the skin brings it back when `until` passes or its rank rises above `severity`.
  */
 export interface DeskSnooze {
-  /** The skin's own id for the item (`run:<id>`, `infra:disk`, a need-row key); opaque to the daemon. */
+  /** An attention item's own key ({@link SystemAttentionSnooze.key}), which `/system` reads; else the skin's own id
+   *  for the item (a need-row key), opaque to the daemon. */
   key: string;
   /** ISO-8601: when the snooze ends by itself. */
   until: string;
