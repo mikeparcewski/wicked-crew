@@ -31,11 +31,21 @@ function codeOf(ch: string): number {
 function charOf(ch: string, fold: boolean): CharSet {
   const s = none();
   s[codeOf(ch)] = 1;
-  if (fold) {
+  if (!fold) return s;
+  if (codeOf(ch) === OTHER) {
+    // A non-ASCII letter may fold to an ASCII one (the long s to `s`, the Kelvin sign to `k`).
+    letters(s);
+  } else if (/[A-Za-z]/.test(ch)) {
     s[codeOf(ch.toLowerCase())] = 1;
     s[codeOf(ch.toUpperCase())] = 1;
+    s[OTHER] = 1; // and an ASCII letter to a non-ASCII one
   }
   return s;
+}
+/** Adds every ASCII letter to `s`. */
+function letters(s: CharSet): void {
+  for (let x = 65; x <= 90; x++) s[x] = 1;
+  for (let x = 97; x <= 122; x++) s[x] = 1;
 }
 function except(...chars: string[]): CharSet {
   const s = all();
@@ -126,10 +136,10 @@ class Reader {
       if (q === '*' || q === '+' || q === '?') {
         this.i++;
         f = this.quantify(f, q === '+' ? 1 : 0, q !== '?');
-      } else if (q === '{' && /^\{\d+(,\d*)?\}/.test(this.src.slice(this.i))) {
-        const m = /^\{(\d+)(,\d*)?\}/.exec(this.src.slice(this.i))!;
+      } else if (q === '{' && /^\{\s*\d*\s*(,\s*\d*\s*)?\}/.test(this.src.slice(this.i))) {
+        const m = /^\{\s*\d*\s*(,\s*\d*\s*)?\}/.exec(this.src.slice(this.i))!;
         this.i += m[0].length;
-        // {n}, {n,} and {n,m}: widened to zero or more.
+        // {n}, {n,}, {,m} and {n,m}: widened to zero or more.
         f = this.quantify(f, 0, true);
       } else {
         break;
@@ -161,8 +171,15 @@ class Reader {
     return { s, e: s };
   }
 
+  /** The next whole character (a code point, so a character outside the BMP is one character, as in Rust). */
+  private next(): string {
+    const c = String.fromCodePoint(this.src.codePointAt(this.i)!);
+    this.i += c.length;
+    return c;
+  }
+
   private atom(): Frag | null {
-    const c = this.src[this.i++]!;
+    const c = this.next();
     if (c === '(') {
       if (this.src.startsWith('?', this.i)) {
         const m = /^\?(P?<[A-Za-z_][A-Za-z0-9_]*>|:|[a-zA-Z-]*:|[a-zA-Z-]*\))/.exec(this.src.slice(this.i));
@@ -182,19 +199,21 @@ class Reader {
     if (c === '^' || c === '$') return this.empty();
     if (c === '*' || c === '+' || c === '?') throw new Unreadable('nothing to repeat');
     if (c === '\\') return this.escape();
+    // A `{` that is not a repeat (those are read after an atom): Rust's reading of it is not modelled.
+    if (c === '{') throw new Unreadable('brace');
     return this.set(charOf(c, true));
   }
 
   private escape(): Frag {
     const c = this.src[this.i++];
     if (c === undefined) throw new Unreadable('trailing backslash');
-    if (!/[A-Za-z0-9]/.test(c)) return this.set(charOf(c, false));
     if (c === 'A' || c === 'z') return this.empty();
     if (c === 'b' || c === 'B' || c === '<' || c === '>') {
       this.boundary = true;
       if (this.src.startsWith('{', this.i)) this.skipBraces();
       return this.empty();
     }
+    if (!/[A-Za-z0-9]/.test(c)) return this.set(charOf(c, true));
     this.skipEscapeBody(c);
     return this.set(all());
   }
@@ -223,21 +242,27 @@ class Reader {
     if (negated) this.i++;
     const listed = none();
     let exact = true;
-    let first = true;
+    const add = (ch: string): void => {
+      if (negated) {
+        if (codeOf(ch) !== OTHER) listed[codeOf(ch)] = 1; // dropping one non-ASCII character cannot drop them all
+      } else {
+        listed.set(charOf(ch, true).map((v, k) => v | listed[k]!));
+      }
+    };
+    // A `]` first is a member, never the start of a range (Rust reads it before the other members).
+    if (this.peek() === ']') {
+      this.i++;
+      add(']');
+    }
     for (;;) {
       const c = this.src[this.i];
       if (c === undefined) throw new Unreadable('unclosed class');
-      if (c === ']' && !first) {
+      if (c === ']') {
         this.i++;
         break;
       }
-      first = false;
-      if (c === '[') {
-        // A nested or POSIX class: widened. Its extent is still walked so the outer class closes in the right place.
-        exact = false;
-        this.skipNested();
-        continue;
-      }
+      // A nested or POSIX class: its extent and meaning are not modelled.
+      if (c === '[') throw new Unreadable('nested class');
       if ((c === '&' || c === '-' || c === '~') && this.src[this.i + 1] === c) {
         exact = false; // a set operation
         this.i += 2;
@@ -260,7 +285,10 @@ class Reader {
         if (b < a) throw new Unreadable('backwards range');
         if (b >= 128) {
           if (negated) exact = false;
-          else listed[OTHER] = 1;
+          else {
+            listed[OTHER] = 1;
+            letters(listed); // a non-ASCII member may fold to an ASCII letter
+          }
         }
         for (let x = a; x <= Math.min(b, 127); x++) {
           const ch = String.fromCodePoint(x);
@@ -269,12 +297,7 @@ class Reader {
         }
         continue;
       }
-      if (negated) {
-        if (codeOf(lo) === OTHER) continue; // dropping one non-ASCII character cannot drop them all
-        listed[codeOf(lo)] = 1;
-      } else {
-        listed.set(charOf(lo, true).map((v, k) => v | listed[k]!));
-      }
+      add(lo);
     }
     if (!exact) return all();
     if (!negated) return listed;
@@ -285,31 +308,23 @@ class Reader {
 
   /** One class member: a character, or null for one that stands for many (`\d`, `\pL`, …). */
   private classChar(): string | null {
-    const c = this.src[this.i++]!;
-    if (c !== '\\') return String.fromCodePoint(c.codePointAt(0)!);
+    const c = this.next();
+    if (c !== '\\') return c;
     const d = this.src[this.i++];
     if (d === undefined) throw new Unreadable('trailing backslash');
     if (!/[A-Za-z0-9]/.test(d)) return d;
     this.skipEscapeBody(d);
     return null;
   }
-
-  private skipNested(): void {
-    let depth = 0;
-    while (this.i < this.src.length) {
-      const c = this.src[this.i++]!;
-      if (c === '\\') {
-        this.i++;
-        continue;
-      }
-      if (c === '[') depth++;
-      else if (c === ']' && --depth === 0) return;
-    }
-    throw new Unreadable('unclosed class');
-  }
 }
 
-/** The canonical context core builds for an MCP call (mcp_gate.rs `context()`), as segments; `N` is the source name. */
+/**
+ * The canonical context core builds for an MCP call (mcp_gate.rs `context()`), as segments; `N` is the source name.
+ * Two facts it rests on: a name is 1-63 of `a-z 0-9 _ -` starting with a letter or digit (`MCP_SERVER_NAME_RE`), so it
+ * is never JSON-escaped and both its edges are word characters (a `\b` there reads the same under either name; the
+ * characters beside it are marked too, for one that does not); and `annotations` is core's flat `McpAnnotations`
+ * (four optional booleans), so it holds no brace. The route test that spells this whole context fires in the engine.
+ */
 type Seg = string | 'ANY' | 'STR' | 'NOBRACE' | 'BOOL' | 'N';
 const CONTEXT: readonly Seg[] = [
   '{"args":', 'ANY', // any JSON value
@@ -370,34 +385,53 @@ function contextNfa(name: string, wide: boolean): { nfa: Nfa; start: number } {
   return { nfa, start };
 }
 
-function closure(nfa: Nfa, from: number): number[] {
-  const seen = new Set([from]);
-  const stack = [from];
-  while (stack.length > 0) {
-    for (const n of nfa.eps[stack.pop()!]!) {
-      if (!seen.has(n)) {
-        seen.add(n);
-        stack.push(n);
+/** Longest trigger read; a longer one names both names. */
+const MAX_TRIGGER = 4096;
+
+/** Work (closure steps and product states) spent on one name before it is answered as matched (fail-closed). */
+const BUDGET = 2_000_000;
+
+class OverBudget extends Error {}
+
+/** Empty-move closures, computed when first asked for and charged to `spend`. */
+function closures(nfa: Nfa, spend: () => void): (from: number) => number[] {
+  const memo = new Map<number, number[]>();
+  return (from) => {
+    const known = memo.get(from);
+    if (known !== undefined) return known;
+    const seen = new Set([from]);
+    const stack = [from];
+    while (stack.length > 0) {
+      for (const n of nfa.eps[stack.pop()!]!) {
+        spend();
+        if (!seen.has(n)) {
+          seen.add(n);
+          stack.push(n);
+        }
       }
     }
-  }
-  return [...seen];
+    const out = [...seen];
+    memo.set(from, out);
+    return out;
+  };
 }
-
-/** Product states searched before the trigger is answered as naming both names (fail-closed). */
-const MAX_STATES = 2_000_000;
 
 function touches(re: Nfa, reStart: number, reAccept: number, name: string, wide: boolean): boolean {
   const { nfa: ctx } = contextNfa(name, wide);
-  const reClose = re.eps.map((_, s) => closure(re, s));
-  const ctxClose = ctx.eps.map((_, s) => closure(ctx, s));
+  let work = 0;
+  const spend = (): void => {
+    if (++work > BUDGET) throw new OverBudget();
+  };
+  const reClose = closures(re, spend);
+  const ctxClose = closures(ctx, spend);
   // A state: (trigger state, context state, whether a marked character has been consumed).
   const key = (r: number, c: number, t: number): number => (r * ctx.size + c) * 2 + t;
   const seen = new Set<number>();
   const stack: Array<[number, number, number]> = [];
   const push = (r: number, c: number, t: number): void => {
-    for (const r2 of reClose[r]!) {
-      for (const c2 of ctxClose[c]!) {
+    for (const r2 of reClose(r)) {
+      for (const c2 of ctxClose(c)) {
+        spend();
         const k = key(r2, c2, t);
         if (seen.has(k)) continue;
         seen.add(k);
@@ -405,19 +439,24 @@ function touches(re: Nfa, reStart: number, reAccept: number, name: string, wide:
       }
     }
   };
-  // The trigger may start matching anywhere in the context.
-  for (let c = 0; c < ctx.size; c++) push(reStart, c, 0);
-  while (stack.length > 0) {
-    if (seen.size > MAX_STATES) return true;
-    const [r, c, t] = stack.pop()!;
-    if (t === 1 && r === reAccept) return true;
-    for (const [rs, rn] of re.moves[r]!) {
-      for (const [cs, cn, mark] of ctx.moves[c]!) {
-        if (meets(rs, cs)) push(rn, cn, t === 1 || mark ? 1 : 0);
+  try {
+    // The trigger may start matching anywhere in the context.
+    for (let c = 0; c < ctx.size; c++) push(reStart, c, 0);
+    while (stack.length > 0) {
+      const [r, c, t] = stack.pop()!;
+      if (t === 1 && r === reAccept) return true;
+      for (const [rs, rn] of re.moves[r]!) {
+        for (const [cs, cn, mark] of ctx.moves[c]!) {
+          spend();
+          if (meets(rs, cs)) push(rn, cn, t === 1 || mark ? 1 : 0);
+        }
       }
     }
+    return false;
+  } catch (e) {
+    if (e instanceof OverBudget) return true;
+    throw e;
   }
-  return false;
 }
 
 /**
@@ -426,6 +465,8 @@ function touches(re: Nfa, reStart: number, reAccept: number, name: string, wide:
  */
 export function triggerNames(contains: string, names: readonly string[]): string[] {
   if (contains === '') return [];
+  // A trigger longer than any a person writes is not read (fail-closed): reading is linear, but searching is not free.
+  if (contains.length > MAX_TRIGGER) return [...names];
   const re = new Nfa();
   const reader = new Reader(contains, re);
   let frag: Frag;

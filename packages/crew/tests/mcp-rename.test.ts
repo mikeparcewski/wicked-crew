@@ -485,8 +485,15 @@ describe('rename: rules whose trigger can match a name (crew#1905)', () => {
       ['fx.*"seat":"codex"', ['fx', 'gx']], // spans fields after the name (and, widened, over the other name)
       ['^"|fx', ['fx']],
       ['\\A.*fx', ['fx', 'gx']],
-      ['\\bx', ['fx', 'gx']], // a boundary reads the character beside the name
+      ['\\bx', ['fx', 'gx']],
+      ['\\b","subject"', ['fx', 'gx']], // a boundary reads the character beside the name, though it takes in none
+      ['\\<fx\\>', ['fx']],
+      ['"server":"f{ 1 }x"', ['fx']],
+      ['"server":"[[]]x]x"', ['fx', 'gx']], // a nested class: not read, both named
+      ['"server":"x{"', ['fx', 'gx']], // a bare brace: not read
       ['(?i)FX', ['fx']],
+      ['"server":"g{,1}x"', ['gx']], // every repeat form, widened to zero or more
+      ['"server":"g{ 1 , 2 }x"', ['gx']],
       ['f\\x78', ['fx']], // an escape it does not decode: any character
       ['\\x66x', ['fx', 'gx']],
       ['(?x) f x', ['fx', 'gx']], // verbose mode: refused, both named
@@ -500,6 +507,18 @@ describe('rename: rules whose trigger can match a name (crew#1905)', () => {
       ['(a+)+!', []],
     ];
     for (const [t, want] of cases) expect(triggerNames(t, ['fx', 'gx']), t).toEqual(want);
+    // Rust's case folding reaches past ASCII both ways; a `]` first in a class is a member, never a range start.
+    expect(triggerNames('(?i)"server":"\u017Fx"', ['sx', 'gx'])).toEqual(['sx', 'gx']); // widened: any letter
+    expect(triggerNames('(?i)"server":"[\u212A-\u212A]"', ['k', 'gx'])).toEqual(['k']);
+    expect(triggerNames('"server":"a[]-a]b"', ['a-b', 'gx'])).toEqual(['a-b']);
+    expect(triggerNames('"server":"a[^]-a]b"', ['a_b', 'gx'])).toEqual(['a_b']);
+    // A character outside the BMP is one character: an optional one may be absent.
+    expect(triggerNames('"server":"fx\u{1F600}?"', ['fx', 'gx'])).toEqual(['fx']);
+    // A trigger whose search would be large is answered as matching (fail-closed), and quickly.
+    const t0 = Date.now();
+    expect(triggerNames('a?'.repeat(2000) + 'zz', ['fx', 'gx'])).toEqual(['fx', 'gx']);
+    expect(triggerNames('x'.repeat(5000), ['fx', 'gx'])).toEqual(['fx', 'gx']);
+    expect(Date.now() - t0).toBeLessThan(10_000);
     // A long name and a pattern that backtracks in JavaScript: answered quickly, since nothing is run as a RegExp.
     const started = Date.now();
     expect(triggerNames('(a+)+!', ['a'.repeat(63), 'b'])).toEqual([]);
