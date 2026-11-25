@@ -38,7 +38,7 @@ export interface PackApproval {
 
 /** The daemon skills root, and how to publish it so workers get what was added. */
 export interface PackSkillsPort {
-  store: Pick<SkillsStore, 'manifest' | 'revision' | 'add' | 'replace' | 'enable' | 'disable' | 'previewWrite' | 'isPublishing' | 'listFiles' | 'resolveSkillFile'>;
+  store: Pick<SkillsStore, 'manifest' | 'revision' | 'add' | 'replace' | 'enable' | 'disable' | 'previewWrite' | 'isPublishing' | 'listFiles' | 'resolveSkillFile' | 'currentSnapshotSkills'>;
   publish(): Promise<Pick<SkillPublishResult, 'verdict' | 'findings' | 'snapshot'>>;
   /** Settles once the daemon's skills boot (seed, first publish) has landed; every skills write waits for it. */
   ready?(): Promise<void>;
@@ -293,7 +293,9 @@ export async function planExtras(input: {
       if (!SKILL_NAME_RE.test(dir)) throw unreadable(`the skill directory ${JSON.stringify(dir)} is not a valid skill name (letters, digits, - and _ only)`);
       const key = installedKey(dir);
       const exists = Object.hasOwn(held, key);
-      const own = exists && input.owned.skills.has(key);
+      // The pack's own: the record names it, or it carries this pack's stamp (crew#1915). Only this pack's install writes
+      // `origin: pack:<name>`, so a skill written before a restart or a failed record write is still the pack's.
+      const own = exists && (input.owned.skills.has(key) || held[key]?.origin === packSkillOrigin(input.packName));
       if (exists && !own) {
         throw new PackExtrasRefusal(409, 'pack_name_taken', `the skill ${dir} would be installed as ${key}, and the skills root already holds a skill of that name that this pack did not add; nothing was installed`);
       }
@@ -568,7 +570,19 @@ export async function withdrawPackExtras(input: {
         if (r.verdict === 'blocked') problems.push(`the skill ${key} could not be switched off (${r.findings.filter((f) => f.severity === 'blocking').map((f) => f.evidence).join('; ')})`);
         else out.skills.push(key);
       }
-      if (out.skills.length > 0) {
+      // Published when a switched-off pack skill is still in the generation workers get: one just switched off, or one an
+      // earlier withdrawal switched off whose publish was blocked (a retry finishes it, crew#1916).
+      let live: ReadonlySet<string> | null;
+      try {
+        live = new Set(port.store.currentSnapshotSkills()?.skills ?? []);
+      } catch {
+        live = null; // unreadable: publish to be sure
+      }
+      const stale = input.skills.some((key) => {
+        const e = port.store.manifest().skills[key];
+        return e !== undefined && e.enabled === false && e.origin === packSkillOrigin(input.packName) && (live === null || live.has(key));
+      });
+      if (out.skills.length > 0 || stale) {
         const published = await port.publish();
         if (published.verdict === 'blocked') {
           problems.push(`the skills root could not be published (${published.findings.filter((f) => f.severity === 'blocking').map((f) => f.evidence).join('; ')}), so workers keep the switched-off skills until the next publish`);
