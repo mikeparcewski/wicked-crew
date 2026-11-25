@@ -91,20 +91,18 @@ jobs:
   # red if the stamp was missed: a `next` tag left, a caret or the lockfile on another version, or
   # the contract changed since the api-types-v<version> tag it claims. Nothing `needs` it: crew's
   # package does not ship the contract, so a missed stamp must not hold crew's publish. The red job
-  # is the release lane's signal to stamp and tag api-types.
+  # is the release lane's signal to stamp and tag api-types. The same check runs earlier on the
+  # version PR itself (ci.yml `api-types-stamp`), while the stamp can still be fixed before the tag.
   api-types-stamped:
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      # `--remote origin`: this checkout is shallow and holds no api-types tag, so the remote says whether
+      # api-types-v<version> exists (and the tag is fetched). A remote that cannot be asked fails the job.
       - name: The api-types contract was stamped
-        shell: bash
-        run: |
-          v="$(node -p "require('./packages/crew-api-types/package.json').version")"
-          git fetch -q --depth=1 origin "refs/tags/api-types-v$v:refs/tags/api-types-v$v" \
-            || echo "api-types-v$v is not tagged yet: nothing published to compare against"
-          node scripts/stamp-api-types.mjs --check
+        run: node scripts/stamp-api-types.mjs --check --remote origin
   version:
     needs: release
     runs-on: ubuntu-latest

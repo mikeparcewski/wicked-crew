@@ -23,8 +23,13 @@ afterEach(() => {
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
 });
 
+// The host's git config (hooks, signing, templates, an external diff) stays out of the throwaway repos, for the
+// fixture's own git calls and for the script's.
+const GIT_ENV: NodeJS.ProcessEnv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+for (const k of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY']) delete GIT_ENV[k];
+
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' });
+  return execFileSync('git', args, { cwd, encoding: 'utf8', env: GIT_ENV });
 }
 
 function writeJson(path: string, value: unknown): void {
@@ -43,6 +48,7 @@ interface Manifest {
   apiTypesVersion?: string;
   scripts?: Record<string, string>;
   devDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
   packages?: Record<string, Manifest>;
 }
 
@@ -51,7 +57,7 @@ function readJson(path: string): Manifest {
 }
 
 function run(root: string, ...args: string[]) {
-  return spawnSync('node', [SCRIPT, '--root', root, ...args], { encoding: 'utf8' });
+  return spawnSync('node', [SCRIPT, '--root', root, ...args], { encoding: 'utf8', env: GIT_ENV });
 }
 
 /** Generators shaped like crew's: they read the version from packages/crew-api-types/package.json. */
@@ -77,12 +83,9 @@ function commitAll(root: string, msg: string): void {
 }
 
 function initGit(root: string): void {
-  git(root, 'init', '-q', '-b', 'main');
+  git(root, 'init', '-q', '--template=', '-b', 'main');
   git(root, 'config', 'user.email', 'fixture@test');
   git(root, 'config', 'user.name', 'fixture');
-  // The host's signing settings stay out of a throwaway repo.
-  git(root, 'config', 'commit.gpgSign', 'false');
-  git(root, 'config', 'tag.gpgSign', 'false');
 }
 
 /** A small crew-shaped workspace at api-types 0.19.0, its lockfile written by npm. */
@@ -106,6 +109,12 @@ function smallWorkspace(): string {
       'export interface New { b?: string }',
       '/** (crew#2, api-types next) Another. */',
       'export interface Other { c?: string }',
+      '/**',
+      ' * (core#1808,',
+      ' *  api-types next) A tag wrapped across comment lines.',
+      ' * @deprecated (api-types next) Replaced by New.',
+      ' */',
+      'export interface Wrapped { d?: string }',
       '',
     ].join('\n'),
   );
@@ -119,12 +128,12 @@ function smallWorkspace(): string {
   });
   write(join(root, 'packages/crew/src/api/routes.ts'), '// (api-types next) the route answers New.\nexport {};\n');
   write(join(root, 'packages/crew/tests/fixture.test.ts'), "// a fixture may spell 'api-types next' on purpose\n");
-  write(join(root, 'CHANGELOG.md'), '## [Unreleased]\n- New (api-types next).\n');
+  write(join(root, 'CHANGELOG.md'), '## [Unreleased]\n- New (api-types next).\n- api-types next: `New`, `Other`.\n- The rule: tag it `(api-types next)`.\n');
   writeJson(join(root, 'packages/crew/endpoint-manifest.json'), { version: 1, apiTypesVersion: '0.19.0', endpoints: [] });
   write(join(root, 'packages/crew/tests/generated/api-sample.generated.test.ts'), '// GENERATED. Manifest: wicked-crew-api-types 0.19.0.\n');
   write(join(root, '.gitignore'), 'node_modules\n');
   // npm writes the lockfile (offline: the only dependency is the local workspace).
-  execFileSync('npm', ['install', '--prefer-offline', '--no-audit', '--no-fund', '--ignore-scripts'], { cwd: root, stdio: 'ignore' });
+  execFileSync('npm', ['install', '--offline', '--no-audit', '--no-fund', '--ignore-scripts'], { cwd: root, stdio: 'ignore' });
   initGit(root);
   commitAll(root, 'base: api-types 0.19.0 with two next tags');
   return root;
@@ -136,7 +145,12 @@ describe('npm run stamp:api-types -- <X.Y.Z>', () => {
     const before = run(root, '--check');
     expect(before.status).toBe(1);
     expect(before.stderr).toContain("packages/crew-api-types/index.d.ts:4 still says 'api-types next'");
+    expect(before.stderr).toContain("packages/crew-api-types/index.d.ts:10 still says 'api-types next'");
+    expect(before.stderr).toContain("packages/crew-api-types/index.d.ts:11 still says 'api-types next'");
+    expect(before.stderr).toContain("CHANGELOG.md:3 still says 'api-types next'");
     expect(before.stderr).not.toContain('index.d.ts:1 ');
+    expect(before.stderr).not.toContain('CHANGELOG.md:4 ');
+    expect(before.stderr).not.toContain('fixture.test.ts');
 
     const r = run(root, '0.20.0');
     expect(r.status, r.stderr).toBe(0);
@@ -152,8 +166,12 @@ describe('npm run stamp:api-types -- <X.Y.Z>', () => {
     expect(types).toContain('(crew#2, api-types 0.20.0) Another.');
     expect(types).toContain('(api-types 0.19.0) An old field.');
     expect(types).toContain('tags what it adds `(api-types next)`: prose');
+    expect(types).toContain(' *  api-types 0.20.0) A tag wrapped across comment lines.');
+    expect(types).toContain('@deprecated (api-types 0.20.0) Replaced by New.');
     expect(readFileSync(join(root, 'packages/crew/src/api/routes.ts'), 'utf8')).toContain('(api-types 0.20.0) the route');
-    expect(readFileSync(join(root, 'CHANGELOG.md'), 'utf8')).toContain('- New (api-types 0.20.0).');
+    expect(readFileSync(join(root, 'CHANGELOG.md'), 'utf8')).toBe(
+      '## [Unreleased]\n- New (api-types 0.20.0).\n- api-types 0.20.0: `New`, `Other`.\n- The rule: tag it `(api-types next)`.\n',
+    );
     // Tests are not stamped.
     expect(readFileSync(join(root, 'packages/crew/tests/fixture.test.ts'), 'utf8')).toContain("'api-types next'");
 
@@ -175,7 +193,7 @@ describe('npm run stamp:api-types -- <X.Y.Z>', () => {
 
   it('refuses a version that is not X.Y.Z or that moves the package back, and writes nothing', () => {
     const root = smallWorkspace();
-    for (const bad of ['0.20', 'v0.20.0', '0.18.9']) {
+    for (const bad of ['0.20', 'v0.20.0', '0.18.9', '0.0232.0', '1234567890.0.0', '0.20.0-rc.1']) {
       const r = run(root, bad);
       expect(r.status).toBe(1);
       expect(git(root, 'status', '--porcelain')).toBe('');
@@ -253,6 +271,87 @@ describe('npm run stamp:api-types -- --check (the release guard)', () => {
     writeJson(pj, crew);
     const r = run(root, '--check');
     expect(r.status).toBe(1);
-    expect(r.stderr).toContain('packages/crew/package.json asks for wicked-crew-api-types ^0.19.0, not ^0.20.0');
+    expect(r.stderr).toContain('packages/crew/package.json devDependencies asks for wicked-crew-api-types ^0.19.0, not ^0.20.0');
+  });
+});
+
+describe('the stamp and the guard keep to crew\'s own entries and the tree on disk', () => {
+  it('fills a workspace lockfile slot that is missing, and the guard names it first', () => {
+    const root = smallWorkspace();
+    expect(run(root, '0.20.0').status).toBe(0);
+    const lockPath = join(root, 'package-lock.json');
+    const lock = readJson(lockPath);
+    delete lock.packages?.['packages/crew']?.devDependencies;
+    writeJson(lockPath, lock);
+    const r = run(root, '--check');
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('package-lock.json "packages/crew" devDependencies asks for wicked-crew-api-types (nothing), not ^0.20.0');
+    expect(run(root, '0.20.0').status).toBe(0);
+    expect(readJson(lockPath).packages?.['packages/crew']?.devDependencies?.['wicked-crew-api-types']).toBe('^0.20.0');
+    expect(run(root, '--check').status).toBe(0);
+  });
+
+  it("leaves a third-party package's own range on the contract alone", () => {
+    const root = smallWorkspace();
+    const lockPath = join(root, 'package-lock.json');
+    const lock = readJson(lockPath);
+    lock.packages = { ...lock.packages, 'node_modules/some-client': { version: '1.0.0', peerDependencies: { 'wicked-crew-api-types': '>=0.1.0' } } };
+    writeJson(lockPath, lock);
+    commitAll(root, 'a third-party client of the contract');
+    expect(run(root, '0.20.0').status).toBe(0);
+    expect(readJson(lockPath).packages?.['node_modules/some-client']).toEqual({
+      version: '1.0.0',
+      peerDependencies: { 'wicked-crew-api-types': '>=0.1.0' },
+    });
+    expect(run(root, '--check').status).toBe(0);
+  });
+
+  it('stamps a new file that is not added to git yet', () => {
+    const root = smallWorkspace();
+    write(join(root, 'packages/crew/src/api/new-route.ts'), '// (api-types next) a route not yet added.\nexport {};\n');
+    expect(run(root, '--check').stderr).toContain("packages/crew/src/api/new-route.ts:1 still says 'api-types next'");
+    expect(run(root, '0.20.0').status).toBe(0);
+    expect(readFileSync(join(root, 'packages/crew/src/api/new-route.ts'), 'utf8')).toContain('(api-types 0.20.0) a route');
+  });
+
+  it('compares the published tag with the contract on disk, staged or not', () => {
+    const root = smallWorkspace();
+    expect(run(root, '0.20.0').status).toBe(0);
+    commitAll(root, 'stamp 0.20.0');
+    git(root, 'tag', '-a', '-m', 'api-types 0.20.0', 'api-types-v0.20.0');
+    const types = join(root, 'packages/crew-api-types/index.d.ts');
+    writeFileSync(types, `${readFileSync(types, 'utf8')}export interface Unstaged { e?: string }\n`);
+    expect(run(root, '--check').stderr).toContain('changed since api-types-v0.20.0 was tagged (packages/crew-api-types/index.d.ts)');
+    git(root, 'add', types);
+    expect(run(root, '--check').stderr).toContain('changed since api-types-v0.20.0 was tagged (packages/crew-api-types/index.d.ts)');
+    git(root, 'checkout', 'HEAD', '--', types);
+    write(join(root, 'packages/crew-api-types/extra.d.ts'), 'export {};\n');
+    expect(run(root, '--check').stderr).toContain('changed since api-types-v0.20.0 was tagged (packages/crew-api-types/extra.d.ts)');
+  });
+
+  it('with --remote, asks the remote for the tag, and fails when the remote cannot be asked', () => {
+    const root = smallWorkspace();
+    const origin = mkdtempSync(join(tmpdir(), 'crew-stamp-origin-'));
+    roots.push(origin);
+    git(origin, 'init', '-q', '--bare', '--template=', '-b', 'main');
+    git(root, 'remote', 'add', 'origin', origin);
+    expect(run(root, '0.20.0').status).toBe(0);
+    commitAll(root, 'stamp 0.20.0');
+    git(root, 'tag', '-a', '-m', 'api-types 0.20.0', 'api-types-v0.20.0');
+    git(root, 'push', '-q', 'origin', 'main', 'refs/tags/api-types-v0.20.0');
+    // A checkout that never fetched the tag (a shallow CI clone): only the remote knows it.
+    git(root, 'tag', '-d', 'api-types-v0.20.0');
+    const types = join(root, 'packages/crew-api-types/index.d.ts');
+    writeFileSync(types, `${readFileSync(types, 'utf8')}export interface Later { f?: string }\n`);
+    commitAll(root, 'feature: untagged change');
+    expect(run(root, '--check').stdout).toContain('api-types-v0.20.0 is not tagged yet');
+    const asked = run(root, '--check', '--remote', 'origin');
+    expect(asked.status).toBe(1);
+    expect(asked.stderr).toContain('changed since api-types-v0.20.0 was tagged (packages/crew-api-types/index.d.ts)');
+
+    git(root, 'remote', 'set-url', 'origin', join(origin, 'gone'));
+    const unreachable = run(root, '--check', '--remote', 'origin');
+    expect(unreachable.status).toBe(1);
+    expect(unreachable.stderr).toContain('cannot ask origin whether api-types-v0.20.0 exists');
   });
 });

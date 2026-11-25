@@ -22,8 +22,9 @@
  * - STAMPED ONCE PER TRAIN. A change here tags what it adds `(api-types next)`
  *   and leaves the package version, crew's caret on it and package-lock.json
  *   alone. The train's crew version PR runs `npm run stamp:api-types -- <X.Y.Z>`,
- *   which writes the number in every place, and the release workflows run
- *   `npm run stamp:api-types -- --check` (see the package README).
+ *   which writes the number in every place. CI on the version PR and the
+ *   release workflows run `npm run stamp:api-types -- --check` (see the
+ *   package README).
  *
  * The shapes mirror wicked-core's serde representation (wicked-core/src/domain.rs,
  * repo.rs, scope.rs) — the daemon passes most of them through verbatim.
