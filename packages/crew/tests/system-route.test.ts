@@ -11,6 +11,7 @@ import type { FastifyInstance } from 'fastify';
 import type { DiagnosticsResponse, HealthResponse, SystemSnapshot } from 'wicked-crew-api-types';
 
 import type { CoreAdapter } from '../src/core/adapter.js';
+import { DeskSnoozes } from '../src/api/desk-snoozes.js';
 import { createServer } from '../src/api/server.js';
 import { SYSTEM_BUDGET_MS } from '../src/api/system-snapshot.js';
 import { removeScratch } from './setup/scratch.js';
@@ -30,6 +31,11 @@ let scratch: string;
 let modeFile: string;
 let seatStatusFile: string;
 let app: FastifyInstance;
+/** The open gate's opening: Unix millis, as the engine's InteractionRequest row carries it (crew-api-types
+ *  `InteractionRequest.created_at`; core stamps it at each opening). A test moves it to re-open the gate. */
+let gateOpenedAt = Date.now() - 300_000;
+/** The open gate's kind; `escalation` holds the run (red). */
+let gateKind = 'plan_approval';
 
 const posix = process.platform !== 'win32';
 
@@ -134,7 +140,7 @@ beforeAll(async () => {
     sessionsDetail: async () => views,
     runEvents: async () => [],
     interactionRequests: async () => [
-      { id: 'ir_gate1', session_id: 'run-gate', kind: 'gate', ord: 1, reviewing_ord: null, prompt: 'Approve the plan?', gate_kind: 'plan_approval', status: 'open', created_at: new Date().toISOString() },
+      { id: 'ir_gate1', session_id: 'run-gate', kind: 'gate', ord: 1, reviewing_ord: null, prompt: 'Approve the plan?', gate_kind: gateKind, status: 'open', created_at: gateOpenedAt },
     ],
     listConformanceRules: async () => [{ id: 'r1' }, { id: 'r2', retired: true }],
     onLaunch: (): (() => void) => () => undefined,
@@ -345,21 +351,30 @@ describe('seat images on GET /system', () => {
 });
 
 // studio#1416 (crew#1124 on the ranked /needs page): a person snoozes an attention item. crew names the item's
-// occurrence (`snooze.key`: its id and crew's own `waitedSince`, so a gate asked again is a new key) and its rank;
-// while the snooze holds (end ahead, rank no higher than the one stored) the item leaves attention[] and the level, and
-// waits in `snoozed[]` with its end.
+// occurrence (`snooze.key`: the open interaction's id and that opening's time, so a gate asked again is a new key) and
+// its rank; while the snooze holds (end ahead, rank no higher than the one stored) the item leaves attention[] and the
+// level, and waits in `snoozed[]` with its end.
 describe('GET /api/v1/system: snoozed items (studio#1416)', () => {
   type Snoozable = SystemSnapshot['attention'][number] & { snooze?: { key: string; rank: number } };
   type Held = Snoozable & { until: string };
   const gateItem = (b: SystemSnapshot): Snoozable | undefined => (b.attention as Snoozable[]).find((a) => a.id === 'run:run-gate');
   const put = (key: string, body: Record<string, unknown>) =>
     app.inject({ method: 'PUT', url: `/api/v1/desk/snoozes/${encodeURIComponent(key)}`, payload: body });
+  const wake = (key: string) => app.inject({ method: 'DELETE', url: `/api/v1/desk/snoozes/${encodeURIComponent(key)}` });
+  const hour = (): string => new Date(Date.now() + 3_600_000).toISOString();
+  const levelOf = (attention: readonly Snoozable[]): string =>
+    attention.some((a) => a.severity === 'red') ? 'red' : attention.some((a) => a.severity === 'yellow') ? 'yellow' : 'green';
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    const left = (await app.inject({ method: 'GET', url: '/api/v1/desk/snoozes' })).json() as { snoozes: Array<{ key: string }> };
+    for (const s of left.snoozes) await wake(s.key);
+  });
 
   it('an item a person may snooze carries its key and rank; a component (infra) item carries none', async () => {
     const { body } = await snapshot();
     const item = gateItem(body)!;
-    // The open gate's interaction id (the engine's, from GET /interactions): a gate asked again is a new key.
-    expect(item.snooze).toEqual({ key: 'attention:run:run-gate@ir_gate1', rank: 101 });
+    // The open gate's interaction id and its opening (the engine's, from GET /interactions).
+    expect(item.snooze).toEqual({ key: `attention:run:run-gate@ir_gate1@${new Date(gateOpenedAt).toISOString()}`, rank: 101 });
     for (const a of body.attention as Snoozable[]) if (a.source !== 'run') expect(a.snooze).toBeUndefined();
   });
 
@@ -387,4 +402,72 @@ describe('GET /api/v1/system: snoozed items (studio#1416)', () => {
     expect(body.snoozed).toEqual([]);
     await app.inject({ method: 'DELETE', url: `/api/v1/desk/snoozes/${encodeURIComponent(item.snooze!.key)}` });
   });
+
+  it('the level is the kept items\' worst: a snoozed item leaves it, and Wake puts it back', async () => {
+    gateKind = 'escalation'; // the run is held: red, the worst on the page
+    try {
+      const before = (await snapshot()).body;
+      const item = gateItem(before)!;
+      expect(item.severity).toBe('red');
+      expect(before.level).toBe('red');
+      const rest = (before.attention as Snoozable[]).filter((a) => a.id !== item.id);
+      expect(levelOf(rest)).not.toBe('red'); // the held gate is what makes the page red
+      expect((await put(item.snooze!.key, { until: hour(), severity: item.snooze!.rank })).statusCode).toBe(200);
+      const held = (await snapshot()).body;
+      expect(gateItem(held)).toBeUndefined();
+      expect(held.level).toBe(levelOf(rest));
+      await wake(item.snooze!.key);
+      expect((await snapshot()).body.level).toBe('red');
+    } finally {
+      gateKind = 'plan_approval';
+    }
+  });
+
+  it('a snooze stored with no severity holds nothing back', async () => {
+    const item = gateItem((await snapshot()).body)!;
+    expect((await put(item.snooze!.key, { until: hour() })).statusCode).toBe(200);
+    const body = (await snapshot()).body as SystemSnapshot & { snoozed?: Held[] };
+    expect(gateItem(body)).toBeDefined();
+    expect(body.snoozed).toEqual([]);
+    await wake(item.snooze!.key);
+  });
+
+  it('the gate asked again (same interaction id, a new opening) is not held by the earlier snooze', async () => {
+    const first = gateItem((await snapshot()).body)!;
+    expect((await put(first.snooze!.key, { until: hour(), severity: first.snooze!.rank })).statusCode).toBe(200);
+    expect(gateItem((await snapshot()).body)).toBeUndefined();
+    const was = gateOpenedAt;
+    gateOpenedAt = Date.now() - 1_000;
+    try {
+      const body = (await snapshot()).body as SystemSnapshot & { snoozed?: Held[] };
+      const again = gateItem(body)!;
+      expect(again).toBeDefined();
+      expect(again.snooze!.key).not.toBe(first.snooze!.key);
+      expect(body.snoozed).toEqual([]);
+    } finally {
+      gateOpenedAt = was;
+      await wake(first.snooze!.key);
+    }
+  });
+
+  it('a snooze read that fails holds nothing back, and the snapshot still answers', async () => {
+    const item = gateItem((await snapshot()).body)!;
+    expect((await put(item.snooze!.key, { until: hour(), severity: item.snooze!.rank })).statusCode).toBe(200);
+    try {
+      vi.spyOn(DeskSnoozes.prototype, 'list').mockRejectedValueOnce(new Error('trail unreadable'));
+      const body = (await snapshot()).body as SystemSnapshot & { snoozed?: Held[] };
+      expect(gateItem(body)!.snooze).toEqual(item.snooze);
+      expect(body.snoozed).toEqual([]);
+    } finally {
+      await wake(item.snooze!.key);
+    }
+  });
+
+  it('a snooze read that never settles holds nothing back, inside the budget', async () => {
+    vi.spyOn(DeskSnoozes.prototype, 'list').mockImplementationOnce(() => new Promise(() => undefined));
+    const { body, ms } = await snapshot();
+    expect(gateItem(body)).toBeDefined();
+    expect((body as SystemSnapshot & { snoozed?: Held[] }).snoozed).toEqual([]);
+    expect(ms).toBeLessThan(SYSTEM_BUDGET_MS + 1_000);
+  }, 20_000);
 });
