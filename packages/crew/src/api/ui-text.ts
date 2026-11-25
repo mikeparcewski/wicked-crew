@@ -165,8 +165,10 @@ export function registerUiTextScrub(app: FastifyInstance, paths: readonly string
   const guarded = new Set(paths);
   app.addHook('onSend', async (request, reply, payload) => {
     if (request.method !== 'GET') return payload;
+    // The matched route, not only the raw URL: every spelling the router serves as a guarded route is scrubbed.
     const path = request.url.split('?', 1)[0] ?? request.url;
-    if (!guarded.has(path)) return payload;
+    const route = request.routeOptions?.url;
+    if (!guarded.has(path) && (route === undefined || !guarded.has(route))) return payload;
     if (typeof payload !== 'string') return payload;
     const ct = String(reply.getHeader('content-type') ?? '');
     if (!ct.includes('application/json')) return payload;
