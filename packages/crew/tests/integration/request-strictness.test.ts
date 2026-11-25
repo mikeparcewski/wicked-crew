@@ -143,7 +143,7 @@ describe('POST /runs rejects fields it does not know (FINDING-031)', () => {
     const { status } = await post('/api/v1/runs', {
       problem: 'Do step one. Do step two',
       sessionId: HAPPY_PATH_ID,
-      clisJson: SEATS,
+      clisJson: SEATS, standIns: true,
       entityMode: 'shared',
     });
     expect(status).toBe(201);

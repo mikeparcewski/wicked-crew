@@ -104,7 +104,7 @@ describe('§4.8 — isCodeWorkDef equals the LIVE POST /runs deliver-default rul
     for (const def of shipped) {
       const { status, body } = await post('/api/v1/runs', {
         problem: `§4.8 launch-rule pin for ${def.id}`,
-        clisJson: SEATS,
+        clisJson: SEATS, standIns: true,
         workflow: def.id,
         repoRef: 'repo-alpha',
         ...(def.id === 'domain-extraction' ? { domainScope: { intent: 'the rules of the alpha repo' } } : {}),
@@ -130,7 +130,7 @@ describe('§4.8 — isCodeWorkDef equals the LIVE POST /runs deliver-default rul
     // M3 (DES-TEAMING-002): `chat` is no def now — the engine's built-in preset — and a repo-scoped
     // chat launch with no `deliver` still defaults to 'none', as its deleted def did.
     expect(shipped.map((w) => w.id)).not.toContain('chat');
-    const chat = await post('/api/v1/runs', { problem: '§4.8 chat preset', clisJson: SEATS, workflow: 'chat', repoRef: 'repo-alpha' });
+    const chat = await post('/api/v1/runs', { problem: '§4.8 chat preset', clisJson: SEATS, standIns: true, workflow: 'chat', repoRef: 'repo-alpha' });
     expect(chat.status, JSON.stringify(chat.body)).toBe(201);
     const chatRun = chat.body['runId'] as string;
     const isChat = (e: AuditEntry) => e.action === 'run.launched' && e.runId === chatRun;

@@ -149,7 +149,7 @@ async function waitForRun(
 async function launch(workflow: string, problem: string): Promise<string> {
   const res = await postJson('/api/v1/runs', {
     problem,
-    clisJson: SEATS,
+    clisJson: SEATS, standIns: true,
     workflow,
     repoRef: repoId,
     humanConfirm: 'none',
@@ -256,7 +256,7 @@ describe('crew#311 end to end — vacuous is loud, resume points at the real rec
     // lineage is on the wire.
     const retry = await postJson('/api/v1/runs', {
       problem: 'e2e: the retry lineage of the vacuous run',
-      clisJson: SEATS,
+      clisJson: SEATS, standIns: true,
       workflow: NOOP_WORKFLOW.id,
       repoRef: repoId,
       humanConfirm: 'none',

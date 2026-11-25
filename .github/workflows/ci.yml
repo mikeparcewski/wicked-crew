@@ -364,6 +364,38 @@ jobs:
           npm ci --no-audit --no-fund
           GATE_ACTIONS_FIXTURE="$fixture" npx vitest run tests/gateContract.engine.test.ts
 
+  # The api-types stamp, on the train's crew version PR only (coord ruling 2026-11-25, train 15). A feature PR
+  # carries `(api-types next)` tags by design and leaves the version alone, so it is not checked. A PR that moves
+  # crew's version is the train's version PR: it must have run `npm run stamp:api-types -- <X.Y.Z>`. This guard
+  # fails it while the stamp can still be fixed, before any tag. `--remote origin` asks the remote whether
+  # api-types-v<version> exists, because this checkout holds no tags. The same check runs again in release.yml.
+  api-types-stamp:
+    name: api-types stamp (version PRs)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: A version PR carries a whole api-types stamp
+        shell: bash
+        # The base commit this run's merge ref was built on, not the branch's tip: a version PR that merges while
+        # this job is queued must not turn a feature PR's comparison into a version PR's.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git fetch -q --depth=1 origin "$BASE_SHA"
+          base="$(git show "$BASE_SHA":packages/crew/package.json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).version))')"
+          head="$(node -p "require('./packages/crew/package.json').version")"
+          if [ "$base" = "$head" ]; then
+            echo "crew stays at $head: not a version PR, so its (api-types next) tags are expected"
+            exit 0
+          fi
+          echo "crew $base -> $head: the train's version PR"
+          node scripts/stamp-api-types.mjs --check --remote origin
+
   # DES-APPS-001 K1: Apps data sources against REAL databases. Postgres 16, Postgres 17 and MySQL 8 run
   # as service containers (Linux only, hence a job of its own); the source tests seed a fresh database
   # per run from packages/crew/tests/fixtures/apps-sources/ and drop it after. WICKED_SOURCES_DB=required

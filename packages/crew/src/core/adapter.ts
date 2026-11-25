@@ -91,6 +91,7 @@ import { QE_OFF_REASON, launchRequiresQe, qeAcceptanceMode, qeSettingSkipReason 
 import { applyVaultBinEnv, BOOT_VAULT_BIN, resolveShippedVaultBin, type VaultBinInputs, type VaultBinPosture } from './vault-bin.js';
 import { withFolderFindings } from './repoPaths.js';
 import { NEW_WORK_SEATS_FIX, NewWorkSeatsRefusal, isSeatKeyList } from './job-seats.js';
+import { isSettingConsent } from './stand-in.js';
 
 /**
  * Parse a JSON string a napi binding returned. The bindings type their return loosely (`unknown`
@@ -1871,6 +1872,11 @@ export class CoreAdapter {
     this.drainSince = drain ? (this.drainSince ?? Date.now()) : null;
   }
 
+  /** Whether new work is refused for maintenance (the launch's stand-in question is not asked of a draining daemon). */
+  isDraining(): boolean {
+    return this.drainSince !== null;
+  }
+
   /** Parked and human-held runs are idle for maintenance, but still hold their repository. */
   async maintenanceState(): Promise<MaintenanceState> {
     const active = (await this.sessionsDetail())
@@ -2247,6 +2253,16 @@ export class CoreAdapter {
       }
       opts.reducedAssurance = true;
     }
+    // (DES-STANDIN-001 §3.8, K2a) Fail CLOSED on an addon without stand-ins (napi ignores undeclared fields): the
+    // person's consent would be dropped and the run would hold or fail where they were told it would be checked.
+    if (input.standInAware === true) {
+      if (!this.supportsStandIns()) {
+        throw new Error('stand-in checks need a wicked-core-ts that carries them (Core.independencePreflight and grantStandIns); upgrade the engine');
+      }
+      const o = opts as LaunchOptions & { standInAware?: boolean; standInJson?: string };
+      o.standInAware = true;
+      if (input.standIn !== undefined) o.standInJson = JSON.stringify(input.standIn);
+    }
     // (program DES-POWER-MODE) Fail CLOSED on an addon without power mode (napi ignores an undeclared
     // field): the run would launch phased while its launcher reported power mode on.
     if (input.power === true) {
@@ -2582,7 +2598,7 @@ export class CoreAdapter {
     /** (DES-CATALOG-002 §4.6) What the answer expects the open gate to be: its unit ord and, at a plan gate, the plan
      *  revision it showed. The engine compares both inside its serialized decision (`gate_changed:` on a mismatch).
      *  Fails CLOSED on an addon without `Core.supportsPlanSendBack`: napi would drop them and answer a stale plan. */
-    expect?: { ord?: number; planRev?: number },
+    expect?: { ord?: number; planRev?: number; gateSeq?: number },
   ): Promise<string> {
     // (operator ruling 2026-10-11) WHO answered — recorded by the gate route just before this call
     // (`recordGateActor`), consumed once. The engine records it when the answer is an operator
@@ -2613,11 +2629,14 @@ export class CoreAdapter {
             actor?: string | null,
             expectOrd?: number | null,
             expectPlanRev?: number | null,
+            expectGateSeq?: number | null,
           ): Promise<string>;
         };
+        // (crew#1698, core#1808) `expectGateSeq`: the opening of the gate the record showed; the engine refuses a
+        // gate that closed and re-opened since (`gate_changed:`), at the same ord too.
         return plan !== undefined
-          ? core.confirmGate(runId, true, note ?? null, 'edit_plan', null, JSON.stringify(plan), actorLabel ?? null, expect.ord ?? null, expect.planRev ?? null)
-          : core.confirmGate(runId, approve, amend ?? null, action ?? null, amendScope ?? null, null, actorLabel ?? null, expect.ord ?? null, expect.planRev ?? null);
+          ? core.confirmGate(runId, true, note ?? null, 'edit_plan', null, JSON.stringify(plan), actorLabel ?? null, expect.ord ?? null, expect.planRev ?? null, expect.gateSeq ?? null)
+          : core.confirmGate(runId, approve, amend ?? null, action ?? null, amendScope ?? null, null, actorLabel ?? null, expect.ord ?? null, expect.planRev ?? null, expect.gateSeq ?? null);
       }, undefined, resumesWork);
     }
     return this.handedToEngine('run', runId, () => {
@@ -2815,6 +2834,50 @@ export class CoreAdapter {
   supportsPlanSendBack(): boolean {
     const C = Core as unknown as { supportsPlanSendBack?: () => boolean };
     return typeof C.supportsPlanSendBack === 'function' && C.supportsPlanSendBack() === true;
+  }
+
+  /** (DES-STANDIN-001 §3.9, §3.10; K2a) The linked engine takes stand-in launches: it carries both the preflight and
+   *  the gate grant (method presence, as core-ts documents). Read at call time. */
+  supportsStandIns(): boolean {
+    const c = this.core as unknown as { independencePreflight?: unknown; grantStandIns?: unknown };
+    return typeof c.independencePreflight === 'function' && typeof c.grantStandIns === 'function';
+  }
+
+  /**
+   * (DES-STANDIN-001 §3.9) Which independent roles this launch would be short of, on the shape it would take: the
+   * engine resolves the contract through the launch's own code. Rejects as the launch would refuse the shape.
+   */
+  async independencePreflight(input: LaunchRunInput): Promise<string> {
+    const core = this.core as unknown as { independencePreflight(clisJson: string, shapeJson: string): Promise<string> };
+    const shape = {
+      ...(input.workflow !== undefined ? { workflow: input.workflow } : {}),
+      ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+      ...(input.plan !== undefined ? { planJson: JSON.stringify(input.plan) } : {}),
+      ...(input.power === true ? { power: true } : {}),
+      ...(input.primary !== undefined ? { primary: input.primary } : {}),
+      ...(input.excludeSeats !== undefined && input.excludeSeats.length > 0 ? { excludeSeats: input.excludeSeats } : {}),
+      ...(input.skipQeAcceptanceReason !== undefined ? { skipQeAcceptanceReason: input.skipQeAcceptanceReason } : {}),
+      ...(input.forceQeAcceptance === true ? { forceQeAcceptance: true } : {}),
+      repoBound: input.repoRef !== undefined,
+    };
+    return core.independencePreflight(engineRosterJson(input.clisJson), JSON.stringify(shape));
+  }
+
+  /**
+   * (DES-STANDIN-001 §3.10, crew#1856) USE STAND-INS at the run's open `stand_in_needed` gate: the person's consent
+   * (`scope`) goes on the run and the held check continues. `gateSeq` is the open gate's opening (its durable row's
+   * `gate_seq`), `actor` the server's name for the person. The engine refuses a stale opening (`gate_changed:`).
+   */
+  grantStandIns(runId: string, scope: string, gateSeq: number, actor: string, ord?: number): Promise<string> {
+    const core = this.core as unknown as {
+      grantStandIns(runId: string, scope: string, expectGateSeq: number, actor?: string | null, expectOrd?: number | null): Promise<string>;
+    };
+    return this.handedToEngine('run', runId, () => {
+      if (!this.supportsStandIns()) {
+        return Promise.reject(new Error('Using stand-ins at a gate needs a wicked-core-ts with Core.grantStandIns; upgrade the engine'));
+      }
+      return core.grantStandIns(runId, scope, gateSeq, actor, ord ?? null);
+    }, undefined, true);
   }
 
   /** (workdoc-all-runs; core lane context-block-core) The linked engine keeps a per-run CONTEXT BLOCK it hands every
@@ -4587,6 +4650,11 @@ export class CoreAdapter {
       if ('qeAcceptance' in parsed && parsed.qeAcceptance !== 'required' && parsed.qeAcceptance !== 'off') delete parsed.qeAcceptance;
       // powerModeDefault (program DES-POWER-MODE): a boolean only; anything else reads as the shipped default (on).
       if ('powerModeDefault' in parsed && typeof parsed.powerModeDefault !== 'boolean') delete parsed.powerModeDefault;
+      // standInReview (DES-STANDIN-001 §4): 'ask' | 'always' only; anything else reads as unset ('ask', asked each time).
+      if ('standInReview' in parsed && parsed.standInReview !== 'ask' && parsed.standInReview !== 'always') delete parsed.standInReview;
+      // standInConsent (wicked-core#1930 F6): the shape the daemon writes, or nothing (a launch then says the setting's
+      // author was not recorded rather than trusting a hand edit).
+      if ('standInConsent' in parsed && !isSettingConsent(parsed.standInConsent)) delete parsed.standInConsent;
       // newWorkSeats (F1/F2): a list of seat keys, or null. An invalid value is left out of the settings served (they
       // keep the API's type) but KEPT for the next write (`kept`): new work reads it strictly (`readNewWorkSeats`) and
       // refuses it, and an unrelated write that erased it would quietly widen the pool to every seat.

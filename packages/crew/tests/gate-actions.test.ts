@@ -35,6 +35,13 @@ const ADJUDICATION: EngineGateActions = {
   gateKind: 'review_adjudication',
   actions: [a('approve', 'land_with_carried_items', 'optional'), a('request_changes', 'send_back', 'optional'), a('reject', 'stop', 'optional')],
 };
+/** (DES-STANDIN-001 §3.10) A stand-in hold, as wicked-core's `gate_actions` lists it (`src/actor/gate_actions.rs`: the
+ *  token is its own intent, no note). */
+const STAND_IN: EngineGateActions = {
+  ord: 4,
+  gateKind: 'stand_in_needed',
+  actions: [a('approve', 'operator_judgment', 'optional'), a('use_stand_ins', 'use_stand_ins', 'none'), a('reject', 'stop', 'none')],
+};
 /** A deliver gate: approve delivers; the in-place QE skip; reject. */
 const DELIVER: EngineGateActions = {
   ord: 5,
@@ -74,6 +81,7 @@ describe('GET /runs/:id/gate — the engine\'s legal actions (crew#1512)', () =>
         view('run-cached', 4, 'review'),
         view('run-rowless', 4, 'review'),
         view('run-race', 4, 'review'),
+        view('run-standin', 4, 'review'),
       ]),
       listRepos: vi.fn().mockResolvedValue([]),
       listWorkflows: () => BUILTIN_WORKFLOWS,
@@ -111,6 +119,7 @@ describe('GET /runs/:id/gate — the engine\'s legal actions (crew#1512)', () =>
     lists.set('run-rowless', { ...RETRY, ord: 0 });
     lists.set('run-race', { ...RETRY, ord: 5 });
     lists.set('run-ghost', { ...RETRY, ord: 5 });
+    lists.set('run-standin', STAND_IN);
     raceReads = 0;
     ghostReads = 0;
   });
@@ -124,6 +133,12 @@ describe('GET /runs/:id/gate — the engine\'s legal actions (crew#1512)', () =>
     return res.json() as { actions?: GateAction[] };
   };
   const tokens = (b: { actions?: GateAction[] }) => b.actions?.map((x) => x.action);
+
+  it('marks the stand-in consent humanOnly: crew answers a non-human use_stand_ins 403 (codex r1 on b7-standin)', async () => {
+    const body = await gate('run-standin');
+    expect(body.actions?.find((x) => x.action === 'use_stand_ins')).toMatchObject({ humanOnly: true });
+    expect(body.actions?.find((x) => x.action === 'reject')).not.toHaveProperty('humanOnly');
+  });
 
   it('serves the engine\'s list on the record path, with crew\'s humanOnly on a rule skip', async () => {
     const body = await gate('run-retry');

@@ -10,7 +10,12 @@
 // and the pass that moved units off ballot-benched seats is gone. What remains are exactly two ways
 // a dead seat surfaces, and this file pins both:
 //
-//   (A) DISTRIBUTION — the typed `NoEligibleSeat` now comes from the bench that is left, the
+//   (A) is now refused at LAUNCH (DES-STANDIN-001 §2.1, §4): one usable helper and no other means the review has
+//       no seat that did not build the work, so crew's preflight answers `409 stand_in_choice` before anything is
+//       created. What follows is the distribution gate it replaced, which the engine's own suites still pin
+//       (`tests/dead_seat_gate.rs`) for a launch that does not ask:
+//
+//       DISTRIBUTION — the typed `NoEligibleSeat` now comes from the bench that is left, the
 //       LAUNCHER's: a build→review plan on a roster whose only seat distinct from the builder was
 //       benched by the launcher (`health.usable: false`, which crew stamps from `council_eligible:
 //       false` and passes through verbatim when handed engine-shaped) makes evaluator ≠ creator
@@ -77,7 +82,7 @@ let app: Awaited<ReturnType<typeof createServer>>;
 let baseUrl: string;
 let deadPath: string;
 /** Each run's rest state and trail, read ONCE after it settled. */
-let settledA: Settled;
+let refusedA: { status: number; body: Record<string, unknown> };
 let settledB: Settled;
 
 function seat(key: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -122,13 +127,14 @@ function phase(id: string, kind: 'build' | 'review', role: 'neutral' | 'evaluato
 }
 
 /** Launch and follow the run to rest: terminal, or the escalation gate. */
-async function launchAndSettle(runId: string, workflow: string, problem: string, clis: unknown[]): Promise<Settled> {
+async function launchAndSettle(runId: string, workflow: string, problem: string, clis: unknown[], extra: Record<string, unknown> = {}): Promise<Settled> {
   const launch = await postJson('/api/v1/runs', {
     problem,
     sessionId: runId,
     workflow,
     entityMode: 'shared',
     clisJson: JSON.stringify(clis),
+    ...extra,
   });
   expect(launch.status, JSON.stringify(launch.body)).toBe(201);
   const deadline = Date.now() + 60_000;
@@ -194,26 +200,27 @@ beforeAll(async () => {
 
   // (A) `BUILDER` is usable; `BENCHED` — the only seat distinct from the builder — was found signed
   // out by the launcher (engine-shaped `health`, passed through verbatim by `toEngineSeat`).
-  settledA = await launchAndSettle(RUN_A, WORKFLOW_A, 'Build the thing, then review it.', [
-    seat(BUILDER),
-    seat(BENCHED, { health: { usable: false, reason: 'signed out' } }),
-  ]);
+  refusedA = await postJson('/api/v1/runs', {
+    problem: 'Build the thing, then review it.',
+    sessionId: RUN_A,
+    workflow: WORKFLOW_A,
+    entityMode: 'shared',
+    clisJson: JSON.stringify([seat(BUILDER), seat(BENCHED, { health: { usable: false, reason: 'signed out' } })]),
+  });
   // (B) both seats believed usable; the WORKER finds them signed out.
   settledB = await launchAndSettle(
     RUN_B,
     WORKFLOW_B,
     'Do one unit of work on a roster whose every seat is signed out',
     DEAD_SEATS.map((key) => seat(key)),
+    // Both fake seats run one binary (`node`): one identity, so a full-assurance launch has no independent judge
+    // and is refused 409 stand_in_choice (DES-STANDIN-001 §4). This case is about the worker finding a dead
+    // seat, not the judge: reduced assurance (an author may judge, disclosed) keeps the path it pins.
+    { reducedAssurance: true },
   );
 }, 150_000);
 
 afterAll(async () => {
-  // Should the reject case not have run, park nothing: reject so the engine cancels and reaps.
-  if (settledA?.session['status'] === 'awaiting_human') {
-    const { body } = await getJson(`/api/v1/runs/${RUN_A}`);
-    const status = (body['run'] as { session?: Record<string, unknown> } | undefined)?.session?.['status'];
-    if (status === 'awaiting_human') await postJson(`/api/v1/runs/${RUN_A}/gate`, { approve: false }).catch(() => undefined);
-  }
   await app.close();
   adapter.close();
   if (priorHome === undefined) delete process.env['HOME'];
@@ -223,61 +230,15 @@ afterAll(async () => {
   removeScratch(dir);
 });
 
-describe('(A) every seat benched at DISTRIBUTION — the launcher bench leaves the review no distinct seat (core#590 S5 / core#560 / DES-L3 PR-3A)', () => {
-  it('convenes no council and seats nothing: 0 councilConvened / councilSeatFailed / unitDistributed / unitDispatched / stepFailed / sessionFailed', () => {
-    expect(String(settledA.session['status'])).toBe('awaiting_human');
-    for (const type of ['councilConvened', 'councilSeatFailed', 'unitDistributed', 'unitDispatched', 'stepFailed', 'sessionFailed']) {
-      expect(ofType(settledA.events, type), type).toHaveLength(0);
-    }
-  });
-
-  it('parks at gateEscalated{dead_seat, attempt 0, defGate false} → awaitingHuman{escalation} with the typed refusal in the summary, even under humanConfirm: none', () => {
-    expect(settledA.session['human_confirm']).toBe('none');
-    const gates = ofType(settledA.events, 'gateEscalated');
-    expect(gates).toHaveLength(1);
-    const gate = gates[0]!;
-    expect(gate).toMatchObject({ ord: 1, condition: 'dead_seat', denialSource: 'dead_seat', attempt: 0, defGate: false, outputCaptured: false });
-    const summary = String(gate['verdictSummary']);
-    expect(summary).toContain(`no eligible seat for ${RUN_A}`);
-    expect(summary).toContain('evaluator≠creator unsatisfiable for unit(s) [2]');
-    expect(summary).toContain('1 of 2 seats benched');
-    expect(summary).toContain(`${BENCHED} (signed out — launcher)`);
-    expect(summary).toContain(`provisionally seated on '${BUILDER}'`);
-    // core#466: the summary carries no home prefix.
-    expect(summary).not.toContain(join(dir, 'home'));
-    const gateIx = settledA.events.indexOf(gate);
-    const awaiting = settledA.events.slice(gateIx).find((e) => e['type'] === 'awaitingHuman');
-    expect(awaiting).toMatchObject({ gateKind: 'escalation', ord: 1, reviewingOrd: 1 });
-    // DES §7 (11): under run-level `human_confirm: none` the prompt discloses why the run paused anyway.
-    expect(String(awaiting!['prompt'])).toContain('engine gate: a denied unit pauses for a decision');
-  });
-
-  it("persists the LAUNCHER's bench and every unit pending, provisionally seated on clis[0], carrying the dead_seat denial", () => {
-    const benched = settledA.session['benched_seats'] as Array<{ cli: string; source: string }>;
-    expect(benched.map((b) => [b.cli, b.source])).toEqual([[BENCHED, 'launcher']]);
-    expect(settledA.units.length).toBeGreaterThan(0);
-    for (const u of settledA.units) {
-      expect(u['status'], JSON.stringify(u)).toBe('pending');
-      expect(u['assigned_cli']).toBe(BUILDER);
-    }
-    expect((settledA.units[0]!['denial'] as { source?: string } | null)?.source).toBe('dead_seat');
-  });
-
-  it('reject → cancelled (runCancelled on the wire), still no sessionFailed', async () => {
-    const rejected = await postJson(`/api/v1/runs/${RUN_A}/gate`, { approve: false });
-    expect(rejected.status, JSON.stringify(rejected.body)).toBeLessThan(300);
-    const deadline = Date.now() + 15_000;
-    for (;;) {
-      const { body } = await getJson(`/api/v1/runs/${RUN_A}`);
-      const status = (body['run'] as { session: Record<string, unknown> }).session['status'];
-      if (status === 'cancelled') break;
-      if (Date.now() > deadline) throw new Error(`reject never cancelled ${RUN_A}: ${String(status)}`);
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    const { body } = await getJson(`/api/v1/runs/${RUN_A}/events`);
-    const events = body['events'] as Ev[];
-    expect(ofType(events, 'runCancelled')).toHaveLength(1);
-    expect(ofType(events, 'sessionFailed')).toHaveLength(0);
+describe('(A) one usable helper and a launcher-benched other: the review has no distinct seat (DES-STANDIN-001 §2.1)', () => {
+  it('is refused 409 stand_in_choice at launch, before anything is created: the reviewer is short and a stand-in could fill it', async () => {
+    expect(refusedA.status, JSON.stringify(refusedA.body)).toBe(409);
+    expect(refusedA.body).toMatchObject({ code: 'stand_in_choice', retryWith: { standIns: true } });
+    const preflight = refusedA.body['preflight'] as { signedIn: string[]; roles: Array<{ role: string; shortBy: number }> };
+    expect(preflight.signedIn).toEqual([BUILDER]);
+    expect(preflight.roles.filter((r) => r.shortBy > 0).map((r) => r.role)).toContain('evaluator');
+    expect(refusedA.body['runId']).toBeUndefined();
+    expect((await getJson(`/api/v1/runs/${RUN_A}`)).status).toBe(404);
   });
 });
 

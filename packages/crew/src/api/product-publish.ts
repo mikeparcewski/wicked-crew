@@ -516,12 +516,13 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
    *   create, in turn with its creates;
    * - an observer (a GET, a card, a refusal outside the slot) reads one only while no publication is being sent or
    *   resolved in this daemon, and a new slot waits for observer reads already running to finish. While a slot is held an
-   *   observer answers the last read-back, or `unreadable` for an issue not read yet.
+   *   observer answers the last read-back, or `null` (not checked yet) for an issue not read yet (crew#1919).
    * So a panel's polling never queues reads beside a create on the source's scheduler (knowledge/gate/scheduler.ts
    * refuses a full queue `busy`), for this publication or another on the same source.
    */
   const readBacks = new Map<string, { number: number; expect: string; readBack: 'ok' | 'differs' | 'unreadable'; url: string | null; at: number }>();
-  const clock = (): number => (deps.now ?? Date.now)();
+  // Monotonic (crew#1919): a wall clock stepped back never keeps a read-back fresh. `now` is the tests' clock.
+  const clock = (): number => (deps.now !== undefined ? deps.now() : performance.now());
   /** Observer reads running now, and the slots waiting for them to finish. */
   let observing = 0;
   const drained: Array<() => void> = [];
@@ -544,7 +545,7 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
   }
 
   /** One created issue read back against what was sent, or the last read-back of it when that is trusted for `reads`. */
-  async function readBackOf(publication: string, reader: { e: PmEntry; t: TrackerSetEntry } | null, it: PublishItem, number: number, parent: number | null, reads: Reads): Promise<{ readBack: 'ok' | 'differs' | 'unreadable'; url: string | null }> {
+  async function readBackOf(publication: string, reader: { e: PmEntry; t: TrackerSetEntry } | null, it: PublishItem, number: number, parent: number | null, reads: Reads): Promise<{ readBack: 'ok' | 'differs' | 'unreadable' | null; url: string | null }> {
     const expectBody = normal(bodyWith(it.body, parent));
     const expect = sha256Hex(`${it.title}\u0000${expectBody}`);
     const key = `${publication}\u0000${it.key}`;
@@ -552,7 +553,8 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
     const known = memo !== undefined && memo.number === number && memo.expect === expect ? memo : undefined;
     if (known !== undefined && known.readBack === 'ok' && clock() - known.at < READ_BACK_FRESH_MS) return { readBack: 'ok', url: known.url };
     // Checked before every read, not once per answer: a slot taken meanwhile stops this observer's next read.
-    if (reads === 'observer' && slots.size > 0) return known !== undefined ? { readBack: known.readBack, url: known.url } : { readBack: 'unreadable', url: null };
+    // One not read yet is not checked yet (null), never `unreadable`, which reads as deleted (crew#1919).
+    if (reads === 'observer' && slots.size > 0) return known !== undefined ? { readBack: known.readBack, url: known.url } : { readBack: null, url: null };
     let read: Read;
     if (reader === null) read = { ok: false };
     else if (reads === 'owner') read = await readIssue(deps.pm!, reader.e, reader.t, number);

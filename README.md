@@ -185,6 +185,11 @@ seat and holds a gate whose judge has no distinct seat, so the run waits for a s
 answer says so (`assuranceNotice`). To proceed with one CLI, opt in explicitly:
 `"reducedAssurance": true` on `POST /runs`, or `wicked-crew start --reduced-assurance`. The creator's
 seat then evaluates its own work, and every receipt says `reduced`. crew never turns it on for you.
+On an engine with stand-ins (`GET /health` `capabilities.standIns`), a launch whose helpers can't check the job
+answers `409 stand_in_choice` before anything is created. A person consents for this job with `"standIns": true`
+(`wicked-crew start --stand-ins`), or for every job with the `standInReview: "always"` setting. A stand-in is a
+fresh session of a helper on the job, labelled on the job, every gate, the delivery and the pull request, and never
+counted as an independent review.
 
 **QE acceptance.** A run of a built-in workflow that makes application changes (`feature`, `bug`,
 `migration`, `mcp-server`, `editor-plugin`) requires real functional QE acceptance: garden's three-agent `wicked-garden-qe accept`
@@ -313,7 +318,7 @@ engine without power mode, runs **phased**, and the launch answer says so.
 
 `GET /api/v1/runs` and `GET /api/v1/runs/:id` include `session.person_needed: { liveness: 'waiting_on_you', reason }` at a paused Power checkpoint, matching `/system`; the field is absent otherwise and the run's status stays unchanged.
 
-A person can snooze a Needs-you item for up to a week: `PUT /api/v1/desk/snoozes/:key` with `{"until": "<ISO time>", "severity": <the skin's rank of the item>}`. The daemon ends the snooze at that time. Bringing an item back sooner when it gets worse is the skin's job: it compares the item's rank now with the `severity` stored on the snooze. `GET /api/v1/desk/snoozes` lists the snoozes in force, and `DELETE` ends one early. Each snooze and early end is written to the audit trail before the answer, so a snooze survives a restart. A write that fails returns a 500 `desk_snooze_unsaved` and changes nothing. Only a human operator can snooze an item or end a snooze; an agent cannot hide a need. The item stays in `/system`.
+A person can snooze a Needs-you item for up to a week: `PUT /api/v1/desk/snoozes/:key` with `{"until": "<ISO time>", "severity": <rank>}`. The daemon ends the snooze at that time. An item on `/system`'s ranked list that a person may snooze (one run's own open gate or question) carries `snooze: {key, rank}`. A snooze on that key, sent with that rank, takes the item out of `attention[]` and the level into `snoozed[]` until it ends or the item's rank goes above the one stored; a gate asked again is a new key. Any other key is the skin's own: the daemon only keeps it, and bringing that item back sooner when it gets worse is the skin's job. `GET /api/v1/desk/snoozes` lists the snoozes in force, and `DELETE` ends one early. Each snooze and early end is written to the audit trail before the answer, so a snooze survives a restart. A write that fails returns a 500 `desk_snooze_unsaved` and changes nothing. Only a human operator can snooze an item or end a snooze; an agent cannot hide a need.
 
 Phased, one run token moves through the workflow's phases with a gate between every one — e.g. for
 `feature`:

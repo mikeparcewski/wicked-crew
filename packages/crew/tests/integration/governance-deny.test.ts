@@ -168,7 +168,7 @@ describe.runIf(GOV_CAPABLE)('SC-005: verdict-gated governance deny blocks a run 
     const res = await fetch(`${baseUrl}/api/v1/runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ problem, sessionId, clisJson: SEATS }),
+      body: JSON.stringify({ problem, sessionId, clisJson: SEATS, standIns: true }),
     });
     if (res.status !== 201) {
       const body = await res.json().catch(() => null);

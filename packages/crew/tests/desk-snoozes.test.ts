@@ -8,11 +8,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { Actor, DeskSnooze, DeskSnoozesResponse } from 'wicked-crew-api-types';
+import type { Actor, DeskSnooze, DeskSnoozesResponse, SystemAttentionItem } from 'wicked-crew-api-types';
 
 import { AuditLog } from '../src/api/audit.js';
 import { LOCAL_ACTOR } from '../src/api/auth.js';
-import { DESK_SNOOZE_MAX_MS, DeskSnoozes, registerDeskSnoozeRoutes } from '../src/api/desk-snoozes.js';
+import { attentionSnooze, DESK_SNOOZE_MAX_MS, DeskSnoozes, holdSnoozed, registerDeskSnoozeRoutes } from '../src/api/desk-snoozes.js';
 
 const AGENT: Actor = { id: 'seat-1', kind: 'agent', trust: 'operator' } as Actor;
 
@@ -219,5 +219,66 @@ describe('crew#1124: snooze a Needs-you item', () => {
     ok.onRecord((e) => heard.push(e.action));
     await ok.recordDurable('desk.need.snoozed', LOCAL_ACTOR, { detail: { key } });
     expect(heard).toEqual(['desk.need.snoozed']);
+  });
+});
+
+// studio#1416: which attention items a person may snooze, and which a snooze holds back on GET /system.
+describe('attention items and snoozes (studio#1416)', () => {
+  const NOW = Date.parse('2026-11-25T12:00:00Z');
+  const item = (over: Partial<SystemAttentionItem>): SystemAttentionItem => ({
+    id: 'run:r1', severity: 'yellow', source: 'run', title: 'run r1 waits on you', reason: 'Waiting for you', remedy: 'Answer the gate.',
+    blocks: 1, target: { kind: 'run', runId: 'r1', gateOrd: 1, interactionId: 'ir_1' }, action: null, kind: 'prevents',
+    blockedRunIds: ['r1'], waitedSince: '2026-11-25T11:00:00.000Z', ...over,
+  });
+  const snz = (key: string, until: number, severity: number | null): DeskSnooze => ({ key, until: new Date(until).toISOString(), severity, at: new Date(NOW - 60_000).toISOString(), by: 'operator' });
+
+  const OPENED = '2026-11-25T11:00:00.000Z';
+  it('names the occurrence: one run\'s open interaction and its opening; nothing else is offered', () => {
+    expect(attentionSnooze(item({}))).toEqual({ key: `attention:run:r1@ir_1@${OPENED}`, rank: 101 });
+    // The engine keeps an unkeyed gate's id when the run pauses at the same gate again; the opening is new, so the key is.
+    expect(attentionSnooze(item({ waitedSince: '2026-11-25T11:30:00.000Z' }))!.key).toBe('attention:run:r1@ir_1@2026-11-25T11:30:00.000Z');
+    // A failed run: no interaction (its time can fall back to the launch), not offered.
+    expect(attentionSnooze(item({ id: 'run:r2', severity: 'red', blocks: 0, target: { kind: 'run', runId: 'r2' } }))).toBeNull();
+    // An open interaction with no opening time: no occurrence.
+    expect(attentionSnooze(item({ waitedSince: null }))).toBeNull();
+    // An item gathering runs (a reviewer gap, a red floor) carries its first run's gate but its oldest member's time.
+    expect(attentionSnooze(item({ id: 'judge:r1' }))).toBeNull();
+    expect(attentionSnooze(item({ id: 'floor:wicked-core', blocks: 3 }))).toBeNull();
+    expect(attentionSnooze(item({ id: 'infra:gateway', source: 'infra', target: { kind: 'infra', key: 'gateway' } as never }))).toBeNull();
+  });
+
+  it('ranks 100 to 299: red above yellow, then the runs it blocks, capped', () => {
+    expect(attentionSnooze(item({ severity: 'red', blocks: 150 }))!.rank).toBe(299);
+    expect(attentionSnooze(item({ blocks: -3 }))!.rank).toBe(100);
+  });
+
+  it('holds an item back while its snooze is in force and it is no worse; anything else stays in attention[]', () => {
+    const a = item({});
+    const at = (id: string, ir: string, over: Partial<SystemAttentionItem> = {}): SystemAttentionItem =>
+      item({ id: `run:${id}`, target: { kind: 'run', runId: id, interactionId: ir }, ...over });
+    const worse = at('r3', 'ir_3', { severity: 'red' });
+    const gone = at('r4', 'ir_4');
+    const anyRank = at('r5', 'ir_5', { severity: 'red' });
+    const reopened = at('r6', 'ir_6', { waitedSince: '2026-11-25T11:50:00.000Z' });
+    const infra = item({ id: 'infra:disk', source: 'infra', target: { kind: 'infra', key: 'disk' } as never });
+    const out = holdSnoozed([infra, a, worse, gone, anyRank, reopened], [
+      snz(`attention:run:r1@ir_1@${OPENED}`, NOW + 3_600_000, 101),
+      snz(`attention:run:r3@ir_3@${OPENED}`, NOW + 3_600_000, 101), // snoozed yellow, red now
+      snz(`attention:run:r4@ir_4@${OPENED}`, NOW - 1, 101), // ended
+      snz(`attention:run:r5@ir_5@${OPENED}`, NOW + 60_000, null), // no severity stored: holds nothing back
+      snz(`attention:run:r6@ir_6@${OPENED}`, NOW + 3_600_000, 101), // the gate's earlier opening
+      snz('infra:disk', NOW + 3_600_000, 1000), // a skin key: never read here
+    ], NOW);
+    expect(out.attention.map((x) => x.id)).toEqual(['infra:disk', 'run:r3', 'run:r4', 'run:r5', 'run:r6']);
+    expect(out.attention.find((x) => x.id === 'run:r3')!.snooze).toEqual({ key: `attention:run:r3@ir_3@${OPENED}`, rank: 201 });
+    expect(out.attention.find((x) => x.id === 'infra:disk')!.snooze).toBeUndefined();
+    expect(out.snoozed.map((x) => [x.id, x.until, x.snooze])).toEqual([['run:r1', new Date(NOW + 3_600_000).toISOString(), { key: `attention:run:r1@ir_1@${OPENED}`, rank: 101 }]]);
+  });
+
+  it('soonest end first', () => {
+    const at = (id: string): SystemAttentionItem => item({ id: `run:${id}`, target: { kind: 'run', runId: id, interactionId: `ir_${id}` } });
+    const out = holdSnoozed([at('a'), at('b')], [snz(`attention:run:a@ir_a@${OPENED}`, NOW + 7_200_000, 101), snz(`attention:run:b@ir_b@${OPENED}`, NOW + 60_000, 101)], NOW);
+    expect(out.snoozed.map((x) => x.id)).toEqual(['run:b', 'run:a']);
+    expect(out.attention).toEqual([]);
   });
 });
