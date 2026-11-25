@@ -8,7 +8,7 @@
  *                                                                  `resolve`: a person settles one `unsure` item
  *   GET  /projects/:id/product/publish/:runId   HUMAN (operator)  whether the run can be published (and why not), the
  *                                                                  project's GitHub repositories, and every publication
- *                                                                  of the run, each read back now
+ *                                                                  of the run, read back as `readBackOf` allows (crew#1911)
  *
  * The plan is read only from a run whose launch recorded compose facts ({@link ComposeFacts}) and whose draft and
  * review units still match them: a plan edited at its gate is refused, in plain words. The repository is the project's
@@ -802,11 +802,19 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
       const { runId, confirm: hash, resolve: want } = parsed.data;
       const projectId = req.params.id;
       if (hash === undefined && want === undefined) {
-        const built = await build(projectId, runId, sel, false);
-        if (!built.ok) return send(reply, built);
-        const b = built.b;
-        const answer: ProductPublishResponse = { done: false, card: b.card, publishHash: b.publishHash, publication: b.f.first === null ? null : await stateOf(b.f, projectId, sel, b.es, 'observer') };
-        return answer;
+        // (crew#1911) A card asks GitHub which account posts (`get_me`): an observer read, so none while anything is
+        // being sent or resolved here, and a slot taken meanwhile waits for it.
+        if (slots.size > 0) return reply.code(409).send({ error: 'a publish is being sent or resolved right now; ask for the card again in a moment', code: 'in_progress' });
+        observing++;
+        try {
+          const built = await build(projectId, runId, sel, false);
+          if (!built.ok) return send(reply, built);
+          const b = built.b;
+          const answer: ProductPublishResponse = { done: false, card: b.card, publishHash: b.publishHash, publication: b.f.first === null ? null : await stateOf(b.f, projectId, sel, b.es, 'observer') };
+          return answer;
+        } finally {
+          if (--observing === 0) for (const w of drained.splice(0)) w();
+        }
       }
       // Taken synchronously, before any await: a second send or resolve of this publication is refused here.
       const slot = publicationOf(runId, sel.repo);

@@ -91,10 +91,10 @@ function tracker(sourceId: string, key: string, targets: Array<{ kind: 'project'
   return { id, tenant: 'github.com', tenantLabel: null, siteHost: null, key, label: key, links: targets.map((t) => ({ id: trackerLinkIdOf(id, t), target: t, linkedAt: stamp, linkedBy: 'local' })) };
 }
 
-interface World { enabled?: boolean; writeOn?: boolean; auth?: { ref: string; env: string } | null; links?: Array<{ kind: 'project' | 'repo'; id: string }>; second?: boolean }
+interface World { enabled?: boolean; writeOn?: boolean; auth?: { ref: string; env: string } | null; links?: Array<{ kind: 'project' | 'repo'; id: string }>; second?: boolean; lib?: boolean }
 function world(w: World = {}): void {
   const common = { url: null, health: { state: 'ok', consecutiveFailures: 0, checkedAt: stamp, lastError: null }, registeredAt: stamp, updatedAt: stamp, kind: 'mcp-stdio', command: process.execPath, pm: { system: 'github' }, agents: { see: true, query: true, projects: [PID], everyProject: false } };
-  const servers = [{ ...common, id: GH_ID, name: 'gh', enabled: w.enabled ?? true, args: [FAKE_GITHUB, ghLog], auth: w.auth === undefined ? { ref: 'env:PM_FAKE', env: 'FAKE_PM_TOKEN' } : w.auth, tools: toolsOf(w.writeOn ?? true), trackers: [tracker(GH_ID, 'owner/app', w.links ?? [{ kind: 'project', id: PID }])] }];
+  const servers = [{ ...common, id: GH_ID, name: 'gh', enabled: w.enabled ?? true, args: [FAKE_GITHUB, ghLog], auth: w.auth === undefined ? { ref: 'env:PM_FAKE', env: 'FAKE_PM_TOKEN' } : w.auth, tools: toolsOf(w.writeOn ?? true), trackers: [tracker(GH_ID, 'owner/app', w.links ?? [{ kind: 'project', id: PID }]), ...(w.lib === true ? [tracker(GH_ID, 'owner/lib', [{ kind: 'project', id: PID }])] : [])] }];
   if (w.second === true) servers.push({ ...common, id: GH2_ID, name: 'gh2', enabled: true, args: [FAKE_GITHUB, ghLog], auth: { ref: 'env:PM_FAKE', env: 'FAKE_PM_TOKEN' }, tools: toolsOf(true), trackers: [tracker(GH2_ID, 'owner/app', [{ kind: 'project', id: PID }])] });
   writeFileSync(join(mcpDir, 'registry.json'), JSON.stringify({ version: 1, servers }));
 }
@@ -722,47 +722,64 @@ describe('reading issues back (crew#1911)', () => {
     expect(g.publications[0]!.items.map((x) => x.readBack)).toEqual(['differs', 'differs', 'ok', 'ok']);
   });
 
-  it('while any publication is being sent, a GET or a card reads nothing, and an issue not read yet shows unreadable', async () => {
+  it('while any publication is being sent, a GET reads nothing and a card waits; an issue not read yet shows unreadable', async () => {
+    world({ lib: true });
+    // owner/lib is published first: a second publication on the same source, which the GET also reads back.
+    const lc = (await post({ repo: 'owner/lib' })).json() as { publishHash: string };
+    expect(states((await post({ repo: 'owner/lib', confirm: lc.publishHash })).json())).toEqual(['created', 'created', 'created', 'created']);
+    const lib = (x: ProductPublicationsResponse) => x.publications.find((p) => p.repo === 'owner/lib')!.items.map((i) => i.readBack);
+    const libBefore = lib((await getPub()).json() as ProductPublicationsResponse);
     const sentS1 = gateOf();
     const readE1f1 = gateOf();
     deps.appendLine = async (p, l, m) => {
-      if (l.includes('"kind":"sending"') && l.includes('"key":"e1.f1.s1"')) {
+      if (l.includes('"kind":"sending"') && l.includes('"key":"e1.f1.s1"') && l.includes('"repo":"owner/app"')) {
         sentS1.reached();
         await sentS1.held;
       }
       return appendLineSynced(p, l, m);
     };
     const vr = real();
+    let appE1f1: number | null = null;
     deps.pm = {
       vendorRead: async (e, tool, args, cls, before, cred) => {
-        // The sender's read-back of e1.f1: its `created` line is on disk, its read-back not yet done.
-        if (tool === 'issue_read' && args['issue_number'] === issues().issues[1]?.number) {
+        // The sender's read-back of owner/app's e1.f1: its `created` line is on disk, its read-back not yet done.
+        if (tool === 'issue_read' && args['repo'] === 'app' && args['issue_number'] === appE1f1) {
           readE1f1.reached();
           await readE1f1.held;
         }
-        return vr(e, tool, args, cls, before, cred);
+        const r = await vr(e, tool, args, cls, before, cred);
+        if (tool === 'issue_write' && args['repo'] === 'app' && args['title'] === 'Sign in and out') appE1f1 = issues().issues.at(-1)!.number;
+        return r;
       },
     };
+    const scheduled = () => calls().filter((c) => c.tool === 'issue_read' || c.tool === 'get_me').length;
     const c = await card();
     const sending = post({ confirm: c.publishHash });
-    await readE1f1.at;
-    let before = reads();
-    let g = (await getPub()).json() as ProductPublicationsResponse;
-    expect(reads()).toBe(before);
-    expect(g.publications[0]!.items.map((i) => [i.state, i.readBack])).toEqual([['created', 'ok'], ['created', 'unreadable'], ['missing', null], ['missing', null]]);
-    readE1f1.release();
-    await sentS1.at;
-    nowMs += READ_BACK_FRESH_MS; // nothing is fresh now: an observer would read if it could
-    before = reads();
-    g = (await getPub()).json() as ProductPublicationsResponse;
-    expect((await post({})).statusCode).toBe(200);
-    expect(reads()).toBe(before);
-    expect(g.publications[0]!.items.map((i) => [i.state, i.readBack])).toEqual([['created', 'ok'], ['created', 'ok'], ['missing', null], ['missing', null]]);
-    sentS1.release();
+    try {
+      await readE1f1.at;
+      let before = scheduled();
+      let g = (await getPub()).json() as ProductPublicationsResponse;
+      expect(scheduled()).toBe(before);
+      const app = (x: ProductPublicationsResponse) => x.publications.find((p) => p.repo === 'owner/app')!;
+      expect(app(g).items.map((i) => [i.state, i.readBack])).toEqual([['created', 'ok'], ['created', 'unreadable'], ['missing', null], ['missing', null]]);
+      readE1f1.release();
+      await sentS1.at;
+      nowMs += READ_BACK_FRESH_MS; // nothing is fresh now: an observer would read if it could
+      before = scheduled();
+      g = (await getPub()).json() as ProductPublicationsResponse;
+      const cardNow = await post({ repo: 'owner/lib' });
+      expect(cardNow.json()).toMatchObject({ code: 'in_progress' });
+      expect(scheduled()).toBe(before);
+      expect(app(g).items.map((i) => [i.state, i.readBack])).toEqual([['created', 'ok'], ['created', 'ok'], ['missing', null], ['missing', null]]);
+      expect(lib(g)).toEqual(libBefore); // owner/lib's last read-backs, though none is fresh: not read beside the send
+    } finally {
+      readE1f1.release();
+      sentS1.release();
+    }
     expect((await sending).json()).toMatchObject({ publication: { published: true } });
   });
 
-  it('a send waits for an observer read already on the source queue before it creates anything', async () => {
+  it('a send waits for an observer read already on the source queue before it does anything', async () => {
     let refuse = 2;
     const firstRead = gateOf();
     let blockRead = false;
@@ -779,17 +796,39 @@ describe('reading issues back (crew#1911)', () => {
       },
     };
     expect(states((await publish()).body)).toEqual(['created', 'not_sent', 'missing', 'missing']);
+    const c = await card();
     nowMs += READ_BACK_FRESH_MS;
     blockRead = true;
     const g = getPub();
     await firstRead.at;
-    const c = await card();
-    const sending = post({ confirm: c.publishHash });
-    await new Promise((r) => setTimeout(r, 300));
-    expect(creates()).toHaveLength(1);
-    firstRead.release();
+    // The confirm's handler reaches the slot and its wait synchronously after it asks who the actor is; until the
+    // observer read ends it must not begin (its first step asks whether the project exists).
+    const entered = gateOf();
+    const actorOf = deps.actorOf;
+    const projectExists = deps.projectExists;
+    let asked = 0;
+    deps.actorOf = (req) => {
+      entered.reached();
+      return actorOf(req);
+    };
+    deps.projectExists = async (id) => {
+      asked++;
+      return projectExists(id);
+    };
+    let sending: ReturnType<typeof post> | null = null;
+    try {
+      sending = post({ confirm: c.publishHash });
+      await entered.at;
+      await new Promise((r) => setImmediate(r));
+      expect(asked).toBe(0);
+      expect(creates()).toHaveLength(1);
+    } finally {
+      firstRead.release();
+      deps.actorOf = actorOf;
+      deps.projectExists = projectExists;
+    }
     await g;
-    expect((await sending).json()).toMatchObject({ publication: { published: true } });
+    expect((await sending!).json()).toMatchObject({ publication: { published: true } });
     expect(creates()).toHaveLength(4);
   });
 });
