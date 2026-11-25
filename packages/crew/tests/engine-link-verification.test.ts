@@ -195,6 +195,24 @@ describe('use-local-core-ts verifies the addon against the source build (FINDING
     expect(existsSync(join(fx.dest, ADDON))).toBe(false);
   });
 
+  it('(J6 K1) an engine that runs no coverage validator (its core-ts has supports_domain_scope) is not asked for the pin', () => {
+    // wicked-core#1922: domain-extraction is two host tool steps; no plan seeds the pin, and the addon does not carry it.
+    const fx = makeFixture('no pin here', PIN_A);
+    mkdirSync(join(fx.pkg, 'src'), { recursive: true });
+    writeFileSync(join(fx.pkg, 'src', 'lib.rs'), '#[napi]\npub fn supports_domain_scope() -> bool {\n    true\n}\n');
+    mkdirSync(fx.dest, { recursive: true });
+    writeFileSync(join(fx.dest, ADDON), readFileSync(fx.addonPath));
+    const checked = run(fx, ['--check']);
+    expect(checked.err).toBe('');
+    expect(checked.status).toBe(0);
+    expect(checked.out).toContain('no coverage validator pin (the engine runs none)');
+    // Without that marker the same addon is the skew the check exists for.
+    const older = makeFixture('no pin here', PIN_A);
+    const refused = run(older);
+    expect(refused.status).toBe(1);
+    expect(refused.err).toContain('PIN SKEW');
+  });
+
   it('refuses an addon that does not carry the pin the checkout declares', () => {
     // Identity and freshness are coherent — the build is simply from a revision with another pin.
     const fx = makeFixture(PIN_A, PIN_B);

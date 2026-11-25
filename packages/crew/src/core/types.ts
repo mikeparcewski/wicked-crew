@@ -265,6 +265,11 @@ export interface LaunchRunInput {
    */
   skipQeAcceptanceReason?: string;
   forceQeAcceptance?: boolean;
+  /**
+   * (J6 K1, wicked-core#1922) A `domain-extraction` run's scope as core-ts `scopeJson`:
+   * `{"intent", "phrases"?, "scope_hash"?, "description"?}`. Refused on an addon without `supportsDomainScope`.
+   */
+  domainScopeJson?: string;
 }
 
 /** Default `workerStallMinutes` (crew#287): silent minutes before the stall watchdog fires. */

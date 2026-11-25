@@ -40,7 +40,9 @@ import { WICKED_CORE_EXE_NAME } from '../core/adapter.js';
 import { execCapped } from '../core/exec.js';
 import { codeGraphDb, requirementsOverrides } from '../core/repoPaths.js';
 import type { RepoEntry } from '../core/types.js';
+import { domainModelOf } from './domain-model.js';
 import type {
+  DomainModel,
   RequirementBusinessDomain,
   RequirementBusinessDomainCatalogEntry,
   RequirementComponent,
@@ -716,6 +718,8 @@ interface RepoIndex {
   minimum: RequirementsMinimum | null;
   /** Rows whose code does not meet them. */
   mismatches: number;
+  /** (J6 K1) The 1.2.0 document's model ({@link domainModelOf}); `null` for any other document. */
+  model: DomainModel | null;
 }
 
 /** Keys in the overrides sidecar that no corpus row claimed — counted, never dropped silently. */
@@ -884,6 +888,7 @@ async function buildIndexRead(
     codeDrift: codeDriftOf(read.code),
     minimum: minimumOf(read.target, coverage),
     mismatches: entries.filter((e) => e.summary.codeMismatch !== null).length,
+    model: domainModelOf(graph),
   };
   cache.set(repoKey(repo), index);
   return { index, coverage: index.coverage, minimum: index.minimum };
@@ -953,6 +958,8 @@ export interface RequirementsPage {
   minimum: RequirementsMinimum | null;
   /** Rows of the whole corpus whose code does not meet them (findings beside real requirements). */
   mismatches: number;
+  /** (J6 K1) The 1.2.0 model the rows come from; omitted for any other document. */
+  model?: DomainModel;
 }
 
 /**
@@ -1078,6 +1085,7 @@ function pageOf(index: RepoIndex, query: RequirementsQuery): RequirementsPage {
     codeDrift: index.codeDrift,
     minimum: index.minimum,
     mismatches: index.mismatches,
+    ...(index.model !== null ? { model: index.model } : {}),
   };
 }
 

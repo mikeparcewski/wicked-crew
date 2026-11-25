@@ -18,6 +18,12 @@ import { ReviewService } from '../src/insights/review-service.js';
 import { InsightsStore } from '../src/insights/store.js';
 import type { LaunchRunInput } from '../src/core/types.js';
 
+// (J6 K1) A domain-extraction launch carries its scope only on an addon that can (Core.supportsDomainScope).
+vi.mock('../src/core/adapter.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/core/adapter.js')>()),
+  addonSupportsDomainScope: () => true,
+}));
+
 // The default evals run in-process at launch; here they answer at once (the preparation itself is the real one).
 vi.mock('../src/evals/routes.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/evals/routes.js')>()),
@@ -387,7 +393,7 @@ describe('POST /runs/preview == POST /runs (studio#1150)', () => {
   });
 
   it.each([undefined, 'pr'] as const)('crew#1418: mapping drops delivery (%s) in preview and launch', async (deliver) => {
-    const { preview, launched, input } = await both({ workflow: 'domain-extraction', repoRef: 'repo-1', ...(deliver !== undefined ? { deliver } : {}) }, {});
+    const { preview, launched, input } = await both({ workflow: 'domain-extraction', repoRef: 'repo-1', domainScope: { intent: 'the payroll rules' }, ...(deliver !== undefined ? { deliver } : {}) }, {});
     expect(launched.statusCode).toBe(201);
     expect(input).not.toHaveProperty('deliver');
     expect(preview.json().posture.deliver).toBe('none');
