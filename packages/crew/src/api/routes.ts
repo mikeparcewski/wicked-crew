@@ -7644,7 +7644,9 @@ export function registerRoutes(
     }
     const open = await resolveOpenGate(id).catch(() => null);
     if (isOpenGate(open)) {
-      return { ord: open.ord, gated: unitAt(open.ord), prompt: open.prompt, gateKind: open.gateKind, ...(open.gateSeq !== undefined ? { gateSeq: open.gateSeq } : {}) };
+      // (crew#1698, codex delta) No open durable row: no opening is bound (only a row the addon wrote numbers one, and
+      // only an addon that writes `gate_seq` takes the expectation), whatever a cached or logged frame says.
+      return { ord: open.ord, gated: unitAt(open.ord), prompt: open.prompt, gateKind: open.gateKind };
     }
     const gated = [...(run.units ?? [])].sort((a, b) => a.ord - b.ord)[run.session.unit_ix];
     return { ord: undefined, gated, prompt: undefined, gateKind: undefined };
@@ -9033,7 +9035,12 @@ export function registerRoutes(
       if (servable) {
         const offers = await offersAt(cached.ord, run);
         if (offers === null) return unavailable503();
-        return { runId: id, ...cached, ...offers };
+        // (crew#1698, codex delta) Beside an open durable row the opening is the ROW's only: a frame's number beside
+        // an unnumbered row is one no answer could name (POST checks the row).
+        const entry: Partial<Pick<typeof cached, 'gateSeq'>> & Omit<typeof cached, 'gateSeq'> = { ...cached };
+        delete entry.gateSeq;
+        const rowSeq = recorded?.state === 'open' ? gateSeqOf(recorded.row['gate_seq']) : cached.gateSeq;
+        return { runId: id, ...entry, ...(rowSeq !== undefined ? { gateSeq: rowSeq } : {}), ...offers };
       }
       gateCache.forget(id);
     }
@@ -9067,9 +9074,15 @@ export function registerRoutes(
     // that read, the record is read once more (it may have moved on, legitimately, meanwhile): an
     // answer that matches it is served; otherwise the entry is dropped and the gate resolved once
     // more from the record, and if that still disagrees nothing verified is served.
-    if (recorded?.state === 'open' && isOpenGate(open) && open.ord !== recorded.ord) {
+    // (crew#1698, codex delta) The opening too, when the row numbers it: a stale frame of an earlier opening at the
+    // same ord is the same disagreement.
+    const sameOpening = (o: GateResolution, r: RecordedOpenGate | null): boolean => isOpenGate(o) && r?.state === 'open' && o.ord === r.ord
+      && (gateSeqOf(r.row['gate_seq']) === undefined || o.gateSeq === gateSeqOf(r.row['gate_seq']));
+    let record: RecordedOpenGate | null = recorded;
+    if (recorded?.state === 'open' && isOpenGate(open) && !sameOpening(open, recorded)) {
       const now = await recordedOpenGate(id);
-      const matchesNow = (o: GateResolution): boolean => isOpenGate(o) && now?.state === 'open' && o.ord === now.ord;
+      record = now;
+      const matchesNow = (o: GateResolution): boolean => sameOpening(o, now);
       if (!matchesNow(open)) {
         gateCache.forget(id);
         open = await resolveOpenGate(id);
@@ -9107,6 +9120,13 @@ export function registerRoutes(
     }
     const offers = await offersAt(open.ord, run);
     if (offers === null) return unavailable503();
+    // (crew#1698, codex delta) Beside an open durable row, its opening only (see the cache-hit path above).
+    if (record?.state === 'open') {
+      const entry: Partial<Pick<typeof open, 'gateSeq'>> & Omit<typeof open, 'gateSeq'> = { ...open };
+      delete entry.gateSeq;
+      const rowSeq = gateSeqOf(record.row['gate_seq']);
+      return { runId: id, ...entry, ...(rowSeq !== undefined ? { gateSeq: rowSeq } : {}), ...offers };
+    }
     return { runId: id, ...open, ...offers };
   });
 

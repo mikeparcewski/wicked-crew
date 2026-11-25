@@ -143,6 +143,44 @@ describe('the per-opening gate id (crew#1698)', () => {
     expect(res.json()).not.toHaveProperty('gateSeq');
   });
 
+  // codex delta on b7-standin: both GET paths and the decision serve or bind the ROW's opening only.
+  it('a warm cache beside an unnumbered row serves no opening', async () => {
+    const { app, cache } = harness(0);
+    cache.ingest({ type: 'awaitingHuman', session: 'r', ord: 4, prompt: 'Retry the review?', gateKind: 'escalation', gateSeq: 2 } as CoreEvent);
+    const res = await app.inject({ method: 'GET', url: '/api/v1/runs/r/gate' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ ord: 4 });
+    expect(res.json()).not.toHaveProperty('gateSeq');
+  });
+
+  it('a stale frame of an earlier opening landing during the status read is not served', async () => {
+    const { app, adapter, cache } = harness(3);
+    let landed = false;
+    const late = () => {
+      if (!landed) {
+        landed = true;
+        cache.ingest({ type: 'awaitingHuman', session: 'r', ord: 4, prompt: 'Retry the review?', gateKind: 'escalation', gateSeq: 2 } as CoreEvent);
+      }
+    };
+    const view = adapter.runView.getMockImplementation()!;
+    const detail = adapter.sessionsDetail.getMockImplementation()!;
+    adapter.runView.mockImplementation(async () => { late(); return view(); });
+    adapter.sessionsDetail.mockImplementation(async () => { late(); return detail(); });
+    const res = await app.inject({ method: 'GET', url: '/api/v1/runs/r/gate' });
+    expect(landed).toBe(true);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ ord: 4, gateSeq: 3 });
+  });
+
+  it('with no open durable row a logged frame\'s opening binds nothing', async () => {
+    const { app, adapter } = harness(2);
+    adapter.interactionRequests.mockResolvedValue([]);
+    adapter.runEvents.mockResolvedValue([{ type: 'awaitingHuman', session: 'r', ord: 4, prompt: 'Retry the review?', gateKind: 'escalation', gateSeq: 7 } as CoreEvent]);
+    const res = await app.inject({ method: 'POST', url: '/api/v1/runs/r/gate', payload: { approve: true } });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(adapter.confirmGate.mock.calls[0]?.[6]).toEqual({ ord: 4 });
+  });
+
   it('a gate read from the record is dropped by a live frame of another opening at the same ord and prompt', async () => {
     const cache = new GateCache();
     const read = { ord: 4, prompt: 'p', lifecycle: 'open' as const, receivedAt: new Date(1).toISOString(), gateSeq: 2 };

@@ -199,7 +199,8 @@ describe('PUT /settings standInReview is a person\'s', () => {
 });
 
 // codex r1 on b7-standin: the consent guards behind crew's REAL auth hooks (required mode), each actor by its bearer: an
-// agent's or a system's token never consents, at launch, in the setting or (below) at the gate. (In `off` mode the daemon
+// agent's or a system's token never consents, at launch or in the setting (the gate's is in the use_stand_ins block
+// below). (In `off` mode the daemon
 // has no identities at all: every request is the local person, as for every human-only rule.)
 describe('stand-in consent behind the real auth hooks', () => {
   let app: FastifyInstance;
@@ -263,8 +264,7 @@ describe('POST /runs/:id/gate use_stand_ins → grantStandIns (crew#1856)', () =
     units: [{ id: `${id}:review`, session_id: id, ord: 4, description: 'review', phase_ref: 'review', status: 'rejected', assigned_cli: 'claude' }],
   });
 
-  beforeAll(async () => {
-    const adapter = {
+  const makeAdapter = () => ({
       sessionsDetail: vi.fn().mockResolvedValue([view('run-s')]),
       listRepos: vi.fn().mockResolvedValue([]),
       listWorkflows: () => [],
@@ -274,7 +274,9 @@ describe('POST /runs/:id/gate use_stand_ins → grantStandIns (crew#1856)', () =
       grantStandIns: vi.fn(async (...args: unknown[]) => { if (grantError !== null) throw grantError; grants.push(args); return 'executing'; }),
       confirmGate: vi.fn(async (...args: unknown[]) => { confirms.push(args); return 'executing'; }),
       updateSettings: vi.fn(async (patch: Record<string, unknown>) => { saved.push(patch); return patch; }),
-    };
+  });
+  beforeAll(async () => {
+    const adapter = makeAdapter();
     app = Fastify({ logger: false });
     withActor(app);
     registerRoutes(app, withRunViews(adapter as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), undefined, {
@@ -305,6 +307,36 @@ describe('POST /runs/:id/gate use_stand_ins → grantStandIns (crew#1856)', () =
     expect(res.json()).toMatchObject({ status: 'executing', standInReview: 'saved' });
     expect(grants).toEqual([['run-s', 'always', 3, 'test-human (human)', 4]]);
     expect(saved).toEqual([{ standInReview: 'always' }]);
+  });
+
+  // codex delta on b7-standin: the gate consent behind crew's REAL auth hooks (required mode), each actor by its bearer.
+  it('behind the real auth hooks only a person\'s bearer grants, and the grant names that person', async () => {
+    const TOKENS: Record<string, Actor> = {
+      human: { id: 'priya', kind: 'human', trust: 'operator' },
+      agent: { id: 'seat-codex', kind: 'agent', trust: 'operator' },
+      system: { id: 'ci', kind: 'system', trust: 'admin' },
+    };
+    const authed = Fastify({ logger: false });
+    registerAuthHooks(authed, { mode: 'required', verifiers: [{ name: 'test', verify: async (t) => TOKENS[t] ?? null }], allowedOrigins: null });
+    registerRoutes(authed, withRunViews(makeAdapter() as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), undefined, {
+      audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog, authMode: 'required',
+    });
+    await authed.ready();
+    try {
+      const answer = (token: string) => authed.inject({
+        method: 'POST', url: '/api/v1/runs/run-s/gate', headers: { authorization: `Bearer ${token}` },
+        payload: { approve: true, action: 'use_stand_ins', scope: 'always' },
+      });
+      for (const token of ['agent', 'system']) expect((await answer(token)).statusCode).toBe(403);
+      expect(grants).toEqual([]);
+      expect(saved).toEqual([]);
+      const res = await answer('human');
+      expect(res.statusCode, res.body).toBe(200);
+      expect(grants).toEqual([['run-s', 'always', 3, 'priya (human)', 4]]);
+      expect(saved).toEqual([{ standInReview: 'always' }]);
+    } finally {
+      await authed.close();
+    }
   });
 
   it('a worker or a standing order cannot consent', async () => {
