@@ -73,6 +73,9 @@ const PREVIEW_CACHE_MAX = 64;
 export const HEALTH_FAILING_AFTER = 3;
 
 /** A refusal the routes map to a status code. */
+/** The fields a refusal carries beside its words: an address to confirm, or (crew#1514) a rename's apps or subjects. */
+export type McpRegistryErrorDetail = AddressConfirmationDetail & { apps?: Array<{ slug: string; name: string }>; subjects?: string[]; rules?: string[] };
+
 export class McpRegistryError extends Error {
   constructor(
     // 500: the registry and the OS secret store disagree and crew could not reconcile them
@@ -82,7 +85,7 @@ export class McpRegistryError extends Error {
     message: string,
     /** (DES-APPS-001 §5.2) Fuller words that hold a source's own text: answered to a HUMAN only. */
     readonly humanMessage?: string,
-    readonly detail: AddressConfirmationDetail = {},
+    readonly detail: McpRegistryErrorDetail = {},
   ) {
     super(message);
   }
@@ -472,9 +475,10 @@ export class McpRegistry {
         registeredAt: prior?.registeredAt ?? stamp,
         updatedAt: stamp,
         tools,
-        // (crew#1514) A re-save keeps the names it retired, and its keychain account while its reference still names it.
+        // (crew#1514) A re-save keeps the names it retired and its keychain account (its own account for as long as it
+        // lives, whatever its reference names now: a re-save back to keychain:wicked-mcp/<account> owns it again).
         ...(prior?.formerNames !== undefined && prior.formerNames.length > 0 ? { formerNames: [...prior.formerNames] } : {}),
-        ...(prior?.keychainAccount !== undefined && config.auth?.ref === keychainRef(prior.keychainAccount) ? { keychainAccount: prior.keychainAccount } : {}),
+        ...(prior?.keychainAccount !== undefined ? { keychainAccount: prior.keychainAccount } : {}),
       };
       // (DES-APPS-001 §7.4, DES-KNOWLEDGE-DATA-001 §5.4) Allow writes is off on every new Postgres source, and
       // "query" on every new source. A re-save keeps each only while the descriptor is unchanged, and a K1
@@ -692,8 +696,9 @@ export class McpRegistry {
         if (taken !== undefined) throw new McpRegistryError(409, 'name_taken', `${to} is already a registered ${taken.kind} server; choose another name`);
         const retiring = retiredBy(file.servers, to);
         if (retiring !== undefined && retiring !== s) throw retiredName(to, retiring);
-        // The secret is never moved: `auth.ref` is part of the descriptor every grant and lock binds to.
-        if (s.keychainAccount === undefined && s.auth?.ref === keychainRef(s.name)) s.keychainAccount = s.name;
+        // The secret is never moved: `auth.ref` is part of the descriptor every grant and lock binds to. The entry's own
+        // account stays the name it had (retired with it), so no other entry can ever write it.
+        if (s.keychainAccount === undefined) s.keychainAccount = s.name;
         if (s.keychainAccount === to) delete s.keychainAccount;
         const former = [...new Set([...(s.formerNames ?? []).filter((n) => n !== to), from])];
         s.formerNames = former;
@@ -715,7 +720,12 @@ export class McpRegistry {
     if (copied) await this.catalogs.remove(from).catch(() => undefined);
     for (const [hash, held] of this.previews) if (held.config.name === from || held.config.name === to) this.previews.delete(hash);
     if (isSourceRecord(renamed)) this.sourceChanged(to);
-    return this.view(renamed);
+    try {
+      return await this.view(renamed);
+    } catch (err) {
+      // The rename has landed: the caller must not undo anything bound to it because its answer could not be built.
+      throw new McpRenameCommitted(from, to, err);
+    }
   }
 
   /** Remove a server, and the keychain secret it owns (`keychain:wicked-mcp/<name>`, or its `keychainAccount`). */
@@ -1052,6 +1062,9 @@ export class McpRegistry {
         registeredAt: prior?.registeredAt ?? stamp,
         updatedAt: stamp,
         tools: [],
+        // (crew#1514) A new upload of a renamed source keeps the names it retired.
+        ...(prior?.formerNames !== undefined && prior.formerNames.length > 0 ? { formerNames: [...prior.formerNames] } : {}),
+        ...(prior?.keychainAccount !== undefined ? { keychainAccount: prior.keychainAccount } : {}),
         // (DES-KNOWLEDGE-DATA-001 §7.1) A new upload of the same name keeps the person's agent switches; "query"
         // only when it is the same snapshot (a new digest is a new descriptor).
         ...(prior?.agents !== undefined ? { agents: { ...agentAccessOf(prior), query: agentAccessOf(prior).query && prior.sql?.snapshot === digest } } : {}),
@@ -1135,14 +1148,7 @@ export class McpRegistry {
     }
     // (crew#1514) An entry the generation holds under another name than the live one was renamed since: the rules,
     // picks and keychain account follow the live name, so the restore is refused until it is renamed back.
-    const live = (await this.readFile()).servers;
-    const crossed = servers.flatMap((s) => {
-      const l = live.find((x) => entryId(x) === entryId(s));
-      return l !== undefined && l.name !== s.name ? [`${l.name} (was ${s.name})`] : [];
-    });
-    if (crossed.length > 0) {
-      throw new McpRegistryError(409, 'restore_crosses_rename', `generation ${generation} holds ${crossed.length === 1 ? 'an entry' : 'entries'} under another name: ${crossed.join(', ')}. Rename ${crossed.length === 1 ? 'it' : 'each'} back first, then restore`);
-    }
+    crossesRename(generation, servers, (await this.readFile()).servers);
     for (const s of servers) {
       if (s.kind !== 'toolbox-source') continue;
       try {
@@ -1186,6 +1192,8 @@ export class McpRegistry {
       s.updatedAt = stamp;
     }
     const { current, tombstoned } = await this.mutate((file) => {
+      // (crew#1514) Again inside the write: a rename that landed after the plan was made is not undone by it.
+      crossesRename(plan.generation, servers, file.servers);
       if (expected !== undefined) {
         const late = file.servers.map((s) => s.name).filter((n) => !expected.includes(n));
         if (late.length > 0) throw new McpRegistryError(409, 'registry_busy', `${late.join(', ')} was registered while the restore ran; nothing was restored: try again`);
@@ -1641,6 +1649,35 @@ export function isPostgresRecord(s: McpServerRecord): boolean {
 }
 
 /** (crew#1514) The keychain account a record's own secret lives under: the name it was saved as. */
+/** (crew#1514) A rename committed, but its answer could not be built (the record is read again by the caller). */
+export class McpRenameCommitted extends Error {
+  constructor(readonly from: string, readonly to: string, readonly cause: unknown) {
+    super(`${from} was renamed to ${to}, but its record could not be read back: ${cause instanceof Error ? cause.message : String(cause)}`);
+  }
+}
+
+/**
+ * (crew#1514) Refuse a restore that would undo a rename (409 `restore_crosses_rename`): an entry the generation holds
+ * under another name, or with other retired names or another keychain account, than the live one; or an entry whose
+ * name a live entry has retired. The rules, picks and keychain account follow the live names.
+ */
+function crossesRename(generation: number, kept: readonly McpServerRecord[], live: readonly McpServerRecord[]): void {
+  const names = (l: readonly string[] | undefined): string => [...new Set(l ?? [])].sort().join(',');
+  const crossed: string[] = [];
+  for (const s of kept) {
+    const l = live.find((x) => entryId(x) === entryId(s));
+    if (l !== undefined && (l.name !== s.name || names(l.formerNames) !== names(s.formerNames) || l.keychainAccount !== s.keychainAccount)) {
+      crossed.push(l.name !== s.name ? `${l.name} (was ${s.name})` : `${l.name} (renamed since)`);
+      continue;
+    }
+    const by = live.find((x) => entryId(x) !== entryId(s) && (x.formerNames ?? []).includes(s.name));
+    if (by !== undefined) crossed.push(`${s.name} (a name ${by.name} retired)`);
+  }
+  if (crossed.length > 0) {
+    throw new McpRegistryError(409, 'restore_crosses_rename', `generation ${generation} would undo a rename: ${crossed.join(', ')}. Rename back first, then restore`);
+  }
+}
+
 export function ownAccount(s: Pick<McpServerRecord, 'name' | 'keychainAccount'>): string {
   return s.keychainAccount ?? s.name;
 }

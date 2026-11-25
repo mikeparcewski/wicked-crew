@@ -15246,8 +15246,11 @@ export interface PatchMcpServerBody {
  * is retired (in `formerNames`) while it exists. Refusals (409, `{error, code, ...}`): `apps_bound` with
  * `apps: Array<{slug, name}>` (the apps that use the source; send the same slugs in `apps` to rename anyway),
  * `name_taken`, `name_retired`, `name_unchanged`, `reserved_name`, `not_renamable`, and `rules_differ` with
- * `subjects: string[]` (a rule matches the source by its content and would judge those tools more loosely under
- * the new name). 403 `rename_human_only` for any other actor.
+ * `subjects: string[]` (tools the engine would judge more loosely under the new name) and/or `rules: string[]`
+ * (rules whose `trigger.contains` names the source by its content: change them to name `mcp:<name>` first). 403
+ * `rename_human_only` for any other actor; 501 `mcp_preview_unsupported` when the engine cannot judge the rules; 502
+ * `renamed_unread` when the rename landed but its record could not be read back (read the list again). A restore of
+ * a generation that would undo a rename is refused 409 `restore_crosses_rename`.
  */
 export interface RenameMcpServerBody {
   to: string;

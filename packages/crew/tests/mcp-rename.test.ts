@@ -51,7 +51,7 @@ function secrets(): SecretStore {
   };
 }
 
-async function call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: unknown) {
+async function call(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', url: string, payload?: unknown) {
   return app.inject({ method, url: `/api/v1${url}`, ...(payload !== undefined ? { payload: payload as object } : {}) });
 }
 
@@ -96,7 +96,7 @@ beforeEach(async () => {
   actor = LOCAL_ACTOR;
   usingApps = [];
   adapter = new CoreAdapter({ dbPath: join(base, 'core.db'), stub: true });
-  registry = new McpRegistry({ store: new McpRegistryStore(join(base, 'state', 'mcp')), secrets: secrets(), probe: probeMcpServer, discover: () => [] });
+  registry = new McpRegistry({ store: new McpRegistryStore(join(base, 'state', 'mcp')), secrets: secrets(), probe: probeMcpServer, discover: () => [], env: { FX_ENV: 'fixture-env-value' } });
   const policies = new McpPolicies(registry, {
     listRules: () => adapter.listConformanceRules(),
     upsertRule: (r) => adapter.upsertConformanceRule(r),
@@ -170,7 +170,8 @@ describe('renaming a source (crew#1514)', () => {
     expect(held.statusCode, held.body).toBe(200);
     expect((await call('POST', '/mcp/servers/fx/rename', { to: 'fx2' })).statusCode).toBe(200);
     const saved = await call('POST', '/mcp/servers', { previewHash: (held.json() as McpPreviewResponse).previewHash });
-    expect(saved.statusCode).toBe(409);
+    expect(saved.statusCode, saved.body).toBe(409);
+    expect(saved.json().code).toBe('preview_stale');
     expect(keychain.get('fx')).toBe('fixture-tok-1');
   });
 
@@ -199,7 +200,7 @@ describe('renaming a source (crew#1514)', () => {
     const res = await call('POST', '/mcp/servers/fx/rename', { to: 'fx2' });
     expect(res.statusCode, res.body).toBe(409);
     expect(res.json().code).toBe('rules_differ');
-    expect(res.json().subjects).toEqual(['mcp:fx/wt_echo', 'mcp:fx/wt_note']);
+    expect(res.json().rules).toEqual(['SEC-FX-BY-TEXT']);
     expect(JSON.stringify(await adapter.listConformanceRules())).toBe(rulesBefore);
     expect((await call('GET', '/mcp/servers')).json().servers.map((s: McpServer) => s.name)).toEqual(['fx']);
   });
@@ -246,5 +247,67 @@ describe('renaming a source (crew#1514)', () => {
     await register('fz');
     expect((await rule(FIRST_USE_LEDGER))!.excludes ?? []).not.toEqual(expect.arrayContaining(['mcp:fz']));
     expect((await rule(FIRST_USE_LEDGER))!.excludes ?? []).not.toContain('mcp:fz/wt_echo');
+  });
+
+  it('a rule that names the source by content is refused in any phase, and for a switched-off tool', async () => {
+    await register('fx');
+    expect((await call('PATCH', '/mcp/servers/fx', { enabled: false })).statusCode).toBe(200);
+    await upsert({ id: 'SEC-FX-BUILD', applies_to: ['build'], effect: 'deny', severity: 'critical', trigger: { contains: 'fx' } });
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'fx2' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'rules_differ', rules: ['SEC-FX-BUILD'] });
+  });
+
+  it('a new upload of a renamed snapshot keeps the names it retired', async () => {
+    const catalog = { dialect: 'sqlite' as const, database: 'up', describedAt: '2026-11-12T00:00:00Z', relations: [] };
+    await registry.registerSnapshotSource('up', 'digest-1', { catalog });
+    expect((await call('POST', '/mcp/servers/up/rename', { to: 'up2' })).statusCode).toBe(200);
+    await registry.registerSnapshotSource('up2', 'digest-2', { catalog });
+    expect((await registry.get('up2')).formerNames).toEqual(['up']);
+    await expect(registry.registerSnapshotSource('up', 'digest-3', { catalog })).rejects.toMatchObject({ code: 'name_retired' });
+  });
+
+  it('a restore that would undo a rename is refused even when the names match again', async () => {
+    await register('fx');
+    const { current } = (await call('GET', '/mcp/registry/generations')).json() as { current: number };
+    expect((await call('POST', '/mcp/servers/fx/rename', { to: 'fx2' })).statusCode).toBe(200);
+    expect((await call('POST', '/mcp/servers/fx2/rename', { to: 'fx' })).statusCode).toBe(200);
+    const res = await call('POST', '/mcp/registry/restore', { generation: current });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().code).toBe('restore_crosses_rename');
+  });
+
+  it('keeps its keychain account through a re-save on another reference and back', async () => {
+    await register('fx', 'fixture-tok-1');
+    expect((await call('POST', '/mcp/servers/fx/rename', { to: 'fx2' })).statusCode).toBe(200);
+    const base = { name: 'fx2', kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath] };
+    const viaEnv = await call('POST', '/mcp/servers/preview', { ...base, auth: { ref: 'env:FX_ENV', env: 'FX_TOKEN' } });
+    expect(viaEnv.statusCode, viaEnv.body).toBe(200);
+    expect((await call('POST', '/mcp/servers', { previewHash: (viaEnv.json() as McpPreviewResponse).previewHash })).statusCode).toBe(201);
+    expect((await registry.get('fx2')).keychainAccount).toBe('fx');
+    const back = await call('POST', '/mcp/servers/preview', { ...base, auth: { ref: keychainRef('fx'), env: 'FX_TOKEN' }, secret: 'fixture-tok-3' });
+    expect(back.statusCode, back.body).toBe(200);
+    expect((await call('POST', '/mcp/servers', { previewHash: (back.json() as McpPreviewResponse).previewHash })).statusCode).toBe(201);
+    expect([...keychain.entries()]).toEqual([['fx', 'fixture-tok-3']]);
+    expect((await call('DELETE', '/mcp/servers/fx2')).statusCode).toBe(200);
+    expect(keychain.size).toBe(0);
+  });
+
+  it('a rename that lands but cannot be read back keeps its rules and says so', async () => {
+    await register('fx');
+    expect((await call('POST', '/mcp/approvals', { subject: 'mcp:fx' })).statusCode).toBe(200);
+    const r = registry as unknown as { view: (s: { name: string }) => Promise<McpServer> };
+    const view = r.view.bind(registry);
+    let reads = 0;
+    r.view = async (s) => {
+      if (s.name === 'fx2' && reads++ < 2) throw new Error('fixture: the secret store is unreachable');
+      return view(s);
+    };
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'fx2' });
+    expect(res.statusCode, res.body).toBe(502);
+    expect(res.json().code).toBe('renamed_unread');
+    expect((await rule(FIRST_USE_LEDGER))!.excludes).toEqual(expect.arrayContaining(['mcp:fx2']));
+    expect((await call('GET', '/mcp/servers')).json().servers.map((s: McpServer) => s.name)).toEqual(['fx2']);
+    expect((await auditEvents()).some((e) => e.action === 'mcp.server.renamed' && e.detail?.['to'] === 'fx2')).toBe(true);
   });
 });

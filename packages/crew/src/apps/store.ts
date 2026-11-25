@@ -341,7 +341,7 @@ export class AppStore {
   /**
    * (crew#1514) The apps, active and archived, any of whose trees that can run (a version, or any tree holding a
    * receipt) uses source `name`: a query or an action on it, or a recall text that names it. A tree that can't be read
-   * can't run, so it counts for nothing. Sorted by slug.
+   * now counts as using it (it may be readable, and run, later). Sorted by slug.
    */
   async appsUsing(name: string): Promise<Array<{ slug: string; name: string }>> {
     if (Object.keys(this.state.apps).length === 0) return [];
@@ -354,7 +354,9 @@ export class AppStore {
         try {
           files = await this.files(a, tree);
         } catch {
-          continue;
+          // A version crew cannot read now may run later: listed, so the person confirms it too (fail closed).
+          out.push({ slug: a.slug, name: a.name });
+          break;
         }
         if (filesUseSource(files, name)) {
           out.push({ slug: a.slug, name: a.name });

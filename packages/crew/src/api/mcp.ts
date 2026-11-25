@@ -91,7 +91,7 @@ import type { AskServer } from '../mcp/ask-server.js';
 import type { McpPolicies } from '../mcp/policies.js';
 import { MCP_PREVIEW_ROLES, MCP_RUN_MODES, McpLedgerEditError } from '../mcp/policies.js';
 import { envFingerprint, envWarningClass, validateServerEnv } from '../mcp/env.js';
-import { agentServerView, configOf, isWriteGrant, McpRegistryError, type McpRegistry } from '../mcp/registry.js';
+import { agentServerView, configOf, isWriteGrant, McpRegistryError, McpRenameCommitted, type McpRegistry } from '../mcp/registry.js';
 import { restTarget } from '../mcp/rest.js';
 import { listUnitTools } from '../mcp/tool-list.js';
 import type { RunFence, SourcePicks } from '../mcp/run-fence.js';
@@ -740,7 +740,7 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
   // `apps_bound`) until the request names exactly those.
   app.post<{ Params: { name: string } }>(
     `${V}/mcp/servers/:name/rename`,
-    { config: { manifest: { requestType: 'RenameMcpServerBody', responseType: 'McpServer', statusCodes: [200, 400, 403, 404, 409, 502, 503] } } },
+    { config: { manifest: { requestType: 'RenameMcpServerBody', responseType: 'McpServer', statusCodes: [200, 400, 403, 404, 409, 500, 501, 502, 503] } } },
     async (req, reply) => {
       const r = registry(reply);
       if (r === null) return reply;
@@ -756,6 +756,15 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       // Both names' locks, in one order (two renames never wait on each other in a cycle).
       const [first, second] = [from, to].sort();
       const locked = <T>(fn: () => Promise<T>): Promise<T> => (p === undefined ? fn() : p.exclusive(first!, () => p.exclusive(second!, fn)));
+      // A rename that landed but whose record could not be read back: read it again (the rules already moved with it).
+      const renamed = async (): Promise<McpServer> => {
+        try {
+          return await r.rename(from, to);
+        } catch (e) {
+          if (!(e instanceof McpRenameCommitted)) throw e;
+          return r.get(to).catch(() => { throw e; });
+        }
+      };
       try {
         const outcome = await locked(async () => {
           await r.get(from);
@@ -764,36 +773,42 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
           if (using.length !== listed.size || using.some((a) => !listed.has(a.slug))) {
             throw new McpRegistryError(409, 'apps_bound', `${using.length} app${using.length === 1 ? ' uses' : 's use'} ${from}: confirm the rename with exactly that list`, undefined, { apps: using });
           }
-          if (p === undefined) return { server: await r.rename(from, to), rules: [] as string[], apps: using, approvalsCopied: true };
-          // Restrictions first (fail-closed if a later step fails), then the engine's own judgement of the new name.
-          const originals = await p.copyRestrictions(from, to).catch((e: unknown) => { auditPartial(deps, req, e, [`mcp:${to}`]); throw e; });
+          if (p === undefined) return { server: await renamed(), rules: [] as string[], apps: using };
+          // Every rule naming the source is copied to the new name first (one edit: restrictions and exemptions), then
+          // the rules are judged as they will stand; a refusal or a failed write puts them back.
+          const originals = await p.copyRules(from, to).catch((e: unknown) => { auditPartial(deps, req, e, [`mcp:${to}`]); throw e; });
+          const back = async (): Promise<void> => { await p.restoreRules(originals).catch((x: unknown) => auditPartial(deps, req, x, [`mcp:${to}`])); };
           let server: McpServer;
           try {
-            const loosened = await p.loosenedByRename(from, to);
-            if (loosened.length > 0) {
-              throw new McpRegistryError(409, 'rules_differ', `a rule would judge ${loosened.join(', ')} more loosely under ${to}: it matches ${from} by its content, not by a name crew can copy. Change the rule to cover ${to}, then rename`, undefined, { subjects: loosened });
+            const judged = await p.loosenedByRename(from, to);
+            if (judged.rules.length > 0) {
+              throw new McpRegistryError(409, 'rules_differ', `rule${judged.rules.length === 1 ? '' : 's'} ${judged.rules.join(', ')} match${judged.rules.length === 1 ? 'es' : ''} ${from} by its content, not by a name crew can copy. Change ${judged.rules.length === 1 ? 'it' : 'them'} to name the source (mcp:${from}), then rename`, undefined, { rules: judged.rules, subjects: judged.subjects });
             }
-            server = await r.rename(from, to);
+            if (judged.subjects.length > 0) {
+              throw new McpRegistryError(409, 'rules_differ', `a rule would judge ${judged.subjects.join(', ')} more loosely under ${to}: it matches ${from} by its content, not by a name crew can copy. Change the rule to cover ${to}, then rename`, undefined, { subjects: judged.subjects });
+            }
           } catch (e) {
-            await p.restoreRules(originals).catch((x: unknown) => auditPartial(deps, req, x, [`mcp:${to}`]));
+            await back();
             throw e;
           }
-          // Exemptions (approvals, a deny's exemption) only once the rename has landed: a failure leaves the new name
-          // asking or denied more, never less.
-          let exempted: string[] = [];
-          let approvalsCopied = true;
           try {
-            exempted = await p.copyExemptions(from, to);
+            server = await renamed();
           } catch (e) {
-            auditPartial(deps, req, e, [`mcp:${to}`]);
-            approvalsCopied = false;
+            // Landed but unreadable: the rules stay with it. Refused or unwritten: they go back.
+            if (!(e instanceof McpRenameCommitted)) await back();
+            throw e;
           }
-          return { server, rules: [...new Set([...originals.map((o) => o.id), ...exempted])], apps: using, approvalsCopied };
+          return { server, rules: originals.map((o) => o.id), apps: using };
         });
-        deps.audit.record('mcp.server.renamed', actor, { detail: { id: outcome.server.id, from, to, apps: outcome.apps.map((a) => a.slug), rules: outcome.rules, ...(outcome.approvalsCopied ? {} : { approvalsCopied: false }) } });
+        deps.audit.record('mcp.server.renamed', actor, { detail: { id: outcome.server.id, from, to, apps: outcome.apps.map((a) => a.slug), rules: outcome.rules } });
         for (const id of outcome.rules) deps.audit.record('governance.rule.upserted', actor, { detail: { id, source: 'mcp-rename' } });
         return serverFor(actor, outcome.server);
       } catch (err) {
+        if (err instanceof McpRenameCommitted) {
+          // It landed (rules and all); only its answer is missing. Audited as what it is, and said so.
+          deps.audit.record('mcp.server.renamed', actor, { detail: { from, to, unread: true } });
+          return reply.code(502).send({ error: `${err.message}; read the source list again`, code: 'renamed_unread' });
+        }
         return fail(reply, err, actor);
       }
     },

@@ -377,37 +377,27 @@ export class McpPolicies {
   // ── rename (crew#1514) ─────────────────────────────────────────────────────────────────────
 
   /**
-   * Before a rename commits: every rule that RESTRICTS `from` (a token naming it in `applies_to`) gets the same token
-   * for `to` beside it; the old tokens stay (`from` is retired while the renamed entry lives). Fail-closed if left
-   * behind by a rename that then fails: it only narrows a name nothing has. Answers the original rules changed, for
-   * {@link restoreRules}. Callers hold {@link exclusive} for both names.
+   * (crew#1514) Before a rename commits: every rule's `applies_to` gains the `to` counterpart of each `from` token (a
+   * restriction never stays behind), and every rule's `excludes` (the approval ledgers, a deny's exemption) for `to`
+   * become exactly those it holds for `from` (stale `to` tokens, from a source that once had that name, are dropped).
+   * One edit, so the rename is judged on the final rules. Answers the rules as they were, for {@link restoreRules}.
+   * Exemptions left under `to` by a rename that then failed are inert (nothing is called `to`) and a later registration
+   * of `to` withdraws them ({@link withdrawnBySave}).
    */
-  async copyRestrictions(from: string, to: string): Promise<ConformanceRule[]> {
+  async copyRules(from: string, to: string): Promise<ConformanceRule[]> {
     return this.editRules((rule) => {
-      const list = rule.applies_to ?? [];
-      const added = renamedTokens(list, from, to).filter((t) => !list.includes(t));
-      return added.length === 0 ? null : { ...rule, applies_to: [...list, ...added] };
+      const applies = rule.applies_to ?? [];
+      const added = renamedTokens(applies, from, to).filter((t) => !applies.includes(t));
+      const ex = rule.excludes ?? [];
+      const kept = ex.filter((t) => !namesServer(t, to));
+      const excludes = [...kept, ...renamedTokens(ex, from, to).filter((t) => !kept.includes(t))];
+      const exChanged = canonicalJson(excludes) !== canonicalJson(ex);
+      if (added.length === 0 && !exChanged) return null;
+      return { ...rule, ...(added.length > 0 ? { applies_to: [...applies, ...added] } : {}), ...(exChanged ? { excludes } : {}) };
     });
   }
 
-  /**
-   * After a rename has committed: every rule's exemptions (`excludes`: the approval ledgers and any deny's exemption)
-   * for `to` become exactly those it holds for `from`. Stale `to` tokens (another source once had that name) are
-   * dropped. Exemptions are copied only after the commit: left behind by a failed rename they would loosen a later
-   * source of that name. A failure here leaves `to` with fewer exemptions than `from` had (it asks or is denied
-   * more): fail-closed. Answers the ids changed.
-   */
-  async copyExemptions(from: string, to: string): Promise<string[]> {
-    const originals = await this.editRules((rule) => {
-      const list = rule.excludes ?? [];
-      const kept = list.filter((t) => !namesServer(t, to));
-      const next = [...kept, ...renamedTokens(list, from, to).filter((t) => !kept.includes(t))];
-      return canonicalJson(next) === canonicalJson(list) ? null : { ...rule, excludes: next };
-    });
-    return originals.map((r) => r.id);
-  }
-
-  /** Put rules back as {@link copyRestrictions} found them (a rename refused after the copy). */
+  /** Put rules back as {@link copyRules} found them (a rename refused or failed after the copy). */
   async restoreRules(originals: readonly ConformanceRule[]): Promise<void> {
     if (originals.length === 0) return;
     const ids = new Set(originals.map((r) => r.id));
@@ -415,27 +405,34 @@ export class McpPolicies {
   }
 
   /**
-   * Whether every one of `from`'s tools would be judged at least as strictly under `to` as it is now, by the engine's own
-   * evaluation over the preview's cells (allow < ask < deny; an allow keeps every obligation). Rules that match the
-   * server by content (a trigger on the context JSON) are covered: nothing here reads a rule. Answers the subjects of
-   * `from` whose verdict would loosen.
+   * Whether `from`'s rules hold for `to` once {@link copyRules} has run. Two checks, both fail-closed:
+   * - a rule that names the server by its content (`trigger.contains` overlapping either name) is never judged
+   *   equivalent (it may match in a phase, or on a data source's gated tools, that no preview covers);
+   * - every tool of `from` must be judged at least as strictly under `to` by the engine's own evaluation over the
+   *   preview's cells (allow < ask < deny; an allow keeps every obligation), with each tool judged as callable whatever
+   *   its switches (a disabled tool switched on later is held to the same rules).
+   * Answers the subjects that would loosen and the rules that name the server by content.
    */
-  async loosenedByRename(from: string, to: string): Promise<string[]> {
+  async loosenedByRename(from: string, to: string): Promise<{ subjects: string[]; rules: string[] }> {
+    const overlaps = (c: string): boolean => c !== '' && (c.includes(from) || c.includes(to) || from.includes(c) || to.includes(c));
+    const rules = (await this.engine.listRules())
+      .filter((r) => r.retired !== true && typeof r.trigger?.contains === 'string' && overlaps(r.trigger.contains))
+      .map((r) => r.id);
     const server = await this.registry.get(from);
     const tools = server.tools.filter((t) => t.status !== 'gone');
-    if (tools.length === 0) return [];
+    if (tools.length === 0) return { subjects: [], rules };
     const cells = this.cells({});
     const callsOf = (name: string): EngineCall[] => tools.map((t) => ({
       server: name,
       tool: t.name,
       annotations: hints(t.annotations),
       classOverride: t.classOverride,
-      registered: server.enabled && t.enabled && t.status === 'registered',
+      registered: true,
       kind: server.kind,
     }));
     const [before, after] = await Promise.all([this.judge(callsOf(from), cells), this.judge(callsOf(to), cells)]);
     const rank = (d: McpDecision): number => (d === 'deny' ? 2 : d === 'ask' ? 1 : 0);
-    const loosened: string[] = [];
+    const subjects: string[] = [];
     tools.forEach((t, i) => {
       const was = before[i] ?? [];
       const now = after[i] ?? [];
@@ -445,9 +442,9 @@ export class McpPolicies {
         if (rank(n.decision) !== rank(c.decision)) return rank(n.decision) < rank(c.decision);
         return c.obligations.some((o) => !n.obligations.includes(o));
       });
-      if (looser) loosened.push(t.subject);
+      if (looser) subjects.push(t.subject);
     });
-    return loosened;
+    return { subjects, rules };
   }
 
   /** Every approval token that names `server` (the server's own and each of its tools'). */
