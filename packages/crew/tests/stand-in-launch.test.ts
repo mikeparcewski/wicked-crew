@@ -20,6 +20,18 @@ import { withRunViews } from './support/run-views.js';
  *  (`src/independence.rs` `IndependencePreflight`, written by its test
  *  `t_r2_one_signed_in_cli_is_short_for_every_independent_role`), copied verbatim. */
 const ONE_HELPER = readFileSync(new URL('./fixtures/stand-in-preflight-one-helper.json', import.meta.url), 'utf8');
+/** (crew#1932) The engine's own preflight for the three repro shapes, through crew's `CoreAdapter.independencePreflight`
+ *  on core-ts 0.15.49 (a scratch store, the roster Claude Code + Codex + Pi CLI, repo-bound). Copied verbatim, except
+ *  one field named on the `bug` file. */
+const fixture = (name: string): string => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
+/** Repro 3: `capture-learnings` (Learn my style) on three helpers: every short role is conditional. */
+const THREE_CAPTURE = fixture('stand-in-preflight-three-helpers-capture.json');
+/** Repro 2: `bug` (Revise this PR) on three helpers. Its QE reviewer reads the host's skills routing, which this probe
+ *  host lacks (it admitted none); on the daemon the repro ran on the card named no tester, so the QE row carries that
+ *  daemon's answer (one real seat, not short). Every other role is the engine's: the short ones are conditional. */
+const THREE_BUG = fixture('stand-in-preflight-three-helpers-bug.json');
+/** Repro 1: a launch with no plan and no workflow (the engine's one neutral unit) on Claude Code alone. */
+const ONE_PLANLESS = fixture('stand-in-preflight-one-helper-planless.json');
 
 const withActor = (app: FastifyInstance) => app.addHook('onRequest', async (req) => {
   const named = req.headers['x-test-actor'];
@@ -120,7 +132,7 @@ describe('POST /runs asks the stand-in question (T-K1, T-K2)', () => {
   });
 
   const post = (body: Record<string, unknown>, actor = 'human/operator') =>
-    app.inject({ method: 'POST', url: '/api/v1/runs', headers: { 'x-test-actor': actor }, payload: { problem: 'fix it', clisJson: '[]', ...body } });
+    app.inject({ method: 'POST', url: '/api/v1/runs', headers: { 'x-test-actor': actor }, payload: { problem: 'fix it', clisJson: '[]', workflow: 'bug', ...body } });
 
   it('a one-CLI roster with no consent is 409 stand_in_choice and nothing is launched', async () => {
     const res = await post({});
@@ -208,6 +220,46 @@ describe('POST /runs asks the stand-in question (T-K1, T-K2)', () => {
     expect(preflights).toEqual([]);
     const res = await post({ standIns: true });
     expect(res.statusCode, res.body).toBe(501);
+  });
+
+  // crew#1932: the launch asks only for roles every run of its plan seats. A role the run needs only if an event calls
+  // for it (a council, the monitors, the rules checks) is asked at the run's own stand_in_needed gate if it comes up.
+  it('crew#1932 repro 3: Learn my style (capture-learnings) on three helpers launches, asking nothing', async () => {
+    preflight = THREE_CAPTURE;
+    const res = await post({ workflow: 'capture-learnings' });
+    expect(res.statusCode, res.body).toBe(201);
+    expect(preflights).toHaveLength(1);
+    expect(launched).toHaveLength(1);
+    expect(launched[0]!.standInAware).toBe(true);
+    expect(launched[0]!.standIn).toBeUndefined();
+  });
+
+  it('crew#1932 repro 2: a bug job (Revise this PR) on three helpers launches, asking nothing', async () => {
+    preflight = THREE_BUG;
+    const res = await post({ workflow: 'bug' });
+    expect(res.statusCode, res.body).toBe(201);
+    expect(launched[0]!.standInAware).toBe(true);
+    expect(launched[0]!.standIn).toBeUndefined();
+  });
+
+  it('crew#1932 repro 1: a launch with no plan and no workflow (one step) is never asked, on any roster', async () => {
+    preflight = ONE_PLANLESS;
+    const res = await app.inject({ method: 'POST', url: '/api/v1/runs', headers: { 'x-test-actor': 'human/operator' }, payload: { problem: 'fix it', clisJson: '[]' } });
+    expect(res.statusCode, res.body).toBe(201);
+    expect(launched).toHaveLength(1);
+    expect(launched[0]!.standIn).toBeUndefined();
+  });
+
+  it('crew#1932: a job its plan cannot check independently is still asked, and the words lead with what every run needs', async () => {
+    // The bug job on Claude Code alone: the reviewer, judge and QE reviewer are short on every run.
+    const p = JSON.parse(THREE_BUG);
+    for (const r of p.roles) if (!r.conditional) { r.real = []; r.shortBy = r.needed; }
+    preflight = JSON.stringify(p);
+    const res = await post({ workflow: 'bug' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().code).toBe('stand_in_choice');
+    expect(res.json().error).toMatch(/^This job's helpers can't check it independently: it needs a reviewer, a judge and a QE reviewer that did not build the work, and, if the job calls for them, /);
+    expect(launched).toEqual([]);
   });
 
   it('a reduced launch keeps today\'s path, and standIns beside it is a 400', async () => {

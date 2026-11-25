@@ -1,0 +1,191 @@
+{
+  "benched": [],
+  "diversity": {
+    "needed": 2,
+    "neededWithFailover": 3,
+    "note": null,
+    "outsideHelper": "GitHub Copilot CLI",
+    "providers": 3,
+    "sharing": []
+  },
+  "judges": [
+    {
+      "judges": [
+        {
+          "seat": "codex"
+        },
+        {
+          "seat": "pi"
+        }
+      ],
+      "notJudges": [],
+      "seat": "claude",
+      "soleJudge": null
+    },
+    {
+      "judges": [
+        {
+          "seat": "pi"
+        },
+        {
+          "seat": "claude"
+        }
+      ],
+      "notJudges": [],
+      "seat": "codex",
+      "soleJudge": null
+    },
+    {
+      "judges": [
+        {
+          "seat": "claude"
+        },
+        {
+          "seat": "codex"
+        }
+      ],
+      "notJudges": [],
+      "seat": "pi",
+      "soleJudge": null
+    }
+  ],
+  "primary": null,
+  "reason": "3 helpers are signed in: 0 can check this job independently and it needs 1",
+  "reasonData": {
+    "have": 0,
+    "kind": "helpers_short",
+    "need": 1,
+    "signed_in": 3
+  },
+  "roles": [
+    {
+      "canStandIn": true,
+      "conditional": false,
+      "needed": 1,
+      "real": [
+        "codex",
+        "pi"
+      ],
+      "role": "evaluator",
+      "shortBy": 0,
+      "standInFrom": {
+        "cli": "claude",
+        "models": [
+          null
+        ]
+      },
+      "why": null
+    },
+    {
+      "canStandIn": true,
+      "conditional": false,
+      "needed": 1,
+      "real": [
+        "codex",
+        "pi"
+      ],
+      "role": "judge",
+      "shortBy": 0,
+      "standInFrom": {
+        "cli": "claude",
+        "models": [
+          null
+        ]
+      },
+      "why": null
+    },
+    {
+      "canStandIn": true,
+      "conditional": false,
+      "needed": 1,
+      "real": [
+        "codex"
+      ],
+      "role": "qe_reviewer",
+      "shortBy": 0,
+      "standInFrom": {
+        "cli": "claude",
+        "models": [
+          null
+        ]
+      },
+      "why": null
+    },
+    {
+      "canStandIn": true,
+      "conditional": true,
+      "needed": 1,
+      "real": [
+        "codex",
+        "pi"
+      ],
+      "role": "rule_judge",
+      "shortBy": 0,
+      "standInFrom": {
+        "cli": "claude",
+        "models": [
+          null
+        ]
+      },
+      "why": null
+    },
+    {
+      "canStandIn": true,
+      "conditional": true,
+      "needed": 3,
+      "real": [
+        "pi"
+      ],
+      "role": "rule_council",
+      "shortBy": 2,
+      "standInFrom": {
+        "cli": "claude",
+        "models": [
+          null
+        ]
+      },
+      "why": "1 of 3 can be the rule council"
+    },
+    {
+      "canStandIn": true,
+      "conditional": true,
+      "needed": 3,
+      "real": [
+        "pi"
+      ],
+      "role": "council",
+      "shortBy": 2,
+      "standInFrom": {
+        "cli": "claude",
+        "models": [
+          null
+        ]
+      },
+      "why": "1 of 3 can be the council"
+    },
+    {
+      "canStandIn": true,
+      "conditional": true,
+      "needed": 3,
+      "real": [
+        "codex",
+        "pi"
+      ],
+      "role": "monitor",
+      "shortBy": 1,
+      "standInFrom": {
+        "cli": "claude",
+        "models": [
+          null
+        ]
+      },
+      "why": "2 of 3 can be the monitor"
+    }
+  ],
+  "short": true,
+  "signedIn": [
+    "claude",
+    "codex",
+    "pi"
+  ]
+}

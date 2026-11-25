@@ -1,0 +1,91 @@
+{
+  "benched": [],
+  "diversity": {
+    "needed": 2,
+    "neededWithFailover": 3,
+    "note": "This job has 1 independent provider; its reviews need 2, plus 1 to survive one failover. Signing in Codex could add another.",
+    "outsideHelper": "Codex",
+    "providers": 1,
+    "sharing": []
+  },
+  "judges": [
+    {
+      "judges": [],
+      "notJudges": [],
+      "seat": "claude",
+      "soleJudge": null
+    }
+  ],
+  "primary": null,
+  "reason": "only Claude Code was signed in",
+  "reasonData": {
+    "cli": "Claude Code",
+    "kind": "only_one_helper"
+  },
+  "roles": [
+    {
+      "canStandIn": true,
+      "conditional": false,
+      "needed": 1,
+      "real": [],
+      "role": "evaluator",
+      "shortBy": 1,
+      "standInFrom": {
+        "cli": "claude",
+        "models": [
+          null
+        ]
+      },
+      "why": "no signed-in helper that did not build the work can be the evaluator"
+    },
+    {
+      "canStandIn": true,
+      "conditional": false,
+      "needed": 1,
+      "real": [],
+      "role": "judge",
+      "shortBy": 1,
+      "standInFrom": {
+        "cli": "claude",
+        "models": [
+          null
+        ]
+      },
+      "why": "no signed-in helper that did not build the work can be the judge"
+    },
+    {
+      "canStandIn": true,
+      "conditional": true,
+      "needed": 1,
+      "real": [],
+      "role": "rule_judge",
+      "shortBy": 1,
+      "standInFrom": {
+        "cli": "claude",
+        "models": [
+          null
+        ]
+      },
+      "why": "no signed-in helper that did not build the work can be the rule judge"
+    },
+    {
+      "canStandIn": true,
+      "conditional": true,
+      "needed": 3,
+      "real": [],
+      "role": "rule_council",
+      "shortBy": 3,
+      "standInFrom": {
+        "cli": "claude",
+        "models": [
+          null
+        ]
+      },
+      "why": "no signed-in helper that did not build the work can be the rule council"
+    }
+  ],
+  "short": true,
+  "signedIn": [
+    "claude"
+  ]
+}
