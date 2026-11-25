@@ -13,7 +13,10 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+// Each case spawns npm and git several times; a loaded host needs more than the suite's default.
+vi.setConfig({ testTimeout: 120_000 });
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const SCRIPT = join(REPO, 'scripts', 'stamp-api-types.mjs');
@@ -25,13 +28,14 @@ afterEach(() => {
 
 // The host's git config (hooks, signing, templates, an external diff) stays out of the throwaway repos, for the
 // fixture's own git calls and for the script's.
-const GIT_ENV: NodeJS.ProcessEnv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
-for (const k of Object.keys(GIT_ENV)) {
-  if (['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT'].includes(k) || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(k)) delete GIT_ENV[k];
-}
+// Spread over `...process.env` at each call (the hermetic arming stays, harness-hygiene.test.ts); an undefined value
+// leaves that variable out of the child's env.
+const GIT_ISOLATION: NodeJS.ProcessEnv = { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+for (const k of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT']) GIT_ISOLATION[k] = undefined;
+for (const k of Object.keys(process.env)) if (/^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(k)) GIT_ISOLATION[k] = undefined;
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', env: GIT_ENV });
+  return execFileSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, ...GIT_ISOLATION } });
 }
 
 function writeJson(path: string, value: unknown): void {
@@ -59,7 +63,7 @@ function readJson(path: string): Manifest {
 }
 
 function run(root: string, ...args: string[]) {
-  return spawnSync('node', [SCRIPT, '--root', root, ...args], { encoding: 'utf8', env: GIT_ENV });
+  return spawnSync('node', [SCRIPT, '--root', root, ...args], { encoding: 'utf8', env: { ...process.env, ...GIT_ISOLATION } });
 }
 
 /** Generators shaped like crew's: they read the version from packages/crew-api-types/package.json. */
