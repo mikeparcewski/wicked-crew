@@ -11932,6 +11932,8 @@ export function registerRoutes(
     ...(runtime.dataGate !== undefined ? { gate: runtime.dataGate } : {}),
     ...(mcpPolicies !== undefined ? { policies: mcpPolicies } : {}),
     ...(runtime.mcpCalls !== undefined ? { usage: runtime.mcpCalls } : {}),
+    // (crew#1514) A rename lists the apps that use the source.
+    ...(runtime.apps !== undefined ? { appsUsing: (name: string) => runtime.apps!.appsUsing(name) } : {}),
     audit,
     actorOf,
   });

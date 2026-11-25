@@ -47,6 +47,7 @@ import type {
 } from '../core/types.js';
 import { EMPTY_LOCK, LOCK_PATH, QUERIES_DIR, QUERY_EXT, SPEC_PATH, lockBytes, ownText, readAppTree, specBytes, stagedCheck, type AppFiles, type CheckOutcome, type AppSourceStage } from './check.js';
 import { AppGit, gitProblem, SHA_RE } from './git.js';
+import { parseRecallQueryText } from './exec/texts.js';
 import { wickedHomeDir } from '../core/wicked-home.js';
 import type { ImageSources } from './publish/layout.js';
 import type { PublishCheckDeps } from './publish/check.js';
@@ -335,6 +336,35 @@ export class AppStore {
   projectOf(slug: string): string | null {
     const a = Object.hasOwn(this.state.apps, slug) ? this.state.apps[slug] : undefined;
     return a === undefined || typeof a.projectId !== 'string' || a.projectId === '' ? null : a.projectId;
+  }
+
+  /**
+   * (crew#1514) The apps, active and archived, any of whose trees that can run (a version, or any tree holding a
+   * receipt) uses source `name`: a query or an action on it, or a recall text that names it. A tree that can't be read
+   * now counts as using it (it may be readable, and run, later). Sorted by slug.
+   */
+  async appsUsing(name: string): Promise<Array<{ slug: string; name: string }>> {
+    if (Object.keys(this.state.apps).length === 0) return [];
+    await this.requireGit();
+    const out: Array<{ slug: string; name: string }> = [];
+    for (const a of Object.values(this.state.apps)) {
+      const trees = new Set([...a.versions.map((v) => v.tree), ...Object.keys(a.receipts)]);
+      for (const tree of trees) {
+        let files: AppFiles;
+        try {
+          files = await this.files(a, tree);
+        } catch {
+          // A version crew cannot read now may run later: listed, so the person confirms it too (fail closed).
+          out.push({ slug: a.slug, name: a.name });
+          break;
+        }
+        if (filesUseSource(files, name)) {
+          out.push({ slug: a.slug, name: a.name });
+          break;
+        }
+      }
+    }
+    return out.sort((x, y) => (x.slug < y.slug ? -1 : x.slug > y.slug ? 1 : 0));
   }
 
   /** The apps of one project (or every project), the active ones unless `scope` says otherwise. */
@@ -1236,6 +1266,19 @@ export class AppStore {
  * The apps root: `WICKED_CREW_APPS_ROOT`, else `${WICKED_HOME:-~/.wicked}/apps` (crew#1823, the wicked home's one
  * resolver). An app already made keeps the root its record names (`StoredApp.root`), so nothing moves.
  */
+/** (crew#1514) Whether an app's files use source `name`: a query, an action, a lock pin or a recall text naming it. */
+export function filesUseSource(files: AppFiles, name: string): boolean {
+  if (files.spec.queries.some((q) => q.source === name) || files.spec.actions.some((a) => a.source === name)) return true;
+  if (Object.hasOwn(files.lock.sources, name)) return true;
+  return files.spec.queries.some((q) => {
+    if (q.kind !== 'recall') return false;
+    const text = Object.hasOwn(files.queryText, q.id) ? files.queryText[q.id] : undefined;
+    if (text === undefined) return false;
+    const r = parseRecallQueryText(text);
+    return r.ok && r.value.source === name;
+  });
+}
+
 export function defaultAppsRoot(env: NodeJS.ProcessEnv = process.env): string {
   return wickedHomeDir('WICKED_CREW_APPS_ROOT', 'apps', env);
 }
