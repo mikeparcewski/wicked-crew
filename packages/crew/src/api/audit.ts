@@ -149,35 +149,7 @@ export class AuditLog {
 
   /** Append `line` after ending a torn last line, then fsync the file (and its directory when this created it). */
   private async appendSynced(line: string): Promise<void> {
-    const fh = await open(this.path, 'a+');
-    let created = false;
-    try {
-      const { size } = await fh.stat();
-      created = size === 0;
-      let text = line;
-      if (size > 0) {
-        const last = Buffer.alloc(1);
-        await fh.read(last, 0, 1, size - 1);
-        if (last[0] !== 0x0a) text = `\n${line}`;
-      }
-      await fh.appendFile(text, 'utf8');
-      await fh.sync();
-    } finally {
-      await fh.close();
-    }
-    if (created) {
-      // The new file's directory entry is durable too. A platform that cannot open a directory (Windows) skips it.
-      const dir = await open(dirname(this.path), 'r').catch(() => null);
-      if (dir !== null) {
-        try {
-          await dir.sync();
-        } catch {
-          // a directory fsync is best effort where the platform refuses it
-        } finally {
-          await dir.close();
-        }
-      }
-    }
+    await appendLineSynced(this.path, line);
   }
 
   /** (workdoc-all-runs) Hear each entry as it is recorded (the working document's person-notes index). Returns the
@@ -245,5 +217,42 @@ export class AuditLog {
     }
     entries.reverse(); // file order is append order; the API answers newest first
     return entries;
+  }
+}
+
+/**
+ * Append `line` to `path` and wait until it is on disk: a torn last line (a crash mid-line) is ended first, so the new
+ * line is never glued onto the fragment; the file is fsynced, and its directory too when this call created the file.
+ * Rejects when the line is not durable. Shared by the audit trail's durable records and crew#372's publish journal.
+ */
+export async function appendLineSynced(path: string, line: string, mode?: number): Promise<void> {
+  const fh = await open(path, 'a+', mode);
+  let created = false;
+  try {
+    const { size } = await fh.stat();
+    created = size === 0;
+    let text = line;
+    if (size > 0) {
+      const last = Buffer.alloc(1);
+      await fh.read(last, 0, 1, size - 1);
+      if (last[0] !== 0x0a) text = `\n${line}`;
+    }
+    await fh.appendFile(text, 'utf8');
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+  if (created) {
+    // The new file's directory entry is durable too. A platform that cannot open a directory (Windows) skips it.
+    const dir = await open(dirname(path), 'r').catch(() => null);
+    if (dir !== null) {
+      try {
+        await dir.sync();
+      } catch {
+        // a directory fsync is best effort where the platform refuses it
+      } finally {
+        await dir.close();
+      }
+    }
   }
 }

@@ -17196,6 +17196,107 @@ export interface ProductComposeResponse {
   requirements: number;
 }
 
+// ── Product publish (api-types 0.229.0, wicked-crew#372; /projects/:id/product/publish) ─────────────
+/**
+ * `POST /projects/:id/product/publish` (a person at operator trust). Publishes a finished compose run's plan as GitHub
+ * issues in a repository linked to the project itself as a tracker (`owner/repo`, or `<source>:owner/repo` when two
+ * sources link it). Three modes:
+ * - no `confirm`, no `resolve`: the card and its `publishHash`; nothing is sent;
+ * - `confirm` = the card's `publishHash`: the items not yet created are created in order, each journaled before and
+ *   after it is sent, then every created issue is read back;
+ * - `resolve`: a person settles one `unsure` item: `issue: N` = it was created as #N (crew reads #N and records it only
+ *   when its title and body are the approved ones), `issue: null` = it was not created (a later confirm creates it).
+ *
+ * Refusals (`{error, code}`; each sends nothing, except a `journal_unreadable` answered after a confirm has sent: GitHub may
+ * then hold some of the issues, and GET answers `journal_unreadable` too until the journal is repaired): 400 `bad_request`; 403 `publish_human_only`; 404
+ * `project_not_found` · `run_not_found` · `repo_not_linked`; 409 `not_a_compose` (no compose facts for this run on
+ * this project: a run composed before publishing shipped; compose again) · `compose_unverified` (the run's draft or
+ * review step is not the one Compose launched: for a plan edited at its gate `error` says so in plain words; `detail`
+ * names what differs) · `run_not_finished` · `plan_unreadable` (the reason names the item) · `ambiguous` ·
+ * `card_changed` (with the fresh `card` and `publishHash`) · `publication_differs` (this run was already published to
+ * that repository with other content; with its `publication`) · `write_tool_off` · `credential_unpinned` ·
+ * `unresolved` (with the `publication`) · `journal_unreadable` · `in_progress` (this daemon is sending or resolving it) · `not_unsure` · `resolve_differs`;
+ * 503 `registry_unavailable` · `source_unavailable` · `journal_unavailable`. Audited `product.publish` and
+ * `product.publish.resolve`.
+ */
+export interface ProductPublishBody {
+  runId: string;
+  repo: string;
+  confirm?: string;
+  resolve?: { key: string; issue: number | null };
+}
+
+/**
+ * One issue a publication creates. `key` is positional (`e1`, `e1.f2`, `e1.f2.s3`), in depth-first order, a parent
+ * before its children. `body` is crew's text and ends with a footer naming the run and the key; `{{parent}}` in it
+ * becomes `#<number>` of the parent's issue when it is sent (show it as the parent's key until then).
+ */
+export interface PublishItem {
+  key: string;
+  kind: 'epic' | 'feature' | 'story';
+  title: string;
+  body: string;
+  parentKey: string | null;
+}
+
+/** What a confirm would create, where, and as whom. */
+export interface ProductPublishCard {
+  runId: string;
+  projectId: string;
+  /** `owner/repo`, lower-cased. */
+  repo: string;
+  /** The tracker source it posts through. */
+  source: string;
+  /** The GitHub account it posts as. */
+  identity: string;
+  items: PublishItem[];
+}
+
+/**
+ * One item of a publication now. `state`: `created`; `sending` (this daemon is sending it right now); `not_sent` (refused
+ * before it was sent); `unsure` (crew cannot tell whether GitHub created it: resolve it); `absent` (a person said it was
+ * not created); `missing` (planned, never sent). `readBack` (created items only): `ok` = the issue's title and body as
+ * GitHub's MCP server shows them are the approved ones; `differs`; `unreadable` (the read failed, a deleted issue
+ * included). An edit made only of characters that server strips is invisible to it.
+ */
+export interface PublicationItemState {
+  key: string;
+  kind: 'epic' | 'feature' | 'story';
+  title: string;
+  state: 'created' | 'sending' | 'not_sent' | 'unsure' | 'absent' | 'missing';
+  number: number | null;
+  url: string | null;
+  readBack: 'ok' | 'differs' | 'unreadable' | null;
+  /** Why it is `not_sent` or `unsure`. */
+  why?: string;
+}
+
+/** One run published to one repository. `published`: every item `created` and read back `ok`. */
+export interface PublicationState {
+  repo: string;
+  source: string;
+  publishHash: string;
+  items: PublicationItemState[];
+  published: boolean;
+}
+
+/** `POST /projects/:id/product/publish` 200. `done: true` = the attempt finished; `publication.published` is the verdict. */
+export type ProductPublishResponse =
+  | { done: false; card: ProductPublishCard; publishHash: string; publication: PublicationState | null }
+  | { done: true; card: ProductPublishCard; publication: PublicationState };
+
+/**
+ * `GET /projects/:id/product/publish/:runId` (a person at operator trust): whether the run can be published now
+ * (`publishable.ok: false` carries the same `code` and plain-words `error` a POST would answer, so a client shows it
+ * before the click; a tracker registry that cannot be read is 503 `registry_unavailable`, never an empty `targets`), the project's own GitHub repositories, and every publication of the run, each read back now.
+ */
+export interface ProductPublicationsResponse {
+  runId: string;
+  publishable: { ok: true; items: number } | { ok: false; code: string; error: string };
+  targets: Array<{ repo: string; source: string }>;
+  publications: PublicationState[];
+}
+
 // ── learn schedules (DES-learn-workflow §5) ────────────────────────────────────────────────────
 
 /** A learn schedule's last outcome: `launched` while its run is open; `refused` = the launch failed. */
