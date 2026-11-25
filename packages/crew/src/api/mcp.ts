@@ -551,6 +551,20 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       return { withdrawFailed: true };
     }
   };
+  /**
+   * (crew#1906 r1) Row-write grants an earlier holder of `name` left (a withdrawal that failed after its own rename, or a
+   * removed source) go before a rename gives a source that name, as Allow writes does before it turns on: a name never
+   * hands a source grants nobody gave it. Only a rename its checks and rules allow gets here, so a refusal changes no
+   * grant. No grant can be made on `name` meanwhile: a grant resolves its source, and no source has that name.
+   */
+  const clearName = async (name: string): Promise<void> => {
+    if (deps.rowWriteGrants === undefined) return;
+    try {
+      await deps.rowWriteGrants.withdrawForSource(name, 'name_reused');
+    } catch (e) {
+      throw new McpRegistryError(500, 'withdraw_failed', `nothing was renamed: row-write grants left on the name ${name} from before could not be withdrawn (${e instanceof Error ? e.message : String(e)}); try again`);
+    }
+  };
   // The MCP ask tool (streamable HTTP, stateless): worker-facing, the unit token in Authorization.
   app.post(`${V}/mcp/ask`, { config: { manifest: { statusCodes: [200, 401, 503] } } }, async (req, reply) => {
     if (deps.askServer === undefined) return reply.code(503).send({ error: 'ask_unsupported' });
@@ -792,17 +806,10 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
           if (using.length !== listed.size || using.some((a) => !listed.has(a.slug))) {
             throw new McpRegistryError(409, 'apps_bound', `${using.length} app${using.length === 1 ? ' uses' : 's use'} ${from}: confirm the rename with exactly that list`, undefined, { apps: using });
           }
-          // (crew#1906 r1) Row-write grants an earlier holder of `to` left (a withdrawal that failed after its own rename,
-          // or a removed source) go before any source has that name again, as Allow writes does before it turns on; the
-          // rename waits for that, so a name never hands a source grants nobody gave it.
-          if (deps.rowWriteGrants !== undefined) {
-            try {
-              await deps.rowWriteGrants.withdrawForSource(to, 'name_reused');
-            } catch (e) {
-              throw new McpRegistryError(500, 'withdraw_failed', `nothing was renamed: row-write grants left on the name ${to} from before could not be withdrawn (${e instanceof Error ? e.message : String(e)}); try again`);
-            }
+          if (p === undefined) {
+            await clearName(to);
+            return { server: await renamed(), rules: [] as string[], apps: using };
           }
-          if (p === undefined) return { server: await renamed(), rules: [] as string[], apps: using };
           // Every rule naming the source is copied to the new name first (one edit: restrictions and exemptions), then
           // the rules are judged as they will stand; a refusal or a failed write puts them back.
           const originals = await p.copyRules(from, to).catch((e: unknown) => { auditPartial(deps, req, e, [`mcp:${to}`]); throw e; });
@@ -836,6 +843,12 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
             if (judged.subjects.length > 0) {
               throw new McpRegistryError(409, 'rules_differ', `a rule would judge ${judged.subjects.join(', ')} more loosely under ${to}: it matches ${from} by its content, not by a name crew can copy. Change the rule to cover ${to}, then rename`, undefined, { subjects: judged.subjects });
             }
+          } catch (e) {
+            await back();
+            throw e;
+          }
+          try {
+            await clearName(to);
           } catch (e) {
             await back();
             throw e;

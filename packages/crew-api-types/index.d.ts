@@ -15302,7 +15302,7 @@ export interface PatchMcpServerBody {
  * is retired (in `formerNames`) while it exists. Apps' row-write grants on the old name are withdrawn once the rename
  * lands (an app that names it needs a new grant; wicked-crew#1906): a failure is audited, and the grants it leaves name no
  * source and go before any source takes that name again. Grants an earlier holder left on the new name are withdrawn
- * before the rename lands. Removing the entry later withdraws every name's approvals. Refusals (409, `{error, code, ...}`): `apps_bound` with
+ * once the rename's checks and rules allow it, before it lands (a refused rename changes no grant). Removing the entry later withdraws every name's approvals. Refusals (409, `{error, code, ...}`): `apps_bound` with
  * `apps: Array<{slug, name}>` (the apps that use the source; send the same slugs in `apps` to rename anyway),
  * `name_taken`, `name_retired`, `name_unchanged`, `reserved_name`, `not_renamable`, and `rules_differ` with
  * `subjects: string[]` (tools the engine would judge more loosely under the new name) and/or `rules: string[]`
