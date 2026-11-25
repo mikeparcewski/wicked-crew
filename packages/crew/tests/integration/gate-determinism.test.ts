@@ -88,7 +88,7 @@ async function launchRun(sessionId: string): Promise<void> {
     body: JSON.stringify({
       problem: 'determinism probe step',
       sessionId,
-      clisJson: SEATS,
+      clisJson: SEATS, standIns: true,
     }),
   });
   const body = await res.json().catch(() => null);

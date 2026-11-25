@@ -683,6 +683,8 @@ async function main(): Promise<void> {
     // wicked-core#850: the EXPLICIT reduced-assurance opt-in (the creator's seat may evaluate its own
     // work, disclosed on every receipt). Only the flag sends it; nothing defaults it on.
     if (optionPresent(argv, '--reduced-assurance', START_VALUE_FLAGS)) launchBody['reducedAssurance'] = true;
+    // (DES-STANDIN-001 §4) The person's consent to stand-ins for this job, when the roster can't check it.
+    if (startStandInsFlag(argv, START_VALUE_FLAGS)) launchBody['standIns'] = true;
     // QE-IN-APP-WORKFLOWS: the operator's EXPLICIT skip of a required QE acceptance (with a reason,
     // labelled on the run, every gate and the delivery), or its explicit force. Only the flags send
     // them; a skip without a reason is refused here, before anything launches.
@@ -704,8 +706,8 @@ async function main(): Promise<void> {
       body: JSON.stringify(launchBody),
     });
     if (!launchRes.ok) {
-      const errBody = await launchRes.json().catch(() => ({ error: launchRes.statusText })) as { error?: string };
-      console.error(`launch failed (${launchRes.status}): ${errBody.error ?? launchRes.statusText}`);
+      const errBody: unknown = await launchRes.json().catch(() => null);
+      console.error(startLaunchFailure(launchRes.status, errBody, launchRes.statusText));
       process.exit(1);
     }
     const { runId, freeText, assuranceNotice } = (await launchRes.json()) as {
@@ -863,6 +865,7 @@ async function runServiceVerb(args: string[]): Promise<number> {
 
 export { withBearerHeader } from './bearer.js';
 import { warnIfUnauthorizedWithoutBearer, withBearerHeader } from './bearer.js';
+import { startLaunchFailure, startStandInsFlag } from './start-stand-ins.js';
 
 /** `fetch` against the local daemon: injects `WICKED_CREW_TOKEN` as a bearer if set; a connection failure exits 1 with the remedy; anything else propagates. */
 async function daemonFetch(port: number, url: string, init?: RequestInit): Promise<Response> {

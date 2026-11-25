@@ -87,6 +87,7 @@ import { record, z } from '../zod.js';
 import type { Actor, McpApprovalResponse, McpCallDecision, McpPreviewResponse, McpRegistryRestoreResponse, McpServer, McpServerAgentView, McpServerTestAgentResponse, McpServerTestResponse, McpUsageResponse } from '../core/types.js';
 import { canonicalJson, MCP_SERVER_NAME_RE } from '../mcp/classify.js';
 import type { McpBroker } from '../mcp/broker.js';
+import type { RowWriteGrants } from '../sources/routes.js';
 import type { AskServer } from '../mcp/ask-server.js';
 import type { McpPolicies } from '../mcp/policies.js';
 import { MCP_PREVIEW_ROLES, MCP_RUN_MODES, McpLedgerEditError } from '../mcp/policies.js';
@@ -351,6 +352,8 @@ export interface McpRouteDeps {
    * no apps store: a rename lists none.
    */
   appsUsing?: (name: string) => Promise<Array<{ slug: string; name: string }>>;
+  /** (crew#1906) A rename withdraws the old name's row-write grants (K2b's store). Absent = no apps store. */
+  rowWriteGrants?: RowWriteGrants;
 }
 
 function invalidBody(reply: FastifyReply, err: z.ZodError): FastifyReply {
@@ -536,6 +539,32 @@ export async function restoreWithdrawals(p: Pick<McpPolicies, 'tokensOf'>, curre
 }
 
 export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): void {
+  /**
+   * (crew#1906) Once a rename has landed: the old name's row-write grants go (an app naming it needs a new grant). A
+   * failure is audited; the grants it leaves name no source, and they go before any source takes that name again.
+   */
+  const withdrawRenamedGrants = async (from: string): Promise<{ withdrawnGrants?: number; withdrawFailed?: true }> => {
+    if (deps.rowWriteGrants === undefined) return {};
+    try {
+      return { withdrawnGrants: await deps.rowWriteGrants.withdrawForSource(from, 'source_renamed') };
+    } catch {
+      return { withdrawFailed: true };
+    }
+  };
+  /**
+   * (crew#1906 r1) Row-write grants an earlier holder of `name` left (a withdrawal that failed after its own rename, or a
+   * removed source) go before a rename gives a source that name, as Allow writes does before it turns on: a name never
+   * hands a source grants nobody gave it. Only a rename its checks and rules allow gets here, so a refusal changes no
+   * grant. No grant can be made on `name` meanwhile: a grant resolves its source, and no source has that name.
+   */
+  const clearName = async (name: string): Promise<void> => {
+    if (deps.rowWriteGrants === undefined) return;
+    try {
+      await deps.rowWriteGrants.withdrawForSource(name, 'name_reused');
+    } catch (e) {
+      throw new McpRegistryError(500, 'withdraw_failed', `nothing was renamed: row-write grants left on the name ${name} from before could not be withdrawn (${e instanceof Error ? e.message : String(e)}); try again`);
+    }
+  };
   // The MCP ask tool (streamable HTTP, stateless): worker-facing, the unit token in Authorization.
   app.post(`${V}/mcp/ask`, { config: { manifest: { statusCodes: [200, 401, 503] } } }, async (req, reply) => {
     if (deps.askServer === undefined) return reply.code(503).send({ error: 'ask_unsupported' });
@@ -777,7 +806,10 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
           if (using.length !== listed.size || using.some((a) => !listed.has(a.slug))) {
             throw new McpRegistryError(409, 'apps_bound', `${using.length} app${using.length === 1 ? ' uses' : 's use'} ${from}: confirm the rename with exactly that list`, undefined, { apps: using });
           }
-          if (p === undefined) return { server: await renamed(), rules: [] as string[], apps: using };
+          if (p === undefined) {
+            await clearName(to);
+            return { server: await renamed(), rules: [] as string[], apps: using };
+          }
           // Every rule naming the source is copied to the new name first (one edit: restrictions and exemptions), then
           // the rules are judged as they will stand; a refusal or a failed write puts them back.
           const originals = await p.copyRules(from, to).catch((e: unknown) => { auditPartial(deps, req, e, [`mcp:${to}`]); throw e; });
@@ -796,11 +828,27 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
           try {
             const judged = await p.loosenedByRename(from, to);
             if (judged.rules.length > 0) {
-              throw new McpRegistryError(409, 'rules_differ', `rule${judged.rules.length === 1 ? '' : 's'} ${judged.rules.join(', ')} match${judged.rules.length === 1 ? 'es' : ''} ${from} by its content, not by a name crew can copy. Change ${judged.rules.length === 1 ? 'it' : 'them'} to name the source (mcp:${from}), then rename`, undefined, { rules: judged.rules, subjects: judged.subjects });
+              // (crew#1905) Say which name each trigger can match, or that crew could not judge it. Another new name is
+              // offered only when nothing blocks the current one; when something does, the next step is that rule.
+              const said = judged.rules.map((id) => `${id} (${judged.unjudged.has(id) ? 'crew cannot judge its trigger, so it counts for both names' : (judged.names.get(id) ?? []).map((n) => `${n}, the ${n === from ? 'current' : 'new'} name`).join('; ')})`);
+              const blocking = judged.rules.filter((id) => (judged.names.get(id) ?? [from]).includes(from));
+              // (crew#1906) A rule that ships with crew is never the one to edit: the source keeps its name instead.
+              const own = blocking.filter((id) => !judged.shipped.has(id));
+              const shipped = blocking.filter((id) => judged.shipped.has(id));
+              const next = blocking.length > 0
+                ? `${own.length > 0 ? `. To rename it, first change or retire ${own.join(', ')}` : ''}${shipped.length > 0 ? `. ${shipped.join(', ')} ship${shipped.length === 1 ? 's' : ''} with crew, so a source ${shipped.length === 1 ? 'its trigger' : 'their triggers'} can match keeps its name` : ''}`
+                : judged.subjects.length === 0 ? `. A new name no rule's trigger can match avoids this` : '';
+              throw new McpRegistryError(409, 'rules_differ', `the trigger of rule${judged.rules.length === 1 ? '' : 's'} ${said.join(', ')} can match the source's name in a call or its result, and crew cannot carry a trigger to a new name, so nothing was renamed${next}`, undefined, { rules: judged.rules, subjects: judged.subjects });
             }
             if (judged.subjects.length > 0) {
               throw new McpRegistryError(409, 'rules_differ', `a rule would judge ${judged.subjects.join(', ')} more loosely under ${to}: it matches ${from} by its content, not by a name crew can copy. Change the rule to cover ${to}, then rename`, undefined, { subjects: judged.subjects });
             }
+          } catch (e) {
+            await back();
+            throw e;
+          }
+          try {
+            await clearName(to);
           } catch (e) {
             await back();
             throw e;
@@ -814,13 +862,15 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
           }
           return { server, rules: originals.map((o) => o.id), apps: using };
         });
-        deps.audit.record('mcp.server.renamed', actor, { detail: { id: outcome.server.id, from, to, apps: outcome.apps.map((a) => a.slug), rules: outcome.rules } });
+        const grants = await withdrawRenamedGrants(from);
+        deps.audit.record('mcp.server.renamed', actor, { detail: { id: outcome.server.id, from, to, apps: outcome.apps.map((a) => a.slug), rules: outcome.rules, ...grants } });
         for (const id of outcome.rules) deps.audit.record('governance.rule.upserted', actor, { detail: { id, source: 'mcp-rename' } });
         return serverFor(actor, outcome.server);
       } catch (err) {
         if (err instanceof McpRenameCommitted) {
           // It landed (rules and all); only its answer is missing. Audited as what it is, and said so.
-          deps.audit.record('mcp.server.renamed', actor, { detail: { from, to, unread: true, rules: moved } });
+          const grants = await withdrawRenamedGrants(from);
+          deps.audit.record('mcp.server.renamed', actor, { detail: { from, to, unread: true, rules: moved, ...grants } });
           for (const id of moved) deps.audit.record('governance.rule.upserted', actor, { detail: { id, source: 'mcp-rename' } });
           return reply.code(502).send({ error: `${err.message}; read the source list again`, code: 'renamed_unread' });
         }
@@ -842,12 +892,14 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
         await exclusive(req.params.name, async () => {
           // (DES-PM-001 §3.2, Q-PM5) Removing a PM source drops its links, and the last GitHub one would hand `#N` back
           // to the daemon's own `gh`: a person's only. Judged on the record being removed, inside the server's lock.
-          if ((await r.get(req.params.name)).pm !== undefined && !mayGrantWrite(deps.actorOf(req))) {
+          const entry = await r.get(req.params.name);
+          if (entry.pm !== undefined && !mayGrantWrite(deps.actorOf(req))) {
             refused = true;
             return;
           }
           if (deps.policies !== undefined) {
-            const tokens = await deps.policies.tokensOf(req.params.name);
+            // (crew#1906) The tokens of every name it had: a rename keeps the old name's, and nothing else can take them.
+            const tokens = [...new Set((await Promise.all([req.params.name, ...(entry.formerNames ?? [])].map((n) => deps.policies!.tokensOf(n)))).flat())];
             if (tokens.length > 0) {
               const rules = await deps.policies.withdraw(tokens).catch((e: unknown) => { auditPartial(deps, req, e, tokens); throw e; });
               deps.audit.record('mcp.approval.withdrawn', deps.actorOf(req), { detail: { subjects: tokens, rules, why: 'server_removed' } });

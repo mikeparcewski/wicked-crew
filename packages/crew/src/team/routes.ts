@@ -193,8 +193,9 @@ export function registerTeamRoutes(
   // it runs inside `exclusive`, so nothing acquires the lock twice.
   gateDecisions: {
     exclusive: <T>(runId: string, fn: () => Promise<T>) => Promise<T>;
-    judge: (run: SessionView, namedOrd: number | undefined) => Promise<{ refusal: { code: number; body: unknown } } | { ord: number | undefined }>;
-    expect: (ord: number | undefined) => { ord: number } | undefined;
+    judge: (run: SessionView, namedOrd: number | undefined) => Promise<{ refusal: { code: number; body: unknown } } | { ord: number | undefined; gateSeq?: number }>;
+    /** (crew#1698) `gateSeq`: the opening the record showed, so the engine refuses an answer to a later one. */
+    expect: (ord: number | undefined, gateSeq?: number) => { ord: number; gateSeq?: number } | undefined;
     changed: (id: string, err: unknown) => Promise<{ code: number; body: unknown } | null>;
     /** crew#1157: a refusal when `plan` would let a read-only (analysis) run write; `null` otherwise. */
     readOnlyRefusal?: (runId: string, plan: { steps: Array<{ catalog: string; [k: string]: unknown }> }) => { code: number; body: unknown } | null;
@@ -256,7 +257,7 @@ export function registerTeamRoutes(
         try {
           // The edit IS the gate answer (T3): the engine proposes it (`plan.proposed{by:"human",
           // kind:"edit"}`), floor-fills and accepts it, or refuses it and re-opens the gate.
-          const status = await adapter.confirmGate(id, true, undefined, 'edit_plan', undefined, plan, gateDecisions.expect(decided.ord));
+          const status = await adapter.confirmGate(id, true, undefined, 'edit_plan', undefined, plan, gateDecisions.expect(decided.ord, decided.gateSeq));
           // WHO answered the gate, like every other gate answer (POST /runs/:id/gate).
           audit.record('gate.decided', actorOf(req), {
             runId: id,

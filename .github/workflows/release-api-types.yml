@@ -92,6 +92,15 @@ jobs:
           fi
           echo "version=${TAG_VERSION}" >> "$GITHUB_OUTPUT"
 
+      # The stamp is whole (coord ruling 2026-11-25, train 15). A feature PR tags what it adds
+      # `(api-types next)` and leaves the version alone, and the train's crew version PR writes the
+      # number (`npm run stamp:api-types -- <X.Y.Z>`). A publish with a `next` tag left, or with
+      # crew's caret or the lockfile on another version, would ship docs and pins that disagree
+      # with the number. Plain node, no install needed.
+      - name: The stamp is whole
+        run: node scripts/stamp-api-types.mjs --check
+        working-directory: .
+
       # The log is kept so the `probe` job can tell "published, registry still processing" apart
       # from "never published": npm ends a successful publish with the line `+ <pkg>@<ver>` (#514).
       # `pipefail` so a failed publish still fails this step through the tee.

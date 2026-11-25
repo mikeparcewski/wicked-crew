@@ -235,6 +235,14 @@ export interface LaunchRunInput {
    */
   reducedAssurance?: boolean;
   /**
+   * (DES-STANDIN-001 §3.8, crew K2a) This launcher asked the stand-in question (`core/stand-in.ts`): the engine may
+   * seat a stand-in for an independent role, with `standIn` consent, and holds at a `stand_in_needed` gate without
+   * it. Never with `reducedAssurance` (the engine refuses the pair). Needs `CoreAdapter.supportsStandIns`.
+   */
+  standInAware?: boolean;
+  /** (DES-STANDIN-001 §3.8) A person's consent to stand-ins, built by the server (`consentFor`). Only with `standInAware`. */
+  standIn?: import('wicked-crew-api-types').StandInConsent;
+  /**
    * (program DES-POWER-MODE, wicked-core-ts with `Core.supportsPowerMode`) Run in POWER MODE: the PA's
    * scope step is also the intake QE plan, the `build` step runs as one multi-turn orchestrator session,
    * and a hand-off NOT-PASS goes back to that session on its own. Set by `POST /runs` from the launch's

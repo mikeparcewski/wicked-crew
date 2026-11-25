@@ -1,6 +1,6 @@
 {
   "name": "wicked-crew-workspace",
-  "version": "0.18.21",
+  "version": "0.18.22",
   "private": true,
   "workspaces": [
     "packages/crew-api-types",
@@ -9,6 +9,7 @@
   ],
   "scripts": {
     "use-local-core-ts": "node scripts/use-local-core-ts.mjs",
+    "stamp:api-types": "node scripts/stamp-api-types.mjs",
     "evals:corpus:pin": "node scripts/evals-internal-corpus.mjs pin",
     "evals:corpus:check": "node scripts/evals-internal-corpus.mjs check",
     "build": "npm run build -w packages/crew",

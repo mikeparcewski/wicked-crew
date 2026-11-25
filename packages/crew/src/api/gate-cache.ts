@@ -31,6 +31,17 @@ export interface GateCacheEntry {
   choices?: string[];
   /** The index into `choices` of the engine's recommended answer. ABSENT without `choices`. */
   recommended?: number;
+  /**
+   * (crew#1698, core#1808) Which OPENING of the gate this is (`awaitingHuman.gateSeq`; the durable row's `gate_seq`):
+   * a gate that closed and re-opened at the same ord is another opening. A client sends it back with its answer
+   * (`gateSeq` on `POST /runs/:id/gate`, `/reassign`, `/resume`). ABSENT when the engine did not number it.
+   */
+  gateSeq?: number;
+}
+
+/** A positive integer gate opening (`gateSeq` / `gate_seq`), else `undefined` (`0` is a row written before the field). */
+export function gateSeqOf(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : undefined;
 }
 
 /**
@@ -111,6 +122,7 @@ function fold(entries: Map<string, GateCacheEntry>, event: CoreEvent): void {
       if (typeof event.ord === 'number' && typeof event.prompt === 'string') {
         const refusal = detectRefusal(event.prompt);
         const gateKind = typeof event['gateKind'] === 'string' && event['gateKind'] !== '' ? event['gateKind'] : undefined;
+        const gateSeq = gateSeqOf(event['gateSeq']);
         entries.set(session, {
           ord: event.ord,
           prompt: event.prompt,
@@ -120,6 +132,7 @@ function fold(entries: Map<string, GateCacheEntry>, event: CoreEvent): void {
           ...(refusal !== undefined ? { refusal } : {}),
           ...(gateKind !== undefined ? { gateKind } : {}),
           ...offeredChoices(event),
+          ...(gateSeq !== undefined ? { gateSeq } : {}),
         });
       }
       break;
@@ -212,7 +225,8 @@ export class GateCache {
       if (event.type === 'awaitingHuman' && this.hydrated.has(event.session)) {
         const entry = this.entries.get(event.session);
         // Live frames cannot be ordered against the durable read.
-        if (entry?.ord !== event.ord || entry?.prompt !== event.prompt) this.forget(event.session);
+        // (crew#1698) Another opening at the same ord and prompt (a re-ask) is another gate too.
+        if (entry?.ord !== event.ord || entry?.prompt !== event.prompt || entry?.gateSeq !== gateSeqOf(event['gateSeq'])) this.forget(event.session);
         return;
       }
       this.hydrated.delete(event.session);

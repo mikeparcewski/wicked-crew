@@ -1,0 +1,136 @@
+{
+  "benched": [],
+  "diversity": {
+    "needed": 2,
+    "neededWithFailover": 3,
+    "note": "This job has 1 independent provider; its reviews need 2, plus 1 to survive one failover.",
+    "outsideHelper": null,
+    "providers": 1,
+    "sharing": []
+  },
+  "judges": [
+    {
+      "judges": [],
+      "notJudges": [],
+      "seat": "tr2-claude",
+      "soleJudge": null
+    }
+  ],
+  "primary": null,
+  "reason": "only Claude Code was signed in",
+  "reasonData": {
+    "cli": "Claude Code",
+    "kind": "only_one_helper"
+  },
+  "roles": [
+    {
+      "canStandIn": true,
+      "conditional": false,
+      "needed": 1,
+      "real": [],
+      "role": "evaluator",
+      "shortBy": 1,
+      "standInFrom": {
+        "cli": "tr2-claude",
+        "models": [
+          null
+        ]
+      },
+      "why": "no signed-in helper that did not build the work can be the evaluator"
+    },
+    {
+      "canStandIn": true,
+      "conditional": false,
+      "needed": 1,
+      "real": [],
+      "role": "judge",
+      "shortBy": 1,
+      "standInFrom": {
+        "cli": "tr2-claude",
+        "models": [
+          null
+        ]
+      },
+      "why": "no signed-in helper that did not build the work can be the judge"
+    },
+    {
+      "canStandIn": true,
+      "conditional": false,
+      "needed": 1,
+      "real": [],
+      "role": "qe_reviewer",
+      "shortBy": 1,
+      "standInFrom": {
+        "cli": "tr2-claude",
+        "models": [
+          null
+        ]
+      },
+      "why": "no signed-in helper that did not build the work can be the qe reviewer"
+    },
+    {
+      "canStandIn": true,
+      "conditional": true,
+      "needed": 1,
+      "real": [],
+      "role": "rule_judge",
+      "shortBy": 1,
+      "standInFrom": {
+        "cli": "tr2-claude",
+        "models": [
+          null
+        ]
+      },
+      "why": "no signed-in helper that did not build the work can be the rule judge"
+    },
+    {
+      "canStandIn": true,
+      "conditional": true,
+      "needed": 3,
+      "real": [],
+      "role": "rule_council",
+      "shortBy": 3,
+      "standInFrom": {
+        "cli": "tr2-claude",
+        "models": [
+          null
+        ]
+      },
+      "why": "no signed-in helper that did not build the work can be the rule council"
+    },
+    {
+      "canStandIn": true,
+      "conditional": true,
+      "needed": 3,
+      "real": [],
+      "role": "council",
+      "shortBy": 3,
+      "standInFrom": {
+        "cli": "tr2-claude",
+        "models": [
+          null
+        ]
+      },
+      "why": "no signed-in helper that did not build the work can be the council"
+    },
+    {
+      "canStandIn": true,
+      "conditional": true,
+      "needed": 3,
+      "real": [],
+      "role": "monitor",
+      "shortBy": 3,
+      "standInFrom": {
+        "cli": "tr2-claude",
+        "models": [
+          null
+        ]
+      },
+      "why": "no signed-in helper that did not build the work can be the monitor"
+    }
+  ],
+  "short": true,
+  "signedIn": [
+    "tr2-claude"
+  ]
+}
