@@ -1,6 +1,7 @@
 // crew#372 slice 2: POST /projects/:id/product/compose re-reads the selected requirements on the
 // server and launches a governed run through POST /runs itself (a fake POST /runs here records the
 // body it was handed). Nothing launches when a ref is unknown or foreign.
+import { createHash } from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -13,7 +14,7 @@ import { COMPOSE_MAX_REQUIREMENTS, ComposeSelectionTooLargeError, composeInstruc
 describe('POST /projects/:id/product/compose (crew#372)', () => {
   let base: string;
   let app: FastifyInstance;
-  const launched: Array<{ body: Record<string, unknown>; auth: string | undefined }> = [];
+  const launched: Array<{ body: Record<string, unknown>; auth: string | undefined; compose?: unknown }> = [];
   let runsAnswer: { status: number; body: unknown } = { status: 201, body: { runId: 'run-compose-1' } };
   let adapterRef: CoreAdapter;
 
@@ -61,7 +62,7 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
     app = Fastify({ logger: false });
     // DES-CHAT-FIRST-001 C3: the compose launches through the shared launch function, as the caller.
     registerProductRoutes(app, adapter as unknown as CoreAdapter, async (raw, ctx) => {
-      launched.push({ body: raw as Record<string, unknown>, auth: `${ctx.actor.id}:${ctx.target ?? ''}` });
+      launched.push({ body: raw as Record<string, unknown>, auth: `${ctx.actor.id}:${ctx.target ?? ''}`, compose: ctx.compose });
       return { statusCode: runsAnswer.status, payload: runsAnswer.body };
     });
     await app.ready();
@@ -110,6 +111,16 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
     const review = String(steps[1]!['instructions']);
     expect(review).toContain('alpha billing::r1: Invoices are numbered');
     expect(review).toContain('alpha billing::r2: Refunds need approval');
+    // crew#372: the launch records what the compose was given, the only facts publish trusts.
+    expect(launched[0]!.compose).toEqual({
+      projectId: 'p1',
+      requirements: [{ repoId: 'alpha', key: 'billing::r1' }, { repoId: 'alpha', key: 'billing::r2' }],
+      level: 'stories',
+      steps: [
+        { id: 'draft', catalog: 'produce', instructionsSha: createHash('sha256').update(draft, 'utf8').digest('hex') },
+        { id: 'review', catalog: 'critique', instructionsSha: createHash('sha256').update(review, 'utf8').digest('hex') },
+      ],
+    });
   });
 
   it('(DES-CATALOG-002 §4.6) the preflight says what a compose would refuse before anything changes, and nothing for one that launches', async () => {

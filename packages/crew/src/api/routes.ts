@@ -182,6 +182,7 @@ import { estateExe, parseEstateTotals, projectGraphRefreshDiagnostics, readBlast
 import { attachRepoToProject, createProjectRecorded, registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { registerProjectAggregateRoutes } from './project-aggregates.js';
 import { composeLaunch, composePreflight, registerProductRoutes } from './product.js';
+import { registerProductPublishRoutes } from './product-publish.js';
 import { buildWorkflowCatalogV2, parseCommand, resolveOption } from '../workflow-catalog/build-v2.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import { DETECT_MAX_CHARS, DETECT_TIMEOUT_MS, DetectService, shadowCheck } from '../workflow-catalog/detect-service.js';
@@ -625,6 +626,8 @@ export interface LaunchContext {
   fromProposal?: string;
   /** The compose route's own plan launch: a `shape` is judged as a compose, not as a run. */
   target?: 'compose';
+  /** (crew#372) The compose route's own facts, recorded on the launch entry for publish (only with `target: 'compose'`). */
+  compose?: import('./compose-facts.js').ComposeFacts;
   /** (api-types 0.196.0) A chat job's Start chose a power run: a launch that would run phased is refused (409
    *  `power_unavailable`) before the engine is called, never started phased with a notice. */
   powerRequired?: boolean;
@@ -2111,8 +2114,13 @@ export function registerRoutes(
     await deliveryResolver.settle(views, runtime.deliverySettleMs);
   };
   // crew#985: terminal runs with no `run.ended` entry are dated from the engine's event log before
-  // the DTO is assembled (read-only, once per run per process; see `backfillEndedFromEvents`).
+  // the DTO is assembled (read-only; once per run, kept across starts: crew#1880, `backfillEnded`).
   const backfillEndedAt = async (views: readonly SessionView[]): Promise<void> => {
+    // crew#1880: the adapter answers from facts kept across starts and one log read shared with the identity.
+    if (typeof (adapter as Partial<CoreAdapter>).runEndedFact === 'function') {
+      await runTimingIndex.backfillEnded(views, (view) => adapter.runEndedFact(view));
+      return;
+    }
     if (typeof adapter.runEvents !== 'function') return;
     await runTimingIndex.backfillEndedFromEvents(views, (id) => adapter.runEvents(id));
   };
@@ -4321,6 +4329,8 @@ export function registerRoutes(
         // DES-CATALOG-002 §4.4: the shape it was launched as, what it was launched with, and the proposal behind it.
         ...(b.shape !== undefined ? { shape: launchShapeOf(b.shape) } : {}),
         ...(ctx.fromProposal !== undefined ? { fromProposal: ctx.fromProposal } : {}),
+        // crew#372: what a compose launched with (its requirements, level and steps), the only source publish trusts.
+        ...(ctx.target === 'compose' && ctx.compose !== undefined ? { compose: ctx.compose } : {}),
         envelope: {
           words: envelopeWords,
           ...(b.repoRef !== undefined ? { repoRef: b.repoRef } : {}),
@@ -10768,12 +10778,12 @@ export function registerRoutes(
     } satisfies ListProposalsResponse;
   });
 
-  // POST /proposals {content, project?, source?} → proposal.submit → 201 { id } (api-types 0.54.0).
-  // A skin files ONE preference into the same review queue — studio's "takes": the person picks one
-  // of two candidate outputs, and the pick becomes "prefers takes like X", learned only once they
-  // accept it here. The kind (`memory`), tier and `capture: "preference"` marker are the daemon's; a
-  // caller cannot file a policy through this door (the schema is strict). `project` becomes the
-  // `project` facet, so the preference is recalled on that project only.
+  // POST /proposals {content, project?, repo?, tier?, source?} → proposal.submit → 201 { id } (api-types 0.54.0;
+  // tier and repo 0.227.0, studio#1095). A skin files ONE memory into the same review queue — studio's "takes" (the
+  // person picks one of two candidate outputs, and the pick becomes "prefers takes like X") and the Memory page's
+  // add — learned only once they accept it here. The kind (`memory`) and `capture: "preference"` marker are the
+  // daemon's; a caller cannot file a policy through this door (the schema is strict). The tier is the person's
+  // choice of three (a fact by default); `project` and `repo` become those facets, so it is recalled there only.
   app.post(
     `${V}/proposals`,
     {
@@ -10786,15 +10796,15 @@ export function registerRoutes(
       if (!parsed.success) {
         return reply.code(400).send(invalidBody(parsed.error, 'Invalid proposal body'));
       }
-      const { content, project, source } = parsed.data;
-      const payload: Record<string, unknown> = { content, tier: 'semantic', capture: 'preference' };
+      const { content, project, repo, tier, source } = parsed.data;
+      const payload: Record<string, unknown> = { content, tier: tier ?? 'semantic', capture: 'preference' };
       if (source !== undefined) payload.source = source;
       let submitted: { id?: unknown };
       try {
         submitted = (await estateTool('proposal.submit', {
           kind_type: 'memory',
           payload,
-          facets: project !== undefined ? { project } : {},
+          facets: { ...(project !== undefined ? { project } : {}), ...(repo !== undefined ? { repo } : {}) },
         })) as { id?: unknown };
       } catch (err) {
         return estateUpstreamError(reply, err);
@@ -11937,6 +11947,8 @@ export function registerRoutes(
     ...(runtime.dataGate !== undefined ? { gate: runtime.dataGate } : {}),
     ...(mcpPolicies !== undefined ? { policies: mcpPolicies } : {}),
     ...(runtime.mcpCalls !== undefined ? { usage: runtime.mcpCalls } : {}),
+    // (crew#1514) A rename lists the apps that use the source.
+    ...(runtime.apps !== undefined ? { appsUsing: (name: string) => runtime.apps!.appsUsing(name) } : {}),
     audit,
     actorOf,
   });
@@ -11985,6 +11997,17 @@ export function registerRoutes(
       return { projectId, repoId: run.session.repo_ref ?? null };
     },
     members: repoMembersOf,
+    audit,
+    actorOf,
+  });
+  // crew#372: publish a finished compose's plan as GitHub issues of a project-linked tracker (human-only, card first).
+  registerProductPublishRoutes(app, {
+    ...(runtime.mcpRegistryStore !== undefined ? { store: runtime.mcpRegistryStore } : {}),
+    ...(runtime.dataGate !== undefined ? { pm: runtime.dataGate.pm } : {}),
+    projectExists: async (id) => (await adapter.projectGet(id).catch(() => null)) !== null,
+    composeOf: (runId) => runTimingIndex.composeOf(runId),
+    runView: (runId) => adapter.runView(runId),
+    workOutput: (unitId) => adapter.workOutput(unitId),
     audit,
     actorOf,
   });

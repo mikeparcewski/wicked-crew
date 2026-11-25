@@ -22,6 +22,8 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- A video card's words read like a person wrote them (crew#1814, coord round 2 on studio#1409). A refused change is named once, without its own "(Undo brings it back)" inside the sentence's parenthesis; an earlier version reads "You're looking at version N"; "The video tool isn't running here: …" ends on one full stop.
+
 - A cut card's interrupted Go says crew's own sentence, ended, and what Go again does, never "could not start it: … Go again resumes the same job." (doubled period, a run's words). Not now on a cut the video tool already made says the version stays and Undo brings back the one before (crew#1814 round 2).
 
 ## [0.18.21] — 2026-11-24

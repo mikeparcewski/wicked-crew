@@ -41,13 +41,24 @@ const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinit
 /** Words for a video tool too old for the chat's changes (an adopted `wicked-interactive serve` nobody recorded). */
 export const CUT_OLD_TOOL = "This computer's video tool is older than this studio needs. Stop the `wicked-interactive serve` you started, then try again.";
 
+/** `s` without its closing full stop (or !, ? or …), so a sentence that quotes it ends once. */
+export const unended = (s: string): string => s.trim().replace(/[.!?…]+$/u, '').trimEnd();
+
+/** The sentence for a video tool that didn't answer, from its error: on one line, one full stop, and no ": ." when it
+ *  said nothing (or only punctuation). */
+export function toolNotRunning(err: unknown): string {
+  const raw = (err instanceof Error ? err.message : String(err)).replace(/\s+/gu, ' ').replace(/[\s.!?…:;,]+$/u, '').trim();
+  const why = /[\p{L}\p{N}]/u.test(raw) ? raw : '';
+  return why === '' ? "The video tool isn't running here." : `The video tool isn't running here: ${why}.`;
+}
+
 /** `GET /d/<doc>/api/demo/cut`, as the seat and the card read it. */
 export async function readCut(call: CutBridgeCall, doc: string): Promise<CutRead | CutUnavailable> {
   let res: { status: number; body: Record<string, unknown> };
   try {
     res = await call('GET', `/d/${encodeURIComponent(doc)}/api/demo/cut`);
   } catch (err) {
-    return { state: 'unavailable', why: `The video tool isn't running here: ${err instanceof Error ? err.message : String(err)}` };
+    return { state: 'unavailable', why: toolNotRunning(err) };
   }
   const b = res.body;
   if (res.status === 410) return { state: 'unavailable', why: 'This video was deleted.', gone: true };

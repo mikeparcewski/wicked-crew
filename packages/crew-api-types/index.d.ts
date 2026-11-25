@@ -5489,7 +5489,7 @@ export interface SkillEntry {
    *  so the two sides of the collision are comparable — the answer's `path` names the file actually
    *  read (api-types 0.28.0). Re-derived by every refresh. */
   upstreamDir: string | null;
-  /** (api-types 0.227.0, crew#1703) Who added it, when it was not the operator: `pack:<pack name>` for a skill an editor
+  /** (api-types 0.230.0, crew#1703) Who added it, when it was not the operator: `pack:<pack name>` for a skill an editor
    *  pack installed. Such a skill is the pack's, not an operator change: it never stops the daemon's garden
    *  auto-refresh, and a refresh leaves it as it is. Absent for every other skill. */
   origin?: string;
@@ -12730,9 +12730,9 @@ export interface ApproveProposalBody {
 }
 
 /**
- * `POST /proposals` body (api-types 0.54.0) — a skin files ONE preference into the review queue
- * (studio's takes: "prefers takes like X", filed when a person picks one of two candidate outputs).
- * The daemon files it as `kind_type: "memory"` with `payload {content, tier: "semantic",
+ * `POST /proposals` body (api-types 0.54.0) — a skin files ONE memory into the review queue
+ * (studio's takes: "prefers takes like X", filed when a person picks one of two candidate outputs;
+ * the Memory page's add). The daemon files it as `kind_type: "memory"` with `payload {content, tier,
  * capture: "preference", source?}`; the kind is never the caller's (unknown keys are a 400).
  * Nothing is learned until the person accepts it on `/proposals`.
  */
@@ -12741,9 +12741,17 @@ export interface FileProposalBody {
   content: string;
   /** Becomes the `project` facet, so the preference is recalled on that project only. */
   project?: string;
+  /** (api-types 0.228.0, studio#1095) Becomes the `repo` facet: recalled on that repository only (1–256 chars). */
+  repo?: string;
+  /** (api-types 0.228.0, studio#1095) The memory tier: a fact (`semantic`, the default), a how-to (`procedural`) or
+   *  something that happened (`episodic`). Any other value is a 400. */
+  tier?: FileProposalTier;
   /** Where the pick was made, e.g. `doc:<docId>@v3` (kept on the payload). */
   source?: string;
 }
+
+/** (api-types 0.228.0) The tiers `POST /proposals` files into. */
+export type FileProposalTier = 'semantic' | 'procedural' | 'episodic';
 
 /** `POST /proposals` → 201: the pending proposal's id. */
 export interface FileProposalResponse {
@@ -14956,6 +14964,17 @@ export interface McpServer {
    * refused until it is saved again with a range.
    */
   address?: McpAddressPolicy;
+  /**
+   * (api-types 0.227.0, wicked-crew#1514) The names this entry was renamed away from, oldest first. Each is retired
+   * while the entry exists: no other source may be saved or renamed under it. Absent = never renamed.
+   */
+  formerNames?: string[];
+  /**
+   * (api-types 0.227.0, wicked-crew#1514) The keychain account this entry's own secret lives under when that is not its
+   * name (the name it had when it was renamed: the secret is never moved). Its own entry is
+   * `keychain:wicked-mcp/<keychainAccount ?? name>`. Absent = its name.
+   */
+  keychainAccount?: string;
   authState: McpAuthState;
   enabled: boolean;
   health: McpHealth;
@@ -15273,6 +15292,26 @@ export interface McpRestEgress {
 /** `PATCH /mcp/servers/:name`. */
 export interface PatchMcpServerBody {
   enabled: boolean;
+}
+
+/**
+ * (api-types 0.227.0, wicked-crew#1514) `POST /mcp/servers/:name/rename`: a human operator's only. Answers the renamed
+ * {@link McpServer}. The entry keeps its id, secret reference, tools, switches, grants, agents and links; its old name
+ * is retired (in `formerNames`) while it exists. Refusals (409, `{error, code, ...}`): `apps_bound` with
+ * `apps: Array<{slug, name}>` (the apps that use the source; send the same slugs in `apps` to rename anyway),
+ * `name_taken`, `name_retired`, `name_unchanged`, `reserved_name`, `not_renamable`, and `rules_differ` with
+ * `subjects: string[]` (tools the engine would judge more loosely under the new name) and/or `rules: string[]`
+ * (rules whose `trigger.contains` contains either name or is contained in one: a substring test, so a short name can
+ * coincide with unrelated text; change them to name `mcp:<name>` first). 403 `rename_human_only` for any other actor;
+ * 500 `rules_unrestored` with `rules` when a refused rename's copied rules could not be put back (they still name the new
+ * name); 501 `mcp_preview_unsupported` when the engine cannot judge the rules; 502 `preview_failed` when it answered no
+ * judgement, or `renamed_unread` when the rename landed but its record could not be read back (read the list again). A
+ * restore of a generation that would undo a rename is refused 409 `restore_crosses_rename`.
+ */
+export interface RenameMcpServerBody {
+  to: string;
+  /** The slugs of the apps the `apps_bound` answer listed: the person saw them and renames anyway. */
+  apps?: string[];
 }
 
 /**
@@ -16871,11 +16910,11 @@ export interface EditorView {
   description?: string;
   /** Its icon, colour and preview (api-types 0.157.0). Absent when it declares none that read. */
   visuals?: EditorVisuals;
-  /** (api-types 0.227.0, crew#1703) The skills its pack added to the daemon skills root: the pack's own name and the
+  /** (api-types 0.230.0, crew#1703) The skills its pack added to the daemon skills root: the pack's own name and the
    *  key it was installed under (`wicked-garden-<dir>`, what a worker invokes as `wicked-garden:<dir>`). Absent when
    *  the pack shipped none. */
   packSkills?: InstalledPackSkill[];
-  /** (api-types 0.227.0, crew#1703) The presets its pack's blocks were installed as (each named by its block id). */
+  /** (api-types 0.230.0, crew#1703) The presets its pack's blocks were installed as (each named by its block id). */
   packBlocks?: string[];
   /** A run plugin (CS7): `run-thread`. Absent for an artifact editor. */
   inline?: 'run-thread';
@@ -16902,7 +16941,7 @@ export interface InstallEditorBody {
   /** Install it on (the default; an update keeps the editor's current switch) or off. */
   enabled?: boolean;
   /**
-   * (api-types 0.227.0, crew#1703) The one consent for a pack that also ships skills or blocks: the person approves
+   * (api-types 0.230.0, crew#1703) The one consent for a pack that also ships skills or blocks: the person approves
    * the pack's skill directories and block ids exactly as the refusal listed them (`InstallEditorRefusal.pack`),
    * together with the editors' permissions. Send the refusal's `digest` to bind the approval to the bytes shown (a
    * consent screen should); a caller that binds the content itself may leave it out (garden's installer does). Absent,
@@ -16911,7 +16950,7 @@ export interface InstallEditorBody {
   approve?: { skills: string[]; blocks: string[]; digest?: string };
 }
 
-/** (api-types 0.227.0, crew#1703) A pack skill: its name in the pack, and the key it is installed under. */
+/** (api-types 0.230.0, crew#1703) A pack skill: its name in the pack, and the key it is installed under. */
 export interface InstalledPackSkill {
   name: string;
   key: string;
@@ -16939,20 +16978,20 @@ export interface InstallEditorResponse {
    */
   granted?: string[];
   grantError?: string;
-  /** (api-types 0.227.0, crew#1703) The pack's skills the daemon skills root now holds (only those written; a
+  /** (api-types 0.230.0, crew#1703) The pack's skills the daemon skills root now holds (only those written; a
    *  `skillsError` names any that were not). Absent when there is none. */
   skills?: InstalledPackSkill[];
-  /** (api-types 0.227.0, crew#1703) The presets written for the pack's blocks. Absent when it ships none. */
+  /** (api-types 0.230.0, crew#1703) The presets written for the pack's blocks. Absent when it ships none. */
   presets?: string[];
-  /** (api-types 0.227.0, crew#1703) Installed, but the skills root could not be published, so workers do not get the
+  /** (api-types 0.230.0, crew#1703) Installed, but the skills root could not be published, so workers do not get the
    *  new skills yet: the reason, and what to do (publish from Skills once it is fixed). */
   skillsError?: string;
-  /** (api-types 0.227.0, crew#1703) An update that no longer ships some of the pack's skills or blocks: what it
+  /** (api-types 0.230.0, crew#1703) An update that no longer ships some of the pack's skills or blocks: what it
    *  switched off and deleted. Absent when the update dropped none. */
   withdrawn?: PackWithdrawn;
 }
 
-/** (api-types 0.227.0, crew#1703) What a pack's removal or update withdrew. */
+/** (api-types 0.230.0, crew#1703) What a pack's removal or update withdrew. */
 export interface PackWithdrawn {
   /** Pack skills switched off: workers stop getting them (they stay in the skills root, and an install of the
    *  pack switches them back on). */
@@ -16967,7 +17006,7 @@ export interface PackWithdrawn {
 export interface RemoveEditorResponse {
   removed: true;
   id: string;
-  /** (api-types 0.227.0, crew#1703) The pack's last editor was removed: the pack's skills and presets this
+  /** (api-types 0.230.0, crew#1703) The pack's last editor was removed: the pack's skills and presets this
    *  withdrew. Absent when the pack added none, or another of its editors is still installed. */
   withdrawn?: PackWithdrawn;
 }
@@ -17025,7 +17064,7 @@ export interface PackCheckResult {
 }
 
 /**
- * `POST /editors` → 409 (api-types 0.227.0, crew#1703): the pack passed garden's gate and also ships skills or
+ * `POST /editors` → 409 (api-types 0.230.0, crew#1703): the pack passed garden's gate and also ships skills or
  * blocks, so the install asks for one consent first. This is what the person approves: the editors' permissions,
  * the run plugins' topics, the blocks, and the skills with the key each is installed under. Install again with
  * `approve: { skills, blocks, digest }`, where `digest` is this one (optional; it binds the approval to these bytes). Nothing was written. A daemon before crew#1703
@@ -17033,13 +17072,13 @@ export interface PackCheckResult {
  * before the install surface, when every pack was refused.)
  */
 export interface InstallEditorRefusal {
-  /** `pack_needs_approval` (409, api-types 0.227.0): the pack also ships skills or blocks, and the install carried no
+  /** `pack_needs_approval` (409, api-types 0.230.0): the pack also ships skills or blocks, and the install carried no
    *  `approve`; `pack_approval_mismatch` (409): its `approve` is not exactly this list. Nothing was installed.
    *  `pack_ships_skills_or_blocks`: the 501 of a daemon before crew#1703. */
   code: 'pack_needs_approval' | 'pack_approval_mismatch' | 'pack_ships_skills_or_blocks' | 'third_party_editors_not_available';
   error: string;
   check: PackCheckResult;
-  /** (api-types 0.227.0) sha256 over the manifest, every skill file and every block's steps as read: the approval
+  /** (api-types 0.230.0) sha256 over the manifest, every skill file and every block's steps as read: the approval
    *  carries it back, so a pack that changed after the person looked is refused (`pack_approval_mismatch`). */
   digest?: string;
   pack: {
@@ -17050,11 +17089,11 @@ export interface InstallEditorRefusal {
     blocks: Array<{ id: string; label: string; produces_kind: string; skills: string[] }>;
     /** The pack's skill directories, approved together with its editors and blocks. */
     skills: string[];
-    /** (api-types 0.227.0) Each skill's pack name and the key it would be installed under, so the person recognises it. */
+    /** (api-types 0.230.0) Each skill's pack name and the key it would be installed under, so the person recognises it. */
     installedSkills?: InstalledPackSkill[];
-    /** (api-types 0.227.0) Its run plugins and the topics each asks to hear (the install grants them). */
+    /** (api-types 0.230.0) Its run plugins and the topics each asks to hear (the install grants them). */
     plugins?: Array<{ id: string; title: string; version: string; observe: Array<{ topic: string; why: string }> }>;
-    /** (api-types 0.227.0) Skill keys and preset names an earlier install of this pack added, which this one replaces. */
+    /** (api-types 0.230.0) Skill keys and preset names an earlier install of this pack added, which this one replaces. */
     replaces?: string[];
   };
 }
@@ -17225,6 +17264,107 @@ export interface ProductComposeResponse {
   runId: string;
   /** How many requirements the draft was handed. */
   requirements: number;
+}
+
+// ── Product publish (api-types 0.229.0, wicked-crew#372; /projects/:id/product/publish) ─────────────
+/**
+ * `POST /projects/:id/product/publish` (a person at operator trust). Publishes a finished compose run's plan as GitHub
+ * issues in a repository linked to the project itself as a tracker (`owner/repo`, or `<source>:owner/repo` when two
+ * sources link it). Three modes:
+ * - no `confirm`, no `resolve`: the card and its `publishHash`; nothing is sent;
+ * - `confirm` = the card's `publishHash`: the items not yet created are created in order, each journaled before and
+ *   after it is sent, then every created issue is read back;
+ * - `resolve`: a person settles one `unsure` item: `issue: N` = it was created as #N (crew reads #N and records it only
+ *   when its title and body are the approved ones), `issue: null` = it was not created (a later confirm creates it).
+ *
+ * Refusals (`{error, code}`; each sends nothing, except a `journal_unreadable` answered after a confirm has sent: GitHub may
+ * then hold some of the issues, and GET answers `journal_unreadable` too until the journal is repaired): 400 `bad_request`; 403 `publish_human_only`; 404
+ * `project_not_found` · `run_not_found` · `repo_not_linked`; 409 `not_a_compose` (no compose facts for this run on
+ * this project: a run composed before publishing shipped; compose again) · `compose_unverified` (the run's draft or
+ * review step is not the one Compose launched: for a plan edited at its gate `error` says so in plain words; `detail`
+ * names what differs) · `run_not_finished` · `plan_unreadable` (the reason names the item) · `ambiguous` ·
+ * `card_changed` (with the fresh `card` and `publishHash`) · `publication_differs` (this run was already published to
+ * that repository with other content; with its `publication`) · `write_tool_off` · `credential_unpinned` ·
+ * `unresolved` (with the `publication`) · `journal_unreadable` · `in_progress` (this daemon is sending or resolving it) · `not_unsure` · `resolve_differs`;
+ * 503 `registry_unavailable` · `source_unavailable` · `journal_unavailable`. Audited `product.publish` and
+ * `product.publish.resolve`.
+ */
+export interface ProductPublishBody {
+  runId: string;
+  repo: string;
+  confirm?: string;
+  resolve?: { key: string; issue: number | null };
+}
+
+/**
+ * One issue a publication creates. `key` is positional (`e1`, `e1.f2`, `e1.f2.s3`), in depth-first order, a parent
+ * before its children. `body` is crew's text and ends with a footer naming the run and the key; `{{parent}}` in it
+ * becomes `#<number>` of the parent's issue when it is sent (show it as the parent's key until then).
+ */
+export interface PublishItem {
+  key: string;
+  kind: 'epic' | 'feature' | 'story';
+  title: string;
+  body: string;
+  parentKey: string | null;
+}
+
+/** What a confirm would create, where, and as whom. */
+export interface ProductPublishCard {
+  runId: string;
+  projectId: string;
+  /** `owner/repo`, lower-cased. */
+  repo: string;
+  /** The tracker source it posts through. */
+  source: string;
+  /** The GitHub account it posts as. */
+  identity: string;
+  items: PublishItem[];
+}
+
+/**
+ * One item of a publication now. `state`: `created`; `sending` (this daemon is sending it right now); `not_sent` (refused
+ * before it was sent); `unsure` (crew cannot tell whether GitHub created it: resolve it); `absent` (a person said it was
+ * not created); `missing` (planned, never sent). `readBack` (created items only): `ok` = the issue's title and body as
+ * GitHub's MCP server shows them are the approved ones; `differs`; `unreadable` (the read failed, a deleted issue
+ * included). An edit made only of characters that server strips is invisible to it.
+ */
+export interface PublicationItemState {
+  key: string;
+  kind: 'epic' | 'feature' | 'story';
+  title: string;
+  state: 'created' | 'sending' | 'not_sent' | 'unsure' | 'absent' | 'missing';
+  number: number | null;
+  url: string | null;
+  readBack: 'ok' | 'differs' | 'unreadable' | null;
+  /** Why it is `not_sent` or `unsure`. */
+  why?: string;
+}
+
+/** One run published to one repository. `published`: every item `created` and read back `ok`. */
+export interface PublicationState {
+  repo: string;
+  source: string;
+  publishHash: string;
+  items: PublicationItemState[];
+  published: boolean;
+}
+
+/** `POST /projects/:id/product/publish` 200. `done: true` = the attempt finished; `publication.published` is the verdict. */
+export type ProductPublishResponse =
+  | { done: false; card: ProductPublishCard; publishHash: string; publication: PublicationState | null }
+  | { done: true; card: ProductPublishCard; publication: PublicationState };
+
+/**
+ * `GET /projects/:id/product/publish/:runId` (a person at operator trust): whether the run can be published now
+ * (`publishable.ok: false` carries the same `code` and plain-words `error` a POST would answer, so a client shows it
+ * before the click; a tracker registry that cannot be read is 503 `registry_unavailable`, never an empty `targets`), the project's own GitHub repositories, and every publication of the run, each read back now.
+ */
+export interface ProductPublicationsResponse {
+  runId: string;
+  publishable: { ok: true; items: number } | { ok: false; code: string; error: string };
+  targets: Array<{ repo: string; source: string }>;
+  publications: PublicationState[];
 }
 
 // ── learn schedules (DES-learn-workflow §5) ────────────────────────────────────────────────────

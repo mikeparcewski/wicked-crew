@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.227.0",
+  "apiTypesVersion": "0.230.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1381,6 +1381,23 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/api/v1/mcp/servers/:name/rename",
+      "requestType": "RenameMcpServerBody",
+      "responseType": "McpServer",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        500,
+        501,
+        502,
+        503
+      ]
+    },
+    {
       "method": "PUT",
       "path": "/api/v1/mcp/servers/:name/secret",
       "requestType": "PutMcpSecretBody",
@@ -1827,6 +1844,34 @@
         409,
         422,
         501,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/projects/:id/product/publish",
+      "requestType": "ProductPublishBody",
+      "responseType": "ProductPublishResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/projects/:id/product/publish/:runId",
+      "requestType": null,
+      "responseType": "ProductPublicationsResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
         503
       ]
     },

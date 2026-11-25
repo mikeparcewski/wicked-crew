@@ -73,6 +73,9 @@ const PREVIEW_CACHE_MAX = 64;
 export const HEALTH_FAILING_AFTER = 3;
 
 /** A refusal the routes map to a status code. */
+/** The fields a refusal carries beside its words: an address to confirm, or (crew#1514) a rename's apps or subjects. */
+export type McpRegistryErrorDetail = AddressConfirmationDetail & { apps?: Array<{ slug: string; name: string }>; subjects?: string[]; rules?: string[] };
+
 export class McpRegistryError extends Error {
   constructor(
     // 500: the registry and the OS secret store disagree and crew could not reconcile them
@@ -82,7 +85,7 @@ export class McpRegistryError extends Error {
     message: string,
     /** (DES-APPS-001 §5.2) Fuller words that hold a source's own text: answered to a HUMAN only. */
     readonly humanMessage?: string,
-    readonly detail: AddressConfirmationDetail = {},
+    readonly detail: McpRegistryErrorDetail = {},
   ) {
     super(message);
   }
@@ -257,6 +260,10 @@ export class McpRegistry {
     if ((config.kind === 'sql' || config.kind === 'graphql' || config.kind === 'toolbox-source') && config.name === CREW_SOURCE) {
       throw new McpRegistryError(400, 'reserved_name', `"${CREW_SOURCE}" is the built-in crew source; choose another name`);
     }
+    // (crew#1514) A name a live entry was renamed away from is retired: refused here, and again inside the save.
+    const registered = (await this.readFile()).servers;
+    const retiring = retiredBy(registered, config.name);
+    if (retiring !== undefined) throw retiredName(config.name, retiring);
     // (DES-KNOWLEDGE-DATA-001 §5.1) A database source is saved as its Toolbox document, checked against the
     // deployment policy here (the preview) and again when the write lands.
     config = this.forSave(config);
@@ -267,8 +274,11 @@ export class McpRegistry {
       if (!this.deps.secrets.available) {
         throw new McpRegistryError(501, 'secret_store_unavailable', 'this platform has no OS secret store; reference a daemon env variable instead (auth.ref "env:<NAME>")');
       }
-      if (config.auth === null || config.auth.ref !== keychainRef(config.name)) {
-        throw new McpRegistryError(400, 'secret_not_staged_here', `a staged secret is stored as this server's own keychain entry, so auth.ref must be ${keychainRef(config.name)}`);
+      // (crew#1514) A renamed entry's own entry keeps the account it was saved under (`keychainAccount`).
+      const own = registered.find((x) => x.name === config.name);
+      const account = own !== undefined ? ownAccount(own) : config.name;
+      if (config.auth === null || config.auth.ref !== keychainRef(account)) {
+        throw new McpRegistryError(400, 'secret_not_staged_here', `a staged secret is stored as this server's own keychain entry, so auth.ref must be ${keychainRef(account)}`);
       }
       // The reference is answered back and audited, so a value it contains would be echoed there.
       if (config.auth.ref.includes(stagedSecret)) {
@@ -384,18 +394,26 @@ export class McpRegistry {
     // orphan this was written to prevent. `null` = no prior value, and then the rollback deletes.
     // (DES-PM-001 §3) A save that would drop or change a PM source's marker is refused BEFORE any credential is
     // written (the mutation refuses it again, under the store's chain, for a marker set meanwhile).
-    const existing = (await this.readFile()).servers.find((s) => s.name === held.config.name);
+    const current = (await this.readFile()).servers;
+    const existing = current.find((s) => s.name === held.config.name);
+    // (crew#1514) Judged BEFORE any credential is written: a preview held across a rename can't save over the retired
+    // name, nor write the keychain account the renamed entry still uses.
+    const retiring = retiredBy(current, held.config.name);
+    if (retiring !== undefined) throw retiredName(held.config.name, retiring);
+    const account = held.secret === null ? held.config.name : stagedAccount(held.config, existing);
     const existingPm = existing === undefined ? null : pmOf(existing);
     if (existingPm !== null && (held.config.pm == null || held.config.pm.system !== existingPm.system)) {
       throw new McpRegistryError(409, 'pm_marker_fixed', `${held.config.name} is registered as a ${existingPm.system} project-management source; save it with pm.system "${existingPm.system}", or remove it and register it again`);
     }
-    const prior = held.secret === null ? null : await this.deps.secrets.get(held.config.name);
-    if (held.secret !== null) await this.deps.secrets.set(held.config.name, held.secret);
+    const prior = held.secret === null ? null : await this.deps.secrets.get(account);
+    if (held.secret !== null) await this.deps.secrets.set(account, held.secret);
     // (crew#1328 item 3) A save that changes a source's allowed views with no new description changes its projection key
     // with no catalog written: it is named once the write lands, so its structure is projected again now.
     let viewsChanged = false;
-    const saved = await this.restoreSecretOnFailure(held.config.name, held.secret !== null, prior, () => this.mutate(async (file) => {
+    const saved = await this.restoreSecretOnFailure(account, held.secret !== null, prior, () => this.mutate(async (file) => {
       const prior = file.servers.find((s) => s.name === held.config.name);
+      const retiredNow = retiredBy(file.servers, held.config.name);
+      if (retiredNow !== undefined) throw retiredName(held.config.name, retiredNow);
       // (DES-PM-001 §3) A PM entry stays the PM system it was registered as: a re-save that drops the marker, or
       // names another system, would hand its tools to the plain path (or its links to another vendor).
       const priorPm = prior === undefined ? null : pmOf(prior);
@@ -457,6 +475,10 @@ export class McpRegistry {
         registeredAt: prior?.registeredAt ?? stamp,
         updatedAt: stamp,
         tools,
+        // (crew#1514) A re-save keeps the names it retired and its keychain account (its own account for as long as it
+        // lives, whatever its reference names now: a re-save back to keychain:wicked-mcp/<account> owns it again).
+        ...(prior?.formerNames !== undefined && prior.formerNames.length > 0 ? { formerNames: [...prior.formerNames] } : {}),
+        ...(prior?.keychainAccount !== undefined ? { keychainAccount: prior.keychainAccount } : {}),
       };
       // (DES-APPS-001 §7.4, DES-KNOWLEDGE-DATA-001 §5.4) Allow writes is off on every new Postgres source, and
       // "query" on every new source. A re-save keeps each only while the descriptor is unchanged, and a K1
@@ -649,7 +671,76 @@ export class McpRegistry {
     return this.view(rec);
   }
 
-  /** Remove a server, and the keychain secret it owns (`keychain:wicked-mcp/<name>`). */
+  /**
+   * (crew#1514) What {@link rename} would refuse now (the names, the entry, the new name taken or retired by another
+   * entry), checked before the caller moves any rule: a refused rename never lends another entry's rules to a live
+   * destination, even for a moment. {@link rename} checks again inside its write.
+   */
+  async checkRename(from: string, to: string): Promise<void> {
+    renameNameRefusal(from, to);
+    this.renameRefusal((await this.readFile()).servers, from, to);
+  }
+
+  /** The entry `from` names, or the refusal: crew's web source, `to` taken, or `to` retired by another entry. */
+  private renameRefusal(servers: McpServerRecord[], from: string, to: string): McpServerRecord {
+    const s = this.find(servers, from);
+    if (s.kind === 'web') throw new McpRegistryError(409, 'not_renamable', `${from} is crew's built-in web source: its name is fixed`);
+    const taken = servers.find((x) => x.name === to);
+    if (taken !== undefined) throw new McpRegistryError(409, 'name_taken', `${to} is already a registered ${taken.kind} server; choose another name`);
+    const retiring = retiredBy(servers, to);
+    if (retiring !== undefined && retiring !== s) throw retiredName(to, retiring);
+    return s;
+  }
+
+  /**
+   * (crew#1514) Rename an entry, keeping everything bound to it: its id, its secret reference (an owned keychain entry
+   * stays under the account it was saved as: `keychainAccount`), its tools, switches, grants, agents and links. `from`
+   * becomes one of its RETIRED names (`formerNames`): no other entry may take it while this one lives. Its stored
+   * description moves with it: copied inside the write, the old file removed once the write has landed (a failed write
+   * leaves no copy behind). Held previews of either name are dropped, so none saves over the renamed entry or under
+   * the retired name. The caller holds both names' policy locks and moves the rules (`McpPolicies`).
+   */
+  async rename(from: string, to: string): Promise<McpServer> {
+    renameNameRefusal(from, to);
+    const stamp = new Date(this.now()).toISOString();
+    let copied = false;
+    let renamed: McpServerRecord;
+    try {
+      renamed = await this.mutate(async (file) => {
+        const s = this.renameRefusal(file.servers, from, to);
+        // The secret is never moved: `auth.ref` is part of the descriptor every grant and lock binds to. The entry's own
+        // account stays the name it had (retired with it), so no other entry can ever write it.
+        if (s.keychainAccount === undefined) s.keychainAccount = s.name;
+        if (s.keychainAccount === to) delete s.keychainAccount;
+        const former = [...new Set([...(s.formerNames ?? []).filter((n) => n !== to), from])];
+        s.formerNames = former;
+        s.name = to;
+        s.updatedAt = stamp;
+        if (isSourceRecord(s)) {
+          const d = await this.catalogs.read(from);
+          if (d !== null) {
+            await this.catalogs.write(to, d);
+            copied = true;
+          }
+        }
+        return s;
+      });
+    } catch (err) {
+      if (copied) await this.catalogs.remove(to).catch(() => undefined);
+      throw err;
+    }
+    if (copied) await this.catalogs.remove(from).catch(() => undefined);
+    for (const [hash, held] of this.previews) if (held.config.name === from || held.config.name === to) this.previews.delete(hash);
+    if (isSourceRecord(renamed)) this.sourceChanged(to);
+    try {
+      return await this.view(renamed);
+    } catch (err) {
+      // The rename has landed: the caller must not undo anything bound to it because its answer could not be built.
+      throw new McpRenameCommitted(from, to, err);
+    }
+  }
+
+  /** Remove a server, and the keychain secret it owns (`keychain:wicked-mcp/<name>`, or its `keychainAccount`). */
   async remove(name: string): Promise<void> {
     const { removed, tombstoned } = await this.mutate(async (file) => {
       const s = this.find(file.servers, name);
@@ -663,14 +754,19 @@ export class McpRegistry {
       return { removed: s, tombstoned: ids };
     });
     this.tombstoned(tombstoned);
-    if (removed.auth?.ref === keychainRef(name) && this.deps.secrets.available) {
+    const account = ownAccount(removed);
+    // (crew#1514) A renamed entry owns its account for its whole life, whatever its reference names now (re-saved with
+    // an env secret, say): the secret under that account goes with it, when there is one.
+    const owned = removed.auth?.ref === keychainRef(account)
+      || (removed.keychainAccount !== undefined && this.deps.secrets.available && (await this.deps.secrets.has(account).catch(() => false)));
+    if (owned && this.deps.secrets.available) {
       try {
-        await this.deps.secrets.delete(name);
+        await this.deps.secrets.delete(account);
       } catch (err) {
         // (crew#719) The row is already gone, so the secret is now unreachable by any route. Say
         // so — the alternative is a silent orphan in the operator's keychain.
         const why = err instanceof Error ? err.message : String(err);
-        throw new McpRegistryError(500, 'secret_orphaned', `${name} was removed but its secret could not be deleted (${why}); remove the "${KEYCHAIN_SERVICE}" keychain entry for account "${name}" by hand`);
+        throw new McpRegistryError(500, 'secret_orphaned', `${name} was removed but its secret could not be deleted (${why}); remove the "${KEYCHAIN_SERVICE}" keychain entry for account "${account}" by hand`);
       }
     }
   }
@@ -787,19 +883,26 @@ export class McpRegistry {
     if (!this.deps.secrets.available) {
       throw new McpRegistryError(501, 'secret_store_unavailable', 'this platform has no OS secret store; reference a daemon env variable instead (auth.ref "env:<NAME>")');
     }
-    const ref = keychainRef(name);
-    // The route answers and audits the reference, so a value it contains would be echoed there.
-    if (ref.includes(value)) throw new McpRegistryError(400, 'secret_in_ref', 'the secret must not appear in its own reference; choose a different value');
     // (crew#719) RE-KEY ONLY. A secret written for a name no registered server references is an
     // orphan nothing can find again — a keychain service's entries cannot be enumerated — and it
     // was the first half of the non-atomic add: secret, then save, with a window between them.
     // A NEW server's secret is staged with its preview and committed by `save`.
+    // The route answers and audits the reference, so a value it contains would be echoed there (checked before the
+    // lookup, as ever, and again for a renamed entry's own account below).
+    const inRef = (r: string): void => {
+      if (r.includes(value)) throw new McpRegistryError(400, 'secret_in_ref', 'the secret must not appear in its own reference; choose a different value');
+    };
+    inRef(keychainRef(name));
     const server = this.find((await this.readFile()).servers, name);
+    // (crew#1514) A renamed entry keeps the account it was saved under.
+    const account = ownAccount(server);
+    const ref = keychainRef(account);
+    inRef(ref);
     if (server.auth?.ref !== ref) {
       // The stored reference is a connection field: it is not echoed (an agent-kind caller reads errors too).
       throw new McpRegistryError(400, 'secret_not_referenced', `${name} does not reference ${ref}, so a secret stored there would be unreachable; stage it with the preview instead`);
     }
-    await this.deps.secrets.set(name, value);
+    await this.deps.secrets.set(account, value);
     return ref;
   }
 
@@ -955,6 +1058,8 @@ export class McpRegistry {
     const stamp = new Date(this.now()).toISOString();
     const rec = await this.mutate(async (file) => {
       const prior = file.servers.find((s) => s.name === name);
+      const retiring = retiredBy(file.servers, name);
+      if (retiring !== undefined) throw retiredName(name, retiring);
       if (prior !== undefined && !(prior.kind === 'sql' && prior.sql?.driver === 'sqlite')) {
         throw new McpRegistryError(409, 'name_taken', `${name} is already a registered ${prior.kind} server; choose another name`);
       }
@@ -973,6 +1078,9 @@ export class McpRegistry {
         registeredAt: prior?.registeredAt ?? stamp,
         updatedAt: stamp,
         tools: [],
+        // (crew#1514) A new upload of a renamed source keeps the names it retired.
+        ...(prior?.formerNames !== undefined && prior.formerNames.length > 0 ? { formerNames: [...prior.formerNames] } : {}),
+        ...(prior?.keychainAccount !== undefined ? { keychainAccount: prior.keychainAccount } : {}),
         // (DES-KNOWLEDGE-DATA-001 §7.1) A new upload of the same name keeps the person's agent switches; "query"
         // only when it is the same snapshot (a new digest is a new descriptor).
         ...(prior?.agents !== undefined ? { agents: { ...agentAccessOf(prior), query: agentAccessOf(prior).query && prior.sql?.snapshot === digest } } : {}),
@@ -993,6 +1101,8 @@ export class McpRegistry {
     const stamp = new Date(this.now()).toISOString();
     const rec = await this.mutate(async (file) => {
       const prior = file.servers.find((s) => s.name === name);
+      const retiring = retiredBy(file.servers, name);
+      if (retiring !== undefined) throw retiredName(name, retiring);
       if (prior !== undefined && prior.kind !== 'web') throw new McpRegistryError(409, 'name_taken', `${name} is already a registered ${prior.kind} server; rename or remove it first`);
       const other = file.servers.find((s) => s.kind === 'web' && s.name !== name);
       if (other !== undefined) throw new McpRegistryError(409, 'name_taken', `the web source is already registered as ${other.name}`);
@@ -1052,6 +1162,9 @@ export class McpRegistry {
       const why = err instanceof Error ? err.message : String(err);
       throw new McpRegistryError(409, 'generation_unreadable', `generation ${generation} is not a registry crew can read: ${why}`);
     }
+    // (crew#1514) An entry the generation holds under another name than the live one was renamed since: the rules,
+    // picks and keychain account follow the live name, so the restore is refused until it is renamed back.
+    crossesRename(generation, servers, (await this.readFile()).servers);
     for (const s of servers) {
       if (s.kind !== 'toolbox-source') continue;
       try {
@@ -1095,6 +1208,8 @@ export class McpRegistry {
       s.updatedAt = stamp;
     }
     const { current, tombstoned } = await this.mutate((file) => {
+      // (crew#1514) Again inside the write: a rename that landed after the plan was made is not undone by it.
+      crossesRename(plan.generation, servers, file.servers);
       if (expected !== undefined) {
         const late = file.servers.map((s) => s.name).filter((n) => !expected.includes(n));
         if (late.length > 0) throw new McpRegistryError(409, 'registry_busy', `${late.join(', ')} was registered while the restore ran; nothing was restored: try again`);
@@ -1257,6 +1372,8 @@ export class McpRegistry {
       ...(isPostgresRecord(s) ? { allowWrites: s.allowWrites === true } : {}),
       ...(isSource ? { descriptorHash: sourceDescriptorHash(configOf(s)), agents: agentAccessOf(s) } : {}),
       ...(pm !== null ? { agents: agentAccessOf(s), trackers: this.trackerLinksOf(s) } : {}),
+      ...(s.formerNames !== undefined && s.formerNames.length > 0 ? { formerNames: [...s.formerNames] } : {}),
+      ...(s.keychainAccount !== undefined ? { keychainAccount: s.keychainAccount } : {}),
       authState: await this.authState(s.auth),
       enabled: s.enabled,
       health: s.health,
@@ -1545,6 +1662,72 @@ export function pmDescriptorHash(c: McpUpstreamConfig): string {
 export function isPostgresRecord(s: McpServerRecord): boolean {
   if (s.kind === 'toolbox-source') return s.toolbox?.type === 'postgres';
   return s.kind === 'sql' && s.sql?.driver === 'postgres';
+}
+
+/** (crew#1514) A rename committed, but its answer could not be built (the record is read again by the caller). */
+export class McpRenameCommitted extends Error {
+  constructor(readonly from: string, readonly to: string, readonly cause: unknown) {
+    super(`${from} was renamed to ${to}, but its record could not be read back: ${cause instanceof Error ? cause.message : String(cause)}`);
+  }
+}
+
+/**
+ * (crew#1514) Refuse a restore that would undo a rename (409 `restore_crosses_rename`): an entry the generation holds
+ * under another name, or with other retired names or another keychain account, than the live one; or an entry whose
+ * name a live entry has retired. The rules, picks and keychain account follow the live names.
+ */
+function crossesRename(generation: number, kept: readonly McpServerRecord[], live: readonly McpServerRecord[]): void {
+  const names = (l: readonly string[] | undefined): string => [...new Set(l ?? [])].sort().join(',');
+  const crossed: string[] = [];
+  for (const s of kept) {
+    const l = live.find((x) => entryId(x) === entryId(s));
+    if (l !== undefined && (l.name !== s.name || names(l.formerNames) !== names(s.formerNames) || l.keychainAccount !== s.keychainAccount)) {
+      crossed.push(l.name !== s.name ? `${l.name} (was ${s.name})` : `${l.name} (renamed since)`);
+      continue;
+    }
+    const by = live.find((x) => entryId(x) !== entryId(s) && (x.formerNames ?? []).includes(s.name));
+    if (by !== undefined) crossed.push(`${s.name} (a name ${by.name} retired)`);
+  }
+  if (crossed.length > 0) {
+    throw new McpRegistryError(409, 'restore_crosses_rename', `generation ${generation} would undo a rename: ${crossed.join(', ')}. A restore keeps every entry's current name, retired names and keychain account, so pick a generation saved since the rename`);
+  }
+}
+
+/** (crew#1514) The new name's own refusals: its form, crew's reserved names, and no change. */
+function renameNameRefusal(from: string, to: string): void {
+  if (!MCP_SERVER_NAME_RE.test(to)) throw new McpRegistryError(400, 'bad_name', 'a name is 1-63 of a-z 0-9 _ -, starting with a letter or digit');
+  if (to === APPS_SERVER || to === ESTATE_SERVER || to === CREW_SOURCE || to === 'web') {
+    throw new McpRegistryError(409, 'reserved_name', `"${to}" is reserved for crew's own ${to === 'web' ? 'web source' : to === CREW_SOURCE ? 'crew source' : `${to} server`}; choose another name`);
+  }
+  if (from === to) throw new McpRegistryError(409, 'name_unchanged', `${from} already has that name`);
+}
+
+/** (crew#1514) The keychain account a record's own secret lives under: the name it was saved as. */
+export function ownAccount(s: Pick<McpServerRecord, 'name' | 'keychainAccount'>): string {
+  return s.keychainAccount ?? s.name;
+}
+
+/** (crew#1514) The live entry that retired `name` (was renamed away from it), or `undefined`. */
+export function retiredBy(servers: readonly McpServerRecord[], name: string): McpServerRecord | undefined {
+  return servers.find((s) => s.name !== name && (s.formerNames ?? []).includes(name));
+}
+
+function retiredName(name: string, by: Pick<McpServerRecord, 'name'>): McpRegistryError {
+  return new McpRegistryError(409, 'name_retired', `${name} was renamed to ${by.name}, so the name stays retired while ${by.name} exists; choose another name, or rename ${by.name} back to ${name}`);
+}
+
+/**
+ * (crew#1514) The keychain account a held preview's staged secret goes to: the one its reference names, which the
+ * preview checked was the server's own. Re-judged at the save against the entry as it is now.
+ */
+function stagedAccount(config: McpUpstreamConfig, existing: McpServerRecord | undefined): string {
+  const parsed = config.auth === null ? null : parseSecretRef(config.auth.ref);
+  const account = parsed?.kind === 'keychain' ? parsed.account : null;
+  const own = existing !== undefined ? ownAccount(existing) : config.name;
+  if (account === null || account !== own) {
+    throw new McpRegistryError(409, 'server_changed', `${config.name} changed since it was previewed (its keychain entry is now "${own}"): preview it again, then save`);
+  }
+  return account;
 }
 
 /** A record's id; one read through {@link normalizeRegistryFile} always has it. */

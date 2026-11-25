@@ -92,6 +92,43 @@ describe('POST /proposals — file a preference memory (api-types 0.54.0)', () =
     });
   });
 
+  it('studio#1095: the person picks the memory tier and may scope it to one repository (the repo facet)', async () => {
+    proposalTool.mockResolvedValue({ id: 'prop-9' });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/proposals',
+      payload: { content: 'Run the migrations before the tests', project: 'northwind', repo: 'northwind-api', tier: 'procedural' },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(proposalTool).toHaveBeenLastCalledWith('proposal.submit', {
+      kind_type: 'memory',
+      payload: { content: 'Run the migrations before the tests', tier: 'procedural', capture: 'preference' },
+      facets: { project: 'northwind', repo: 'northwind-api' },
+    });
+    // Each offered tier passes through; none named stays a fact (semantic), as before.
+    for (const tier of ['semantic', 'procedural', 'episodic'] as const) {
+      await app.inject({ method: 'POST', url: '/api/v1/proposals', payload: { content: 'x', tier } });
+      expect((proposalTool.mock.lastCall?.[1] as { payload: { tier: string } }).payload.tier).toBe(tier);
+    }
+    // A repo alone is the one facet.
+    await app.inject({ method: 'POST', url: '/api/v1/proposals', payload: { content: 'x', repo: 'northwind-api' } });
+    expect((proposalTool.mock.lastCall?.[1] as { facets: unknown }).facets).toEqual({ repo: 'northwind-api' });
+  });
+
+  it('studio#1095: a tier outside the three offered (or a blank repo) is a 400; the kind is still never the caller\'s', async () => {
+    for (const payload of [
+      { content: 'x', tier: 'working' },
+      { content: 'x', tier: 'archival' },
+      { content: 'x', tier: 'policy' },
+      { content: 'x', repo: '' },
+      { content: 'x', repo: 'r'.repeat(257) },
+    ]) {
+      const res = await app.inject({ method: 'POST', url: '/api/v1/proposals', payload });
+      expect(res.statusCode, JSON.stringify(payload).slice(0, 60)).toBe(400);
+    }
+    expect(proposalTool).not.toHaveBeenCalled();
+  });
+
   it('400s a blank or missing content, an unknown key (no caller-chosen kind), and never calls estate', async () => {
     for (const payload of [
       {},
