@@ -313,6 +313,8 @@ engine without power mode, runs **phased**, and the launch answer says so.
 
 `GET /api/v1/runs` and `GET /api/v1/runs/:id` include `session.person_needed: { liveness: 'waiting_on_you', reason }` at a paused Power checkpoint, matching `/system`; the field is absent otherwise and the run's status stays unchanged.
 
+A person can snooze a Needs-you item for up to a week: `PUT /api/v1/desk/snoozes/:key` with `{"until": "<ISO time>", "severity": <the skin's rank of the item>}`. The daemon ends the snooze at that time. Bringing an item back sooner when it gets worse is the skin's job: it compares the item's rank now with the `severity` stored on the snooze. `GET /api/v1/desk/snoozes` lists the snoozes in force, and `DELETE` ends one early. Each snooze and early end is written to the audit trail before the answer, so a snooze survives a restart. A write that fails returns a 500 `desk_snooze_unsaved` and changes nothing. Only a human operator can snooze an item or end a snooze; an agent cannot hide a need. The item stays in `/system`.
+
 Phased, one run token moves through the workflow's phases with a gate between every one — e.g. for
 `feature`:
 
@@ -347,7 +349,8 @@ product code, or no longer indexed), and `corroboration` (validated by independe
 unconfirmed and why; `null` on an uncounted row or a graph built before the field); the page's
 `uncounted` totals say why the list holds more rows than the header. The list opens on real
 requirements, then placeholders, then uncounted rows, then config and data. A repository with no
-graph yet answers a typed 404 (`code: "notGenerated"`) that names the workflow to run.
+graph yet answers a 200 with `code: "notGenerated"` in place of the page (older daemons sent it as a 404),
+naming the workflow to run; a 404 means only that the repository is not registered.
 
 **Every run proposes what it learned.** At its checkpoints, a test that failed and then passed on
 its identical retry, or a check its sandbox could not start, is proposed at once, worded from the

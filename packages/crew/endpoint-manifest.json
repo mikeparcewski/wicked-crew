@@ -662,6 +662,39 @@
     },
     {
       "method": "GET",
+      "path": "/api/v1/desk/snoozes",
+      "requestType": null,
+      "responseType": "DeskSnoozesResponse",
+      "statusCodes": [
+        200
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/desk/snoozes/:key",
+      "requestType": null,
+      "responseType": "DeskSnoozeWakeResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        500
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/desk/snoozes/:key",
+      "requestType": "PutDeskSnoozeBody",
+      "responseType": "DeskSnooze",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        500
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/api/v1/diagnostics",
       "requestType": null,
       "responseType": "DiagnosticsResponse",

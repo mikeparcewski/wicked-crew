@@ -55,7 +55,7 @@ describe('chat document launch roster (production server, crew#1611)', () => {
     const address = bridge.server.address();
     if (address === null || typeof address === 'string') throw new Error('bridge has no TCP address');
     writeFileSync(join(root, '.wi-serve.json'), JSON.stringify({
-      port: address.port, host: '127.0.0.1', pid: process.pid, startedAt: new Date().toISOString(), version: '0.16.2',
+      port: address.port, host: '127.0.0.1', pid: process.pid, startedAt: new Date().toISOString(), version: '0.17.0',
     }));
 
     const adapter = withRunViews({

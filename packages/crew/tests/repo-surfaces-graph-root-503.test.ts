@@ -103,7 +103,9 @@ describe('repo surfaces — a current engine with no repo-graph root answers 503
     expect(br.statusCode).toBe(404);
     expect((br.json() as { error: string }).error).toMatch(/not built/);
     const req = await app.inject({ method: 'GET', url: '/api/v1/repos/ok/requirements' });
-    expect(req.statusCode).toBe(404);
+    // studio#986: not generated yet is the typed state, answered 200 (a 404 before).
+    expect(req.statusCode).toBe(200);
+    expect((req.json() as { code?: unknown }).code).toBe('notGenerated');
     // wicked-core#1698: nothing to retire before a graph is built.
     const retire = await app.inject({ method: 'POST', url: '/api/v1/repos/ok/requirements/src%3A%3AREQ-001/retire' });
     expect(retire.statusCode).toBe(404);

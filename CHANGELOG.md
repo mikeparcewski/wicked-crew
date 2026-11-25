@@ -10,6 +10,20 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+
+- feat(chat): a chat changes the demo video open in it (crew#1814, studio#1140 option (a)). A client that sends `accepts: ['cut']` gets crew's note on the video and its chapter list (ids, titles, timings; no caption words) in the turn's context. The seat's `wicked-make` `{"cut":{"ref","ops"}}` block becomes a `cut` card: the ops frozen, crew's words for each change, and the head the seat read. Go posts the ops to wicked-interactive's recut once, with `expect_head` and the Go's id as `request_id`. Go again reads that request first, so it never posts twice, and answers 409 `cut_pending` while the video is still rendering. A moved, deleted or refused video blocks the card with words saying which change failed and why. `chatArtifacts.cut` advertises it.
+- api-types 0.225.0: `ArtifactProposalKind` `cut`, `CutOp`, `ProposalCut`, `ArtifactProposal.cut`, `ProposalResult.version`, `ChatArtifactsCapabilities.cut`, and `accepts` takes `'cut'`.
+
+### Changed
+
+- The interactive default range is `^0.17.0` (the chapter ops, the request read and `head` on `GET cut`, wicked-interactive#351). A 0.16.x override is flagged as below the floor.
+- A document is a demo cut when it has interactive's `demo-cut.json` marker (the video tool's own rule). A recorder storyboard from before cuts (manifest kind `demo`, no marker) is a page again.
+
+### Fixed
+
+- A cut card's interrupted Go says crew's own sentence, ended, and what Go again does, never "could not start it: … Go again resumes the same job." (doubled period, a run's words). Not now on a cut the video tool already made says the version stays and Undo brings back the one before (crew#1814 round 2).
+
 ## [0.18.21] — 2026-11-24
 
 Patch release on the train-13 cut 811252b0, carrying 70 PRs since 0.18.20: #1733, #1734, #1735, #1749, #1746, #1748, #1755, #1757, #1759, #1747, #1756, #1758, #1711, #1754, #1765, #1770, #1769, #1772, #1768, #1773, #1771, #1776, #1778, #1777, #1785, #1783, #1789, #1784, #1786, #1781, #1782, #1799, #1796, #1798. wicked-crew-api-types 0.224.0 releases with it: 0.223.0 plus the type changes from #1758, #1765, #1773, #1776, #1778, #1782, #1783, #1784, #1789, #1796 and #1798 (it stays a workspace link in this repository), #1809, #1801, #1811, #1805, #1808, #1810, #1807, #1806, #1817, #1816, #1815, #1821, #1820, #1824, #1830, #1827, #1829, #1826, #1828, #1825, #1831, #1833, #1834, #1836, #1841, #1850, #1847, #1848, #1849, #1852, #1853, #1858, #1859, #1861, #1860, #1866.

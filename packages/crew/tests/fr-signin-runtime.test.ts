@@ -5,9 +5,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RuntimeState, type ContainerRuntimeState, type RuntimeStateReader } from '../src/api/runtime-state.js';
 import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
-import { gatewayDirOf, registerLoginCleanup, SeatContainerStatus, sweepLoginContainers, type ExecLike } from '../src/api/seat-container-login.js';
+import { CONTAINER_LOGIN_CLIS, gatewayDirOf, registerLoginCleanup, SeatContainerStatus, type ExecLike } from '../src/api/seat-container-login.js';
 import { SeatHealthTracker } from '../src/api/seat-health.js';
-import * as snapshot from '../src/api/system-snapshot.js';
 
 let home: string;
 const close: Array<() => void> = [];
@@ -185,28 +184,33 @@ describe('background runtime reader', () => {
     expect(exec).toHaveBeenCalledTimes(1); expect(change).not.toHaveBeenCalled(); expect(reader.state()).toBe('unknown');
   });
 });
-describe('daemon login-container sweep', () => {
-  it('removes only exact session names of the canonical gateway', async () => {
-    const gatewayDir = join(home, 'gateway'); const gateway = snapshot.gatewayName(gatewayDirOf(gatewayDir));
-    const own = `${gateway}-login-claude-deadbeef`; const agy = `${gateway}-login-agy-01234567`;
-    const exec = vi.fn<ExecLike>(async () => ({ stdout: [own, agy, own, 'wicked-agw-foreign-login-claude-deadbeef', `${own}-extra`, `${gateway}-login-codex-DEADBEEF`, `${gateway}-login-nope-deadbeef`, gateway].join('\n'), stderr: '' }));
-    await sweepLoginContainers({ gatewayDir, runtime: () => '/fixture/runtime', exec, log: vi.fn() });
-    expect(exec.mock.calls.map(([, args]) => args)).toEqual([
-      ['ps', '-a', '--filter', `name=${gateway}-login-`, '--format', '{{.Names}}'], ['rm', '-f', own, agy],
-    ]);
-    expect(exec.mock.calls.every(([, , opts]) => opts.timeout === 3_000)).toBe(true);
-  });
-  it('logs one plain line when the runtime is down', async () => {
-    const log = vi.fn(); const exec = vi.fn<ExecLike>().mockRejectedValue(new Error('/Users/fixture/private'));
-    await sweepLoginContainers({ gatewayDir: join(home, 'gateway'), runtime: () => '/fixture/runtime', exec, log });
-    expect(log.mock.calls).toEqual([['Sign-in cleanup skipped: container runtime unavailable.']]);
-  });
-  it('wires startup and close sweeps on the container floor only', async () => {
-    vi.spyOn(snapshot, 'resolveContainerRuntime').mockReturnValue('/fixture/runtime'); vi.stubEnv('WICKED_SEAT_FLOOR', 'container');
-    const exec = vi.fn<ExecLike>(async () => ({ stdout: '', stderr: '' })); const app = Fastify();
+describe('daemon start ends orphaned sign-ins (crew#1523)', () => {
+  it('asks the engine to abandon each seat\'s sign-in before listening, on the container floor only, never a runtime rm', async () => {
+    vi.stubEnv('WICKED_SEAT_FLOOR', 'container');
+    // Each engine call is held open: the daemon is not ready (so takes no sign-in) until every one has finished.
+    const pending: Array<() => void> = [];
+    const exec = vi.fn<ExecLike>(() => new Promise((resolve) => { pending.push(() => resolve({ stdout: '{"abandoned":false}', stderr: '' })); }));
+    const app = Fastify();
     registerLoginCleanup(app, { gatewayDir: join(home, 'gateway'), exec });
-    await app.ready(); expect(exec).toHaveBeenCalledTimes(1); await app.close(); expect(exec).toHaveBeenCalledTimes(2);
+    let ready = false; const readying = app.ready().then(() => { ready = true; });
+    await vi.waitFor(() => expect(pending).toHaveLength(CONTAINER_LOGIN_CLIS.length));
+    for (const finish of pending.slice(0, -1)) finish();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(ready).toBe(false);
+    pending.at(-1)!(); await readying; expect(ready).toBe(true);
+    expect(exec.mock.calls.map(([file, args]) => [file, args])).toEqual(CONTAINER_LOGIN_CLIS.map((cli) => ['/fixture/core', ['seat-login', 'abandon', cli]]));
+    expect(exec.mock.calls.every(([, , opts]) => opts.env['WICKED_SEAT_GATEWAY_DIR'] === gatewayDirOf(join(home, 'gateway')))).toBe(true);
+    await app.close(); expect(exec).toHaveBeenCalledTimes(CONTAINER_LOGIN_CLIS.length);
     vi.stubEnv('WICKED_SEAT_FLOOR', 'host'); const host = Fastify(); registerLoginCleanup(host, { gatewayDir: join(home, 'gateway'), exec });
-    await host.ready(); await host.close(); expect(exec).toHaveBeenCalledTimes(2);
+    await host.ready(); await host.close(); expect(exec).toHaveBeenCalledTimes(CONTAINER_LOGIN_CLIS.length);
+  });
+  it('logs one scrubbed line per seat when the engine cannot end a sign-in, and still starts', async () => {
+    vi.stubEnv('WICKED_SEAT_FLOOR', 'container');
+    const exec = vi.fn<ExecLike>().mockRejectedValue(Object.assign(new Error('x'), { code: 1, stderr: 'wicked-core seat-login: cannot reach /home/fixture/cluster\nsecond line' }));
+    const app = Fastify(); const info = vi.fn(); vi.spyOn(app.log, 'info').mockImplementation(info);
+    registerLoginCleanup(app, { gatewayDir: join(home, 'gateway'), exec }, ['claude']);
+    await app.ready(); await app.close();
+    expect(info.mock.calls).toEqual([['Sign-in cleanup for claude did not finish: wicked-core seat-login: cannot reach ~/cluster']]);
   });
 });
+
