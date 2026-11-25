@@ -7020,7 +7020,9 @@ export interface CoverageReport {
   unaccounted_nodes: UnaccountedNode[];
 }
 
-/** One entry of a repo's code-graph summary — a node kind and how many the graph holds (#122). */
+/** One entry of a repo's code-graph summary — a node kind and how many the graph holds (#122). The summary route
+ *  (`GET /governance/graph?repo=`) answers `{ kinds: GraphKind[] }`; for a registered repo with no code graph yet it is
+ *  `{ kinds: [], code: 'not_indexed', error }` with status 200 (studio#1402, a 404 before); an unknown repo is a 404. */
 export interface GraphKind {
   kind: string;
   count: number;
@@ -17932,7 +17934,9 @@ export interface VoiceTtsStatus {
   /** This machine can install it: macOS or Linux (WSL2 counts), arm64 or x86_64, CPython 3.9 to 3.14. `reason` is the plain refusal or the one-line remedy (no Python); `null` when ok. */
   supported: { ok: boolean; reason: string | null };
   python: { found: boolean; path: string | null; version: string | null };
-  engine: { found: boolean; version: string | null };
+  /** `bytes` (crew#1563): about what installing the engine downloads on this machine, from the committed lock for
+   *  its (OS, arch, CPython): the total of the PyPI wheels pip picks there. `null` on an unsupported machine. */
+  engine: { found: boolean; version: string | null; bytes: number | null };
   /** Keyed by voice id (`en_US-joe-medium`, `en_GB-cori-high`). */
   voices: Record<string, { installed: boolean; name: string; accent: string; licence: string; bytes: number; source: string }>;
   /** An install in progress (`step` is `engine` or `voice:<id>`), or the last one's failure; `null` when none. */

@@ -78,6 +78,21 @@ export function lockPath(os: string, arch: string, minor: number, locksDir: stri
 }
 
 /**
+ * crew#1563: what the engine install downloads on this lock's target, in bytes: the lock's own `# engine-bytes:` line
+ * (the generator sums the size PyPI gives for the wheel pip picks there, one per pin). `null` when the lock has none
+ * or cannot be read: never a guess.
+ */
+export function lockEngineBytes(lock: string): number | null {
+  try {
+    const m = /^# engine-bytes: (\d+)$/m.exec(readFileSync(lock, 'utf8'));
+    const n = m === null ? Number.NaN : Number(m[1]);
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The text as piper reads it: control characters and line breaks gone (a break becomes a space, so words never
  * fuse), runs of space collapsed, piper's `[[ ... ]]` phoneme markup neutralized so it is never interpreted (a
  * space goes between every pair of adjacent brackets, so no run of any length keeps a `[[` or `]]`), at most
@@ -392,7 +407,7 @@ export class TtsService {
     return {
       supported: { ok: problem === null, reason: problem },
       python: { found: picked.python !== null, path: picked.python?.path ?? null, version: picked.python?.version ?? null },
-      engine: { found: engine, version: engine ? TTS_ENGINE.version : null },
+      engine: { found: engine, version: engine ? TTS_ENGINE.version : null, bytes: problem === null && picked.lock !== null ? lockEngineBytes(picked.lock) : null },
       voices,
       install: this.installState === null ? null : { ...this.installState },
     };
