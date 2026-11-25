@@ -738,11 +738,50 @@ export function requiredTrust(method: string, path: string, body: unknown): Trus
   return 'operator';
 }
 
-/** Path without the query string. */
-function pathOf(req: FastifyRequest): string {
+/** Path without the query string or fragment, as the client sent it. */
+function rawPathOf(req: FastifyRequest): string {
   const url = req.raw.url ?? req.url;
-  const q = url.indexOf('?');
-  return q >= 0 ? url.slice(0, q) : url;
+  const end = url.search(/[?#]/);
+  return end >= 0 ? url.slice(0, end) : url;
+}
+
+/**
+ * A request path percent-decoded as the router decodes a path before it matches: `decodeURI`, which leaves the
+ * reserved characters such as `/` encoded, except that `%25` stays `%25` (the router keeps it too; plain `decodeURI`
+ * would turn it into `%`). Null when the path does not decode, which the router also refuses. Used only to decide
+ * whether an UNMATCHED request is protected; a matched request is judged on its route.
+ */
+export function routedPath(raw: string): string | null {
+  try {
+    return raw
+      .split(/%25/i)
+      .map((part) => decodeURI(part))
+      .join('%25');
+  } catch {
+    return null;
+  }
+}
+
+/** A matched route pattern with each parameter (and a trailing wildcard) filled by one plain segment. */
+function routeShape(route: string): string {
+  return route.replace(/:[A-Za-z0-9_]+/g, 'x').replace(/\*/g, 'x');
+}
+
+/**
+ * What the boundary judges a request on.
+ * - **Protected** when any reading of the request a route could be served under is a protected path: the route the
+ *   router matched, the path as the router decodes it, or the raw path. So no spelling of a protected route (an
+ *   encoded character, an absolute-form target) skips the check, and an unmatched protected path still needs a token.
+ * - **The rules** (trust, human-only, unit-token, token extraction) read the matched route's own shape whenever a route
+ *   matched, never the request's spelling of it; only an unmatched request (nothing is served) is read by its path.
+ */
+function boundaryOf(req: FastifyRequest): { guarded: boolean; path: string | null } {
+  const raw = rawPathOf(req);
+  const decoded = routedPath(raw);
+  const route = req.routeOptions?.url;
+  const guarded =
+    isProtectedPath(raw) || (decoded !== null && isProtectedPath(decoded)) || (route !== undefined && isProtectedPath(route));
+  return { guarded, path: route !== undefined ? routeShape(route) : decoded };
 }
 
 /** True for the paths the auth boundary covers: the API and the WS upgrades. */
@@ -824,8 +863,9 @@ export function registerAuthHooks(app: FastifyInstance, auth: ResolvedAuth): voi
   app.decorateRequest('actor', null as unknown as Actor);
 
   app.addHook('onRequest', async (req, reply) => {
-    const path = pathOf(req);
-    if (!isProtectedPath(path)) return;
+    const { guarded, path } = boundaryOf(req);
+    if (!guarded) return;
+    if (path === null) return reply.code(400).send({ error: 'Malformed request path' });
     // The engine verifies the capability token, including /mcp/ask's Authorization header.
     if (isUnitTokenRoute(req.method, path)) return;
     if (auth.mode === 'off') {
@@ -847,11 +887,15 @@ export function registerAuthHooks(app: FastifyInstance, auth: ResolvedAuth): voi
   });
 
   app.addHook('preHandler', async (req, reply) => {
-    const path = pathOf(req);
-    if (!isProtectedPath(path)) return;
+    const { guarded, path } = boundaryOf(req);
+    if (!guarded) return;
+    if (path === null) return reply.code(400).send({ error: 'Malformed request path' });
     if (isUnitTokenRoute(req.method, path)) return; // no actor to rank: the engine judged the token
-    // `actor` is always set here: the onRequest hook either assigned it or
-    // already answered 401 (which skips the rest of the lifecycle).
+    // The onRequest hook either assigned an actor or already answered 401 (which skips the rest of the lifecycle).
+    // Fail closed all the same: a protected route never reaches its handler without one.
+    if (req.actor === null || req.actor === undefined) {
+      return deny401(reply, 'Authentication required: send Authorization: Bearer <token>');
+    }
     // Spike 3: a plugin actor (observer) writes its OWN working-document lines; the route checks that it writes only
     // as itself and only its own section. Nothing else a plugin sends passes this boundary.
     if (req.actor?.kind === 'plugin' && req.method === 'POST' && WORKING_DOC_VERSIONS_PATH.test(path)) return;
