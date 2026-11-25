@@ -22,6 +22,7 @@
 
 import { defaultLaunchRoster } from '../core/opt-in-seats.js';
 import { randomUUID } from 'node:crypto';
+import { resolve as resolvePath } from 'node:path';
 
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from '../zod.js';
@@ -42,6 +43,7 @@ import type {
 import type { AuditLog } from './audit.js';
 import { recordRunLaunched, type RunTimingIndex } from './run-timing-index.js';
 import type { EvalRunStore } from './eval-store.js';
+import { ruleStoreReader } from './eval-rule-store.js';
 import { API_PREFIX } from './api-prefix.js';
 import { STEERING_TYPE_VALUES, STEERING_TYPES } from './governance-steering.js';
 import { resolveScopeRepos } from './multiscope.js';
@@ -248,7 +250,8 @@ export function registerTestingRoutes(
         });
         // Record the run in the eval history (best-effort, LOUD-NON-FATAL): the report is the
         // contract and must answer even if persistence fails, so a store miss is warned and
-        // swallowed, never a 500. `rule_store` is the daemon's own steering store the run judged.
+        // swallowed, never a 500. `rule_store` is the daemon's own steering store the run judged,
+        // recorded absolute (never masked: the read routes compare it canonically, crew#1934).
         // `degraded` and `rule_coverage` are the ENGINE's readings persisted verbatim — the
         // daemon recomputes neither; `rule_coverage` is spread conditionally because an engine
         // predating core #394 emits none, and an absent key (never a fabricated one) is how a
@@ -259,7 +262,7 @@ export function registerTestingRoutes(
               actor: actorOf(req).id,
               corpus: parsed.data.corpus ?? null,
               type_filter: parsed.data.type ?? null,
-              rule_store: adapter.dbPath,
+              rule_store: typeof adapter.dbPath === 'string' && adapter.dbPath !== '' && adapter.dbPath !== ':memory:' ? resolvePath(adapter.dbPath) : adapter.dbPath,
               summary: report.summary,
               per_type: perTypeRollup(report.results),
               degraded: report.degraded,
@@ -293,12 +296,13 @@ export function registerTestingRoutes(
     async (req) => {
       if (deps.evalStore === undefined) return { runs: [] };
       const q = req.query as { type?: string; corpus?: string };
-      return {
-        runs: await deps.evalStore.list({
-          ...(q.type !== undefined ? { type_filter: q.type } : {}),
-          ...(q.corpus !== undefined ? { corpus: q.corpus } : {}),
-        }),
-      };
+      const rows = await deps.evalStore.list({
+        ...(q.type !== undefined ? { type_filter: q.type } : {}),
+        ...(q.corpus !== undefined ? { corpus: q.corpus } : {}),
+      });
+      // crew#1934: compare canonically, mask for display (eval-rule-store.ts).
+      const shown = ruleStoreReader(adapter.dbPath);
+      return { runs: rows.map((r) => ({ ...r, rule_store: shown(r.rule_store) as string })) };
     },
   );
 
@@ -311,7 +315,7 @@ export function registerTestingRoutes(
       const { id } = req.params as { id: string };
       const detail = (await deps.evalStore?.get(id)) ?? null;
       if (detail === null) return reply.code(404).send({ error: `no eval run '${id}'` });
-      return detail;
+      return { ...detail, rule_store: ruleStoreReader(adapter.dbPath)(detail.rule_store) as string };
     },
   );
 
