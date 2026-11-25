@@ -583,13 +583,13 @@ describe('crew#1703: an editor pack with skills and a block', () => {
 });
 
 /** The editor routes over the rig, as the daemon mounts them (an operator at the keyboard). */
-async function routes(r: ReturnType<typeof rig>) {
+async function routes(r: ReturnType<typeof rig>, skills: PackSkillsPort = r.deps.skills) {
   const app = Fastify({ logger: false });
   app.decorateRequest('actor', null as unknown as never);
   app.addHook('onRequest', async (req) => {
     (req as unknown as { actor: unknown }).actor = { id: 'human-1', kind: 'human', trust: 'operator' };
   });
-  registerEditorRoutes(app, { registry: r.registry, adapter: {}, packCheck: passCheck, conformance: r.conformance, skills: r.deps.skills, presets: r.presets, log: () => undefined });
+  registerEditorRoutes(app, { registry: r.registry, adapter: {}, packCheck: passCheck, conformance: r.conformance, skills, presets: r.presets, log: () => undefined });
   await app.ready();
   return app;
 }
@@ -707,5 +707,71 @@ describe('crew#1703 coord round 2: what a pack added leaves with it, and garden 
     expect(EditorRegistry.view(r.registry.get('acme-terms')!).packSkills).toBeUndefined();
     const reread = new EditorRegistry({ stateHome: r.home, studioRoot: r.studio });
     expect(EditorRegistry.view(reread.get('acme-terms')!).packSkills).toBeUndefined();
+  });
+});
+
+const BOTH = ['wicked-garden-acme-terms', 'wicked-garden-acme-terms-checker'];
+
+describe('crew#1877 delta follow-ups: a pack can always be installed again, and a removal can always be retried', { timeout: 120_000 }, () => {
+  it('crew#1915: a reinstall claims the skills stamped as the pack’s when the record never named them (the record write failed, then a restart)', async () => {
+    const r = rig();
+    const root = pack(['critique']);
+    const ok = await approvalFor(root, r.deps);
+    const fail = vi.spyOn(r.registry, 'setPackExtras').mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+    const first = await installPack(root, undefined, r.deps, ok);
+    fail.mockRestore();
+    expect(first.skillsError).toMatch(/could not name the pack’s skills \(disk full\)/);
+    expect(r.sc.store.manifest().skills['wicked-garden-acme-terms']?.origin).toBe('pack:acme-terms');
+    // After a restart the record holds none of them: only the stamp says whose they are.
+    const reread = new EditorRegistry({ stateHome: r.home, studioRoot: r.studio });
+    expect(reread.packExtrasOwned('acme-terms').skills).toEqual([]);
+    const deps = { ...r.deps, registry: reread };
+    const again = await installPack(root, undefined, deps, await approvalFor(root, deps));
+    expect(again.skillsError).toBeUndefined();
+    expect(again.skills?.map((k) => k.key)).toEqual(BOTH);
+    expect(reread.packExtrasOwned('acme-terms').skills.map((k) => k.key)).toEqual(BOTH);
+  });
+
+  it('crew#1915: a skill stamped as ANOTHER pack’s is still a 409 for this one; nothing is written', async () => {
+    const r = rig();
+    const taken = r.sc.store.add('wicked-garden-acme-terms', { 'SKILL.md': '---\nname: wicked-garden-acme-terms\ndescription: theirs\n---\n' }, r.sc.store.revision(), { origin: 'pack:other-pack' });
+    expect(taken.verdict).not.toBe('blocked');
+    const err = await installPack(pack(['critique']), undefined, r.deps, APPROVE).catch((e: unknown) => e);
+    expect((err as PackInstallError).status).toBe(409);
+    expect(((err as PackInstallError).body as { code?: string } | undefined)?.code).toBe('pack_name_taken');
+    expect(r.sc.store.manifest().skills['wicked-garden-acme-terms']?.origin).toBe('pack:other-pack');
+  });
+
+  it('crew#1916: a removal whose withdrawal fails is a 503 that keeps the editor installed; the retry finishes it', async () => {
+    const r = rig();
+    const root = pack(['critique']);
+    await installPack(root, undefined, r.deps, await approvalFor(root, r.deps));
+    let refuse = true;
+    const port: PackSkillsPort = {
+      ...r.deps.skills,
+      publish: async () => (refuse
+        ? { verdict: 'blocked' as const, findings: [{ kind: 'frontmatter-invalid', severity: 'blocking', skill: null, file: null, line: null, evidence: 'a broken skill elsewhere' } as never], snapshot: null }
+        : r.deps.skills.publish()),
+    };
+    const app = await routes(r, port);
+    const failed = await app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-terms' });
+    expect(failed.statusCode, failed.body).toBe(503);
+    const body = failed.json<{ error: string; withdrawn: { skills: string[]; presets: string[]; error?: string } }>();
+    expect(body.error).toMatch(/acme-terms was not removed: .*could not be published \(a broken skill elsewhere\).*; try again/);
+    expect(body.withdrawn.skills).toEqual(BOTH);
+    // Still installed, so the retry reaches it; workers still have the skills (the publish was refused).
+    expect(r.registry.isInstalled('acme-terms')).toBe(true);
+    expect(published(r)).toEqual(expect.arrayContaining(BOTH));
+    refuse = false;
+    const retried = await app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-terms' });
+    expect(retried.statusCode, retried.body).toBe(200);
+    expect(retried.json<RemoveEditorResponse>()).toMatchObject({ removed: true, id: 'acme-terms' });
+    expect(r.registry.isInstalled('acme-terms')).toBe(false);
+    expect(published(r)).not.toContain('wicked-garden-acme-terms');
+    expect(published(r)).not.toContain('wicked-garden-acme-terms-checker');
+    expect(r.presets.presets.has('acme-terms-review')).toBe(false);
+    await app.close();
   });
 });
