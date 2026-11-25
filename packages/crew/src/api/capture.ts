@@ -68,11 +68,17 @@ export const ApproveEditSchema = z.strictObject({
   reach: z.enum(['project', 'pattern', 'operator']).optional(),
 });
 
-/** `POST /proposals` body — one preference a person files from a skin (studio's takes). Strict: the
- *  kind, tier and capture marker are the daemon's, never the caller's. */
+/** The memory tiers a person may file into (studio#1095): a fact, a how-to, or something that happened. */
+export const FILE_PROPOSAL_TIERS = ['semantic', 'procedural', 'episodic'] as const;
+
+/** `POST /proposals` body — one memory a person files from a skin (studio's takes, the Memory page). Strict: the
+ *  kind (`memory`) and the capture marker are the daemon's, never the caller's. The tier is one of
+ *  {@link FILE_PROPOSAL_TIERS} (default `semantic`); `project` and `repo` become the matching facets. */
 export const FileProposalSchema = z.strictObject({
   content: z.string().trim().min(1).max(4000),
   project: z.string().trim().min(1).max(128).optional(),
+  repo: z.string().trim().min(1).max(256).optional(),
+  tier: z.enum(FILE_PROPOSAL_TIERS).optional(),
   source: z.string().trim().min(1).max(256).optional(),
 });
 
