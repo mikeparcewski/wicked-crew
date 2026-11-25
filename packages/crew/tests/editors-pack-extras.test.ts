@@ -744,6 +744,28 @@ describe('crew#1877 delta follow-ups: a pack can always be installed again, and 
     expect(r.sc.store.manifest().skills['wicked-garden-acme-terms']?.origin).toBe('pack:other-pack');
   });
 
+  it('crew#1917 r1: a removal takes the skills stamped as the pack’s even when the record never named them', async () => {
+    const r = rig();
+    const root = pack(['critique']);
+    const ok = await approvalFor(root, r.deps);
+    const fail = vi.spyOn(r.registry, 'setPackExtras').mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+    await installPack(root, undefined, r.deps, ok);
+    fail.mockRestore();
+    expect(published(r)).toEqual(expect.arrayContaining(BOTH));
+    // A restart: the record names no skill, only the stamp says whose they are.
+    const reread = new EditorRegistry({ stateHome: r.home, studioRoot: r.studio });
+    expect(reread.packExtrasOwned('acme-terms').skills).toEqual([]);
+    const app = await routes({ ...r, registry: reread });
+    const removed = await app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-terms' });
+    expect(removed.statusCode, removed.body).toBe(200);
+    expect(removed.json<RemoveEditorResponse>().withdrawn?.skills).toEqual(BOTH);
+    expect(published(r)).not.toContain('wicked-garden-acme-terms');
+    expect(published(r)).not.toContain('wicked-garden-acme-terms-checker');
+    await app.close();
+  });
+
   it('crew#1916: a removal whose withdrawal fails is a 503 that keeps the editor installed; the retry finishes it', async () => {
     const r = rig();
     const root = pack(['critique']);
@@ -756,7 +778,11 @@ describe('crew#1877 delta follow-ups: a pack can always be installed again, and 
         : r.deps.skills.publish()),
     };
     const app = await routes(r, port);
+    // The generation is read only when nothing was just switched off, and never by the unpaced walk (crew#1917 r1).
+    const unpaced = vi.spyOn(r.sc.store, 'currentSnapshotSkills');
+    const paced = vi.spyOn(r.sc.store, 'currentSnapshotPaced');
     const failed = await app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-terms' });
+    expect(paced).not.toHaveBeenCalled();
     expect(failed.statusCode, failed.body).toBe(503);
     const body = failed.json<{ error: string; withdrawn: { skills: string[]; presets: string[]; error?: string } }>();
     expect(body.error).toMatch(/acme-terms was not removed: .*could not be published \(a broken skill elsewhere\).*; try again/);
@@ -765,7 +791,12 @@ describe('crew#1877 delta follow-ups: a pack can always be installed again, and 
     expect(r.registry.isInstalled('acme-terms')).toBe(true);
     expect(published(r)).toEqual(expect.arrayContaining(BOTH));
     refuse = false;
+    unpaced.mockClear(); // the assertions above read it themselves
     const retried = await app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-terms' });
+    expect(paced).toHaveBeenCalled();
+    expect(unpaced).not.toHaveBeenCalled();
+    unpaced.mockRestore();
+    paced.mockRestore();
     expect(retried.statusCode, retried.body).toBe(200);
     expect(retried.json<RemoveEditorResponse>()).toMatchObject({ removed: true, id: 'acme-terms' });
     expect(r.registry.isInstalled('acme-terms')).toBe(false);

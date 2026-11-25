@@ -378,17 +378,20 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
         let withdrawn: Awaited<ReturnType<typeof withdrawPackExtras>> | null = null;
         if (packName !== null && !registry.hasPack(packName, id)) {
           const owned = registry.packExtrasOwned(packName);
-          if (owned.skills.length > 0 || owned.presets.length > 0) {
-            withdrawn = await withdrawPackExtras({
+          // A skills root is asked even when the record names no skill: one stamped as the pack's goes too (crew#1917 r1).
+          if (owned.skills.length > 0 || owned.presets.length > 0 || (deps.skills ?? null) !== null) {
+            const w = await withdrawPackExtras({
               packName,
               skills: owned.skills.map((k) => k.key),
               presets: owned.presets,
               skillsPort: deps.skills ?? null,
               presetsPort: deps.presets ?? null,
+              wholePack: true,
             });
-            if (withdrawn.error !== undefined) {
-              return reply.code(503).send({ error: `${id} was not removed: ${withdrawn.error}; try again`, withdrawn });
+            if (w.error !== undefined) {
+              return reply.code(503).send({ error: `${id} was not removed: ${w.error}; try again`, withdrawn: w });
             }
+            if (owned.skills.length > 0 || owned.presets.length > 0 || w.skills.length > 0 || w.presets.length > 0) withdrawn = w;
           }
         }
         // Its grants go next (codex r1): a failed withdrawal keeps the editor installed, so a retry of
