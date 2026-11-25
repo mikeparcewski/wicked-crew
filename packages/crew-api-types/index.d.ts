@@ -12695,16 +12695,16 @@ export interface FileProposalBody {
   content: string;
   /** Becomes the `project` facet, so the preference is recalled on that project only. */
   project?: string;
-  /** (api-types 0.227.0, studio#1095) Becomes the `repo` facet: recalled on that repository only (1–256 chars). */
+  /** (api-types 0.228.0, studio#1095) Becomes the `repo` facet: recalled on that repository only (1–256 chars). */
   repo?: string;
-  /** (api-types 0.227.0, studio#1095) The memory tier: a fact (`semantic`, the default), a how-to (`procedural`) or
+  /** (api-types 0.228.0, studio#1095) The memory tier: a fact (`semantic`, the default), a how-to (`procedural`) or
    *  something that happened (`episodic`). Any other value is a 400. */
   tier?: FileProposalTier;
   /** Where the pick was made, e.g. `doc:<docId>@v3` (kept on the payload). */
   source?: string;
 }
 
-/** (api-types 0.227.0) The tiers `POST /proposals` files into. */
+/** (api-types 0.228.0) The tiers `POST /proposals` files into. */
 export type FileProposalTier = 'semantic' | 'procedural' | 'episodic';
 
 /** `POST /proposals` → 201: the pending proposal's id. */
