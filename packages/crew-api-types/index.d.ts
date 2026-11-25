@@ -1850,6 +1850,42 @@ export interface RepoEntry {
    * resolves for this daemon, so `code_graph_db` is empty).
    */
   findings?: RepoFinding[];
+  /**
+   * (api-types 0.232.0, wicked-core#1043) The toolchain layers this repo's seats get, for the repo card: the layers the
+   * engine detected in the checkout, in catalog order, each with whether it is on and what turned it off. Derived on
+   * the reads a person sees (`GET /repos`, `POST /repos`, `PUT /repos/:id/seat-layers`); absent from an engine before it.
+   */
+  seat_layers?: RepoSeatLayer[];
+  /**
+   * (api-types 0.232.0, wicked-core#1043) The layer ids a person turned off for this repo
+   * (`PUT /repos/:id/seat-layers`), sorted. Absent when none are.
+   */
+  seat_layers_off?: string[];
+}
+
+/** (api-types 0.232.0, wicked-core#1043) One toolchain layer of a repo's seats ({@link RepoEntry.seat_layers}). */
+export interface RepoSeatLayer {
+  /** The layer id: today `go`, `java`, `node`, `python` or `rust`. */
+  id: string;
+  /** Whether the layer is put on this repo's seat images. */
+  enabled: boolean;
+  /**
+   * What turned it off, when it is off: `repo` (this repo's switch, which `PUT /repos/:id/seat-layers` sets),
+   * `daemon` (the daemon runs with `WICKED_SEAT_LAYERS=off`) or `operator_base` (the operator's own base image is the
+   * toolchain, `WICKED_SEAT_BASE_IMAGE`). `null` when it is on. Only `repo` is this repo's to change.
+   */
+  off_by: 'repo' | 'daemon' | 'operator_base' | null;
+}
+
+/**
+ * (api-types 0.232.0, wicked-core#1043) `PUT /repos/:id/seat-layers`: the full list of layer ids to turn off for the
+ * repo (`[]` turns every layer back on), at most 32, each a layer id. A person's choice: any other actor gets 403
+ * `human_operator_only`. 200 answers the repo's {@link RepoEntry} as `GET /repos` shows it; 400 `unknown_seat_layer`
+ * names an id the engine has no layer for; 404 `repo_not_found`; 501 `repo_seat_layers_unsupported` on an engine
+ * before the switch.
+ */
+export interface PutRepoSeatLayersBody {
+  off: string[];
 }
 
 /** One engine diagnostic on a registered repo (`RepoEntry.findings[]`; wicked-core#406). */

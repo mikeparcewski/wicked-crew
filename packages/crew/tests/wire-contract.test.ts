@@ -52,7 +52,7 @@ import type {
   RequirementSummary,
 } from '../src/api/requirements.js';
 import { REQUIREMENTS_NOT_GENERATED } from '../src/api/requirements.js';
-import type { ChatOpenSchema, GateSchema, GuidanceSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema, RepoGraphReply, ReqMinimumSchema, RetireMemorySchema } from '../src/api/routes.js';
+import type { ChatOpenSchema, GateSchema, GuidanceSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema, RepoGraphReply, RepoSeatLayersSchema, ReqMinimumSchema, RetireMemorySchema } from '../src/api/routes.js';
 import type { SteeringAuthorSchema, SteeringImportSchema } from '../src/api/governance-steering.js';
 import type {
   ImportEvalCorpusSchema,
@@ -1048,6 +1048,9 @@ respondsWith<Wire.RequirementsMinimum, RequirementsMinimum>();
 respondsWith<Wire.RequirementsMinimumResponse, { minimum: RequirementsMinimum | null }>();
 accepts<z.input<typeof ReqMinimumSchema>, Wire.RequirementsMinimumBody>();
 respondsWith<Wire.RequirementsCodeDrift, RequirementsCodeDrift>();
+// PUT /repos/:id/seat-layers (0.232.0, wicked-core#1043): the full off list in, the repo's row out.
+accepts<z.input<typeof RepoSeatLayersSchema>, Wire.PutRepoSeatLayersBody>();
+respondsWith<Wire.RepoEntry, Awaited<ReturnType<CoreAdapter['setRepoSeatLayersOff']>>>();
 
 // GET/PUT /settings — persisted system settings (defaults applied server-side). Checked twice:
 // the compiled-in defaults, and the adapter's read shape (defaults + persisted patch), which

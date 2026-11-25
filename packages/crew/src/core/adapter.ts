@@ -657,7 +657,11 @@ type CoreHandleFull = CoreHandle &
   ProjectMethods &
   PresetMethods &
   TeamMethods &
-  CampaignMethods & { unregisterRepo?: (repoId: string) => Promise<string> };
+  CampaignMethods & {
+    unregisterRepo?: (repoId: string) => Promise<string>;
+    /** (wicked-core#1043 part 2) Optional: an engine before it has no per-repo seat layer switch. */
+    setRepoSeatLayersOff?: (repoId: string, offJson: string) => Promise<string>;
+  };
 
 /**
  * crew#994: the engine bindings that read the store file directly, on a read-only connection of
@@ -1081,6 +1085,14 @@ export class MaintenanceDrainError extends Error {
   constructor() {
     super('This daemon is draining for maintenance and is refusing new work.');
     this.name = 'MaintenanceDrainError';
+  }
+}
+
+/** The linked engine predates the per-repo seat layer switch (wicked-core#1043 `setRepoSeatLayersOff`). */
+export class RepoSeatLayersUnsupportedError extends Error {
+  constructor() {
+    super('Turning a repository\'s seat layers off requires an engine with setRepoSeatLayersOff; upgrade wicked-core-ts.');
+    this.name = 'RepoSeatLayersUnsupportedError';
   }
 }
 
@@ -3576,6 +3588,18 @@ export class CoreAdapter {
   async unregisterRepo(id: string): Promise<boolean> {
     if (typeof this.core.unregisterRepo !== 'function') throw new RepoUnregisterUnsupportedError();
     return parseEngineJson<boolean>(await this.core.unregisterRepo(id), 'unregisterRepo');
+  }
+
+  /**
+   * (wicked-core#1043 part 2) Turn the seat layers `off` off for the repo `id` (`[]` turns every layer back on). The
+   * engine stores the list sorted and deduplicated and answers the repo's entry with its `seat_layers` rows, checked
+   * here as `listRepos` checks a row (the folder-missing finding). It refuses an unknown repo or layer by name.
+   */
+  async setRepoSeatLayersOff(id: string, off: string[]): Promise<RepoEntry> {
+    if (typeof this.core.setRepoSeatLayersOff !== 'function') throw new RepoSeatLayersUnsupportedError();
+    const entry = parseEngineJson<RepoEntry>(await this.core.setRepoSeatLayersOff(id, JSON.stringify(off)), 'setRepoSeatLayersOff');
+    const [shown] = await withFolderFindings([entry]);
+    return shown!;
   }
 
   /**

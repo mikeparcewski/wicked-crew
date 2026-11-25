@@ -28,7 +28,7 @@ import { promises as fsp } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { videoPalette } from '../appearance/video-palette.js';
-import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, MaintenanceDrainError, RepoUnregisterUnsupportedError, TERMINAL_RUN_STATUSES, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, readNewWorkSeats, settingsFilePath, type RunViewsSnapshot } from '../core/adapter.js';
+import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, MaintenanceDrainError, RepoSeatLayersUnsupportedError, RepoUnregisterUnsupportedError, TERMINAL_RUN_STATUSES, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, readNewWorkSeats, settingsFilePath, type RunViewsSnapshot } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, repoFolderMissing, repoFolderMissingBody } from '../core/repoPaths.js';
 import type {
   ConformanceRule,
@@ -793,6 +793,11 @@ const SAFE_REPO_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
 /** `PUT /repos/:id/requirements/minimum` (api-types 0.197.0 `RequirementsMinimumBody`): `null` clears. */
 export const ReqMinimumSchema = z.strictObject({ minPct: z.number().int().min(1).max(100).nullable() });
+
+/** `PUT /repos/:id/seat-layers` (api-types 0.232.0 `PutRepoSeatLayersBody`): each id one layer id, as core checks it. */
+export const RepoSeatLayersSchema = z.strictObject({
+  off: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/u, 'a layer id: lower-case letters, digits, - or _')).max(32),
+});
 
 export const RegisterRepoSchema = z.strictObject({
   name: z
@@ -3453,6 +3458,34 @@ export function registerRoutes(
       // The engine's refusal names the runs or projects in its text (a lease taken after crew's check, or a project).
       const refused = /^(repo_in_use|repo_in_project): /u.exec(message(err));
       if (refused !== null) return reply.code(409).send({ code: refused[1], error: message(err) });
+      throw err;
+    }
+  });
+
+  /**
+   * (wicked-core#1043) Turn this repo's seat toolchain layers off (`off: []` turns them all back on): the engine stores
+   * the switch and leaves those layers out of the repo's seat images. A person's choice: a seat's or agent's token is
+   * refused before the engine is asked. Answers the repo's row as `GET /repos` shows it.
+   */
+  app.put(`${V}/repos/:id/seat-layers`, { config: { manifest: { requestType: 'PutRepoSeatLayersBody', responseType: 'RepoEntry', statusCodes: [200, 400, 403, 404, 501] } } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const actor = actorOf(req);
+    if (!isHumanOperator(actor)) {
+      return reply.code(403).send({ code: 'human_operator_only', error: `Turning a repository's seat layers off is a person's choice (you are ${actor.kind}/${actor.trust}). Nothing changed.` });
+    }
+    const parsed = RepoSeatLayersSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+    if (!(await adapter.listRepos()).some((r) => r.id === id)) return reply.code(404).send({ code: 'repo_not_found' });
+    try {
+      const entry = await adapter.setRepoSeatLayersOff(id, parsed.data.off);
+      audit.record('repo.seat_layers.set', actor, { detail: { repoId: id, off: entry.seat_layers_off ?? [] } });
+      return await repoOrigins.withGitUrl(entry);
+    } catch (err) {
+      if (err instanceof RepoSeatLayersUnsupportedError) return reply.code(501).send({ code: 'repo_seat_layers_unsupported', error: message(err) });
+      // The engine's refusals, by name (core src/repo.rs set_seat_layers_off): the repo went after crew's check, or a
+      // layer it does not have.
+      if (/^no registered repo `/u.test(message(err))) return reply.code(404).send({ code: 'repo_not_found' });
+      if (/^no seat layer `/u.test(message(err))) return reply.code(400).send({ code: 'unknown_seat_layer', error: message(err) });
       throw err;
     }
   });

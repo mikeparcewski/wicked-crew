@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.231.0",
+  "apiTypesVersion": "0.232.0",
   "endpoints": [
     {
       "method": "GET",
@@ -2219,6 +2219,19 @@
         409,
         500,
         503
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/repos/:id/seat-layers",
+      "requestType": "PutRepoSeatLayersBody",
+      "responseType": "RepoEntry",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        501
       ]
     },
     {
