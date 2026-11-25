@@ -244,7 +244,7 @@ describe.skipIf(!ENGINE_HAS_PRESETS)('preset launch through the real engine', ()
     expect(put.status).toBe(200);
     const launch = await fetch(`${ctx.baseUrl}/api/v1/runs`, {
       method: 'POST',
-      ...json({ problem: 'add SSO login', workflow: 'my-flow', clisJson: SEATS }),
+      ...json({ problem: 'add SSO login', workflow: 'my-flow', clisJson: SEATS, standIns: true }),
     });
     expect(launch.status, await launch.clone().text()).toBe(201);
     const { runId } = (await launch.json()) as { runId: string };

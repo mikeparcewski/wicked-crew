@@ -172,7 +172,7 @@ describe('crew#481 / crew#496 — a completed tool-only run reads delivery:none 
 
     const launch = await postJson('/api/v1/runs', {
       problem: 'e2e: survey the repo and write notes (no code work, no deliver)',
-      clisJson: SEATS,
+      clisJson: SEATS, standIns: true,
       workflow: NOTES_WORKFLOW.id,
       repoRef: repoId,
       humanConfirm: 'none',

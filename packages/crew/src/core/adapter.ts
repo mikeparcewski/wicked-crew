@@ -1847,6 +1847,11 @@ export class CoreAdapter {
     this.drainSince = drain ? (this.drainSince ?? Date.now()) : null;
   }
 
+  /** Whether new work is refused for maintenance (the launch's stand-in question is not asked of a draining daemon). */
+  isDraining(): boolean {
+    return this.drainSince !== null;
+  }
+
   /** Parked and human-held runs are idle for maintenance, but still hold their repository. */
   async maintenanceState(): Promise<MaintenanceState> {
     const active = (await this.sessionsDetail())

@@ -3980,6 +3980,8 @@ export function registerRoutes(
     if (b.standIns === true && !standInsSupported) {
       return reply.code(501).send({ error: 'stand-in checks need a wicked-core-ts that carries them (Core.independencePreflight and grantStandIns); upgrade the engine' });
     }
+    // A draining daemon refuses the launch before it asks anything (the choice would only lead to the 503).
+    if (typeof adapter.isDraining === 'function' && adapter.isDraining()) return reply.code(503).send(maintenanceDrainBody(new MaintenanceDrainError()));
     if (standInEligible && standInsSupported) {
       const setting = await Promise.resolve().then(() => adapter.getSettings()).then((s) => s.standInReview).catch(() => undefined);
       const consent = consentFor(b.standIns === true, setting, `${req.actor.id} (${req.actor.kind})`);

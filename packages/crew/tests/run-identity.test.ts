@@ -258,7 +258,7 @@ describe.skipIf(!ENGINE_HAS_PLANS)('run identity through the real engine', () =>
   }
 
   async function launch(body: Record<string, unknown>): Promise<SessionView> {
-    const res = await fetch(`${baseUrl}/api/v1/runs`, json({ problem: 'x2 identity', clisJson: SEATS, ...body }));
+    const res = await fetch(`${baseUrl}/api/v1/runs`, json({ problem: 'x2 identity', clisJson: SEATS, standIns: true, ...body }));
     expect(res.status, await res.clone().text()).toBe(201);
     const { runId } = (await res.json()) as { runId: string };
     return planned(runId);

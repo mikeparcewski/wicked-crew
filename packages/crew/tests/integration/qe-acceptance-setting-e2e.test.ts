@@ -56,7 +56,7 @@ const clisJson = (): string => JSON.stringify(SEATS.map((key) => ({ key, display
 
 /** Launch over POST /runs and read the persisted run back (the contract is written at launch). */
 async function launch(runId: string, workflow: string, extra: Record<string, unknown> = {}): Promise<{ status: number; body: Record<string, unknown>; session: Record<string, unknown> | null }> {
-  const res = await call('POST', '/api/v1/runs', { problem: 'Build the thing, then review it.', sessionId: runId, workflow, entityMode: 'shared', humanConfirm: 'all', clisJson: clisJson(), ...extra });
+  const res = await call('POST', '/api/v1/runs', { problem: 'Build the thing, then review it.', standIns: true, sessionId: runId, workflow, entityMode: 'shared', humanConfirm: 'all', clisJson: clisJson(), ...extra });
   if (res.status !== 201) return { ...res, session: null };
   launched.push(runId);
   const deadline = Date.now() + 30_000;
@@ -155,7 +155,7 @@ describe.skipIf(!addonSupportsQeOverride())('qeAcceptance on a real daemon', () 
   }, 60_000);
 
   it("'off': a launch with its own plan (no workflow) gets no skip", async () => {
-    const res = await call('POST', '/api/v1/runs', { problem: 'Build it.', sessionId: 'it-qe-setting-off-plan-1', plan: { steps: [{ catalog: 'build' }] }, humanConfirm: 'all', clisJson: clisJson() });
+    const res = await call('POST', '/api/v1/runs', { problem: 'Build it.', standIns: true, sessionId: 'it-qe-setting-off-plan-1', plan: { steps: [{ catalog: 'build' }] }, humanConfirm: 'all', clisJson: clisJson() });
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     launched.push('it-qe-setting-off-plan-1');
     const deadline = Date.now() + 30_000;

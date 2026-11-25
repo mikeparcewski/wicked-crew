@@ -140,7 +140,7 @@ describe('maintenance HTTP', () => {
   it('POST /runs returns a typed 503 without reaching core; disabling drain admits it', async () => {
     const { app } = await serve();
     adapter.setDraining(true);
-    const launch = () => app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'inspect this' } });
+    const launch = () => app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'inspect this', standIns: true } });
     const refused = await launch();
     expect(refused.statusCode, refused.body).toBe(503);
     expect(refused.json()).toMatchObject({ code: 'maintenance_drain', error: expect.any(String), hint: expect.any(String) });
