@@ -17,9 +17,9 @@
 // is exactly the invocation CI and developers use: if verification were ever wired into `--check`
 // only, those cases would observe the unguarded copy and fail.
 //
-// Assertions name the substance (the offending file, both hashes) rather than just
-// the exit code — on macOS a fixture addon that survives verification dies later at `codesign`,
-// which also exits 1, and an exit-code-only assertion would pass with verification deleted.
+// Assertions name the substance (the offending file, both hashes) rather than just the exit code:
+// a later step of the copy that fails also exits 1, and an exit-code-only assertion would pass with
+// verification deleted.
 
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
@@ -190,8 +190,19 @@ describe('use-local-core-ts verifies the addon against the source build (FINDING
     const checked = run(fx, ['--check']);
     expect(checked.err).toBe('');
     expect(checked.status).toBe(0);
-    expect(checked.out).toContain('verified');
-    expect(checked.out).not.toMatch(/pin/i);
+    expect(checked.out).toMatch(/^use-local-core-ts: verified — build current \(.*\), linked\.\n$/);
+    expect(checked.out).not.toMatch(/coverage validator pin|carries pin|PIN SKEW/);
+  });
+
+  it('(J6 M1) the DEPLOY path (no flags, what CI runs) links an addon that carries no pin', () => {
+    // An ad-hoc codesign of a plain file succeeds on macOS, so this copy path runs on every CI platform.
+    const fx = makeFixture();
+    const r = run(fx);
+    expect(r.err).toBe('');
+    expect(r.status).toBe(0);
+    for (const f of ['index.js', 'index.d.ts', ADDON]) expect(existsSync(join(fx.dest, f))).toBe(true);
+    expect(r.out).toMatch(/verified: addon is the current build \(.*\)$/m);
+    expect(r.out).not.toMatch(/coverage validator pin|carries pin|PIN SKEW/);
   });
 
   it('fails closed when there is no cargo artifact to verify against', () => {

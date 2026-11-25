@@ -110,8 +110,8 @@ if (binaries.length > 1) {
 }
 
 // ------------------------------------------------------------------------------------------------
-// FINDING-090 verification. Everything below derives from artifacts — the cargo build output, the
-// dep-info file cargo wrote beside it, and core's own source constant. Nothing is restated here:
+// FINDING-090 verification. Everything below derives from artifacts — the cargo build output and the
+// dep-info file cargo wrote beside it. Nothing is restated here:
 // a second copy of a value that must agree is the defect this exists to catch.
 // ------------------------------------------------------------------------------------------------
 
