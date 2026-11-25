@@ -10,8 +10,9 @@ import type { CoreEvent } from '../src/core/types.js';
 import { SeatSessionSchema } from '../src/api/routes.js';
 
 const URL = '/api/v1/seats/codex/container-login';
-const NAME = 'wicked-agw-fixture-login-codex-deadbeef';
-const ARGV = ['/fixture/runtime', 'run', '--rm', '--name', NAME, 'image'];
+// codex signs in on the host: the shape of wicked-core `seat_login::host_login_argv` (src/seat_login.rs), abridged.
+const ARGV = ['/usr/bin/env', '-i', 'TERM=xterm-256color', 'CODEX_HOME=/fixture/gateway/login/wicked-agw-fixture-login-codex-deadbeef/codex',
+  '/bin/sh', '-c', 'exec "$3" "$@"', 'wicked-login', 'Codex sign-in', '/fixture/gateway/login/codex.pid', '/fixture/bin/codex', 'login'];
 let home: string;
 const apps: FastifyInstance[] = [];
 beforeEach(() => {
@@ -56,8 +57,8 @@ describe('sign-in refusal and abandonment routes', () => {
     expect(res.json().error).not.toContain('/Users/');
   });
   // crew-0182: closing an open HOST sign-in (codex) keeps what it saved: one ingest for that sign-in, then the release
-  // (its exact container removed); its later exit ingests nothing more.
-  it('reports the open terminal for reattachment, and an exact-name DELETE saves it once and releases it', async () => {
+  // (the engine's ingest ends the login; crew removes nothing itself); its later exit ingests nothing more.
+  it('reports the open terminal for reattachment, and a DELETE saves it once and releases it', async () => {
     const { app, exec, closeTerminal, emit } = build();
     await app.inject({ method: 'POST', url: URL });
     const conflict = await app.inject({ method: 'POST', url: URL });
@@ -65,13 +66,13 @@ describe('sign-in refusal and abandonment routes', () => {
     expect(conflict.json()).toEqual({ code: 'signin_already_open', error: 'A Codex sign-in is already open. Finish it, or close it and start again.', terminalId: 'term-1' });
     expect((await app.inject({ method: 'DELETE', url: URL })).json()).toEqual({ closed: true, saved: true });
     expect(closeTerminal).toHaveBeenCalledWith('term-1');
-    expect(exec).toHaveBeenCalledWith('/fixture/runtime', ['rm', '-f', NAME], expect.objectContaining({ timeout: 3_000 }));
+    expect(exec.mock.calls.some(([file]) => file !== '/fixture/core')).toBe(false);
     emit('term-1');
     expect(exec.mock.calls.filter(([, args]) => args[1] === 'ingest')).toHaveLength(1);
     expect((await app.inject({ method: 'DELETE', url: URL })).json()).toEqual({ closed: false });
     expect((await app.inject({ method: 'POST', url: URL })).statusCode).toBe(201);
   });
-  it('allows a POST after terminal exit while its ingest is still pending, and removes its exact container', async () => {
+  it('allows a POST after terminal exit while its ingest is still pending', async () => {
     const { app, exec, emit, closeTerminal } = build();
     let finish!: () => void;
     exec.mockImplementation(async (_file, args) => {
@@ -88,7 +89,6 @@ describe('sign-in refusal and abandonment routes', () => {
     expect(early).toBeNull();
     expect((await next).statusCode).toBe(201);
     expect(closeTerminal).toHaveBeenCalledWith('term-1');
-    expect(exec.mock.calls).toContainEqual(['/fixture/runtime', ['rm', '-f', NAME], expect.objectContaining({ timeout: 3_000 })]);
   });
   it('expires a session after fifteen minutes and ignores its later exit', async () => {
     const { app, exec, emit, closeTerminal } = build();
@@ -119,7 +119,7 @@ describe('sign-in refusal and abandonment routes', () => {
     await app.inject({ method: 'POST', url: URL });
     await app.close();
     expect(closeTerminal).toHaveBeenCalledWith('term-1');
-    expect(exec.mock.calls.some(([, args]) => args[0] === 'rm' && args[2] === NAME)).toBe(true);
+    expect(exec.mock.calls).toContainEqual(['/fixture/core', ['seat-login', 'abandon', 'codex'], expect.objectContaining({ timeout: 20_000 })]);
     expect(exec.mock.calls.some(([, args]) => args[1] === 'ingest')).toBe(false);
   });
   it('codes parser and terminal-spawn failures and scrubs the spawn diagnostic', async () => {

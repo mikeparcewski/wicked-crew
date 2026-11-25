@@ -360,6 +360,7 @@ import {
   readStudioBundleVersion,
   type ErrorRing,
 } from './diagnostics.js';
+import { DiskStoreCache, readDiskStores } from './disk-stores.js';
 import { GovernanceDiagnostics } from './governance-health.js';
 import { ATTACHMENT_LIMITS, ATTACHMENT_MAX_MESSAGE_BYTES, AttachmentError, ChatAttachmentStore, attachmentWire, attachmentsBlock, boundaryOf, parseMultipart, stageForSeat } from './chat-attachments.js';
 import { CHAT_HISTORY_MAX_LIMIT, ChatHistoryStore, SeedRequestStore, decodeCursor } from './chat-history.js';
@@ -418,6 +419,7 @@ import { VoiceService, defaultVoiceDir } from '../voice/service.js';
 import { TtsService } from '../voice/tts.js';
 import { VoiceDashboardStore } from '../voice/dashboard.js';
 import { registerVoiceRoutes } from '../voice/routes.js';
+import { DeskSnoozes, registerDeskSnoozeRoutes } from './desk-snoozes.js';
 import { VoiceInjectInputs } from '../voice/inject-input.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
@@ -1975,6 +1977,7 @@ export function registerRoutes(
     service: new VoiceService({ dir: defaultVoiceDir() }),
     dashboard: (() => { try { return VoiceDashboardStore.under(crewStateHome()); } catch { return null; } })(),
   };
+  registerDeskSnoozeRoutes(app, { snoozes: new DeskSnoozes(audit) });
   registerVoiceRoutes(app, { voice: voice.service, tts: voice.tts ?? new TtsService({ dir: defaultVoiceDir() }), dashboard: voice.dashboard, audit });
   const voiceInputs = runtime.voiceInputs ?? new VoiceInjectInputs();
   const openWithOs = runtime.openWithOs ?? openWithSystemDefault;
@@ -2774,6 +2777,10 @@ export function registerRoutes(
   const acpFoldCache = new AcpFoldCache();
   const engineVersionCache = new EngineVersionCache();
   const floorCacheCache = new FloorCacheCache();
+  // crew#1126: what wicked holds on the state-home volume, read only when the disk row is low (60 s cache).
+  const diskStoresCache = new DiskStoreCache(async (volumePath, deadline) =>
+    readDiskStores({ volumePath, deadline, floorCache: () => floorCacheCache.getRaw(), repos: await adapter.listRepos() }),
+  );
   // The governance block (crew#495): the store the engine's emit seam writes to (as the adapter
   // exported it — `null` on a boot that resolved none), its record count through the engine
   // binding when the addon has one, and the dead-letter outbox folded on change. Built at boot so
@@ -9854,7 +9861,10 @@ export function registerRoutes(
       // Not generated yet is a state, typed by `code`, not a refusal (lane repo-page). It says how
       // far the repository is ("23% real requirements · 4397 placeholders · target 80%";
       // wicked-core#1233), from the very engine read the page used, when it has a store to count.
-      return reply.code(404).send({
+      // A 200, not a 404 (studio#986): a repository nobody has generated requirements for is a normal
+      // answer, and studio reads it for every such repository on each page. `code` is the discriminator;
+      // the 404 stays only for a repository that is not registered (no `code`).
+      return reply.code(200).send({
         ...REQUIREMENTS_NOT_GENERATED,
         ...(coverage === null ? {} : { coverage }),
         ...(minimum === null ? {} : { minimum }),
@@ -12149,7 +12159,7 @@ export function registerRoutes(
           tailLagMs: watchHealth?.tail_lag_ms ?? null,
         }),
         probeVault({ vault: adapter.vaultBin != null ? vaultDiagnostics(adapter.vaultBin) : null, exec: systemExec }),
-        diskRow(stateHome),
+        diskRow(stateHome, undefined, undefined, undefined, stateHome === null ? null : (deadline) => diskStoresCache.get(stateHome, deadline)),
         probeSeatImages({
           containerFloor,
           clis: rosterSeatClis(),

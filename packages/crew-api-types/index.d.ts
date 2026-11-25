@@ -7873,10 +7873,13 @@ export interface RequirementsPage {
 }
 
 /**
- * `GET /repos/:id/requirements` 404 when the repository's `requirements_graph.json` has not been
+ * `GET /repos/:id/requirements` answer when the repository's `requirements_graph.json` has not been
  * generated (0.154.0). A state, not a refusal: `code` is the discriminator a client matches on, and
  * `workflow` names the preset that generates the graph (its last step runs `wicked-core domain-graph`).
- * Any other 404 on the route (an unknown repo) carries no `code`.
+ * Sent with status 200 after crew 0.18.20 (studio#986), so the route's 200 body is
+ * `RequirementsPage | RequirementsNotGenerated`, told apart by `code === 'notGenerated'`; an older daemon
+ * sends this body with a 404. `error` stays for those older readers. A 404 on the route now means only an
+ * unknown repository, and carries no `code`.
  */
 export interface RequirementsNotGenerated {
   error: string;
@@ -17934,6 +17937,47 @@ export interface VoiceTtsStatus {
   voices: Record<string, { installed: boolean; name: string; accent: string; licence: string; bytes: number; source: string }>;
   /** An install in progress (`step` is `engine` or `voice:<id>`), or the last one's failure; `null` when none. */
   install: { state: 'running' | 'failed'; step: string; error: string | null } | null;
+}
+
+/**
+ * Snooze a Needs-you item (crew#1124, DES-desk-v2 §6 item 6). `GET /desk/snoozes` → {@link DeskSnoozesResponse};
+ * `PUT /desk/snoozes/:key` {@link PutDeskSnoozeBody} → {@link DeskSnooze} (audited `desk.need.snoozed`; 400
+ * `desk_snooze_invalid` for a time not in the future, more than 7 days ahead, or a key over 200 characters);
+ * `DELETE /desk/snoozes/:key` → {@link DeskSnoozeWakeResponse} (audited `desk.need.woken`). Both are on disk before
+ * the answer (500 `desk_snooze_unsaved` when the trail could not take them; nothing changed). Setting or ending one
+ * is a human operator's (403 `human_operator_only`; an observer token gets the auth boundary's own trust 403). A snooze only defers the item on the Desk: it stays in
+ * `/system.attention[]`, and the skin brings it back when `until` passes or its rank rises above `severity`.
+ */
+export interface DeskSnooze {
+  /** The skin's own id for the item (`run:<id>`, `infra:disk`, a need-row key); opaque to the daemon. */
+  key: string;
+  /** ISO-8601: when the snooze ends by itself. */
+  until: string;
+  /** The skin's own rank of the item when it was snoozed (higher is worse), so it can bring the item back when it
+   *  gets worse; `null` when not said. */
+  severity: number | null;
+  /** ISO-8601: when it was snoozed. */
+  at: string;
+  /** The actor id that snoozed it. */
+  by: string;
+}
+
+export interface DeskSnoozesResponse {
+  /** The snoozes still in force, soonest to end first. */
+  snoozes: DeskSnooze[];
+}
+
+export interface PutDeskSnoozeBody {
+  /** ISO-8601 with an offset; in the future, at most 7 days ahead. */
+  until: string;
+  /** A whole number 0-1000: the skin's rank of the item, higher is worse. */
+  severity?: number;
+}
+
+export interface DeskSnoozeWakeResponse {
+  key: string;
+  /** `false` when no snooze was in force for the key. */
+  woken: boolean;
 }
 
 /** `POST /voice/tts`: the person's consent and the voices to install (202 = started, with the engine first when missing;
