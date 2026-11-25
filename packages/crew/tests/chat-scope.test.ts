@@ -1137,7 +1137,13 @@ describe('crew#1569: the statement on the container seat floor', () => {
     const text = chatScopeStatement('k6', scope);
     expect(text).toContain('Do NOT `cd` into a repository: run every command from where you start, and name the repository\'s path in it instead,');
     expect(text).toContain('e.g. `git -C /srv/repos/alpha log -5` or `ls /srv/repos/alpha`.');
-    expect(text).toContain('in a command that\ncan also write');
+    // Every form the engine refuses (core gate_hook.rs, crew#1795), before and after wicked-core#1849: a cd in a command
+    // with any write target (a redirect, even into the seat's own folder), a script interpreter or shell, or a git
+    // command that changes something (crew#1854: the line had dropped the redirect). It never promises the answer stops.
+    expect(text).toContain('The repositories are read-only: a command that `cd`s into one is refused when\n' +
+      'it also writes anywhere (a `>` redirect or any other write target, even one in your own folder), runs a script\n' +
+      'interpreter (python, node, a shell script) or runs a git command that changes something.');
+    expect(text).not.toContain('your answer stops');
     // The container floor's own checkout is the working directory: nothing to cd into, no line.
     const floor = chatScopeStatement('k6', scope, undefined, { containerFloor: true, runRepoId: 'r-alpha' });
     expect(floor).not.toContain('Do NOT `cd`');

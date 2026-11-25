@@ -188,16 +188,16 @@ describe.skipIf(!supported)('recon fan-out as an engine campaign (crew#390/#391)
         expect(runId).toMatch(/^[A-Za-z0-9._-]+(?::[A-Za-z0-9._-]+)+$/);
         const sanitized = runId.replaceAll(':', '-');
 
-        // The engine minted at its SANITIZED path …
-        const engineTree = join(repoRoot, 'wicked-worktrees', sanitized);
+        // The engine minted at its SANITIZED path, beside the checkout (wicked-core#1851:
+        // `<parent>/<name>.wicked/wicked-worktrees/<id>`, `repo::worktrees_root`) …
+        const engineTree = join(scratch, 'repos', `${repo}.wicked`, 'wicked-worktrees', sanitized);
         expect(existsSync(engineTree), `engine-native worktree for ${runId}`).toBe(true);
         // … and the RAW path — the one crew's deleted pre-provisioning produced — is ABSENT.
         // That absence is the actual proof this run went through the engine-native path: mere
         // existence would also pass if crew still pre-provisioned, because the engine ADOPTS.
-        expect(
-          existsSync(join(repoRoot, 'wicked-worktrees', runId)),
-          `no crew-pre-provisioned tree for ${runId}`,
-        ).toBe(false);
+        for (const root of [join(repoRoot, 'wicked-worktrees'), join(scratch, 'repos', `${repo}.wicked`, 'wicked-worktrees')]) {
+          expect(existsSync(join(root, runId)), `no crew-pre-provisioned tree for ${runId}`).toBe(false);
+        }
         // The ownership marker is the engine's signature: crew's workaround never wrote one.
         expect(readFileSync(join(adminDir(engineTree), 'wicked-run-id'), 'utf8').trim()).toBe(runId);
         // And the branch carries the engine's one spelling.
@@ -282,11 +282,11 @@ describe.skipIf(!supported)('recon fan-out as an engine campaign (crew#390/#391)
       }, 110_000);
       expect(branch, `the engine must mint wicked/${sanitized} for the repo-scoped node`).not.toBeNull();
 
-      // And crew minted nothing of its own at the raw, colon-carrying spelling.
-      expect(
-        existsSync(join(repoRoot, 'wicked-worktrees', runId)),
-        `no crew-pre-provisioned tree for ${runId}`,
-      ).toBe(false);
+      // And crew minted nothing of its own at the raw, colon-carrying spelling, inside the checkout
+      // or beside it (wicked-core#1851).
+      for (const root of [join(repoRoot, 'wicked-worktrees'), join(scratch, 'repos', 'alpha.wicked', 'wicked-worktrees')]) {
+        expect(existsSync(join(root, runId)), `no crew-pre-provisioned tree for ${runId}`).toBe(false);
+      }
     },
     120_000,
   );

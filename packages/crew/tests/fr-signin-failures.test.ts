@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { signInFailure } from '../src/api/seat-container-login.js';
+import { engineSpotOf, signInFailure } from '../src/api/seat-container-login.js';
 
 let home: string;
 beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'fr-signin-')); vi.stubEnv('HOME', home); });
@@ -46,12 +46,27 @@ describe('signInFailure', () => {
     expect(signInFailure('the cluster_unreachable flag was seen', 'claude').code).toBe('signin_failed');
     expect(signInFailure('xno_cluster: nope', 'claude').code).toBe('signin_failed');
   });
+  it('crew#1844: the commands a cluster refusal names are filled in for this daemon', () => {
+    const said = (kind: string) => `wicked-core seat-login: ${kind}: the reason`;
+    const engine = { exe: '/opt/wicked/bin/wicked-core', home: '/var/crew' };
+    const none = signInFailure(said('no_cluster'), 'codex', engine).error;
+    expect(none).toContain("run `/opt/wicked/bin/wicked-core cluster install --admin-context rancher-desktop --home /var/crew` (rancher-desktop is Rancher Desktop's cluster; for a different cluster, use its context), then try again.");
+    expect(signInFailure(said('controller_missing'), 'codex', engine).error).toContain('`/opt/wicked/bin/wicked-core cluster install --admin-context rancher-desktop --home /var/crew`');
+    expect(signInFailure(said('image_unavailable'), 'codex', engine).error).toContain('`/opt/wicked/bin/wicked-core seat-image build codex`');
+    for (const kind of ['no_cluster', 'controller_missing', 'image_unavailable']) expect(signInFailure(said(kind), 'codex', engine).error).not.toMatch(/<[^>]+>/);
+    // The engine and state home a sign-in runs with: the gateway dir's parent, as runSeatLogin hands it.
+    vi.stubEnv('WICKED_CORE_EXE', '/opt/wc');
+    expect(engineSpotOf({ gatewayDir: '/opt/crew-1844/gateway' })).toEqual({ exe: '/opt/wc', home: '/opt/crew-1844' });
+  });
   it('explains that the missing CLI is installed on this computer', () => {
     expect(signInFailure("codex is not installed on this host: its sign-in runs this host's own codex (the seats run codex 0.162.1). Install it, then sign in again", 'codex')).toEqual({
       code: 'cli_not_installed',
       error: "Codex isn't installed on this computer. Its sign-in runs your own codex: install it (see its install guide), then try again.",
     });
     expect(signInFailure('codex is not installed on this host. Install it: npm install -g @openai/codex', 'codex').error).toContain('(npm install -g @openai/codex)');
+    // core#1845: the engine's refusal now ends with the seat package (seat_login.rs host_cli_missing).
+    expect(signInFailure("codex is not installed on this host: its sign-in runs this host's own codex (the seats run codex 0.162.1). Install it, then sign in again: npm install -g @openai/codex@0.162.1", 'codex').error)
+      .toBe("Codex isn't installed on this computer. Its sign-in runs your own codex: install it (npm install -g @openai/codex@0.162.1), then try again.");
   });
   it('scrubs foreign Unix and Windows homes, the injected home, and multiline diagnostics', () => {
     expect(signInFailure(`cannot read /Users/x/auth.json or /home/y/auth or C:\\Users\\z\\auth or ${home}/auth\nprivate second line`, 'codex')).toEqual({

@@ -107,19 +107,39 @@ function invocationFlags(seat: GovernanceSeatInput): string[] {
 }
 
 /** The CLI that actually runs for `seat` (C5, codex c5-crew-r3): the executable of its headless
- *  invocation (quote-aware first token), else its binary, else its key — basename, lower-case, no
- *  extension — as the engine resolves it, so a `claude` seat running `pi` is judged as pi. */
+ *  invocation (its first token, {@link firstToken}), else its binary, else its key — basename,
+ *  lower-case, its final extension dropped (the engine's `file_stem`, crew#1704 r2) — as the engine
+ *  resolves it, so a `claude` seat running `pi` is judged as pi. */
 export function runRoot(seat: GovernanceSeatInput): string {
-  const inv = typeof seat.headless_invocation === 'string' ? seat.headless_invocation.trim() : '';
-  let exe = '';
-  if (inv !== '') {
-    const m = /^"([^"]*)"|^'([^']*)'|^(\S+)/.exec(inv);
-    exe = (m?.[1] ?? m?.[2] ?? m?.[3] ?? '').trim();
-  }
+  const inv = typeof seat.headless_invocation === 'string' ? seat.headless_invocation : '';
+  let exe = firstToken(inv).trim();
   if (exe === '' && typeof seat.binary === 'string') exe = seat.binary;
   if (exe === '') exe = seat.key.split('#')[0] ?? seat.key;
   const base = exe.split(/[\\/]/).pop() ?? exe;
-  return base.replace(/\.(exe|cmd|bat|mjs|js)$/i, '').toLowerCase();
+  const dot = base.lastIndexOf('.');
+  return (dot > 0 ? base.slice(0, dot) : base).toLowerCase();
+}
+
+/** The first token of an invocation as the engine's tokenizer reads it (wicked-council
+ *  `dispatch::tokenize`): a double quote groups and joins with the text around it
+ *  (`"/opt/Agent Tools"/claude` is one token), whitespace outside quotes separates, and a single
+ *  quote is an ordinary character. */
+function firstToken(inv: string): string {
+  let cur = '';
+  let inQuote = false;
+  let any = false;
+  for (const ch of inv) {
+    if (ch === '"') {
+      inQuote = !inQuote;
+      any = true;
+    } else if (/\s/.test(ch) && !inQuote) {
+      if (any) return cur;
+    } else {
+      cur += ch;
+      any = true;
+    }
+  }
+  return cur;
 }
 
 function fenceFor(scope: GovernanceScopeKind, roots: GovernanceFenceRoots): SeatGovernanceFence {

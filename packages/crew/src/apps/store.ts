@@ -47,6 +47,7 @@ import type {
 } from '../core/types.js';
 import { EMPTY_LOCK, LOCK_PATH, QUERIES_DIR, QUERY_EXT, SPEC_PATH, lockBytes, ownText, readAppTree, specBytes, stagedCheck, type AppFiles, type CheckOutcome, type AppSourceStage } from './check.js';
 import { AppGit, gitProblem, SHA_RE } from './git.js';
+import { wickedHomeDir } from '../core/wicked-home.js';
 import type { ImageSources } from './publish/layout.js';
 import type { PublishCheckDeps } from './publish/check.js';
 import { appsRuntime } from './publish/artifacts.js';
@@ -1231,10 +1232,10 @@ export class AppStore {
   }
 }
 
-/** The apps root: `WICKED_CREW_APPS_ROOT`, else `~/.wicked/apps`. */
+/**
+ * The apps root: `WICKED_CREW_APPS_ROOT`, else `${WICKED_HOME:-~/.wicked}/apps` (crew#1823, the wicked home's one
+ * resolver). An app already made keeps the root its record names (`StoredApp.root`), so nothing moves.
+ */
 export function defaultAppsRoot(env: NodeJS.ProcessEnv = process.env): string {
-  const explicit = env['WICKED_CREW_APPS_ROOT'];
-  if (explicit !== undefined && explicit.trim() !== '') return explicit;
-  const home = env['HOME'] ?? env['USERPROFILE'] ?? '/tmp';
-  return join(home, '.wicked', 'apps');
+  return wickedHomeDir('WICKED_CREW_APPS_ROOT', 'apps', env);
 }

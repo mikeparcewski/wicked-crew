@@ -705,11 +705,12 @@ export function chatSearchLines(paths: readonly string[]): string[] {
 }
 
 /**
- * (crew#1795) A seat that starts outside the repositories tends to `cd` into one. The engine's input governance judges
- * a `cd` out of the working directory in a command that can also write (a redirect, an interpreter or shell, a git verb
- * that is not a read: wicked-core gate_hook.rs `bash_cd_escape_targets`) as a write outside the job's folder and blocks
- * it, so the answer stops at a rules card. Say where to stay and hand the form that works: the repository's path named
- * in the command. `.` (the working directory itself, a container-floor checkout) needs no such line.
+ * (crew#1795) A seat that starts outside the repositories tends to `cd` into one. The repositories are read-only to the
+ * job, and the engine's input governance (wicked-core gate_hook.rs `bash_cd_escape_targets`) refuses a `cd` into one in
+ * a command that may write there: any write target (a redirect, even into the seat's own folder), a script interpreter
+ * or shell whose writes it cannot see, a git command that changes something (crew#1854: every one is named, so a seat
+ * that keeps its output with `> notes.txt` is not told that only interpreters are refused). Say where to stay and hand the form that works: the repository's path named in the command. `.` (the
+ * working directory itself, a container-floor checkout) needs no such line.
  */
 export function chatStayLines(paths: readonly string[]): string[] {
   const outside = paths.filter((p) => p !== '.');
@@ -717,9 +718,9 @@ export function chatStayLines(paths: readonly string[]): string[] {
   const one = shellWord(outside[0]!);
   return [
     "Do NOT `cd` into a repository: run every command from where you start, and name the repository's path in it instead,",
-    `e.g. \`git -C ${one} log -5\` or \`ls ${one}\`. The job's rules refuse a \`cd\` out of where you start in a command that`,
-    'can also write (a redirect, a script interpreter such as python or node, a git command that changes something), and',
-    'your answer stops at that refusal.',
+    `e.g. \`git -C ${one} log -5\` or \`ls ${one}\`. The repositories are read-only: a command that \`cd\`s into one is refused when`,
+    'it also writes anywhere (a `>` redirect or any other write target, even one in your own folder), runs a script',
+    'interpreter (python, node, a shell script) or runs a git command that changes something.',
   ];
 }
 
@@ -862,6 +863,10 @@ export function chatJobLines(mode: 'cards' | 'prose'): string[] {
     'with the new `card` or `option`; crew asks whether to start it again. Anything else is answered.',
     '',
     '**While a job runs**, a request to add to it is answered in prose, pointing at the job\'s own plan Edit; no block.',
+    '',
+    '**A change to a pull request a job of this chat delivered** ("revise that PR", "add a test on the same PR"): new work,',
+    'routed as above. Crew decides where it is delivered and the card says it ("It updates pull request #N"); never say',
+    'yourself that it lands on, or is constrained to, an existing pull request.',
   ];
 }
 

@@ -64,6 +64,7 @@ import { mkdirSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
 import { defaultStateHome } from '../projects/state-home.js';
+import { withoutAdoCredential } from './ado-env.js';
 
 /** The `serve` / `governance` flag naming the store explicitly. */
 export const GOVERNANCE_DB_FLAG = '--governance-db';
@@ -343,7 +344,9 @@ export function applyEmitOrigin(origin: string, env: NodeJS.ProcessEnv = process
  * process booted with — the operator's explicit store, or nothing (a newer estate binary handed the
  * daemon's `governance.db` as its graph store could migrate the file's schema past what the engine's
  * vendored store opens) — and crew's own override `WICKED_CREW_GOVERNANCE_DB`, needed only at
- * resolution, is dropped outright. Governed workers are covered separately by core's `hardened()`.
+ * resolution, is dropped outright. The raw Azure DevOps credential is dropped too (crew#1843): only the two children
+ * that mint a header ask for it back (`withAdoCredential`). Governed workers are covered separately by core's
+ * `hardened()`.
  */
 export function childEnvWithBootEstateDb(
   env: NodeJS.ProcessEnv = process.env,
@@ -353,7 +356,9 @@ export function childEnvWithBootEstateDb(
   if (bootValue === undefined) delete out[ESTATE_DB_ENGINE_ENV];
   else out[ESTATE_DB_ENGINE_ENV] = bootValue;
   delete out[GOVERNANCE_DB_ENV];
-  return out;
+  // (crew#1843) Nor the daemon's raw Azure DevOps credential: the engine in this process reads it, no crew child does but
+  // the two that mint a header from it, and they ask for it back by name (`withAdoCredential`, ado-env.ts).
+  return withoutAdoCredential(out);
 }
 
 /**

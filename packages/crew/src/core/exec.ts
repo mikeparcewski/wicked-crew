@@ -26,10 +26,44 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { withoutAdoCredential } from './ado-env.js';
 import { childEnvWithBootEstateDb } from './governance-store.js';
 import { isDirectoryPresent } from './repoPaths.js';
 
 const execFileAsync = promisify(execFile);
+
+// (crew#1843) The raw Azure DevOps credential's names and the two env helpers live in a leaf module (governance-store.ts
+// drops the credential from every crew child, and this module imports governance-store.ts).
+export { ADO_RAW_ENV, withAdoCredential, withoutAdoCredential } from './ado-env.js';
+
+/** Whether `file` runs git itself (`git`, `/usr/bin/git`, `git.exe`). */
+export function isGitProgram(file: string): boolean {
+  return /^git(?:\.exe)?$/i.test(file.split(/[\\/]/).pop() ?? '');
+}
+
+/** The `-c` entry every crew git carries (crew#1843), in `GIT_CONFIG_PARAMETERS`' quoting. */
+export const FSMONITOR_OFF_PARAMETER = "'core.fsmonitor=false'";
+
+/**
+ * (crew#1843) The environment of every git crew starts: a crew child's ({@link childEnvWithBootEstateDb}), without the
+ * raw Azure DevOps credential, and with `core.fsmonitor=false`. A host whose global config turns fsmonitor on would
+ * otherwise start a `git fsmonitor--daemon` per checkout crew reads, carrying this environment and outliving the
+ * daemon. The setting rides `GIT_CONFIG_PARAMETERS`, the channel `git -c` uses (the engine's `hardened()` does the
+ * same): git reads it after every config file and after the `GIT_CONFIG_COUNT` entries, and the last entry wins, so it
+ * is appended to what `env` carries and a caller's own entries (a scoped header, a redirect refusal) keep theirs.
+ */
+export function gitChildEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out = withoutAdoCredential(childEnvWithBootEstateDb(env));
+  // Always appended (applied twice, it is there twice): a check for "already last" could be fooled by a quoted value.
+  const current = (out['GIT_CONFIG_PARAMETERS'] ?? '').trim();
+  out['GIT_CONFIG_PARAMETERS'] = current === '' ? FSMONITOR_OFF_PARAMETER : `${current} ${FSMONITOR_OFF_PARAMETER}`;
+  return out;
+}
+
+/** A crew child's environment for `file`: {@link gitChildEnv} for git, else {@link childEnvWithBootEstateDb}. */
+export function childEnvFor(file: string, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return isGitProgram(file) ? gitChildEnv(env) : childEnvWithBootEstateDb(env);
+}
 
 /** 64 MiB. Chosen to clear the largest `blast-radius` output observed in the corpus by a wide
  *  margin while still bounding the daemon's heap. Raise it deliberately, not reflexively — if a
@@ -136,11 +170,12 @@ export async function execCapped(
     // BOOT values (`childEnvWithBootEstateDb`): the daemon exports its governance store as
     // WICKED_ESTATE_DB for the in-process engine, and that is nobody else's business — not git's,
     // uv's, the estate CLI's or a version probe's. An explicit `opts.env` is scrubbed the same way,
-    // so a caller that spreads `process.env` is covered too.
+    // so a caller that spreads `process.env` is covered too. A git also loses the raw Azure DevOps credential and runs
+    // with fsmonitor off (`gitChildEnv`, crew#1843).
     return await execFileAsync(file, args, {
       ...opts,
       maxBuffer,
-      env: childEnvWithBootEstateDb(opts.env ?? process.env),
+      env: childEnvFor(file, opts.env ?? process.env),
     });
   } catch (err) {
     if (isMaxBufferError(err)) throw new ExecOutputTooLarge(file, maxBuffer);

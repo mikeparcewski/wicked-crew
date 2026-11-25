@@ -62,9 +62,8 @@ export const RECALL_GROUPS: { readonly [F in AppRecallFrom]: readonly NonNullabl
 export const RECALL_LIMIT_DEFAULT = 20;
 const TITLE_MAX = 200;
 const CONTENT_MAX = 2000;
-/** What a recall asks estate for; a recall naming one source asks for the relay's cap (16,000), as it keeps only that source's items. */
+/** What a recall asks estate for. */
 const TOKEN_BUDGET = 8000;
-const TOKEN_BUDGET_NAMED = 16_000;
 /** A literal recall text, at most. */
 const QUERY_TEXT_MAX = 200;
 
@@ -198,8 +197,9 @@ export async function readRecall(
     const only = t.source !== undefined ? await visibleSource(deps, projectId, t.source) : null;
     const visible = await deps.visible(projectId);
     // Estate is asked under the project's WHOLE set (narrowing it would hide what that source was derived from together
-    // with another visible source); a named source keeps only its items after, with the relay's larger budget.
-    const got = await estate('knowledge.recall', { query: queryText ?? '', visible, token_budget: only === null ? TOKEN_BUDGET : TOKEN_BUDGET_NAMED });
+    // with another visible source). A named source is `require`d (crew#1362): estate keeps only the items whose deps
+    // include it BEFORE it ranks and spends the budget, so other sources' better matches cannot crowd it out.
+    const got = await estate('knowledge.recall', { query: queryText ?? '', visible, token_budget: TOKEN_BUDGET, ...(only !== null ? { require: [sourceDep(only.id)] } : {}) });
     const items = isObj(got) && Array.isArray(got['items']) ? got['items'] : null;
     if (items === null) throw new RecallRefusal('unavailable', 'estate answered the recall with no items');
     // The release re-check: an item keeps only when every one of its deps is still in the set read now.

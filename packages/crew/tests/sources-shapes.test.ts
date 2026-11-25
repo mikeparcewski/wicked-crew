@@ -1,7 +1,7 @@
 // DES-KNOWLEDGE-DATA-001 §10.2, §19 B4 against REAL Postgres (CI: 16 and 17): the value-free profiler, started by a
-// person (POST /sources/:name/profile), reads a support-like schema through the data gate's person read and files
-// one data-shape proposal per relation into estate's review queue (a recording fake here; the real estate binary is
-// knowledge-shapes-estate-live.test.ts).
+// person (POST /sources/:name/profile), reads a support-like schema through the data gate's person read and writes
+// one data shape per relation straight into knowledge (crew#1625: submit then approve; nothing waits in the review
+// queue). A recording fake here; the real estate binary is knowledge-shapes-estate-live.test.ts.
 //
 // NEGATIVE CONTROL: a marker seeded in every text value, in a column DEFAULT and in a COMMENT appears in no estate
 // call, no answer and no audit line; no exact row count is kept; every statement the profiler sends is a fixed
@@ -153,6 +153,17 @@ for (const target of PG_TARGETS) {
           queue.push({ id, state: 'pending', payload: args['payload'] });
           return { id };
         }
+        if (tool === 'knowledge.neighbors') {
+          // The shapes estate holds live on a table: those approved whose derived_from is this document.
+          const shapes = queue.filter((q) => q.state === 'approved' && (q.payload as { relate: Array<{ rel: string; to: string }> }).relate.some((r) => r.rel === 'derived_from' && r.to === args['id']));
+          return { nodes: [{ store: 'knowledge', id: args['id'] }, ...shapes.map((q) => ({ store: 'knowledge', id: `kconcept synthetic proposal:${q.id}:` }))], edges: [] };
+        }
+        if (tool === 'proposal.approve') {
+          const q = queue.find((x) => x.id === args['id'] && x.state === 'pending');
+          if (q === undefined) throw new Error(`proposal ${String(args['id'])} is not pending`);
+          q.state = 'approved';
+          return { outcome: 'approved', node_id: `kconcept synthetic proposal:${q.id}:` };
+        }
         throw new Error(`unexpected estate tool ${tool}`);
       };
       const graphDb = join(base, 'escalations.db');
@@ -184,7 +195,7 @@ for (const target of PG_TARGETS) {
       if (base !== undefined) rmSync(base, { recursive: true, force: true });
     }, 60_000);
 
-    it('profiles every relation in bands, finds the joins, and files one shape per relation', async () => {
+    it('profiles every relation in bands, finds the joins, and writes one shape per relation into knowledge', async () => {
       texts.length = 0;
       const res = await app.inject({ method: 'POST', url: '/api/v1/sources/support-pg/profile' });
       expect(res.statusCode, res.body).toBe(200);
@@ -205,7 +216,11 @@ for (const target of PG_TARGETS) {
         { from: 'support.tickets', columns: ['region_id'], to: 'support.regions', references: ['id'], basis: 'fk', overlap: 'all' },
       ]);
       expect(body.describes).toEqual([{ relation: 'support.tickets', repo: 'escalations', name: 'Ticket', kind: 'class', file: 'src/ticket.ts' }]);
-      expect(body.proposed.map((p) => p.relation)).toEqual(['support."order-items"', 'support.assignments', 'support.regions', 'support.tickets']);
+      expect(body.written!.map((p) => p.relation)).toEqual(['support."order-items"', 'support.assignments', 'support.regions', 'support.tickets']);
+      // crew#1625: the person's profile is their decision; every shape is approved, none waits in the review queue.
+      expect(queue.map((q) => q.state)).toEqual(['approved', 'approved', 'approved', 'approved']);
+      expect(body.proposed).toEqual([]);
+      expect((queue[0]!.payload as { shape: { profiledBy?: string } }).shape.profiledBy).toBe(LOCAL_ACTOR.id);
       // The quoted key links estate's own document id (percent-encoded as estate does).
       const items = queue.find((q) => (q.payload as { shape: { relation: string } }).shape.relation === 'support."order-items"')!.payload as Record<string, unknown>;
       expect((items['relate'] as Array<{ to: string }>)[0]!.to).toBe(`kdoc synthetic source:${SID}/support.%22order-items%22:`);
@@ -237,8 +252,8 @@ for (const target of PG_TARGETS) {
         expect(text).not.toContain('region ');
         expect(text).not.toMatch(/\b437\b|\b120\b/);
       }
-      // The same profile again files nothing new (an identical shape is in the queue).
-      expect((res.json() as SourceProfileResponse).alreadyProposed).toBe(4);
+      // The same profile again writes nothing new (an identical shape is in knowledge).
+      expect((res.json() as SourceProfileResponse).unchanged).toBe(4);
       expect(estateCalls.filter((c) => c.tool === 'proposal.submit')).toHaveLength(4);
     });
 

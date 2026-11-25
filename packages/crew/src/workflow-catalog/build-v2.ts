@@ -535,9 +535,7 @@ export function resolveOption(cardId: string, optionId: string | null, served: S
     writes,
     gate,
     requiresQe,
-    // The review preparer does not yet exclude the seats that ran the reviewed work (wicked-crew#1375): the R≠ rule is
-    // not claimed until it does.
-    seats: { ...seatsOf(card.seats, option?.seats), ...(workflow === 'review-recent-work' ? { notRunSeat: false } : {}) },
+    seats: seatsOf(card.seats, option?.seats),
     archetype: option?.archetype ?? card.archetype ?? null,
     typicalMinutes: hint.typicalMinutes,
     cost: hint.cost,

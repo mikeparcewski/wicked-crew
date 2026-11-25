@@ -14,7 +14,7 @@ import { realpathSync } from 'node:fs';
 import { devNull } from 'node:os';
 import { resolve } from 'node:path';
 
-import { childEnvWithBootEstateDb } from '../core/governance-store.js';
+import { gitChildEnv } from '../core/exec.js';
 import type { ChatCheckoutFreshness } from '../core/types.js';
 
 /** What opening a chat found (and did) for one repository's checkout. */
@@ -58,7 +58,7 @@ const realGit: Git = (root, args, timeoutMs = 30_000) =>
       // No hooks (codex on crew#902): a fetch or fast-forward run on the operator's behalf must not
       // execute the checkout's post-merge / reference-transaction hooks.
       ['-C', root, '-c', `core.hooksPath=${devNull}`, ...args],
-      { windowsHide: true, timeout: timeoutMs, env: nonInteractiveGitEnv(childEnvWithBootEstateDb(process.env)) },
+      { windowsHide: true, timeout: timeoutMs, env: nonInteractiveGitEnv(gitChildEnv(process.env)) },
       (err, stdout) => (err ? fail(err) : ok(String(stdout).trim())),
     );
   });

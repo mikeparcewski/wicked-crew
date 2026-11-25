@@ -39,7 +39,8 @@ import type {
   SystemTarget,
   SystemUnresolvedItem,
 } from '../core/types.js';
-import { HOST_FLOOR_BENCH_COPY, HOST_FLOOR_UNKNOWN_COPY } from './seat-standing.js';
+import { gatewayNotReadyFix, NO_ENGINE, type EngineSpot } from './cluster-status.js';
+import { HOST_FLOOR_BENCH_COPY, HOST_FLOOR_UNKNOWN_COPY, isHostFloorBenchCopy } from './seat-standing.js';
 
 const DAY_MS = 86_400_000;
 /** A failed run launched longer ago than this is history to resolve, not a need. */
@@ -58,6 +59,49 @@ const CITES: Partial<Record<SystemInfraKey, RegExp>> = {
   // The k8s runner's refusal kinds (wicked-core FloorUnarmed): a run held on one is the cluster's.
   cluster: /\b(?:no_cluster|cluster_unreachable|controller_missing|pids_unlimited|policy_refused|admission_pending|image_unavailable|exec_stream_lost)\b/,
 };
+
+/** crew#1845: a gateway pod still not serving this long after it first read `starting` is not starting normally: the
+ *  engine reads a pod that keeps crashing, or one whose image cannot be pulled, as `starting` for ever. A first image
+ *  pull on a slow network fits inside it. */
+export const GATEWAY_START_BOUND_MS = 10 * 60_000;
+
+/**
+ * crew#1845: since when the model gateway has read `starting`, across this daemon's reads. A read that says the
+ * gateway serves, is stopped or is not started yet ends the run of `starting` reads; a read that could not see the
+ * gateway (the cluster did not answer) neither starts nor ends it. A read older than one already seen (a slow
+ * snapshot's second needs pass) changes nothing.
+ */
+export class GatewayStartWatch {
+  private since: number | null = null;
+  private seenAt = -Infinity;
+
+  /** The time the gateway first read `starting` in this run of reads, or null when it does not read `starting` now. */
+  observe(row: SystemInfraRow | undefined, now: number): number | null {
+    // A snapshot's `now` is taken once, before its reads: both of its needs passes carry it.
+    const readAt = now;
+    const seen = row?.key === 'gateway' ? (row.details as { gateway?: unknown } | undefined)?.gateway : undefined;
+    if (readAt < this.seenAt) return seen === 'starting' ? this.since : null;
+    this.seenAt = readAt;
+    if (seen === 'starting') {
+      if (this.since === null || readAt < this.since) this.since = readAt;
+      return this.since;
+    }
+    if (seen === 'serving' || seen === 'stopped' || seen === 'absent' || row?.state === 'off' || row?.state === 'ok') this.since = null;
+    return null;
+  }
+}
+/** This daemon's watch (one gateway per daemon). */
+const DAEMON_GATEWAY_WATCH = new GatewayStartWatch();
+
+/** crew#1845: the CLIs whose broker credential refresh is failing (the broker row's per-CLI readings). */
+export function brokerRefreshFailing(row: SystemInfraRow): string[] {
+  if (row.key !== 'broker' || row.state !== 'degraded') return [];
+  const byCli = (row.details as { byCli?: unknown } | undefined)?.byCli;
+  if (byCli === null || typeof byCli !== 'object') return [];
+  return Object.entries(byCli as Record<string, unknown>)
+    .filter(([, r]) => (r as { state?: unknown } | null)?.state === 'refresh_failing')
+    .map(([cli]) => cli);
+}
 
 /** A floor denial whose base fails the same check: the red-base evidence. */
 const BASE_RED = /base_red_unseparated|the run base [0-9a-f]{6,40} fails this check too|base fails (this check )?too/i;
@@ -106,6 +150,10 @@ export interface NeedsInput {
   infraHoldsLive: (key: SystemInfraKey) => boolean;
   /** Per-run cost, when its log was read; absent ⇒ unknown. */
   costOf?: (runId: string) => RunCost | undefined;
+  /** How long the gateway has read `starting` (crew#1845); this daemon's own watch when absent. */
+  gatewayWatch?: GatewayStartWatch;
+  /** (crew#1851) The engine CLI and state home the cluster rows were read with, so a fix names commands that run. */
+  engine?: EngineSpot;
 }
 
 export interface Needs {
@@ -232,19 +280,38 @@ function seatsOut(v: SessionView | undefined, clis: readonly SystemCli[]): strin
  */
 function noneReason(clis: readonly SystemCli[]): string {
   // A seat the engine gives no work on this floor keeps its real reason: the shortcuts below would lose it.
-  const hostReason = clis.some((c) => c.stateReason === HOST_FLOOR_BENCH_COPY || c.stateReason === HOST_FLOOR_UNKNOWN_COPY);
+  const hostReason = clis.some((c) => isHostFloorBenchCopy(c.stateReason) || c.stateReason === HOST_FLOOR_UNKNOWN_COPY);
   if (!hostReason && clis.every((c) => c.state === 'unknown')) return 'No helper’s sign-in can be confirmed right now';
   const out = seatsOut(undefined, clis);
   if (!hostReason && out.length === clis.length) return `Every helper is signed out or benched (${out.join(', ')})`;
   const words = clis.map((c) => {
     if (c.stateReason === HOST_FLOOR_UNKNOWN_COPY) return `${c.cli} work eligibility unknown`;
-    if (c.stateReason === HOST_FLOOR_BENCH_COPY) return `${c.cli} not taking work`;
+    if (isHostFloorBenchCopy(c.stateReason)) return `${c.cli} not taking work`;
     if (c.state === 'signed_out' || c.state === 'benched') return seatsOut(undefined, [c])[0]!;
     return `${c.cli} ${c.state === 'unknown' ? 'sign-in not confirmed' : 'not taking work'}`;
   });
-  const onHost = clis.some((c) => c.stateReason === HOST_FLOOR_BENCH_COPY) ? '; on this computer only Claude Code and Codex get work' : '';
+  // crew#1818: a policy-silenced claude says its own reason, once, and the generic line then leaves claude out of it.
+  const policies = [...new Set(clis.flatMap((c) => isHostFloorBenchCopy(c.stateReason) && c.stateReason !== HOST_FLOOR_BENCH_COPY ? [c.stateReason!] : []))];
+  const policy = policies.map((r) => `; ${r}`).join('');
+  const onHost = clis.some((c) => c.stateReason === HOST_FLOOR_BENCH_COPY)
+    ? (policies.length > 0 ? '; on this computer only Codex gets work' : '; on this computer only Claude Code and Codex get work')
+    : '';
   const unread = clis.some((c) => c.stateReason === HOST_FLOOR_UNKNOWN_COPY) ? '; crew could not read which agents get work on this computer' : '';
-  return `No helper is free to take work (${words.join(', ')})${onHost}${unread}`;
+  return `No helper is free to take work (${words.join(', ')})${onHost}${policy}${unread}`;
+}
+
+/**
+ * crew#1818: what can bring a helper back when none can take work: a sign-in (a signable seat), a bench that lifts by
+ * itself (any bench but the host floor's), both, or neither: then the reason above is the remedy. A roster with no
+ * host-floor reason keeps the one sentence it always had.
+ */
+function noneRemedy(clis: readonly SystemCli[], signable: boolean): string {
+  const hostFloor = clis.some((c) => isHostFloorBenchCopy(c.stateReason) || c.stateReason === HOST_FLOOR_UNKNOWN_COPY);
+  const lifts = clis.some((c) => c.state === 'benched' && !isHostFloorBenchCopy(c.stateReason) && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY);
+  if (!hostFloor || (signable && lifts)) return 'Sign a CLI in, or wait for a bench to lift.';
+  if (signable) return 'Sign a CLI in.';
+  if (lifts) return 'Wait for a bench to lift.';
+  return 'Do what the reason says for each helper, or set up another helper on the Helpers page.';
 }
 
 /** Why a held run is held, in a person's words (the denial's category, never its raw text). */
@@ -401,8 +468,38 @@ export function buildNeeds(input: NeedsInput): Needs {
   };
 
   // Down (or silent) components first: a held run whose denial names one joins it.
-  const infraItems: Array<{ row: SystemInfraRow; kind: 'prevents' | 'slows' }> = [];
+  const infraItems: Array<{ row: SystemInfraRow; kind: 'prevents' | 'slows'; word?: string; cli?: string }> = [];
+  const gatewayRow = input.infra.find((r) => r.key === 'gateway');
+  const startingSince = (input.gatewayWatch ?? DAEMON_GATEWAY_WATCH).observe(gatewayRow, now);
   for (const row of input.infra) {
+    // crew#1845: a gateway still `starting` past its bound, or with a live run already stalled behind it, does not
+    // serve: it is down for every seat and claims the stalled runs behind it. A fresh install's gateway (`absent`,
+    // started before the first seat) stays quiet.
+    if (row.key === 'gateway' && row.state === 'degraded' && startingSince !== null) {
+      const startingFor = Math.max(0, now - startingSince);
+      const stalledBehind = input.infraHoldsLive('gateway') && input.runs.some((r) => r.liveness === 'stalled' && eligible(r.runId));
+      if (startingFor >= GATEWAY_START_BOUND_MS || stalledBehind) {
+        const minutes = Math.round(startingFor / 60_000);
+        infraItems.push({
+          row: {
+            ...row,
+            state: 'down',
+            reason: `Its pod has not become ready${minutes > 0 ? ` in ${minutes} min` : ''}, so seats have no route to their models (a pod that keeps crashing, or an image the cluster cannot pull, stays like this)`,
+            remedy: gatewayNotReadyFix(input.engine ?? NO_ENGINE),
+          },
+          kind: 'prevents',
+          word: 'not ready',
+        });
+        continue;
+      }
+    }
+    // crew#1845: a failing credential refresh is a slowdown ahead of the work: the credential is served until it
+    // expires, then the CLI can take no work. It names the CLI, and signing it in again is the fix.
+    const failing = brokerRefreshFailing(row);
+    if (failing.length > 0) {
+      infraItems.push({ row, kind: 'slows', word: `can't refresh ${failing.join(' and ')}'s sign-in`, cli: failing[0]! });
+      continue;
+    }
     if (row.state === 'down') infraItems.push({ row, kind: 'prevents' });
     else if (row.state === 'degraded' && (row.key === 'load' || row.key === 'daemon' || row.key === 'seat_images' || (row.key === 'skills' && /launches wait/i.test(row.reason)))) infraItems.push({ row, kind: 'slows' });
     else if (row.state === 'unknown' && WORK_PATH.has(row.key)) infraItems.push({ row, kind: 'slows' });
@@ -493,7 +590,7 @@ export function buildNeeds(input: NeedsInput): Needs {
   const anyWorker = input.clis.some((c) => c.workEligible && c.state !== 'signed_out' && c.state !== 'benched');
   if (input.clis.length > 0 && !anyWorker) {
     // A signed-out seat that could take work here after sign-in: never a host-benched one (signing in changes nothing).
-    const signable = input.clis.find((c) => c.canSignIn && c.state === 'signed_out' && c.stateReason !== HOST_FLOOR_BENCH_COPY && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY);
+    const signable = input.clis.find((c) => c.canSignIn && c.state === 'signed_out' && !isHostFloorBenchCopy(c.stateReason) && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY);
     const live = input.runs.filter((r) => eligible(r.runId)).map((r) => ({ runId: r.runId, view: byId.get(r.runId), run: r, severity: 'red' as const, waitedMs: msOf(r.gate?.receivedAt ?? null) }));
     groups.set('cli:none', {
       key: 'cli:none',
@@ -505,7 +602,7 @@ export function buildNeeds(input: NeedsInput): Needs {
         kind: 'prevents',
         title: 'No helper can take work',
         reason: noneReason(input.clis),
-        remedy: 'Sign a CLI in, or wait for a bench to lift.',
+        remedy: noneRemedy(input.clis, signable !== undefined),
         target: { kind: 'cli', cli: (signable ?? input.clis[0]!).cli },
         action: signable !== undefined ? { kind: 'sign_in', label: 'Sign in' } : null,
       }),
@@ -520,10 +617,10 @@ export function buildNeeds(input: NeedsInput): Needs {
   // Fewer than two distinct CLIs signed in (a second seat of one CLI is not a second agent; a benched
   // one is still signed in, and its bench lifts by itself). A job already held for want of a reviewer
   // says it in its own item: one cause, one item.
-  const signedKeys = [...new Set(input.clis.filter((c) => (c.state === 'benched' ? c.stateReason !== HOST_FLOOR_BENCH_COPY && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY : c.state === 'signed_in' && c.workEligible)).map((c) => cliKeyOf(c.cli)))];
+  const signedKeys = [...new Set(input.clis.filter((c) => (c.state === 'benched' ? !isHostFloorBenchCopy(c.stateReason) && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY : c.state === 'signed_in' && c.workEligible)).map((c) => cliKeyOf(c.cli)))];
   if (anyWorker && signedKeys.length < 2 && distinctJudgePair(input.clis) === null && !input.gaps.some((g) => eligible(g.run.runId))) {
     const only = [...new Set(input.clis.filter((c) => c.workEligible && c.state === 'signed_in').map((c) => cliKeyOf(c.cli)))];
-    const signable = input.clis.find((c) => c.canSignIn && c.state === 'signed_out' && !only.includes(cliKeyOf(c.cli)) && c.stateReason !== HOST_FLOOR_BENCH_COPY && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY);
+    const signable = input.clis.find((c) => c.canSignIn && c.state === 'signed_out' && !only.includes(cliKeyOf(c.cli)) && !isHostFloorBenchCopy(c.stateReason) && c.stateReason !== HOST_FLOOR_UNKNOWN_COPY);
     groups.set('cli:one-reviewer', {
       key: 'cli:one-reviewer',
       members: [],
@@ -556,6 +653,8 @@ export function buildNeeds(input: NeedsInput): Needs {
     for (const c of outSeats) {
       const named = needing.filter((r) => onSeat(r, c.cli));
       if (named.length === 0) continue;
+      // crew#1818: a seat the engine gives no work on this floor is not fixed by a sign-in: its reason, and reassign.
+      const benched = isHostFloorBenchCopy(c.stateReason) ? c.stateReason! : null;
       groups.set(`cli:out:${c.cli}`, {
         key: `cli:out:${c.cli}`,
         members: named.map((r) => ({ runId: r.runId, view: byId.get(r.runId), run: r, severity: 'yellow' as const, waitedMs: null })),
@@ -564,11 +663,13 @@ export function buildNeeds(input: NeedsInput): Needs {
           severity: 'yellow',
           source: 'cli',
           kind: 'slows',
-          title: `${c.label} is signed out`,
-          reason: `${plural(ms.length, 'job')} ${ms.length === 1 ? 'has' : 'have'} work on it, and it can’t take that work until it is signed in again`,
-          remedy: `Sign ${c.label} in again, or reassign the step to another agent.`,
+          title: benched === null ? `${c.label} is signed out` : `${c.label} gets no work here`,
+          reason: benched === null
+            ? `${plural(ms.length, 'job')} ${ms.length === 1 ? 'has' : 'have'} work on it, and it can’t take that work until it is signed in again`
+            : `${plural(ms.length, 'job')} ${ms.length === 1 ? 'has' : 'have'} work on it, and ${benched}`,
+          remedy: benched === null ? `Sign ${c.label} in again, or reassign the step to another agent.` : 'Reassign the step to another agent.',
           target: { kind: 'cli', cli: c.cli },
-          action: c.canSignIn ? { kind: 'sign_in', label: 'Sign in' } : null,
+          action: c.canSignIn && benched === null ? { kind: 'sign_in', label: 'Sign in' } : null,
         }),
       });
     }
@@ -593,7 +694,7 @@ export function buildNeeds(input: NeedsInput): Needs {
   // Components: a down one holds the runs whose denial names it (and every live run when it is on
   // their path); host load slows the held runs whose next step is real work, and every new run.
   const heldMembers = members.filter((m) => m.run !== undefined);
-  for (const { row, kind } of infraItems) {
+  for (const { row, kind, word, cli } of infraItems) {
     const held: Member[] = [];
     const add = (m: Member): void => {
       if (!held.some((x) => x.runId === m.runId)) held.push(m);
@@ -601,7 +702,7 @@ export function buildNeeds(input: NeedsInput): Needs {
     if (row.key === 'load') {
       for (const m of heldMembers) if (m.run!.gate?.kind === 'escalation' && m.view !== undefined && !isAskRun(m.view)) add(m);
       for (const r of input.runs) if ((r.liveness === 'working' || r.liveness === 'quiet' || r.liveness === 'stalled') && eligible(r.runId)) add({ runId: r.runId, view: byId.get(r.runId), run: r, severity: 'yellow', waitedMs: null });
-    } else {
+    } else if (cli === undefined) {
       for (const m of heldMembers) if (claimed.has(`${row.key}\u0000${m.runId}`)) add(m);
       if (input.infraHoldsLive(row.key)) {
         for (const r of input.runs) if ((r.liveness === 'working' || r.liveness === 'quiet' || r.liveness === 'stalled') && eligible(r.runId)) add({ runId: r.runId, view: byId.get(r.runId), run: r, severity: 'red', waitedMs: null });
@@ -611,7 +712,8 @@ export function buildNeeds(input: NeedsInput): Needs {
     // The one exception: a run list that could not be read, so nothing proves there is no work.
     // The seat images warn ahead of the work: a missing image costs the next unit a build, and a
     // filling runtime disk is said before a kubelet's image cleanup runs.
-    if (kind === 'slows' && held.length === 0 && !(row.key === 'daemon' && row.state === 'degraded') && row.key !== 'seat_images') continue;
+    // A failing credential refresh (`cli`) warns before the credential expires and every seat of that CLI stops.
+    if (kind === 'slows' && held.length === 0 && !(row.key === 'daemon' && row.state === 'degraded') && row.key !== 'seat_images' && cli === undefined) continue;
     const down = row.state === 'down';
     finish(
       { members: held },
@@ -620,11 +722,11 @@ export function buildNeeds(input: NeedsInput): Needs {
         severity: down ? 'red' : 'yellow',
         source: 'infra',
         kind,
-        title: `${row.label}: ${row.state === 'unknown' ? 'not answering' : down ? (DOWN_WORD[row.key] ?? 'down') : 'degraded'}`,
+        title: `${row.label}: ${word ?? (row.state === 'unknown' ? 'not answering' : down ? (DOWN_WORD[row.key] ?? 'down') : 'degraded')}`,
         reason: `${row.reason}${held.length > 0 ? `; it ${kind === 'slows' ? 'slows the next step of' : 'holds'} ${plural(held.length, 'job')}${row.key === 'load' ? ' and every new one' : ''}` : ''}`,
         remedy: row.remedy ?? 'Re-check.',
-        target: { kind: 'infra', key: row.key },
-        action: seatImagesRebuildFixes(row) ? { kind: 'rebuild_seat_images', label: 'Rebuild seat images' } : { kind: 'recheck', label: 'Re-check' },
+        target: cli !== undefined ? { kind: 'cli', cli } : { kind: 'infra', key: row.key },
+        action: cli !== undefined ? { kind: 'sign_in', label: 'Sign in' } : seatImagesRebuildFixes(row) ? { kind: 'rebuild_seat_images', label: 'Rebuild seat images' } : { kind: 'recheck', label: 'Re-check' },
       },
     );
   }

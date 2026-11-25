@@ -28,6 +28,7 @@ import { z } from '../zod.js';
 
 import { SteeringUnsupportedError, type CoreAdapter } from '../core/adapter.js';
 import type { Actor, SteeringImportEntry, SteeringImportResult } from '../core/types.js';
+import { wickedHomeDir } from '../core/wicked-home.js';
 import type { AuditLog } from './audit.js';
 import { recordRunLaunched, type RunTimingIndex } from './run-timing-index.js';
 import { API_PREFIX } from './api-prefix.js';
@@ -123,13 +124,8 @@ export const SteeringAuthorSchema = z.strictObject({
  * ride the problem statement, never the prompt-fattening content itself).
  */
 export function steeringInboxDir(runId: string): string {
-  // Env override first (the workflowOverlayDir pattern) — what keeps tests out of the
-  // operator's real ~/.wicked.
-  if (process.env.WICKED_STEERING_INBOX_DIR) {
-    return join(process.env.WICKED_STEERING_INBOX_DIR, runId);
-  }
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
-  return join(home, '.wicked', 'steering-inbox', runId);
+  // Env override first (the workflowOverlayDir pattern), else `${WICKED_HOME:-~/.wicked}/steering-inbox` (crew#1802).
+  return join(wickedHomeDir('WICKED_STEERING_INBOX_DIR', 'steering-inbox'), runId);
 }
 
 /**
@@ -139,6 +135,48 @@ export function steeringInboxDir(runId: string): string {
  * so it is present only for runs launched before that, or put there by hand.
  */
 export const STEERING_PROPOSAL_FILENAME = 'proposed-rules.json';
+
+/** At most this many in-use ids are listed by name in the author problem; the next free numbers cover the rest. */
+export const STEERING_IDS_LISTED_MAX = 200;
+
+/**
+ * (crew#1846) The first `<prefix><number>` no taken id uses, above `floor` and above every number a taken id of
+ * that prefix carries, zero-padded to `width`. BigInt: an id with a huge number never stalls the count.
+ */
+export function nextFreeNumberedId(prefix: string, width: number, taken: ReadonlySet<string>, floor: bigint = 0n): string {
+  let max = floor;
+  for (const t of taken) {
+    if (!t.startsWith(prefix)) continue;
+    const rest = t.slice(prefix.length);
+    if (/^\d+$/u.test(rest)) {
+      const n = BigInt(rest);
+      if (n > max) max = n;
+    }
+  }
+  return `${prefix}${(max + 1n).toString().padStart(width, '0')}`;
+}
+
+/**
+ * (crew#1846) The author problem's "ids in use" block: every id on the store (retired ones too; capped at
+ * {@link STEERING_IDS_LISTED_MAX}, the rest counted) and, for PAT- and POL- ids, the first free number. No block
+ * when the store holds no rule.
+ */
+export function ruleIdsInUseLines(ids: readonly string[]): string[] {
+  const sorted = [...new Set(ids)].sort();
+  if (sorted.length === 0) return [];
+  const taken = new Set(sorted);
+  const listed = sorted.slice(0, STEERING_IDS_LISTED_MAX);
+  const more = sorted.length - listed.length;
+  const next = (['PAT-', 'POL-'] as const).map((prefix) => {
+    const widths = sorted.filter((id) => id.startsWith(prefix) && /^\d+$/u.test(id.slice(prefix.length))).map((id) => id.length - prefix.length);
+    return nextFreeNumberedId(prefix, widths.length === 0 ? 3 : Math.max(...widths), taken);
+  });
+  return [
+    '',
+    `Rule ids already in use (never reuse one; a reused id is landed under a new id): ${listed.join(', ')}${more > 0 ? `, and ${more} more` : ''}.`,
+    `Number new rules from ${next[0]} (patterns) and ${next[1]} (policies).`,
+  ];
+}
 
 export interface SteeringRoutesDeps {
   audit: AuditLog;
@@ -316,6 +354,15 @@ export function registerGovernanceSteeringRoutes(
       }
       const type = b.type ?? DEFAULT_STEERING_TYPE;
       const sources = [...(b.paths ?? []), ...docPaths];
+      // crew#1846: the worker numbers its rules, and a number already in use would collide with a rule in force.
+      // The landing never writes over one (it re-mints), but the draft the person reads should already carry the
+      // ids it lands under. Best-effort: an unreadable store authors without the list (the landing still guards).
+      let inUse: string[] = [];
+      try {
+        inUse = (await adapter.listConformanceRules()).map((r) => r.id);
+      } catch (err) {
+        req.log.warn(`[steering] the rule ids in use could not be read; authoring without them: ${message(err)}`);
+      }
       // #789: the propose phase hands the rules back in its REPLY (one ```json fenced array), and
       // the gate handler's landing reads them from the unit's stored output. The problem used to
       // name a file in this inbox for the worker to write; the seat's sandbox refuses a write
@@ -328,6 +375,7 @@ export function registerGovernanceSteeringRoutes(
         ...(sources.length > 0
           ? ['', 'Analyze these files/directories on this machine:', ...sources.map((s) => `- ${s}`)]
           : []),
+        ...ruleIdsInUseLines(inUse),
         '',
         'Proposal (for the propose phase): reply with the proposed rules as ONE ```json fenced JSON array. The reply is the proposal; do not write it to a file.',
       ].join('\n');

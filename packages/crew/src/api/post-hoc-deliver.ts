@@ -25,11 +25,13 @@ import {
   DELIVER_POSTHOC_ENV,
   DELIVER_VERIFIED_BASE_ENV,
   DELIVER_PR_CHECKS_DETAIL_MARKER,
+  deliverAdoTarget,
   deliverChecksTimeoutSecs,
   deliverPrScript,
   type DeliverScriptOptions,
 } from '../core/deliver.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
+import { gitChildEnv, withAdoCredential } from '../core/exec.js';
 
 /** What one spawn of the deliver script produced: its exit status and merged output. */
 export interface DeliverScriptResult {
@@ -87,7 +89,7 @@ export const gitReprovisionWorktree: WorktreeReprovisioner = async (repoRoot, ru
   const branch = `wicked/${runId}`;
   const run = (args: string[]): Promise<void> =>
     new Promise((resolve, reject) => {
-      execFile('git', ['-C', repoRoot, ...args], { windowsHide: true, env: childEnvWithBootEstateDb() }, (err) =>
+      execFile('git', ['-C', repoRoot, ...args], { windowsHide: true, env: gitChildEnv() }, (err) =>
         err === null ? resolve() : reject(err),
       );
     });
@@ -156,6 +158,18 @@ export function withoutCheckLogs(output: string): string {
 }
 
 /**
+ * The deliver shell's environment: a crew child's (`childEnvWithBootEstateDb`; the daemon's governance-store variables
+ * never ride in, applied LAST so a caller overlay that spreads `process.env` cannot put them back). For a worktree whose
+ * origin is on Azure DevOps it carries the raw credential the script mints its header from (crew#1843: the script
+ * unexports it before any git runs and hands it only to its header helper); any other origin gets none.
+ */
+export function deliverShellEnv(env?: Record<string, string>, adoOrigin = false): NodeJS.ProcessEnv {
+  const from = { ...process.env, ...env };
+  const child = childEnvWithBootEstateDb(from);
+  return adoOrigin ? withAdoCredential(child, from) : child;
+}
+
+/**
  * The production {@link DeliverExec}: `bash -lc <script>` in the run's worktree — the exact
  * invocation core's `run_tool_cmd` uses for the deliver phase (login shell, so the operator's
  * PATH — where `gh` lives — is loaded). `opts` is the PR/commit text context (crew#524). `env`
@@ -168,9 +182,9 @@ export function runDeliverScript(
   opts?: DeliverScriptOptions,
   env?: Record<string, string>,
 ): Promise<DeliverScriptResult> {
-  // The daemon's governance-store variables never ride into the deliver shell: the helper is
-  // applied LAST, so a caller overlay that spreads `process.env` cannot put them back.
-  const shellEnv = childEnvWithBootEstateDb({ ...process.env, ...env });
+  // Only an Azure DevOps delivery needs the raw credential (review r1 on #1869), and it is the one the script itself
+  // targets (`deliverAdoTarget`, from the same options), so the env never disagrees with the push (review r1 delta).
+  const shellEnv = deliverShellEnv(env, deliverAdoTarget(opts) !== null);
   // A post-hoc lift has NO engine verification to pin to — the daemon runs the script itself, no
   // deliver lift preceded it — so the script's verified-base refusal (wicked-core#431,
   // `WICKED_DELIVER_VERIFIED_BASE`) must not fire off a stray pin in the daemon's own environment:

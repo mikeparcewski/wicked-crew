@@ -71,7 +71,8 @@ export function parseCpuTime(raw: string): number {
 function runChecked(
   cmd: string,
   args: string[],
-  env: NodeJS.ProcessEnv = process.env,
+  // A crew child's env (crew#1843: the docker/podman probes never get the raw Azure DevOps credential).
+  env: NodeJS.ProcessEnv = childEnvWithBootEstateDb(),
 ): Promise<{ ok: boolean; stdout: string }> {
   return new Promise((resolve) => {
     execFile(cmd, args, { encoding: 'utf8', timeout: 6_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true, env }, (err, stdout) => {

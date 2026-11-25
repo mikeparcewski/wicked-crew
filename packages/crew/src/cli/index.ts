@@ -5,6 +5,7 @@ import { performance } from 'node:perf_hooks';
 import { join, dirname } from 'node:path';
 import { closeSync, mkdirSync, openSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { Core } from 'wicked-core-ts';
 import { CoreAdapter } from '../core/adapter.js';
 import { exportLedgerPackageDir } from '../qe/ledger.js';
 import { engineBusHandoff, type BusUnavailable } from '../core/engine-bus.js';
@@ -12,7 +13,7 @@ import { DISABLE_BACKGROUND_TASKS_ENV, ensureForegroundOnlyWorkers } from '../co
 import { bridgeReaper, reapOrphansAtBoot, startOrphanSweep } from '../core/bridge-reaper.js';
 import { defaultSeatFloor } from '../api/seat-container-login.js';
 import { daemonSignalLog } from '../core/daemon-signal-log.js';
-import { shutdownWithDeadline } from '../core/shutdown.js';
+import { installDaemonShutdown, type ConformanceStopper } from '../core/shutdown.js';
 import { describeThrown, installProcessGuards, type ProcessGuards } from '../core/process-guards.js';
 import { startServer, type BootStages } from '../api/server.js';
 import { resolveAuthMode } from '../api/auth.js';
@@ -513,50 +514,22 @@ async function bootstrap(opts: BootstrapOpts, bootStartedAt: number = performanc
 let processGuards: ProcessGuards | null = null;
 
 function installShutdownHandlers(): void {
-  let shuttingDown = false;
-  const shutdown = (): void => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    shutdownWithDeadline(async () => {
-      // Reap bridge children BEFORE this process goes away — the ACP bridges (crew#285: the
-      // engine's in-memory kill handles die with the daemon) and the interactive bridge trees
-      // the pool spawned (F-W1-103: the npm wrapper AND its server child). This is the last
-      // actor that can still find them (they are our direct OS children / grandchildren).
-      // SIGTERM, a ~2 s grace, then SIGKILL for anything that ignored it. Best-effort — a reap
-      // failure must never block shutdown.
-      try {
-        await bridgeReaper.shutdown();
-      } catch {
-        /* reaping is best-effort */
-      }
-      // Close the single subscription so the pump thread + tsfn release and the
-      // process can exit on its own.
-      try {
-        adapterRef?.close();
-      } catch {
-        /* already closed */
-      }
-    }, (code) => process.exit(code));
-  };
-  process.on('SIGTERM', () => {
-    const at = Date.now();
-    daemonSignalLog.record('SIGTERM', at);
-    processGuards?.noteExitReason(`received SIGTERM at ${new Date(at).toISOString()}`);
-    console.warn(`[daemon] received SIGTERM at ${new Date(at).toISOString()} pid=${process.pid} (sender pid unavailable in Node signal callbacks) (crew#411)`);
-    shutdown();
-  });
-  process.on('SIGINT', () => {
-    const at = Date.now();
-    daemonSignalLog.record('SIGINT', at);
-    processGuards?.noteExitReason(`received SIGINT at ${new Date(at).toISOString()}`);
-    console.warn(`[daemon] received SIGINT at ${new Date(at).toISOString()} pid=${process.pid} (sender pid unavailable in Node signal callbacks) (crew#411)`);
-    shutdown();
-  });
-  // Normal exit (`process.exit` anywhere, main() falling off): an 'exit' handler cannot
-  // await, so this is the synchronous SIGTERM sweep. After the graceful path above it is
-  // a no-op re-scan; on a plain exit it is the only reaping that happens.
-  process.on('exit', () => {
-    bridgeReaper.sweepSync();
+  installDaemonShutdown({
+    on: (event, fn) => { process.on(event, fn); },
+    // crew#1835: the engine's install-time conformance harness runs in its own process group; stop it on the way out.
+    core: Core as unknown as ConformanceStopper,
+    // The ACP bridges (crew#285: the engine's in-memory kill handles die with the daemon) and the interactive bridge
+    // trees the pool spawned (F-W1-103: the npm wrapper AND its server child): SIGTERM, a ~2 s grace, then SIGKILL.
+    reap: async () => { await bridgeReaper.shutdown(); },
+    sweepSync: () => bridgeReaper.sweepSync(),
+    close: () => adapterRef?.close(),
+    exit: (code) => process.exit(code),
+    onSignal: (signal) => {
+      const at = Date.now();
+      daemonSignalLog.record(signal, at);
+      processGuards?.noteExitReason(`received ${signal} at ${new Date(at).toISOString()}`);
+      console.warn(`[daemon] received ${signal} at ${new Date(at).toISOString()} pid=${process.pid} (sender pid unavailable in Node signal callbacks) (crew#411)`);
+    },
   });
 }
 

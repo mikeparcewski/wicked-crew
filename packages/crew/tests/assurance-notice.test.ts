@@ -1,6 +1,6 @@
 import Fastify from 'fastify';
 import { describe, expect, it, vi } from 'vitest';
-import { coverageNote, launchAssuranceNotice, readJudgeCoverage, type JudgeCoverage } from '../src/core/assurance.js';
+import { coverageNote, launchAssuranceNotice, readJudgeCoverage, sharingNotes, type JudgeCoverage } from '../src/core/assurance.js';
 import { CoreAdapter } from '../src/core/adapter.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
@@ -13,6 +13,56 @@ const uncovered: JudgeCoverage = {
 };
 const notice = (coverage: JudgeCoverage | null, reducedAssurance?: boolean) =>
   launchAssuranceNotice({ runId: 'r1', reducedAssurance, coverage });
+
+// crew#1673 / core#1594: a COVERED launch the engine saw sharing a provider, exactly as `Core.judgeCoverage` serializes
+// it (wicked-core src/judge_coverage.rs: `Judge.seenSharing` omitted when none, `soleJudge` null when not exactly one,
+// `notes` the engine's own sentence in seat keys).
+const ENGINE_SHARING = JSON.stringify({
+  covered: true, singleIdentity: false,
+  authors: [
+    { seat: 'claude', judges: [{ seat: 'codex' }, { seat: 'pi', seenSharing: 'api.anthropic.com:443' }], soleJudge: 'codex', notJudges: [] },
+    { seat: 'codex', judges: [{ seat: 'claude' }, { seat: 'pi' }], soleJudge: null, notJudges: [] },
+  ],
+  benched: [],
+  notes: ['pi was seen calling api.anthropic.com:443, the provider claude calls, so only codex can judge claude\'s work.'],
+});
+
+describe('provider sharing on a covered launch (crew#1673)', () => {
+  it('reads the engine\'s soleJudge, and words its note with display names', () => {
+    const coverage = readJudgeCoverage('[]', true, () => ENGINE_SHARING);
+    expect(coverage?.authors[0]?.soleJudge).toBe('codex');
+    const names: Record<string, string> = { claude: 'Builder', codex: 'Reviewer', pi: 'Helper' };
+    expect(sharingNotes(coverage, (k) => names[k] ?? k)).toEqual([
+      'Helper was seen calling api.anthropic.com:443, as was Builder, so only Reviewer can check Builder\'s work independently.',
+    ]);
+    // Covered, so no launch notice and no uncovered sentence: the note is the only disclosure.
+    expect(coverageNote(coverage)).toBeNull();
+    expect(notice(coverage)).toBeNull();
+  });
+
+  it('says nothing on a cold daemon (nothing seen yet) or for an uncovered or unknown launch', () => {
+    const cold = readJudgeCoverage('[]', true, () => JSON.stringify({ ...JSON.parse(ENGINE_SHARING), authors: [{ seat: 'claude', judges: [{ seat: 'codex' }, { seat: 'pi' }], soleJudge: null, notJudges: [] }], notes: [] }));
+    expect(sharingNotes(cold)).toEqual([]);
+    expect(sharingNotes(uncovered)).toEqual([]);
+    expect(sharingNotes(null)).toEqual([]);
+  });
+
+  it('every judge seen sharing, or several left: the sentence says so', () => {
+    const all: JudgeCoverage = { covered: true, singleIdentity: false, benched: [], authors: [
+      { seat: 'a', judges: [{ seat: 'b', seenSharing: 'p' }], soleJudge: null, notJudges: [] },
+      { seat: 'b', judges: [{ seat: 'c' }, { seat: 'd' }, { seat: 'a', seenSharing: 'q' }], soleJudge: null, notJudges: [] },
+    ] };
+    expect(sharingNotes(all)).toEqual([
+      'b was seen calling p, as was a, so no seat can check a\'s work independently.',
+      'a was seen calling q, as was b, so c and d can check b\'s work independently.',
+    ]);
+  });
+
+  it('refuses a malformed soleJudge as unknown coverage', () => {
+    const badSole = JSON.parse(ENGINE_SHARING); badSole.authors[0].soleJudge = 3;
+    expect(readJudgeCoverage('[]', true, () => JSON.stringify(badSole))).toBeNull();
+  });
+});
 
 describe('engine judge coverage', () => {
   it('two CLIs without an independent judge are named with the bench and shared provider', () => {

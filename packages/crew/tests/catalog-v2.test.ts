@@ -98,6 +98,11 @@ describe('the v2 wire', () => {
     expect(resolveOption('risk', null, served)!.resolved).toMatchObject({ requiresQe: false, gate: ['cited-findings'] });
   });
 
+  it('(crew#1375) Retro and Review recent work claim R≠: the review preparer leaves out the seats that ran the work', () => {
+    const served = servedState({ defs, presets, entries });
+    for (const id of ['retro', 'review-recent-work']) expect(resolveOption(id, null, served)!.resolved.seats.notRunSeat, id).toBe(true);
+  });
+
   it('Improve cards pass the proposal-only predicate; a plan that writes a store with no gate after it fails it', () => {
     const served = servedState({ defs, presets, entries });
     for (const card of CATALOG_V2_CARDS.filter((c) => c.category === 'improve' && c.release === '1.0')) {

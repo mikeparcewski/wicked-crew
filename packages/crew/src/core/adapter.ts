@@ -55,7 +55,7 @@ import type {
 import { DEFAULT_SETTINGS } from './types.js';
 import type { EstateRequirementsRead } from '../api/requirements.js';
 import { BASE_SKILL_REF_SHAPE } from '../skills/base-skill.js';
-import { execCapped } from './exec.js';
+import { cloneRepository, type AdoCloneSeam } from './repo-clone.js';
 import { gitCommitIdents, usableGitIdent, type GitIdent } from '../setup/known.js';
 import { composeDeliverWorkflow, DELIVER_PHASE_ID, deliverPresetStep, deliverIdentityFor, deliverRepoFor, isGitHubLogin, pushIdentityOf, readDeliverOriginUrl } from './deliver.js';
 import { engineCampaignDef, engineRosterJson } from './engine-roster.js';
@@ -3509,7 +3509,7 @@ export class CoreAdapter {
    * Clone a remote git URL and return the persisted `RepoEntry` from registration.
    * `checkoutPath` overrides the state-home-derived repos destination.
    */
-  async cloneAndRegister(name: string, gitUrl: string, checkoutPath?: string, opts: { allowProtocols?: string } = {}): Promise<RepoEntry> {
+  async cloneAndRegister(name: string, gitUrl: string, checkoutPath?: string, opts: { allowProtocols?: string; ado?: AdoCloneSeam } = {}): Promise<RepoEntry> {
     const reposRoot = wickedWorkRoot('repos');
     let cloneDir: string;
     if (checkoutPath) {
@@ -3558,12 +3558,8 @@ export class CoreAdapter {
 
     if (needsClone) {
       try {
-        await execCapped('git', ['clone', '--', gitUrl, cloneDir], {
-          timeout: 5 * 60 * 1000,
-          // crew-0182: a repository that needs a sign-in fails in seconds with git's own reason, instead of waiting on a
-          // credential prompt no one can answer until the 5-minute timeout.
-          env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...(opts.allowProtocols !== undefined ? { GIT_ALLOW_PROTOCOL: opts.allowProtocols } : {}) },
-        });
+        // crew#1839: an Azure DevOps URL clones with the daemon's Azure DevOps credential when it holds one.
+        await cloneRepository(gitUrl, cloneDir, opts);
       } catch (err) {
         // Cleanup is best-effort: swallow any cleanup error so the original
         // clone failure is what the caller sees.

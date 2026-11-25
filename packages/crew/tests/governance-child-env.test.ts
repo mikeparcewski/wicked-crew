@@ -92,7 +92,9 @@ describe('STATIC — every non-execCapped child-process call in src/ routes its 
           sites.push(site);
           // The env must be built in the same statement — look a bounded window around the call.
           const window = src.slice(Math.max(0, idx - WINDOW), idx + WINDOW);
-          if (!window.includes('childEnvWithBootEstateDb(')) uncovered.push(site);
+          // `gitChildEnv` / `childEnvFor` (core/exec.ts, crew#1843) and `deliverShellEnv` (api/post-hoc-deliver.ts) build on
+          // childEnvWithBootEstateDb.
+          if (!['childEnvWithBootEstateDb(', 'gitChildEnv(', 'childEnvFor(', 'deliverShellEnv('].some((h) => window.includes(h))) uncovered.push(site);
         }
       }
     }

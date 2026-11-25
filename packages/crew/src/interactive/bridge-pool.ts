@@ -68,6 +68,7 @@ import type { AddressInfo } from 'node:net';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import semver from 'semver';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
+import { withoutAdoCredential } from '../core/exec.js';
 import { bridgeNpmCachePath, recorderBrowsersPath } from './bridge-root.js';
 
 export const LOCK_NAME = '.wi-serve.json';
@@ -1036,8 +1037,9 @@ export class InteractiveBridgePool {
     // …with the engine-only store variables restored to their boot values: the daemon's governance
     // store is the in-process engine's business, never the bridge's.
     // crew#509: a fresh token per spawn — the bridge's echo of it is the ownership proof.
+    // (crew#1843) The daemon's raw Azure DevOps credential is not the bridge's: nothing it runs mints from it.
     const spawnToken = randomBytes(16).toString('hex');
-    const env: NodeJS.ProcessEnv = { ...childEnvWithBootEstateDb(), ...bridgeEnv, [SPAWN_TOKEN_ENV]: spawnToken };
+    const env: NodeJS.ProcessEnv = { ...withoutAdoCredential(childEnvWithBootEstateDb()), ...bridgeEnv, [SPAWN_TOKEN_ENV]: spawnToken };
     const child = (this.io.spawn ?? defaultSpawn)(root, env);
     const childPid = child.pid; // undefined when the spawn failed synchronously — its 'error' follows
     // Detached + unref: the bridge is keyed by root and adoptable through its lockfile, so the
@@ -1191,7 +1193,7 @@ function defaultSpawn(root: string, env: NodeJS.ProcessEnv): ChildProcess {
   // version the installer put on the machine is the one that runs.
   const bin = resolveInteractiveBinary(env);
   if (bin !== null) {
-    return nodeSpawn(bin.path, ['serve', '--root', root], { cwd: root, detached: true, stdio: 'ignore', env: childEnvWithBootEstateDb(env) });
+    return nodeSpawn(bin.path, ['serve', '--root', root], { cwd: root, detached: true, stdio: 'ignore', env: withoutAdoCredential(childEnvWithBootEstateDb(env)) });
   }
   // The npx fallback resolves into the daemon's own cache under its state home, never the
   // operator's `~/.npm/_npx` (F-W4-110).
@@ -1203,7 +1205,7 @@ function defaultSpawn(root: string, env: NodeJS.ProcessEnv): ChildProcess {
     detached: true,
     stdio: 'ignore',
     // The pool already restored the engine-only store variables; re-applied here so THIS spawn is
-    // safe on its own terms too (idempotent — crew#495).
-    env: childEnvWithBootEstateDb(env),
+    // safe on its own terms too (idempotent — crew#495), the Azure DevOps credential with them (crew#1843).
+    env: withoutAdoCredential(childEnvWithBootEstateDb(env)),
   });
 }

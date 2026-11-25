@@ -1007,6 +1007,10 @@ export async function startInteractiveChatSubscriber(
     } catch (err) {
       return refuse(`crew could not take its own copy of the revision (${err instanceof Error ? err.message : String(err)})`);
     }
+    // crew#1727: the citations are checked against crew's own records and the document's repositories (its binding's).
+    const bindings = opts.bindings;
+    const binding = bindings?.get(bound.ref) ?? null;
+    if (bindings === undefined || binding === null) return refuse("crew could not read this document's record, so its citations could not be checked; ask again");
     const guard = await guardRefine(
       {
         outPath: landedOut,
@@ -1016,7 +1020,8 @@ export async function startInteractiveChatSubscriber(
         doc: documentId,
         base: bound.base,
         allow: bound.allow,
-        allowOf: (id) => opts.bindings?.allowOf(id) ?? [],
+        allowOf: (id) => bindings.allowOf(id),
+        claims: { files: bound.files, packetBytes: (name) => bindings.packetBytes(bound.ref, name), repos: binding.repos },
       },
       { ...(opts.draftFloorIo !== undefined ? { floor: opts.draftFloorIo } : {}), ...(opts.gardenIo !== undefined ? { garden: opts.gardenIo } : {}) },
     );

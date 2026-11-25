@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { registerRoutes, type RuntimeDeps } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -22,7 +22,7 @@ const apps: FastifyInstance[] = [];
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8', env: { ...process.env } }).trim();
 }
-function fixture(conflict = 'CHANGELOG.md') {
+function fixture(conflict = 'CHANGELOG.md', o: { settings?: Record<string, unknown>; gh?: NonNullable<RuntimeDeps['redeliverGhExec']> } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'crew-redeliver-'));
   roots.push(root);
   const origin = join(root, 'origin.git');
@@ -52,7 +52,9 @@ function fixture(conflict = 'CHANGELOG.md') {
   const log = join(root, 'gh.log'); const pushLog = join(root, 'push.log');
   // Every network git operation is intercepted BEFORE the real executable. The canonical
   // GitHub URL is mapped to the bare local origin; no GitHub connection is possible.
-  writeFileSync(join(bin, 'git'), `#!/bin/bash\nunset GIT_ALLOW_PROTOCOL GIT_CONFIG_COUNT\na=()\nfor x in "$@"; do [ "$x" != 'https://github.com/o/r.git' ] || x='${origin}'; a+=("$x"); done\nprintf '%s\\n' "$*" >> '${pushLog}'\nexec '${realGit}' "\${a[@]}"\n`);
+  // (crew#1862) Each git also records the raw Azure DevOps variables it inherited (names only) and the fsmonitor it reads.
+  const gitEnvLog = join(root, 'git-env.log');
+  writeFileSync(join(bin, 'git'), `#!/bin/bash\nprintf '%s|%s|%s\\n' "$1" "$(env | grep -ioE '^(azure_devops_ext_pat|crew_ado_[a-z_]+)=' | tr -d '=' | sort | tr '\\n' ' ')" "$('${realGit}' config --get core.fsmonitor || true)" >> '${gitEnvLog}'\nunset GIT_ALLOW_PROTOCOL GIT_CONFIG_COUNT\na=()\nfor x in "$@"; do [ "$x" != 'https://github.com/o/r.git' ] || x='${origin}'; a+=("$x"); done\nprintf '%s\\n' "$*" >> '${pushLog}'\nexec '${realGit}' "\${a[@]}"\n`);
   writeFileSync(join(bin, 'gh'), `#!/bin/bash\nif [ \"\${GH_FAIL_MUTATIONS:-}\" = 1 ] && { [ \"$2\" = comment ] || [ \"$2\" = edit ]; }; then echo 'fixture mutation failure' >&2; exit 1; fi\ncase "$1 $2" in\n'auth status') exit 0;;\n'pr view') if [[ "$*" == *'--json body'* ]]; then echo 'Original body'; else cat '${join(root, 'pr.json')}'; fi;;\n'pr comment') printf '%s\\n' "$*" >> '${log}';;\n'pr edit') cat "\${@: -1}" >> '${log}';;\n*) echo "unexpected gh: $*" >&2; exit 1;;\nesac\n`);
   chmodSync(join(bin, 'git'), 0o755); chmodSync(join(bin, 'gh'), 0o755);
   writeFileSync(join(home, '.bash_profile'), `export PATH='${bin}':$PATH\n`);
@@ -65,17 +67,19 @@ function fixture(conflict = 'CHANGELOG.md') {
   const audit = AuditLog.noop(); const record = vi.spyOn(audit, 'record');
   const view = { session: { id, status: 'completed', repo_ref: 'repo', workdir: null }, units: [] } as unknown as SessionView;
   const runtime = { deliveryIndex: index, checkRunTree: check,
-    redeliverGhExec: async (args: string[]) => ({ code: 0, stdout: execFileSync(join(bin, 'gh'), args, { env, encoding: 'utf8' }), stderr: '' }),
+    redeliverGhExec: o.gh ?? (async (args: string[]) => ({ code: 0, stdout: execFileSync(join(bin, 'gh'), args, { env, encoding: 'utf8' }), stderr: '' })),
     redeliverExec: async (wd: string, script: string) => {
       try { return { status: 0, output: execFileSync('bash', ['-lc', script], { cwd: wd, env, encoding: 'utf8' }) }; }
       catch (err) { const e = err as { status: number; stdout: string; stderr: string }; return { status: e.status, output: `${e.stdout}${e.stderr}` }; }
     },
   } as RuntimeDeps;
   const app = Fastify(); apps.push(app);
-  registerRoutes(app, withRunViews({ getSettings: async () => ({}), sessionsDetail: async () => [view], sessions: async () => [id], listRepos: async () => [{ id: 'repo', root_path: clone }] } as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit, authMode: 'off' }, runtime);
-  return { root, origin, clone, old, oldBase, base, env, log, pushLog, pr, savePr, index, check, record, app, view, runtime };
+  registerRoutes(app, withRunViews({ getSettings: async () => (o.settings ?? {}), sessionsDetail: async () => [view], sessions: async () => [id], listRepos: async () => [{ id: 'repo', root_path: clone }] } as unknown as CoreAdapter), new GateCache(), new ElicitationCache(), { bus: null, index: new MembershipIndex(), log: () => undefined }, { audit, authMode: 'off' }, runtime);
+  return { root, origin, clone, old, oldBase, base, env, log, pushLog, gitEnvLog, pr, savePr, index, check, record, app, view, runtime };
 }
-afterEach(async () => { for (const app of apps.splice(0)) await app.close(); for (const root of roots.splice(0)) removeScratch(root); });
+// The PR read is pinned per the daemon's environment (crew#1804): every case runs as a daemon with none exported.
+beforeEach(() => { vi.stubEnv('GH_TOKEN', ''); vi.stubEnv('GH_ACCOUNT', ''); });
+afterEach(async () => { vi.unstubAllEnvs(); for (const app of apps.splice(0)) await app.close(); for (const root of roots.splice(0)) removeScratch(root); });
 const post = (app: FastifyInstance) => app.inject({ method: 'POST', url: `/api/v1/runs/${id}/redeliver` });
 
 it('T1/T5 rebases CHANGELOG only, checks the exact tree, leases the push and discloses the same result', async () => {
@@ -94,6 +98,21 @@ it('T1/T5 rebases CHANGELOG only, checks the exact tree, leases the push and dis
   expect(f.index.commitFor(id)).toBe(r.newHead);
   expect(f.record).toHaveBeenCalledWith('run.redelivered', expect.anything(), { runId: id, detail: { url, old: f.old, new: r.newHead, checks: r.checks, via: 'redeliver' } });
   expect(git(f.clone, 'worktree', 'list')).not.toContain('wicked-redeliver');
+});
+it('(crew#1862) the refresh scripts run no git with the raw Azure DevOps credential or with fsmonitor on', async () => {
+  const f = fixture();
+  // A daemon that also holds an Azure DevOps credential (re-delivery never needs it).
+  Object.assign(f.env, { AZURE_DEVOPS_EXT_PAT: 'pat-SECRET-0123456789abcdef', CREW_ADO_TENANT_ID: 't', CREW_ADO_CLIENT_ID: 'c', CREW_ADO_CLIENT_SECRET: 'sp-SECRET-value', Azure_Devops_Ext_Pat: 'pat-SECRET-0123456789abcdef' }); // ggignore: made-up test values
+  const res = await post(f.app);
+  expect(res.statusCode, res.body).toBe(200);
+  const calls = readFileSync(f.gitEnvLog, 'utf8').split('\n').filter(Boolean);
+  for (const sub of ['worktree', 'rebase']) expect(calls.some((c) => c.startsWith(`${sub}|`)), sub).toBe(true);
+  for (const call of calls) {
+    const [arg, names, fsmonitor] = call.split('|');
+    expect(names!.trim(), `git ${arg}: inherited`).toBe('');
+    expect(fsmonitor, `git ${arg}: core.fsmonitor`).toBe('false');
+  }
+  expect(readFileSync(f.gitEnvLog, 'utf8')).not.toContain('SECRET');
 });
 it('T2 refuses other-file conflicts before checks or push', async () => {
   const f = fixture('code.txt'); const res = await post(f.app);
@@ -178,4 +197,23 @@ it('records a successful push even when PR comment and body edits fail', async (
   expect(git(f.origin, 'rev-parse', 'delivered')).toBe(res.json().newHead);
   expect(f.index.commitFor(id)).toBe(res.json().newHead);
   expect(f.record).toHaveBeenCalledWith('run.redelivered', expect.anything(), expect.anything());
+});
+
+it('reads the delivered PR as the deliver identity, not gh\'s active account (crew#1804)', async () => {
+  {
+    let pr = '';
+    const gh = vi.fn<NonNullable<RuntimeDeps['redeliverGhExec']>>(async (args, opts) => {
+      if (args[0] === 'auth') return args.includes('deliverbot') ? { code: 0, stdout: 'gho_deliverbot\n', stderr: '' } : { code: 1, stdout: '', stderr: 'no token' };
+      // gh's active account cannot see the repository; only the deliver identity's own token can.
+      return opts.env?.['GH_TOKEN'] === 'gho_deliverbot' ? { code: 0, stdout: pr, stderr: '' }
+        : { code: 1, stdout: '', stderr: "GraphQL: Could not resolve to a Repository with the name 'o/r'. (repository)" };
+    });
+    const f = fixture('CHANGELOG.md', { settings: { deliverIdentityByRepo: { repo: 'deliverbot' } }, gh });
+    pr = readFileSync(join(f.root, 'pr.json'), 'utf8');
+    const res = await f.app.inject(`/api/v1/runs/${id}/pr`);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ number: 42, headSha: f.old });
+    expect(gh).toHaveBeenCalledWith(['pr', 'view', url, '--json', expect.any(String)],
+      expect.objectContaining({ env: { GH_TOKEN: 'gho_deliverbot', GH_HOST: 'github.com', GH_REPO: 'github.com/o/r' } }));
+  }
 });

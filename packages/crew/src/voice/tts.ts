@@ -128,6 +128,8 @@ export function ttsWavProblem(buf: Buffer): string | null {
     }
     at = body + size + (size % 2);
   }
+  // crew#1559 (1): every chunk header, payload and pad byte fits, and the walk ends exactly at the RIFF end.
+  if (at !== buf.length) return at > buf.length ? 'the last chunk is missing its pad byte' : 'the file ends inside a chunk header';
   if (fmt === null) return 'no usable fmt chunk';
   if (dataBeforeFmt) return 'the data chunk comes before the fmt chunk';
   if (data === 0) return 'no audio in the data chunk';
@@ -257,6 +259,10 @@ export class TtsService {
   /** Bumped by every removal: a synthesis that queued before it never starts after it. */
   private epoch = 0;
   private removing = 0;
+  /** The removal in flight: a status read waits for it and probes again (crew#1559 (5)). */
+  private removal: Promise<unknown> | null = null;
+  /** Install admissions, one at a time: a second POST waits for the first's probe and checks (crew#1559 (4)). */
+  private admitting: Promise<unknown> = Promise.resolve();
   private readonly synths = new Set<{ abort: AbortController; done: Promise<unknown> }>();
 
   constructor(deps: TtsDeps) {
@@ -376,7 +382,7 @@ export class TtsService {
 
   async status(): Promise<TtsStatusBody> {
     const platformProblem = this.platformProblem();
-    const picked: Picked = platformProblem === null ? await this.pickPython() : { python: null, lock: null, problem: null };
+    const picked: Picked = platformProblem === null ? await this.pickSettled() : { python: null, lock: null, problem: null };
     const problem = platformProblem ?? picked.problem;
     const engine = this.engineInstalled();
     const voices: TtsStatusBody['voices'] = {};
@@ -399,10 +405,38 @@ export class TtsService {
   }
 
   /**
+   * crew#1559 (5): the Python this machine will use, never the "being removed" or aborted answer a removal in flight
+   * gives: a read waits for the removal and probes again (status reports what is there, not the transient).
+   */
+  private async pickSettled(): Promise<Picked> {
+    for (;;) {
+      if (this.removal !== null) await this.removal.catch(() => undefined);
+      const epoch = this.epoch;
+      const picked = await this.pickPython();
+      if (epoch === this.epoch && this.removing === 0) return picked;
+    }
+  }
+
+  /**
    * Install the engine if missing, then the named voices. Resolves at once; `status().install` reports it. Only
    * manifest voices are accepted (400 `voice_unknown`); an unsupported machine is 409 `voice_tts_unsupported`.
    */
   async startInstall(ids: readonly string[]): Promise<{ started: boolean }> {
+    // crew#1559 (4): one admission at a time, so a double click waits for the first's probe and then reads its outcome
+    // (an install running, or nothing to install) instead of probing beside it. A removal fences the queue too: a request
+    // received before or during a DELETE is refused when its turn comes, never installed after the removal.
+    for (const id of ids) this.voiceById(id);
+    if (this.removing > 0) throw new VoiceError(409, 'voice_tts_missing', 'The speech engine is being removed.');
+    const received = this.epoch;
+    const turn = this.admitting.then(() => {
+      if (this.epoch !== received) throw new VoiceError(409, 'voice_tts_missing', 'The speech engine was removed while this install waited.');
+      return this.admit(ids);
+    });
+    this.admitting = turn.catch(() => undefined);
+    return turn;
+  }
+
+  private async admit(ids: readonly string[]): Promise<{ started: boolean }> {
     const wanted = ids.map((id) => this.voiceById(id));
     if (this.removing > 0) throw new VoiceError(409, 'voice_tts_missing', 'The speech engine is being removed.');
     if (this.inflight !== null) throw new VoiceError(409, 'voice_install_running', 'The speech install is already running.');
@@ -564,6 +598,16 @@ export class TtsService {
 
   /** Remove the engine, the voices and the cached samples. An install in flight is cancelled first. */
   async remove(): Promise<{ removed: boolean }> {
+    const run = this.removeNow();
+    this.removal = run;
+    try {
+      return await run;
+    } finally {
+      if (this.removal === run) this.removal = null;
+    }
+  }
+
+  private async removeNow(): Promise<{ removed: boolean }> {
     this.gen += 1;
     this.epoch += 1;
     this.removing += 1;

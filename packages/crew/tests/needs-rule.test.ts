@@ -6,13 +6,15 @@
 // ask refused by input governance (1). Everything else is either unresolved work (with what it
 // cost and how to resolve it) or not stuck at all.
 
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { SessionView, SystemCli, SystemInfraRow, SystemRun } from 'wicked-crew-api-types';
 
-import { buildNeeds, foldRunCost, isAnsweredAsk, needsLevel, RunCostCache, supersession } from '../src/api/needs.js';
-import { judgeGaps, runLiveness } from '../src/api/system-snapshot.js';
+import { buildNeeds, foldRunCost, GATEWAY_START_BOUND_MS, GatewayStartWatch, isAnsweredAsk, needsLevel, RunCostCache, supersession } from '../src/api/needs.js';
+import { judgeGaps, probeBroker, runLiveness } from '../src/api/system-snapshot.js';
+import { clusterInstallCommand, clusterRows, gatewayNamespace, kubectlWord, type ClusterStatus } from '../src/api/cluster-status.js';
 
 interface DumpRun {
   id: string;
@@ -470,5 +472,111 @@ describe('a power run paused at a checkpoint', () => {
     const run = runLiveness({ view, now: NOW, evidence: null, gate: null, quietAfterMs: 5 * 60_000, stallAfterMs: 15 * 60_000 });
     const needs = buildNeeds({ now: NOW, views: [view], runs: [run], infra, clis, gaps: [], infraHoldsLive: () => false });
     expect(JSON.stringify(needs)).toContain('pw-paused');
+  });
+});
+
+// crew#1845: Nerve Center said "All clear" while the model gateway never became ready (the engine reads a crash loop
+// as `starting` for ever) or the broker's credential refresh was failing. Rows come from their real writers
+// (`clusterRows` in cluster-status.ts, `probeBroker` in system-snapshot.ts).
+describe('a gateway that never serves and a failing credential refresh (crew#1845)', () => {
+  const MIN = 60_000;
+  const status = (gateway: 'serving' | 'starting' | 'stopped' | 'absent'): ClusterStatus => ({
+    configured: true, reachable: true, kind: null, context: 'rancher-desktop', controller: { ready: true, detail: null },
+    controllerVersion: '0.1.0', gateway, runNamespaces: 1, pendingPods: 0, detail: null,
+  });
+  const gatewayRow = (gateway: 'serving' | 'starting' | 'stopped' | 'absent'): SystemInfraRow =>
+    clusterRows({ kind: 'ok', value: status(gateway), ms: 5 }, true, NOW).gateway;
+  const signedIn = clis.map((c) => ({ ...c, state: 'signed_in', workEligible: true, councilEligible: true }) as SystemCli);
+  const executing = (id: string, quietMin: number): { view: SessionView; run: SystemRun } => {
+    const view = viewOf({ id, title: `job ${id}`, status: 'executing', repo: 'wicked-crew', workflow: 'bug', created_h_ago: 1, delivery: 'pr', retry_of: null, ask_turn: null, archived: false, units_total: 2, units_done: 1 });
+    const run = runLiveness({ view, now: NOW, evidence: { at: NOW - quietMin * MIN, source: 'event_log' } as never, gate: null, quietAfterMs: 5 * MIN, stallAfterMs: 15 * MIN });
+    return { view, run };
+  };
+  const needsAt = (now: number, infraRows: SystemInfraRow[], watch: GatewayStartWatch, runs: Array<{ view: SessionView; run: SystemRun }> = []) =>
+    buildNeeds({ now, views: runs.map((r) => r.view), runs: runs.map((r) => r.run), infra: infraRows, clis: signedIn, gaps: [], infraHoldsLive: (k) => k === 'gateway' || k === 'broker' || k === 'cluster', gatewayWatch: watch });
+
+  it('a gateway still starting past the bound is a work-path item with its fix, and claims the stalled run behind it', () => {
+    const watch = new GatewayStartWatch();
+    const working = executing('wk', 1);
+    // First read: a gateway that has only just started, with nothing stalled behind it, is not yet a need.
+    expect(needsAt(NOW, [gatewayRow('starting')], watch, [working]).attention.find((a) => a.id === 'infra:gateway')).toBeUndefined();
+    // Still starting on every read past the bound: a pod that keeps crashing, or an image that does not pull.
+    const stalled = executing('st', 20);
+    const later = needsAt(NOW + GATEWAY_START_BOUND_MS + MIN, [gatewayRow('starting')], watch, [stalled]);
+    const item = later.attention.find((a) => a.id === 'infra:gateway');
+    expect(item).toMatchObject({ kind: 'prevents', severity: 'red', source: 'infra', title: 'Model gateway: not ready', blockedRunIds: ['st'] });
+    expect(item!.reason).toMatch(/^Its pod has not become ready in 11 min, so seats have no route to their models/);
+    expect(item!.remedy).toMatch(/gateway pod's events/);
+    expect(item!.remedy).toMatch(/wicked-core cluster install/);
+    // The stalled run is the gateway's, not an item of its own.
+    expect(later.attention.find((a) => a.id === 'run:st')).toBeUndefined();
+    expect(needsLevel(later.attention)).not.toBe('green');
+  });
+
+  // crew#1851: the fix named an install command with two placeholders and "the gateway pod's events and log" with no
+  // command or namespace. It is now the cluster row's own filled-in install command (one source) and the exact kubectl
+  // commands, in the namespace the engine puts this daemon's gateway in.
+  it('the not-ready fix is runnable as offered: the filled-in install command and the exact events and log commands (crew#1851)', () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'crew-1851-')));
+    try {
+      const engine = { exe: '/opt/wicked/bin/wicked-core', home };
+      const watch = new GatewayStartWatch();
+      needsAt(NOW, [gatewayRow('starting')], watch);
+      const item = buildNeeds({
+        now: NOW + GATEWAY_START_BOUND_MS + MIN, views: [], runs: [], infra: [gatewayRow('starting')], clis: signedIn, gaps: [],
+        infraHoldsLive: (k) => k === 'gateway', gatewayWatch: watch, engine,
+      }).attention.find((a) => a.id === 'infra:gateway');
+      expect(item?.title).toBe('Model gateway: not ready');
+      const remedy = item!.remedy!;
+      // No placeholder a person could paste as offered.
+      expect(remedy).not.toMatch(/<[^>]*>/);
+      expect(remedy).not.toMatch(/your cluster context|state home>/);
+      // The install command is the cluster row's, character for character.
+      expect(remedy).toContain(`\`${clusterInstallCommand(engine)}\``);
+      const ns = gatewayNamespace(home);
+      expect(ns).toMatch(/^wicked-sys-w[0-9a-f]{12}$/);
+      // The kubectl this host's terminal runs (the daemon's PATH, Rancher Desktop's ~/.rd/bin included).
+      const kubectl = kubectlWord();
+      expect(remedy).toContain(`\`${kubectl} --context rancher-desktop -n ${ns} describe pods -l wicked.dev/role=gateway\``);
+      // Every container's log, init containers included; one not started yet does not stop the others (codex r1).
+      expect(remedy).toContain(`\`${kubectl} --context rancher-desktop -n ${ns} logs deploy/agw --all-containers --ignore-errors --prefix --tail 50\``);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it('a run already stalled behind a starting gateway makes it a need on the first read (Nerve Center opened late)', () => {
+    const needs = needsAt(NOW, [gatewayRow('starting')], new GatewayStartWatch(), [executing('st', 20)]);
+    expect(needs.attention.find((a) => a.id === 'infra:gateway')).toMatchObject({ title: 'Model gateway: not ready', blockedRunIds: ['st'] });
+    expect(needs.attention.find((a) => a.id === 'infra:gateway')!.reason).toMatch(/^Its pod has not become ready, so seats/);
+  });
+
+  it('a read that could not see the gateway keeps the clock; a serving gateway resets it; an older snapshot changes nothing', () => {
+    const watch = new GatewayStartWatch();
+    needsAt(NOW, [gatewayRow('starting')], watch);
+    const unread = clusterRows({ kind: 'timeout', ms: 6000 }, true, NOW).gateway;
+    needsAt(NOW + 5 * MIN, [unread], watch);
+    // A slower snapshot taken earlier replays its `serving` read in its second pass: the clock stands.
+    needsAt(NOW + 4 * MIN, [gatewayRow('serving')], watch);
+    expect(needsAt(NOW + GATEWAY_START_BOUND_MS, [gatewayRow('starting')], watch).attention.map((a) => a.id)).toContain('infra:gateway');
+    needsAt(NOW + GATEWAY_START_BOUND_MS + MIN, [gatewayRow('serving')], watch);
+    expect(needsAt(NOW + GATEWAY_START_BOUND_MS + 2 * MIN, [gatewayRow('starting')], watch).attention.map((a) => a.id)).not.toContain('infra:gateway');
+  });
+
+  it("a fresh install's gateway (not started yet) stays quiet however long", () => {
+    const watch = new GatewayStartWatch();
+    needsAt(NOW, [gatewayRow('absent')], watch);
+    expect(needsAt(NOW + 60 * MIN, [gatewayRow('absent')], watch).attention).toEqual([]);
+  });
+
+  it('a failing broker refresh is a slows item that names the CLI and offers its sign-in', async () => {
+    const broker = await probeBroker({ containerFloor: true, clis: ['claude', 'codex'], status: async (c) => (c === 'codex' ? { state: 'refresh_failing', reason: 'token revoked' } : { state: 'signed_in' }) });
+    expect(broker.state).toBe('degraded');
+    const needs = needsAt(NOW, [broker], new GatewayStartWatch());
+    const item = needs.attention.find((a) => a.id === 'infra:broker');
+    expect(item).toMatchObject({ kind: 'slows', severity: 'yellow', title: "Credential broker: can't refresh codex's sign-in", target: { kind: 'cli', cli: 'codex' }, action: { kind: 'sign_in', label: 'Sign in' } });
+    expect(item!.reason).toMatch(/codex \(token revoked\)/);
+    expect(item!.remedy).toBe('Sign codex in again on the Helpers page before its credential expires.');
+    // A broker with no CLI signed in is not a refresh failure: the seat items say that.
+    const none = await probeBroker({ containerFloor: true, clis: ['claude'], status: async () => ({ state: 'signed_out' }) });
+    expect(needsAt(NOW, [none], new GatewayStartWatch()).attention.find((a) => a.id === 'infra:broker')).toBeUndefined();
   });
 });

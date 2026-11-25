@@ -104,6 +104,21 @@ describe('background runtime reader', () => {
     for (let i = 0; i < 3; i++) await noExe.refresh();
     expect(noExe.state()).toBe('down'); expect(none).not.toHaveBeenCalled();
   });
+  it('crew#1844: a state home with no cluster reads its own reason with the filled-in install command, never "Kubernetes isn\'t running"', async () => {
+    // wicked-core `cluster status --json` for a state home never installed (k8s/cli.rs status, resolve_settings).
+    const doc = { configured: false, reachable: false, kind: 'no_cluster', detail: 'no cluster is configured for this daemon: run `wicked-core cluster install` or set WICKED_K8S_CONTEXT (the current kubectl context is never used implicitly)' };
+    const exec = vi.fn<ExecLike>(async () => { throw Object.assign(new Error('Command failed'), { code: 1, stdout: JSON.stringify(doc), stderr: '' }); });
+    const reader = new RuntimeState({ exec, exe: () => '/opt/wicked/bin/wicked-core', home: () => '/var/wicked crew', intervalMs: 60_000 }); close.push(() => reader.close());
+    for (let i = 0; i < 3; i++) await reader.refresh();
+    expect(reader.state()).toBe('down');
+    expect(reader.reason()).toBe("No Kubernetes cluster is set up for these helpers yet. Set one up: `/opt/wicked/bin/wicked-core cluster install --admin-context rancher-desktop --home '/var/wicked crew'`");
+    // No kubectl at all is Rancher Desktop missing or stopped: starting it is the fix.
+    const noKubectl = { configured: false, reachable: false, kind: 'no_cluster', detail: 'no kubectl was found (set WICKED_KUBECTL to its path)' };
+    const exec2 = vi.fn<ExecLike>(async () => { throw Object.assign(new Error('Command failed'), { code: 1, stdout: JSON.stringify(noKubectl), stderr: '' }); });
+    const r2 = new RuntimeState({ exec: exec2, exe: () => '/opt/wc', home: () => '/var/crew', intervalMs: 60_000 }); close.push(() => r2.close());
+    for (let i = 0; i < 3; i++) await r2.refresh();
+    expect(r2.reason()).toBe("Kubernetes isn't running");
+  });
   it('caches immediate reads, bounds the check and probes again in the background', async () => {
     vi.useFakeTimers(); let up = false;
     const exec = vi.fn<ExecLike>(async () => { if (!up) throw new Error('runtime down'); return { stdout: UP, stderr: '' }; });

@@ -833,13 +833,37 @@ export interface RigorRaiseRequest {
   reason: string;
 }
 
-/** `POST /runs/:id/power/pause`: answer a checkpoint pause ({@link PowerPause}); 200 answers {@link PowerView}.
+/** `POST /runs/:id/power/pause`: answer a checkpoint pause ({@link PowerPause}); 200 answers {@link PowerPauseAnswer}.
  *  `continue_high` raises rigor to at least high (an operator floor), `continue` goes on (the `note`, if any, is the
  *  next turn's steer), `switch_phased` flips the switch off (the build hands off as it stands), `stop` cancels the
  *  run. 409 {@link PowerConflict} when the run is not paused. Human actors only; audited `run.power_mode.paused`. */
 export interface PowerPauseRequest {
   decision: 'continue_high' | 'continue' | 'switch_phased' | 'stop';
   note?: string | null | undefined;
+  /** (crew#1739) The pause this answers, as the card showed it ({@link PowerPause.checkpoint}). When either this or
+   *  {@link at} is given and the open pause differs (or none is open), the answer is refused with 409
+   *  {@link PowerPauseChanged} and nothing changes. Omit both to answer whatever pause is open. */
+  checkpoint?: number | undefined;
+  /** (crew#1739) The pause this answers: its {@link PowerPause.at}. */
+  at?: number | undefined;
+}
+
+/** (crew#1739) A power pause's identity: its checkpoint and when it opened. */
+export interface PowerPauseIdentity {
+  checkpoint: number;
+  at: number;
+}
+
+/** (crew#1739) The 200 body of `POST /runs/:id/power/pause`: the run's power view after the answer, and the pause the
+ *  answer consumed (null when the daemon read none open just before answering). */
+export interface PowerPauseAnswer extends PowerView {
+  answered: PowerPauseIdentity | null;
+}
+
+/** (crew#1739) The 409 body when a pause answer names a pause that is no longer open. `open` is the pause open now,
+ *  or null when the run is not paused. */
+export interface PowerPauseChanged extends PowerConflict {
+  open: PowerPauseIdentity | null;
 }
 
 /** The 409 (and 422) body of the power routes. */
@@ -5178,6 +5202,12 @@ export interface SteeringLandingResult {
   error?: string;
   /** (api-types 0.160.0) The drafted rules the approve's `keepRules` left out: never landed. */
   declinedIds?: string[];
+  /** (api-types 0.224.0, crew#1846) Drafted ids already used on the store, landed under a new id (`from` → `to`) so
+   *  the rule that held the id is untouched. Each is audited on its `governance.rule.upserted` entry (`draftedId`). */
+  reminted?: Array<{ from: string; to: string }>;
+  /** (api-types 0.224.0, crew#1846) Rules this run landed at an earlier approve and this approve updated in place (a
+   *  send-back re-approve), audited with `replaced: true`. A landing never replaces a rule another author wrote. */
+  replacedIds?: string[];
 }
 
 /**
@@ -7322,6 +7352,25 @@ export interface GitContributor {
   email: string;
 }
 
+/**
+ * `GET /api/v1/settings/start-on-login` (studio#1324): whether this daemon's port starts at login. The unit is the
+ * one `wicked-crew serve --install-service` writes for the port (crew#1469): a launchd agent on macOS, a systemd user
+ * unit on Linux. Elsewhere (`platform: 'other'`, Windows) nothing is automated: the install command prints a Task
+ * Scheduler recipe and `installed` is always false. Installing and removing stay CLI steps; these are their commands.
+ */
+export interface StartOnLoginStatus {
+  platform: 'darwin' | 'linux' | 'other';
+  /** The port this daemon listens on: the unit is per port. */
+  port: number;
+  installed: boolean;
+  /** The unit file, home-relative (`~/Library/LaunchAgents/…`); `null` when none is installed. */
+  unit: string | null;
+  /** `wicked-crew serve --port <port> --install-service`: always the port, so a shell's `CREW_PORT` can't redirect it. */
+  installCommand: string;
+  /** `wicked-crew serve --port <port> --uninstall-service`. */
+  uninstallCommand: string;
+}
+
 /** Daemon-persisted system settings (~/.config/wicked-core/settings.json). */
 export interface SystemSettings {
   /** Max nodes returned by wicked-estate graph-view (default 150). */
@@ -7860,6 +7909,12 @@ export interface BlastRadiusFreshness {
   stale_files?: Array<{ file: string; status: 'modified' | 'deleted' }>;
   /** Per-page counts summed; a file spanning pages counts once per page (crew#1556). */
   stale_files_total: number;
+  /**
+   * (crew#1797) Project blast radius only: `stale_files_total` may still count files of a repository that left the
+   * project and has not been refreshed since, because a page's stale-file evidence was cut to fit estate's reply budget.
+   * The total is then at most this many. ABSENT when the total is exact.
+   */
+  stale_files_total_partial?: true;
   unindexed_files?: number | null;
   checked_files: number;
   not_file_backed: number;
@@ -10195,6 +10250,12 @@ export interface ArtifactProposal {
   /** (api-types 0.194.0) The held plan this reshape was offered for (a `plan_offer`'s `ord` and `planRev`): its Reject is
    *  bound to that version, so a plan revised since is 409 `gate_changed`, never rejected unseen. */
   heldPlan?: { ord: number; planRev: number };
+  /**
+   * (crew#1840) A job asked to change a pull request a run of this chat delivered (on the job's repository): Go
+   * launches it with `revisesPr: number` and `deliver: "pr"`, so its work is pushed onto that pull request's branch and
+   * no new one is opened. The sentence says so. ABSENT: the job opens a pull request of its own (when it makes one).
+   */
+  revisesPr?: { number: number; url: string; runId: string };
   /** (§2.5) What else a reshape launches with, from the held run's launch envelope. */
   relaunch?: Pick<LaunchEnvelope, 'deliver' | 'deliverGate' | 'campaignId' | 'groupLabel' | 'revisesPr' | 'forceQeAcceptance' | 'clisJson'>;
 }
@@ -15191,6 +15252,13 @@ export interface PatchMcpToolBody {
    * Acceptance requires an effective read (409 `not_a_read`) and a registered schema (409 `not_registered`).
    */
   readAccepted?: boolean;
+  /**
+   * (crew#1788) The saved schema the person saw: the row's {@link McpTool.schemaHash} (64 lowercase hex). When set, a
+   * patch against any other saved schema (another save landed since the row was drawn) is refused 409
+   * `schema_changed` and changes nothing; read the tool again and show the new schema. Send it with `readAccepted` and
+   * `disclosure`, so the acceptance or review binds to what was reviewed.
+   */
+  expectedSchemaHash?: string;
 }
 
 /**
@@ -16004,8 +16072,11 @@ export interface SourceProfileJoin {
 /**
  * (api-types 0.186.0) `POST /sources/:name/profile`, a human operator's only (403 `profile_human_only`). The
  * value-free profile of a described native Postgres source, through the data gate's person read, and the data shapes
- * it filed as `knowledge` proposals for the review (one per relation; an identical shape already in the queue is not
- * filed again). 409 `not_in_knowledge`: estate holds no structure for the source yet.
+ * it wrote (one per relation). 409 `not_in_knowledge`: estate holds no structure for the source yet.
+ *
+ * (crew#1625) A profile the person started is their decision: its shapes go straight into knowledge, scoped to the
+ * source, and a re-profile replaces the source's set. Nothing is filed for review, so `proposed` is always empty and
+ * `alreadyProposed` always 0 (kept for clients that still read them; read `written`, `unchanged` and `replaced`).
  */
 export interface SourceProfileResponse {
   name: string;
@@ -16016,7 +16087,17 @@ export interface SourceProfileResponse {
   joins: SourceProfileJoin[];
   /** Code entities named exactly like a relation, in the repos' code graphs. */
   describes: Array<{ relation: string; repo: string; name: string; kind: string; file: string }>;
+  /** (crew#1625) The shapes written into knowledge now: the id names the knowledge node (`kconcept synthetic proposal:<id>:`). */
+  written?: Array<{ id: string; relation: string }>;
+  /** (crew#1625) Shapes already in knowledge and the same (the bands and the links, not the day): left as they are. */
+  unchanged?: number;
+  /** (crew#1625) Older shapes of the source this profile replaced (forgotten from knowledge, or a pending one declined). */
+  replaced?: number;
+  /** (crew#1625) Tables this profile could not read whose earlier shape stays in knowledge as it was (absent: none). */
+  kept?: number;
+  /** @deprecated (crew#1625) Always empty: a profile files nothing for review. */
   proposed: Array<{ id: string; relation: string }>;
+  /** @deprecated (crew#1625) Always 0. */
   alreadyProposed: number;
   codeSearch: { searched: string[]; notSearched: string[] };
   /** Catalog documents estate holds that crew's own catalog does not (or a view not allowed): not profiled. */
@@ -16041,6 +16122,8 @@ export interface KnowledgeShapeRecord {
   describes: Array<{ repo: string; symbolId: string; name: string; kind: string; file: string }>;
   /** Related tables whose join did not fit estate's 200 links per proposal (`joins` above keeps every one). */
   linksNotListed?: number;
+  /** (crew#1625) The actor id of the person whose profile wrote it (provenance). */
+  profiledBy?: string;
 }
 
 /** (api-types 0.186.0) A node of the Knowledge map. `key` is `<store>:<id>` (`source:`, `repo:`, `knowledge:`, `estate:`). */
@@ -17136,6 +17219,13 @@ export interface WorkflowSchedule {
   /** (api-types 0.215.0, crew#1578) Set while the last run waits on a person and due times are being skipped: the
    *  schedule never cancels it, and says so. `null` (or absent, before 0.215.0) when nothing blocks it. */
   blocked?: ScheduleBlocked | null;
+  /** (api-types 0.224.0, crew#1837) The person accepted reduced assurance for this schedule: when every seat that could
+   *  review the work ran some of it (a one-seat daemon), one of them does, said in its brief and on the run. Absent
+   *  before 0.224.0 (= false). */
+  reducedAssurance?: boolean;
+  /** (api-types 0.224.0, crew#1837) Present when the last start was refused because every seat that could review the
+   *  work ran some of it: accepting reduced assurance (`PUT` with it, or Run it now with this body) lets it run. */
+  retryWith?: { reducedAssurance: true };
 }
 
 /** (api-types 0.215.0, crew#1578) A schedule held by its last run waiting on a person. */
@@ -17164,9 +17254,19 @@ export interface SchedulePutBody {
   projectIds?: string[];
   repoRef?: string | null;
   problem?: string | null;
+  /** (api-types 0.224.0, crew#1837) Accept (true) or withdraw (false) reduced assurance; absent keeps it. */
+  reducedAssurance?: boolean;
 }
 
-/** `POST /schedules/:id/run` ("Run it now", human-only): 409 when its last run is still going or another run works. */
+/** (api-types 0.224.0, crew#1837) `POST /schedules/:id/run` body, optional. `reducedAssurance: true` is the person
+ *  accepting it: kept on the schedule (audited `schedule.saved`), so its own runs take it too. */
+export interface ScheduleRunBody {
+  reducedAssurance?: true;
+}
+
+/** `POST /schedules/:id/run` ("Run it now", human-only): 409 when its last run is still going or another run works.
+ *  A review every eligible seat took part in answers 409 `code: "no_independent_reviewer"` with `excluded` (the seats)
+ *  and `retryWith: { reducedAssurance: true }` (api-types 0.224.0, crew#1837). */
 export interface ScheduleRunResponse {
   runId: string;
   schedule: WorkflowSchedule;

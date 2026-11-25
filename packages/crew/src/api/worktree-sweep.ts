@@ -1,13 +1,17 @@
 import { execFile } from 'node:child_process';
 import { join } from 'node:path';
-import { childEnvWithBootEstateDb } from '../core/governance-store.js';
+import { gitChildEnv } from '../core/exec.js';
 
 /**
  * Best-effort post-delivery worktree sweep (crew#620 — Acceptance 3).
  *
- * Removes the run's worktree (`<repoRoot>/wicked-worktrees/<runId>`) and prunes stale
- * worktree entries from the registered repo. Called ONLY when the run is confirmed delivered
- * (PR open); never for cancelled or failed runs.
+ * Removes the run's worktree and prunes stale worktree entries from the registered repo. Called ONLY when the run is
+ * confirmed delivered (PR open); never for cancelled or failed runs.
+ *
+ * The tree is named by its last two segments, `wicked-worktrees/<runId>`, which git resolves among the repository's
+ * own worktrees when they are unique: the engine mints new run trees BESIDE the checkout
+ * (`<repo>.wicked/wicked-worktrees/<runId>`, wicked-core#1109), and a run an earlier engine minted keeps its tree
+ * inside it (`<repo>/wicked-worktrees/<runId>`). Both are found.
  *
  * Never throws — all outcomes (removed / not-present / git-error) are logged. The diff
  * endpoint falls back to the run branch when the worktree is gone (F-7R2-013).
@@ -19,7 +23,7 @@ export async function sweepDeliveredWorktree(
 ): Promise<void> {
   const worktreePath = join('wicked-worktrees', runId);
   await new Promise<void>((resolve) => {
-    execFile('git', ['-C', repoRoot, 'worktree', 'remove', '--force', worktreePath], { windowsHide: true, env: childEnvWithBootEstateDb() }, (err) => {
+    execFile('git', ['-C', repoRoot, 'worktree', 'remove', '--force', worktreePath], { windowsHide: true, env: gitChildEnv() }, (err) => {
       if (err !== null) {
         if (/not.*working tree|is not a working tree|no such worktree/i.test(err.message)) {
           log(`[runs] worktree sweep: ${runId} not present — nothing to remove`);
@@ -33,7 +37,7 @@ export async function sweepDeliveredWorktree(
     });
   });
   await new Promise<void>((resolve) => {
-    execFile('git', ['-C', repoRoot, 'worktree', 'prune'], { windowsHide: true, env: childEnvWithBootEstateDb() }, (err) => {
+    execFile('git', ['-C', repoRoot, 'worktree', 'prune'], { windowsHide: true, env: gitChildEnv() }, (err) => {
       if (err !== null) {
         log(`[runs] worktree sweep: prune error: ${err.message}`);
       }

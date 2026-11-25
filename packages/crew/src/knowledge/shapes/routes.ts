@@ -1,7 +1,7 @@
 /**
  * Data shapes and the Knowledge map (DES-KNOWLEDGE-DATA-001 §10, §19 B4):
  *
- *   POST /sources/:name/profile   HUMAN   profile a source (value-free), file its shapes as proposals for review
+ *   POST /sources/:name/profile   HUMAN   profile a source (value-free), write its shapes into knowledge (crew#1625)
  *   GET  /knowledge/map           HUMAN   the approved shapes and the source catalogs, as nodes and typed edges
  *   GET  /knowledge/summary       HUMAN   what an app in a project can be built on: counts and names only (§9.1)
  *
@@ -28,7 +28,7 @@ import { type NameLookup, searchableRepos, searchEntities } from './code-search.
 import { buildKnowledgeMap } from './map.js';
 import { type KnowledgeSummaryDeps, projectKnowledge } from '../summary.js';
 import { entityNames, PROFILE_BUDGET_MS, profileSource, type ProfileRelation } from './profile.js';
-import { CatalogChangedError, type EstateCall, fileShapes, readCatalog, shapeProposals } from './shapes.js';
+import { CatalogChangedError, type EstateCall, readCatalog, ShapeWriteError, shapeProposals, writeShapes } from './shapes.js';
 
 const V = API_PREFIX;
 
@@ -112,7 +112,7 @@ export function relationsFromCatalog(
 }
 
 export function registerShapeRoutes(app: FastifyInstance, deps: ShapeRouteDeps): void {
-  // One profile per source at a time on this daemon: two at once would both read the queue empty and file twice.
+  // One profile per source at a time on this daemon: two at once would both read the same shapes and write twice.
   const running = new Map<string, Promise<unknown>>();
   const oneAtATime = <T>(sourceId: string, job: () => Promise<T>): Promise<T> => {
     const prior = running.get(sourceId) ?? Promise.resolve();
@@ -170,7 +170,31 @@ export function registerShapeRoutes(app: FastifyInstance, deps: ShapeRouteDeps):
           return reply.code(502).send({ error: `estate could not be read: ${capped(err)}`, code: 'estate_unavailable' });
         }
         const picked = relationsFromCatalog(held?.docs ?? [], catalog, s.viewsAllowed);
+        /** (crew#1625) The source's catalog keys as estate holds them NOW (a dropped table's shape goes by these). */
+        const catalogNow = async (): Promise<Set<string> | null> => {
+          const got = await readCatalog(deps.estate, s.id, [`source:${s.id}`]);
+          return got === null || got.truncated ? null : new Set(got.docs.map((d) => d.key));
+        };
+        /** Write the person's shapes, auditing what was done whatever the outcome; a failure is the 502 it answers. */
+        const write = async (proposals: Parameters<typeof writeShapes>[2], visible: string[], detail: Record<string, unknown>): Promise<Awaited<ReturnType<typeof writeShapes>> | { failed: unknown }> => {
+          try {
+            const shapes = await writeShapes(deps.estate, s.id, proposals, catalogNow, visible);
+            deps.audit.record('knowledge.source.profiled', actor, { detail: { source: name, ...detail, written: shapes.written.map((w) => w.id), unchanged: shapes.unchanged, replaced: shapes.replaced, kept: shapes.kept } });
+            return shapes;
+          } catch (err) {
+            // What was written before the failure is in knowledge: the audit and the answer say so.
+            const partial = err instanceof ShapeWriteError ? err.partial : { written: [], unchanged: 0, replaced: 0, kept: 0 };
+            deps.audit.record('knowledge.source.profiled', actor, { detail: { source: name, ...detail, failed: capped(err), written: partial.written.map((w) => w.id), unchanged: partial.unchanged, replaced: partial.replaced, kept: partial.kept } });
+            void reply.code(502).send({ error: `estate did not take every shape (${partial.written.length} written, ${partial.replaced} replaced before it stopped): ${capped(err)}; profile it again`, code: 'estate_unavailable' });
+            return { failed: err };
+          }
+        };
         if (picked.relations.length === 0) {
+          // (crew#1625) A source whose whole catalog no longer has a profiled table: its shapes go (nothing is profiled).
+          if (held !== null && !held.truncated) {
+            const cleared = await write([], [`source:${s.id}`], { relations: 0 });
+            if ('failed' in cleared) return reply;
+          }
           return reply.code(409).send({ error: `crew has not written ${name}'s structure into knowledge yet: test its connection again, then profile it`, code: 'not_in_knowledge' });
         }
         let secret: { secret: string | null; missing: boolean };
@@ -219,16 +243,12 @@ export function registerShapeRoutes(app: FastifyInstance, deps: ShapeRouteDeps):
           return reply.code(409).send({ error: `${name} was switched off, removed or saved again while it was profiled: nothing was filed; profile it again`, code: 'source_changed' });
         }
         const at = new Date().toISOString();
-        const proposals = shapeProposals({ id: s.id, name }, profile, code.matches, at);
-        let filed: Awaited<ReturnType<typeof fileShapes>>;
-        try {
-          filed = await fileShapes(deps.estate, proposals);
-        } catch (err) {
-          return reply.code(502).send({ error: `estate did not take the shapes: ${capped(err)}`, code: 'estate_unavailable' });
-        }
-        deps.audit.record('knowledge.source.profiled', actor, {
-          detail: { source: name, relations: profile.relations.length, unread: profile.relations.filter((p) => p.rows === null).length, joins: profile.joins.length, describes: [...code.matches.values()].reduce((n, m) => n + m.length, 0), proposed: filed.filed.length, alreadyProposed: filed.skipped },
-        });
+        // (crew#1625) The person started this profile: it is their decision, so the shapes go straight into knowledge.
+        const proposals = shapeProposals({ id: s.id, name }, profile, code.matches, at, actor.id);
+        // What a shape may stand on: this source and every repository (a shape `describes` code in one).
+        const visible = [`source:${s.id}`, ...repos.map((r) => `repo:${r.id}`)];
+        const shapes = await write(proposals, visible, { relations: profile.relations.length, unread: profile.relations.filter((p) => p.rows === null).length, joins: profile.joins.length, describes: [...code.matches.values()].reduce((n, m) => n + m.length, 0) });
+        if ('failed' in shapes) return reply;
         const body: SourceProfileResponse = {
           name,
           sourceId: s.id,
@@ -236,8 +256,12 @@ export function registerShapeRoutes(app: FastifyInstance, deps: ShapeRouteDeps):
           relations: profile.relations,
           joins: profile.joins,
           describes: [...code.matches.entries()].flatMap(([relation, ms]) => ms.map((m) => ({ relation, repo: m.repo, name: m.name, kind: m.kind, file: m.file }))),
-          proposed: filed.filed,
-          alreadyProposed: filed.skipped,
+          written: shapes.written,
+          unchanged: shapes.unchanged,
+          replaced: shapes.replaced,
+          ...(shapes.kept > 0 ? { kept: shapes.kept } : {}),
+          proposed: [],
+          alreadyProposed: 0,
           codeSearch: { searched: code.searched, notSearched: code.notSearched },
           ...(picked.notInCatalog > 0 ? { notInKnowledge: picked.notInCatalog } : {}),
           ...(picked.notListed > 0 ? { notListed: picked.notListed } : {}),

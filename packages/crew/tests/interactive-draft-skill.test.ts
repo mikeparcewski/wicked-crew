@@ -26,6 +26,8 @@ import {
   latestDraftRender,
   reusablePageCount,
   versionLine,
+  withoutCarriedClaims,
+  type ClaimFinding,
   type PageBudget,
 } from '../src/interactive/draft-skill.js';
 import { createHash } from 'node:crypto';
@@ -666,5 +668,66 @@ describe('runDraftFloor — never throws, and a floor that cannot run says so', 
     expect(v.verdict).toBe('fail');
     expect(v.breaches[0]).toContain('1 placeholder');
     expect(seen[0]?.join(' ')).toContain('--repo /snap');
+  });
+});
+
+describe('coord r2 on crew#1853 — a refine judges only the citations it adds or changes', () => {
+  // The report's shape as garden's self_check.py `run` writes it (claims from claims_scan.run: ok, by_kind, findings
+  // of Finding.as_dict {kind, path, text, detail}).
+  const offLine: ClaimFinding = { kind: 'cite-off', text: 'The API serves 450 requests per second.', detail: 'docs/perf.md:3 reads "Measured on the staging cluster."' };
+  const gone: ClaimFinding = { kind: 'dangling-source', text: 'docs/uptime.md:1', detail: 'data-source names a path that does not exist under --repo' };
+  const report = (findings: ClaimFinding[], extra: { failed?: string[] } = {}) => {
+    const byKind: Record<string, number> = {};
+    for (const f of findings) byKind[f.kind] = (byKind[f.kind] ?? 0) + 1;
+    const failed = extra.failed ?? (findings.length > 0 ? ['claims'] : []);
+    return {
+      check: 'draft-self-check', verdict: failed.length > 0 ? 'FAIL' : 'PASS', ok: failed.length === 0, failed, unverified: [],
+      checks: {
+        contrast: { ok: true, contrast_failures: 0, size_failures: 0, summary: 'contrast: clean' },
+        claims: { ok: findings.length === 0, by_kind: byKind, findings: findings.map((f) => ({ ...f, path: 'html > body > p' })), summary: 'claims' },
+        leaks: { ok: true, by_kind: {}, summary: 'leaks: clean' },
+        notes: { ok: true, findings: [], summary: 'notes: ok' },
+      },
+    };
+  };
+  const budget: PageBudget = { pages: null, exact: false, source: 'unknown' };
+
+  it('sets aside the repository-dependent findings the base already had, counted, and keeps the rest', () => {
+    const added: ClaimFinding = { ...offLine, text: 'Throughput is 900 rps.' };
+    const uncited: ClaimFinding = { kind: 'uncited-number', text: 'Uptime 99%', detail: 'number(s) 99' };
+    // Everything the base had: gone, the base passes.
+    const all = withoutCarriedClaims(report([offLine, gone]), [offLine, gone]);
+    expect(all.dropped).toBe(2);
+    expect(draftFloorVerdict(all.report, budget, { notes: true }).verdict).toBe('pass');
+    // A new citation, a duplicate of a carried one, and a document-only kind the base also had all stay judged.
+    const some = withoutCarriedClaims(report([offLine, offLine, added, uncited]), [offLine, uncited]);
+    expect(some.dropped).toBe(1);
+    const v = draftFloorVerdict(some.report, budget, { notes: true });
+    expect(v.verdict).toBe('fail');
+    expect(v.breaches.join(' ')).toMatch(/2 cite-off, 1 uncited-number/);
+    // Another check's failure stays a FAIL after the claims pass.
+    const other = withoutCarriedClaims(report([gone], { failed: ['claims', 'contrast'] }), [gone]);
+    expect((other.report as { verdict: string; failed: string[] }).verdict).toBe('FAIL');
+    expect((other.report as { failed: string[] }).failed).toEqual(['contrast']);
+  });
+
+  it('runDraftFloor asks for the base only when the claims fail, and discloses what it set aside', async () => {
+    let asked = 0;
+    const carried = async () => {
+      asked += 1;
+      return [offLine];
+    };
+    const io = (findings: ClaimFinding[]) => ({ gardenRoot: () => '/garden', run: async () => ({ stdout: JSON.stringify(report(findings)), code: 1 }) });
+    const clean = await runDraftFloor('/x/revised.html', budget, [], { notes: '/x/n.json', carried }, io([]));
+    expect(clean.verdict).toBe('pass');
+    expect(asked).toBe(0);
+    const carriedOnly = await runDraftFloor('/x/revised.html', budget, [], { notes: '/x/n.json', carried }, io([offLine]));
+    expect(asked).toBe(1);
+    expect(carriedOnly.verdict).toBe('pass');
+    expect(carriedOnly.summary).toContain('carried over unchanged');
+    expect(carriedOnly.claimFindings).toEqual([offLine]);
+    // The base cannot be read: nothing is set aside, the refusal stands.
+    const unknown = await runDraftFloor('/x/revised.html', budget, [], { notes: '/x/n.json', carried: async () => null }, io([offLine]));
+    expect(unknown.verdict).toBe('fail');
   });
 });

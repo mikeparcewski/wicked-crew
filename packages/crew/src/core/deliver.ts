@@ -88,8 +88,10 @@
 
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { devNull } from 'node:os';
 import type { GitIdent } from '../setup/known.js';
 import { childEnvWithBootEstateDb } from './governance-store.js';
+import { ADO_RAW_ENV, FSMONITOR_OFF_PARAMETER, gitChildEnv, withAdoCredential } from './exec.js';
 import type { PhaseDef, WorkflowDef } from './types.js';
 import { ADO_HELPER_JS } from './ado-deliver-helper.js';
 import { prChecksJs } from './pr-checks-helper.js';
@@ -382,7 +384,7 @@ export const defaultAdoHelperExec: AdoHelperExec = async (args, opts) => {
     const file = join(dir, 'ado.mjs');
     await writeFile(file, ADO_HELPER_JS, { mode: 0o600 });
     return await new Promise((resolve) => {
-      execFile(process.execPath, [file, ...args], { timeout: opts.timeoutMs, encoding: 'utf8', env: childEnvWithBootEstateDb(process.env) }, (err, stdout, stderr) => {
+      execFile(process.execPath, [file, ...args], { timeout: opts.timeoutMs, encoding: 'utf8', env: withAdoCredential(childEnvWithBootEstateDb(process.env), process.env) }, (err, stdout, stderr) => {
         const code = err === null ? 0 : typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : null;
         resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), code });
       });
@@ -438,26 +440,116 @@ export function pinnedGhExec(
   env: NodeJS.ProcessEnv = process.env,
 ): GhExec {
   return async (args, opts) => {
-    const exported = (env['GH_TOKEN'] ?? '').trim() !== '';
-    const login = exported ? null : (await identity().catch(() => null)) || null;
-    if (!exported && login === null) return exec(args, opts);
-    if (login !== null && !isGitHubLogin(login)) return { stdout: '', stderr: `the deliver identity ${JSON.stringify(login.slice(0, 60))} is not a GitHub login`, code: 1 };
-    const origin = await readDeliverOriginUrl(opts.cwd).catch(() => null);
-    if (origin === null) {
-      return { stdout: '', stderr: `could not read the repository's origin, so the read cannot be pinned to it${login === null ? '' : ` as the deliver identity ${login}`}`, code: 1 };
-    }
-    const repo = githubRepoOf(origin);
-    if (repo === null) return exec(args, opts);
-    const pin = { GH_HOST: 'github.com', GH_REPO: `github.com/${repo}` };
-    if (login === null) return exec(args, { ...opts, env: { ...opts.env, ...pin } });
-    const read = await exec(['auth', 'token', '--hostname', 'github.com', '--user', login], { cwd: opts.cwd, timeoutMs: opts.timeoutMs });
-    const token = read.code === 0 ? read.stdout.trim() : '';
-    if (token === '') {
-      return { stdout: '', stderr: `gh holds no token for ${login} on this machine and no GH_TOKEN is exported, so it cannot read as the deliver identity`, code: 1 };
-    }
-    return exec(args, { ...opts, env: { ...opts.env, ...pin, GH_TOKEN: token } });
+    const pin = await deliverPin(identity, exec, env, opts.cwd, opts.timeoutMs);
+    if (pin.kind === 'refused') return { stdout: '', stderr: pin.why, code: 1 };
+    if (pin.kind === 'unpinned') return exec(args, opts);
+    const at = { GH_HOST: 'github.com', GH_REPO: `github.com/${pin.repo}` };
+    return exec(args, { ...opts, env: { ...opts.env, ...at, ...(pin.token !== null ? { GH_TOKEN: pin.token } : {}) } });
   };
 }
+
+/**
+ * The pin a read as the deliver identity takes in `cwd` ({@link pinnedGhExec}, {@link pinnedGitExec}): `unpinned` with
+ * no exported `GH_TOKEN` and no identity, or on an origin that is not github.com; `refused` (said why) when a pin
+ * applies and the origin or the identity's token cannot be read; else the origin's `owner/repo` and the identity's own
+ * token (`null` = the exported `GH_TOKEN` stands).
+ */
+async function deliverPin(
+  identity: () => Promise<string | null>,
+  gh: GhExec,
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  timeoutMs: number,
+): Promise<{ kind: 'unpinned' } | { kind: 'refused'; why: string } | { kind: 'pinned'; repo: string; token: string | null }> {
+  const exported = (env['GH_TOKEN'] ?? '').trim() !== '';
+  const login = exported ? null : (await identity().catch(() => null)) || null;
+  if (!exported && login === null) return { kind: 'unpinned' };
+  if (login !== null && !isGitHubLogin(login)) return { kind: 'refused', why: `the deliver identity ${JSON.stringify(login.slice(0, 60))} is not a GitHub login` };
+  const origin = await readDeliverOriginUrl(cwd).catch(() => null);
+  if (origin === null) {
+    return { kind: 'refused', why: `could not read the repository's origin, so the read cannot be pinned to it${login === null ? '' : ` as the deliver identity ${login}`}` };
+  }
+  const repo = githubRepoOf(origin);
+  if (repo === null) return { kind: 'unpinned' };
+  if (login === null) return { kind: 'pinned', repo, token: null };
+  const read = await gh(['auth', 'token', '--hostname', 'github.com', '--user', login], { cwd, timeoutMs });
+  const token = read.code === 0 ? read.stdout.trim() : '';
+  if (token === '') {
+    return { kind: 'refused', why: `gh holds no token for ${login} on this machine and no GH_TOKEN is exported, so it cannot read as the deliver identity` };
+  }
+  return { kind: 'pinned', repo, token };
+}
+
+/** The git seam crew's own reads go through: exit codes kept, never thrown; `env` is set for this one call. */
+export type GitExec = (
+  args: string[],
+  cwd: string,
+  env?: Readonly<Record<string, string>>,
+) => Promise<{ code: number | null; stdout: string; stderr: string }>;
+
+/**
+ * (crew#1804) A git seam whose `fetch origin [<branch>]` runs as the deliver identity, the way the deliver script's
+ * `_gnet` fetches: from the canonical https URL of the github.com origin, with a one-command credential helper carrying
+ * the pinned token (from this call's environment, never argv), git's own helpers and any ambient `http.extraHeader`
+ * off, redirects refused and `GIT_ALLOW_PROTOCOL=https`. The fetch writes `refs/remotes/origin/…` as `git fetch origin`
+ * does. Pinned in {@link pinnedGhExec}'s order; every other git command, and a fetch with nothing to pin, runs as is.
+ */
+export function pinnedGitExec(
+  identity: () => Promise<string | null>,
+  git: GitExec,
+  gh: GhExec = defaultGhExec,
+  env: NodeJS.ProcessEnv = process.env,
+): GitExec {
+  return async (args, cwd, extra) => {
+    const branch = args[2];
+    if (args[0] !== 'fetch' || args[1] !== 'origin' || args.length > 3 || (branch !== undefined && !isSafeRefName(branch))) return git(args, cwd, extra);
+    const pin = await deliverPin(identity, gh, env, cwd, 5_000);
+    if (pin.kind === 'refused') return { stdout: '', stderr: pin.why, code: 1 };
+    if (pin.kind === 'unpinned') return git(args, cwd, extra);
+    const url = `https://github.com/${pin.repo}.git`;
+    // A `url.*.insteadOf` that rewrites the canonical URL (to another login's https URL, say) would fetch as someone
+    // else: refused, as the deliver script refuses it before `_gnet` (xreview r1).
+    const rewrites = await git(['config', '--get-regexp', '^url\\..*\\.insteadof$'], cwd);
+    if (rewrites.code !== 0 && rewrites.code !== 1) return { stdout: '', stderr: "could not read git's url rewrites, so the fetch cannot be pinned", code: 1 };
+    for (const line of rewrites.code === 0 ? rewrites.stdout.split('\n') : []) {
+      const value = line.slice(line.indexOf(' ') + 1).trim();
+      if (line.includes(' ') && value !== '' && url.startsWith(value)) {
+        return { stdout: '', stderr: `git config rewrites ${value} (a url.*.insteadOf), so the fetch would not use the deliver identity; remove the rewrite for this repository`, code: 1 };
+      }
+    }
+    const refspec = branch === undefined ? '+refs/heads/*:refs/remotes/origin/*' : `+refs/heads/${branch}:refs/remotes/origin/${branch}`;
+    const token = pin.token ?? (env['GH_TOKEN'] ?? '').trim();
+    return git(
+      [
+        '-c', 'credential.helper=', '-c', `credential.https://github.com.helper=${GITHUB_TOKEN_HELPER}`,
+        // No hook, alternate-refs command, askpass, maintenance or submodule fetch runs with the token in its
+        // environment (xreview r1, r2; the same keys apps/git.ts pins off).
+        '-c', `core.hooksPath=${devNull}`, '-c', 'core.alternateRefsCommand=', '-c', 'core.askPass=', '-c', 'credential.interactive=false',
+        '-c', 'maintenance.auto=false', '-c', 'gc.auto=0',
+        'fetch', '-q', '--no-recurse-submodules', url, refspec,
+      ],
+      cwd,
+      {
+        ...extra,
+        // An inherited GIT_CONFIG_PARAMETERS is read after GIT_CONFIG_COUNT and could restore another login's header.
+        GIT_CONFIG_PARAMETERS: '',
+        GIT_CONFIG_COUNT: '4',
+        GIT_CONFIG_KEY_0: 'http.extraHeader', GIT_CONFIG_VALUE_0: '',
+        GIT_CONFIG_KEY_1: `http.${url}.extraHeader`, GIT_CONFIG_VALUE_1: '',
+        GIT_CONFIG_KEY_2: 'http.followRedirects', GIT_CONFIG_VALUE_2: 'false',
+        GIT_CONFIG_KEY_3: `http.${url}.followRedirects`, GIT_CONFIG_VALUE_3: 'false',
+        GIT_ALLOW_PROTOCOL: 'https',
+        GIT_TERMINAL_PROMPT: '0',
+        // An empty GIT_ASKPASS is no askpass at all (git's prompt.c), so no prompt program sees the token either.
+        GIT_ASKPASS: '',
+        GH_TOKEN: token,
+      },
+    );
+  };
+}
+
+/** The deliver script's one-command credential helper: the token from the call's own `GH_TOKEN`. */
+const GITHUB_TOKEN_HELPER = '!f() { test "$1" = get && echo username=x-access-token && echo "password=$GH_TOKEN"; }; f';
 
 /**
  * `git remote get-url --push origin` in `rootPath` — the deliver gate's origin preflight (F2).
@@ -483,7 +575,7 @@ export async function readDeliverOriginUrl(rootPath: string): Promise<string | n
     execFile(
       'git',
       ['remote', 'get-url', '--push', 'origin'],
-      { cwd: rootPath, timeout: 5_000, encoding: 'utf8', env: childEnvWithBootEstateDb(process.env) },
+      { cwd: rootPath, timeout: 5_000, encoding: 'utf8', env: gitChildEnv(process.env) },
       (err, stdout, stderr) => {
         const code = err === null ? 0 : typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : null;
         resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), code });
@@ -689,6 +781,19 @@ export const GITHUB_CREDENTIAL_LINES: readonly string[] = [
   '  fi',
 ];
 
+/**
+ * (crew#1862) The first lines of the deliver and redeliver scripts: what `gitChildEnv` gives the gits crew starts itself,
+ * for the gits a script starts. The raw Azure DevOps variables lose their export (they stay readable here, for the
+ * credential preflight) and only the header mint exports them again, in its own subshell; every git, and every hook,
+ * filter or fsmonitor daemon of one, reads `core.fsmonitor=false` last. Every spelling of the names is unexported, in
+ * any letter case: a Windows child reads `Azure_Devops_Ext_Pat` as the same variable (`withoutAdoCredential`).
+ */
+export const SCRIPT_GIT_ENV_LINES: readonly string[] = [
+  `export -n ${ADO_RAW_ENV.join(' ')}`,
+  `for _v in $(compgen -e); do case "$_v" in ${ADO_RAW_ENV.map((n) => n.replace(/[A-Za-z]/g, (c) => `[${c.toLowerCase()}${c.toUpperCase()}]`)).join('|')}) export -n "$_v";; esac; done`,
+  `export GIT_CONFIG_PARAMETERS="\${GIT_CONFIG_PARAMETERS:+\$GIT_CONFIG_PARAMETERS }${FSMONITOR_OFF_PARAMETER}"`,
+];
+
 /** The `_rebasing` shell helper the shared resolver loop below calls. */
 export const REBASING_LINE =
     '_rebasing() { [ -d "$(git rev-parse --git-path rebase-merge 2>/dev/null)" ] || [ -d "$(git rev-parse --git-path rebase-apply 2>/dev/null)" ]; }';
@@ -810,6 +915,15 @@ export const CHANGELOG_REBASE_LINES: readonly string[] = [
  * from (`core/deliver-text.ts`); `opts` carries the rest of the launch-time facts and the daemon
  * origin the script asks for the run-derived text (crew#524).
  */
+/**
+ * (crew#720) The Azure DevOps repository a delivery composed with `opts` pushes to: `opts.adoTarget` when given, else the
+ * one `opts.originUrl` names; `null` ⇒ not an Azure DevOps delivery. (crew#1843) The post-hoc deliver shell decides from
+ * this same answer whether the script gets the raw credential, so the env and the script never disagree.
+ */
+export function deliverAdoTarget(opts: DeliverScriptOptions = {}): AdoRepo | null {
+  return opts.adoTarget !== undefined ? opts.adoTarget : adoRepoOf(opts.originUrl);
+}
+
 export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}): string {
   const commitEnv = opts.commitIdents == null ? '' :
     `GIT_AUTHOR_NAME=${shellSingleQuote(opts.commitIdents.author.name)} GIT_AUTHOR_EMAIL=${shellSingleQuote(opts.commitIdents.author.email)} GIT_COMMITTER_NAME=${shellSingleQuote(opts.commitIdents.committer.name)} GIT_COMMITTER_EMAIL=${shellSingleQuote(opts.commitIdents.committer.email)} `;
@@ -876,7 +990,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
   // the daemon's own credential. (crew#933) A revision pushes onto the PR's head branch and comments
   // the run record as a thread, as on GitHub; the intent's Azure Boards work items (`AB#<id>`) are
   // linked on the PR it opens. Digits only, so the literal is safe.
-  const ado = opts.adoTarget !== undefined ? opts.adoTarget : adoRepoOf(opts.originUrl);
+  const ado = deliverAdoTarget(opts);
   const adoWorkItems = ado === null ? '' : adoWorkItemIds(intent ?? '').join(',');
   // The revised PR must be THIS delivery's pull request: on Azure DevOps its URL names the target
   // repository and the number (an origin re-pointed between resolution and composition must not
@@ -906,6 +1020,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // replace that status under `set -e` (codex review).
     `_outcome() { local rc=$?; [ -z "$TD" ] || rm -rf "$TD" || true; echo "${DELIVER_OUTCOME_MARKER} $${DELIVER_NONCE_VAR} $VERDICT"; exit "$rc"; }`,
     'trap _outcome EXIT',
+    ...SCRIPT_GIT_ENV_LINES,
     // IDENTITY (DES-L9 D-18, crew#549 / F-RC1-010) — read ONCE, up front, before anything is
     // fetched, staged or pushed, so the refusal is the phase's WHOLE output (the engine's head-150
     // carries it). With GH_ACCOUNT set, a differing or unreadable active login REFUSES: the
@@ -973,7 +1088,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // DRIFT: every push URL of origin must still name the consented repository (the GitHub rule,
     // crew#736). The URLs are passed as data, never printed (one may carry a token).
     '  "$ADONODE" "$TD/ado.mjs" same "$ADOGIT" "$(git remote get-url --push --all origin 2>/dev/null | sed -E "s#^(https?://)[^@/]*@#\\1#" || true)" || { echo "deliver: origin no longer points at $ADOWEB alone, the repository this delivery was approved for — nothing was staged, committed or pushed. Point origin back at it, or reject and relaunch against the new remote"; exit 1; }',
-    `  if ! ADOHDR=$("$ADONODE" "$TD/ado.mjs" header "$ADOLOGIN"); then VERDICT=rejected; : > ${DELIVER_STRANDED_SENTINEL} || true; echo "deliver: could not obtain the Azure DevOps credential (above) — nothing was staged, committed or pushed; fix the credential, then approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1; fi`,
+    `  if ! ADOHDR=$(export ${ADO_RAW_ENV.join(' ')}; "$ADONODE" "$TD/ado.mjs" header "$ADOLOGIN"); then VERDICT=rejected; : > ${DELIVER_STRANDED_SENTINEL} || true; echo "deliver: could not obtain the Azure DevOps credential (above) — nothing was staged, committed or pushed; fix the credential, then approve to retry the deliver phase; ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1; fi`,
     // The raw credential leaves the environment now: nothing this script runs later (the crew#426
     // npm preflight, git's commit machinery) can read it.
     `  unset ${[ADO_PAT_ENV, ...ADO_SP_ENV].join(' ')}`,
@@ -2065,7 +2180,7 @@ export function deliverGateInstructions(opts: DeliverScriptOptions): string {
   // BEFORE approval, on the card, in the same words the phase refuses with.
   const cred = opts.credentials ?? null;
   const credSentence = cred !== null && cred.status === 'missing' ? `${cred.message} ` : '';
-  const ado = opts.adoTarget !== undefined ? opts.adoTarget : adoRepoOf(opts.originUrl);
+  const ado = deliverAdoTarget(opts);
   if (ado !== null) {
     // gh plays no part in an Azure DevOps delivery: the card names the credential instead.
     const how =
