@@ -23,6 +23,12 @@ vi.mock('node:fs/promises', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:fs/promises')>()),
   statfs: async () => ({ bavail: 500_000, bsize: 1_000_000, blocks: 1_000_000 }),
 }));
+// RED (this commit only): the macOS CI runner's condition, a saturated host (the 1-minute load at 6 per core), which
+// the load row reads from the real host and calls `down` (red) at 5 per core.
+vi.mock('node:os', async (importOriginal) => {
+  const os = await importOriginal<typeof import('node:os')>();
+  return { ...os, loadavg: () => [os.cpus().length * 6, 0, 0] };
+});
 
 const ENV_KEYS = ['WICKED_SEAT_FLOOR', 'WICKED_CONTAINER_RUNTIME', 'WICKED_CORE_EXE', 'WICKED_MEMORY_DB', 'WICKED_ESTATE_EXE', 'WICKED_ESTATE_MCP_EXE', 'LOG_LEVEL'] as const;
 const saved: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
