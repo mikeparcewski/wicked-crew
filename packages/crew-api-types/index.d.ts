@@ -17131,14 +17131,16 @@ export interface ProductComposeResponse {
  * - `resolve`: a person settles one `unsure` item: `issue: N` = it was created as #N (crew reads #N and records it only
  *   when its title and body are the approved ones), `issue: null` = it was not created (a later confirm creates it).
  *
- * Refusals (`{error, code}`; each sends nothing): 400 `bad_request`; 403 `publish_human_only`; 404
+ * Refusals (`{error, code}`; each sends nothing, except a `journal_unreadable` answered after a confirm has sent: GitHub may
+ * then hold some of the issues, and a GET shows which): 400 `bad_request`; 403 `publish_human_only`; 404
  * `project_not_found` · `run_not_found` · `repo_not_linked`; 409 `not_a_compose` (no compose facts for this run on
  * this project: a run composed before publishing shipped; compose again) · `compose_unverified` (the run's draft or
- * review step is not the one Compose launched, e.g. its plan was edited at its gate: `error` says so in plain words,
- * `detail` names what differs) · `run_not_finished` · `plan_unreadable` (the reason names the item) · `ambiguous` ·
+ * review step is not the one Compose launched: for a plan edited at its gate `error` says so in plain words; `detail`
+ * names what differs) · `run_not_finished` · `plan_unreadable` (the reason names the item) · `ambiguous` ·
  * `card_changed` (with the fresh `card` and `publishHash`) · `publication_differs` (this run was already published to
  * that repository with other content; with its `publication`) · `write_tool_off` · `credential_unpinned` ·
- * `unresolved` (with the `publication`) · `journal_unreadable` · `in_progress` · `not_unsure` · `resolve_differs`;
+ * `unresolved` (with the `publication`) · `journal_unreadable` · `in_progress` (this daemon or another one on the same
+ * state home is sending or resolving it) · `not_unsure` · `resolve_differs`;
  * 503 `registry_unavailable` · `source_unavailable` · `journal_unavailable`. Audited `product.publish` and
  * `product.publish.resolve`.
  */
@@ -17211,7 +17213,7 @@ export type ProductPublishResponse =
 /**
  * `GET /projects/:id/product/publish/:runId` (a person at operator trust): whether the run can be published now
  * (`publishable.ok: false` carries the same `code` and plain-words `error` a POST would answer, so a client shows it
- * before the click), the project's own GitHub repositories, and every publication of the run, each read back now.
+ * before the click; a tracker registry that cannot be read is 503 `registry_unavailable`, never an empty `targets`), the project's own GitHub repositories, and every publication of the run, each read back now.
  */
 export interface ProductPublicationsResponse {
   runId: string;

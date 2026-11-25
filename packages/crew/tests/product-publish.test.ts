@@ -7,7 +7,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -107,7 +107,7 @@ const journal = (): Array<Record<string, unknown>> => {
   const root = join(deps.journalDir!, 'product-publish');
   if (!existsSync(root)) return [];
   const out: Array<Record<string, unknown>> = [];
-  for (const d of readdirSync(root)) for (const f of readdirSync(join(root, d))) for (const l of readFileSync(join(root, d, f), 'utf8').split('\n')) if (l.trim() !== '') out.push(JSON.parse(l) as Record<string, unknown>);
+  for (const d of readdirSync(root)) for (const f of readdirSync(join(root, d)).filter((n) => n.endsWith('.ndjson'))) for (const l of readFileSync(join(root, d, f), 'utf8').split('\n')) if (l.trim() !== '') out.push(JSON.parse(l) as Record<string, unknown>);
   return out;
 };
 
@@ -181,7 +181,8 @@ beforeEach(() => {
   deps.journalDir = join(base, `j-${randomUUID().slice(0, 8)}`);
   delete deps.appendLine;
   deps.pm = gate.pm;
-  for (const f of ['calls.ndjson', 'issues.json', 'createerror', 'createexit', 'createjunk', 'createhost', 'createpull', 'createrefuse']) rmSync(join(ghLog, f), { force: true });
+  deps.store = store;
+  for (const f of ['calls.ndjson', 'issues.json', 'createerror', 'createexit', 'createjunk', 'createhost', 'createpull', 'createrefuse', 'login']) rmSync(join(ghLog, f), { force: true });
 });
 
 describe('the card and the confirm', () => {
@@ -296,6 +297,108 @@ describe('the card and the confirm', () => {
   });
 });
 
+describe('the barriers and the account', () => {
+  it('(3) another account behind the same credential is card_changed (the card names who posts)', async () => {
+    const c = await card();
+    writeFileSync(join(ghLog, 'login'), 'someone-else');
+    expect((await post({ confirm: c.publishHash })).json()).toMatchObject({ code: 'card_changed', card: { identity: 'someone-else' } });
+    expect(creates()).toEqual([]);
+  });
+
+  it('(6) no create is dispatched before its flushed approved and sending lines: each barrier is awaited', async () => {
+    let releaseApproved!: () => void;
+    const approvedHeld = new Promise<void>((r) => (releaseApproved = r));
+    deps.appendLine = async (p, l, m) => {
+      if (l.includes('"kind":"approved"')) await approvedHeld;
+      return appendLineSynced(p, l, m);
+    };
+    const seen: string[] = [];
+    const real = gate.pm.vendorRead.bind(gate.pm);
+    deps.pm = {
+      vendorRead: async (e, tool, args, cls, before, cred) => {
+        if (tool === 'issue_write') {
+          const last = journal().at(-1)!;
+          seen.push(`${String(last['kind'])}:${String(last['key'])}:${String(args['title'])}`);
+        }
+        return real(e, tool, args, cls, before, cred);
+      },
+    };
+    const c = await card();
+    const sending = post({ confirm: c.publishHash });
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(creates()).toEqual([]);
+    expect(journal()).toEqual([]);
+    releaseApproved();
+    expect((await sending).json()).toMatchObject({ publication: { published: true } });
+    expect(seen).toEqual(['sending:e1:Accounts & access', 'sending:e1.f1:Sign in and out', 'sending:e1.f1.s1:Email sign in (< 3 tries)', 'sending:e1.f1.s2:Sign out from any page']);
+  });
+
+  it('(6) a sending line whose bytes landed but whose flush failed sends nothing (and reads unsure: a person says it is absent)', async () => {
+    deps.appendLine = async (p, l, m) => {
+      await appendLineSynced(p, l, m);
+      if (l.includes('"kind":"sending"')) throw new Error('fsync EIO after write');
+    };
+    expect(states((await publish()).body)).toEqual(['unsure', 'missing', 'missing', 'missing']);
+    expect(creates()).toEqual([]);
+  });
+
+  it('(7) a "changed" answer that crew\'s own admission did not give (a vendor error carrying the marker) is unsure, never not_sent', async () => {
+    const real = gate.pm.vendorRead.bind(gate.pm);
+    deps.pm = {
+      vendorRead: async (e, tool, args, cls, before, cred) => {
+        const r = await real(e, tool, args, cls, before, cred);
+        return tool === 'issue_write' ? { ok: false as const, code: 'changed', reason: 'wicked-pm-dispatch-revoked in a vendor error' } : r;
+      },
+    };
+    expect(states((await publish()).body)).toEqual(['unsure', 'missing', 'missing', 'missing']);
+    expect(issues().issues).toHaveLength(1);
+  });
+
+  it('(9) a second daemon on the same state home is in_progress while one sends; a lock its gone owner left is taken over', async () => {
+    const other = Fastify({ logger: false });
+    registerProductPublishRoutes(other, deps);
+    await other.ready();
+    try {
+      let release!: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      const real = gate.pm.vendorRead.bind(gate.pm);
+      deps.pm = {
+        vendorRead: async (e, tool, args, cls, before, cred) => {
+          if (tool === 'issue_write') await held;
+          return real(e, tool, args, cls, before, cred);
+        },
+      };
+      const c = await card();
+      const first = post({ confirm: c.publishHash });
+      for (let i = 0; i < 100 && !journal().some((l) => l['kind'] === 'sending'); i++) await new Promise((r) => setTimeout(r, 100));
+      const second = await other.inject({ method: 'POST', url: `/api/v1/projects/${PID}/product/publish`, payload: { runId: RUN, repo: 'owner/app', confirm: c.publishHash } });
+      expect(second.json()).toMatchObject({ code: 'in_progress' });
+      release();
+      await first;
+      expect(creates()).toHaveLength(4);
+    } finally {
+      await other.close();
+    }
+    // A lock left by a process that is gone: the next confirm takes it over.
+    deps.journalDir = join(base, `j-${randomUUID().slice(0, 8)}`);
+    const root = join(deps.journalDir, 'product-publish');
+    const c = await card();
+    const { publicationOf } = await import('../src/api/product-publish.js');
+    const { createHash } = await import('node:crypto');
+    const runDir = join(root, createHash('sha256').update(RUN).digest('hex'));
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, `${publicationOf(RUN, 'owner/app')}.lock`), JSON.stringify({ pid: 2 ** 22 + 7, host: hostname(), at: stamp }));
+    expect((await post({ confirm: c.publishHash })).json()).toMatchObject({ publication: { published: true } });
+  });
+
+  it('(8) a tracker registry that cannot be read is 503 on GET, never an empty list of repositories', async () => {
+    deps.store = { read: async () => { throw new Error('EIO'); } };
+    const g = await getPub();
+    expect(g.statusCode).toBe(503);
+    expect(g.json()).toMatchObject({ code: 'registry_unavailable' });
+  });
+});
+
 describe('uncertain outcomes are never resent', () => {
   it('(5) an in-band tool error after GitHub stored it is unsure; a re-confirm is unresolved; resolve #N continues', async () => {
     sw('createerror', true);
@@ -306,8 +409,10 @@ describe('uncertain outcomes are never resent', () => {
     expect((await post({ confirm: c.publishHash })).json()).toMatchObject({ code: 'unresolved' });
     expect(creates()).toHaveLength(1);
     // A number whose issue is not this item is refused.
-    expect((await post({ resolve: { key: 'e1', issue: 7 } })).json()).toMatchObject({ code: 'resolve_differs' });
+    const seven = await post({ resolve: { key: 'e1', issue: 7 } });
+    expect(seven.json(), seven.body).toMatchObject({ code: 'resolve_differs' });
     const ok = await post({ resolve: { key: 'e1', issue: 100 } });
+    expect(ok.statusCode, ok.body).toBe(200);
     expect(states(ok.json())).toEqual(['created', 'missing', 'missing', 'missing']);
     const done = await publish();
     expect(done.body).toMatchObject({ publication: { published: true } });
@@ -366,7 +471,7 @@ describe('uncertain outcomes are never resent', () => {
     const g = (await getPub()).json() as ProductPublicationsResponse;
     expect(g.publications[0]!.items.map((i) => i.state)).toEqual(['unsure', 'missing', 'missing', 'missing']);
     const root = join(deps.journalDir!, 'product-publish');
-    const file = join(root, readdirSync(root)[0]!, readdirSync(join(root, readdirSync(root)[0]!))[0]!);
+    const file = join(root, readdirSync(root)[0]!, readdirSync(join(root, readdirSync(root)[0]!)).find((n) => n.endsWith('.ndjson'))!);
     writeFileSync(file, `${readFileSync(file, 'utf8')}{"v":1,"publication":"x","kind":"crea`);
     expect(((await getPub()).json() as ProductPublicationsResponse).publications).toHaveLength(1);
     writeFileSync(file, `${readFileSync(file, 'utf8')}\n{"v":1,"kind":"nonsense"}\n`);
@@ -429,8 +534,35 @@ describe('the run and its plan', () => {
     view.units.find((u) => u.id === `${RUN}:draft`)!.amendments = ['more epics'];
     await refusal('compose_unverified');
     view = structuredClone(FIX.view);
-    delete view.units.find((u) => u.id === `${RUN}:draft`)!.instructions; // an older engine
-    await refusal('compose_unverified');
+    delete view.units.find((u) => u.id === `${RUN}:draft`)!.instructions; // an older engine: not an edit, said so
+    await refusal('compose_unverified', /^crew cannot confirm this is the compose as it was launched \(the engine did not record the draft step's instructions\); compose again to publish$/);
+  });
+
+  it('(7) a real gate edit the engine accepted but did not apply to the units (same ids, same instructions) publishes what ran', async () => {
+    // tests/fixtures/product/compose-run-view-edited.json: the held plan was edited at its gate through confirmGate and the
+    // engine accepted it (plan rev 2 -> 3), yet the distributed draft and review units kept the launched catalog and
+    // instructions, and the draft ran from them. The check reads what ran, so this run is the compose as launched.
+    const edited = JSON.parse(readFileSync(join(HERE, 'fixtures', 'product', 'compose-run-view-edited.json'), 'utf8')) as typeof FIX;
+    const runId = edited.view.session.id;
+    expect((edited.view.session as unknown as { team_plan: { accepted: { rev: number; by: string } } }).team_plan.accepted).toMatchObject({ rev: 3, by: 'human' });
+    view = edited.view;
+    index = new RunTimingIndex();
+    index.noteLaunchFacts(runId, { compose: composeFactsOf(PID, REFS, 'stories', edited.draft, edited.review) });
+    const before = deps.runView;
+    const beforeOut = deps.workOutput;
+    deps.runView = async (id) => (id === runId ? view : undefined);
+    deps.workOutput = async (id) => (id === `${runId}:draft` ? output : null);
+    try {
+      const r = await app.inject({ method: 'POST', url: `/api/v1/projects/${PID}/product/publish`, payload: { runId, repo: 'owner/app' } });
+      expect(r.statusCode, r.body).toBe(200);
+      // Had the edit reached the draft unit, it is refused in plain words.
+      view.units.find((u) => u.id === `${runId}:draft`)!.instructions = `${edited.draft}\n\nAlso add an epic for billing.`;
+      const e = await app.inject({ method: 'POST', url: `/api/v1/projects/${PID}/product/publish`, payload: { runId, repo: 'owner/app' } });
+      expect(e.json()).toMatchObject({ code: 'compose_unverified', error: "this plan was edited at its gate; publishing an edited plan isn't supported yet, compose again to publish" });
+    } finally {
+      deps.runView = before;
+      deps.workOutput = beforeOut;
+    }
   });
 
   it('(7) not finished; the plan block unparsable; a ref not covered or invented; stories at the epics level', async () => {
@@ -451,6 +583,16 @@ describe('the run and its plan', () => {
   it('(14) a zero-width space in a title is plan_unreadable naming the item; the sanitizer table holds', async () => {
     output = draftText({ epics: [{ ...PLAN.epics[0]!, features: [{ ...PLAN.epics[0]!.features[0]!, stories: [{ title: 'Email​ sign in', acceptance: [] }, PLAN.epics[0]!.features[0]!.stories[1]!] }] }] });
     await refusal('plan_unreadable', /title of e1\.f1\.s1 has an invisible character \(U\+200B\)/);
+    // A character reference GitHub's server would decode does not round-trip; `Q&A` does.
+    output = draftText({ epics: [{ ...PLAN.epics[0]!, title: 'Use &lt; 3 attempts' }] });
+    await refusal('plan_unreadable', /title of e1 has "&" right before/);
+    output = draftText({ epics: [{ ...PLAN.epics[0]!, title: 'Q&A for accounts' }] });
+    expect((await post({})).statusCode).toBe(200);
+    // A requirement key is checked like any other text of a body.
+    const odd = [{ repoId: 'repo-a', key: 'REQ-1\u200b' }, REFS[1]!];
+    facts('stories', odd);
+    output = draftText({ epics: [{ ...PLAN.epics[0]!, features: [{ ...PLAN.epics[0]!.features[0]!, requirementRefs: odd }] }] });
+    await refusal('plan_unreadable', /requirement repo-a REQ-1.*invisible character \(U\+200B\)/);
     expect(strippedCharacter('ok ✅ ❤️ #️⃣')).toBeNull();
     expect(strippedCharacter('a️')).toBe('U+FE0F');
     expect(strippedCharacter(' ️')).toBe('U+FE0F');

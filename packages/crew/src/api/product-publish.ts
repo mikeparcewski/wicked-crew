@@ -19,8 +19,9 @@
  * plus a read-back of every created issue, never the run's own claim.
  */
 
-import { mkdir, readdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { hostname } from 'node:os';
+import { mkdir, open, readdir, readFile, unlink } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from '../zod.js';
@@ -158,13 +159,18 @@ export function strippedCharacter(s: string): string | null {
 
 /**
  * Why a title would not read back as written, or `null`. Besides {@link strippedCharacter}, the server's
- * `sanitize.PlainText` drops HTML tags and code-fence info from a title (its `&`, `<` and `>` it escapes, and crew
- * reads those back decoded).
+ * `sanitize.PlainText` drops HTML tags and code-fence info from a title, decodes character references, and escapes
+ * `&`, `<` and `>` (crew reads those back decoded).
  */
 function titleRefusal(t: string): string | null {
   const c = strippedCharacter(t);
   if (c !== null) return `has an invisible character (${c}) that GitHub's server removes`;
   if (/<[A-Za-z/!?]/.test(t)) return 'has text GitHub reads as an HTML tag (a "<" before a letter)';
+  // PlainText decodes an entity before it escapes the text again, so `&lt;` (or `&#60`, `&amp`) would come back as
+  // another character. Every entity name has at least two characters, so `Q&A` and `R&D` stay as written.
+  if (/&(#|[A-Za-z]{2})/.test(t)) return 'has "&" right before "#" or a word, which GitHub reads as an HTML character reference';
+  // The projector keeps 400 characters of the title as the server answers it, escaped.
+  if (t.replace(/&/g, '&amp;').replace(/[<>]/g, '&lt;').length > 400) return 'is too long once GitHub escapes its "&", "<" and ">"';
   if (/^\s*```/.test(t)) return 'starts with a code fence';
   if (t.includes(PARENT)) return `has the text ${PARENT}, which crew uses for the parent issue`;
   return null;
@@ -219,7 +225,13 @@ export function publishItems(runId: string, plan: Plan, facts: ComposeFacts): { 
         covered.add(id);
       }
       if (facts.level === 'epics' && (f.stories ?? []).length > 0) return { ok: false, error: `${fk} has stories, but this compose drafted epics and features only` };
-      const ferr = push(fk, 'feature', ftitles[fi]!, ['Requirements:', ...f.requirementRefs.map((r) => `- ${oneLine(r.repoId)} ${oneLine(r.key)}`)], ek);
+      const refLines: string[] = [];
+      for (const r of f.requirementRefs) {
+        const t = text(`${fk} (requirement ${r.repoId} ${r.key})`, `${r.repoId} ${r.key}`);
+        if (typeof t !== 'string') return { ok: false, ...t };
+        refLines.push(`- ${t}`);
+      }
+      const ferr = push(fk, 'feature', ftitles[fi]!, ['Requirements:', ...refLines], ek);
       if (ferr !== null) return { ok: false, error: ferr };
       for (const [si, s] of (f.stories ?? []).entries()) {
         const sk = `${fk}.s${si + 1}`;
@@ -275,7 +287,10 @@ export async function composedPlan(deps: Pick<ProductPublishDeps, 'composeOf' | 
   if (facts === undefined || facts.projectId !== projectId) {
     return refuse(409, 'not_a_compose', "this run was not composed for this project, or it was composed before publishing was added; compose again to publish");
   }
-  const unverified = (detail: string): Refusal => refuse(409, 'compose_unverified', EDITED, { detail });
+  // A run still working has no units to judge yet (they appear once its scope is planned): say it is not finished.
+  if (view.session.status !== 'completed') return refuse(409, 'run_not_finished', `this compose has not finished (it is ${view.session.status}); publish it once its review is confirmed`);
+  const unverified = (detail: string, edited = false): Refusal =>
+    refuse(409, 'compose_unverified', edited ? EDITED : `crew cannot confirm this is the compose as it was launched (${detail}); compose again to publish`, { detail });
   const draft = view.units.filter((u) => u.id === `${runId}:draft`);
   const review = view.units.filter((u) => u.id === `${runId}:review`);
   if (draft.length !== 1 || review.length !== 1) return unverified('the run does not have exactly one draft step and one review step');
@@ -284,12 +299,12 @@ export async function composedPlan(deps: Pick<ProductPublishDeps, 'composeOf' | 
   if (d.ord > r.ord) return unverified('the review step runs before the draft step');
   for (const [u, id] of [[d, 'draft'], [r, 'review']] as const) {
     const step = facts.steps.find((s) => s.id === id);
-    if (step === undefined || u.catalog !== step.catalog) return unverified(`the ${id} step is not the ${step?.catalog ?? id} step Compose launched`);
-    if (u.structured_description !== true || typeof u.instructions !== 'string' || sha256Hex(u.instructions) !== step.instructionsSha) return unverified(`the ${id} step's instructions are not the ones Compose wrote`);
-    if ((u.amendments ?? []).length > 0) return unverified(`the ${id} step was amended`);
+    if (step === undefined || u.catalog !== step.catalog) return unverified(`the ${id} step is not the ${step?.catalog ?? id} step Compose launched`, true);
+    if (u.structured_description !== true || typeof u.instructions !== 'string') return unverified(`the engine did not record the ${id} step's instructions`);
+    if (sha256Hex(u.instructions) !== step.instructionsSha) return unverified(`the ${id} step's instructions are not the ones Compose wrote`, true);
+    if ((u.amendments ?? []).length > 0) return unverified(`the ${id} step was amended`, true);
   }
-  if (r.role !== 'evaluator' || !sameGate(r.gate)) return unverified("the review step is not the evaluator behind a person's confirmation");
-  if (view.session.status !== 'completed') return refuse(409, 'run_not_finished', `this compose has not finished (it is ${view.session.status}); publish it once its review is confirmed`);
+  if (r.role !== 'evaluator' || !sameGate(r.gate)) return unverified("the review step is not the evaluator behind a person's confirmation", true);
   if (d.status !== 'done' || r.status !== 'done') return unverified('the draft or its review did not finish');
   const out = await deps.workOutput(`${runId}:draft`);
   if (out === null || out.trim() === '') return refuse(409, 'plan_unreadable', 'the draft step left no output to publish');
@@ -350,14 +365,17 @@ function journalPath(dir: string, runId: string, publication: string): string {
 
 /**
  * Fold one journal. A dangling `sending` (no outcome after it) is `unsure` unless `live` (this daemon is sending it
- * now). A line cut short by a crash mid-append (it does not end its object: its barrier never returned, so nothing was
+ * now, read just after the journal). A line cut short by a crash mid-append (it does not end its object: its barrier never returned, so nothing was
  * sent on it, and every line's absence leaves an item no further along) is skipped; any other line crew cannot read
  * throws {@link JournalUnreadable}: a damaged journal is never read as empty.
  */
-async function fold(path: string, publication: string, live: boolean): Promise<Folded> {
+async function fold(path: string, publication: string, live: () => boolean): Promise<Folded> {
   let text: string;
+  let sendingNow = false;
   try {
     text = await readFile(path, 'utf8');
+    // Read after the journal: a send that started meanwhile shows `sending`, not a stop.
+    sendingNow = live();
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { first: null, last: null, items: new Map() };
     throw new JournalUnreadable(`the publish journal could not be read (${(err as NodeJS.ErrnoException).code ?? 'error'})`);
@@ -392,7 +410,7 @@ async function fold(path: string, publication: string, live: boolean): Promise<F
       : { state: 'created', number: line.number, url: line.url, why: null };
     out.items.set(line.key, s);
   }
-  if (!live) {
+  if (!sendingNow) {
     for (const [k, s] of out.items) {
       if (s.state === 'sending') out.items.set(k, { state: 'unsure', number: null, url: null, why: 'crew stopped after sending it and before it could record the answer' });
     }
@@ -427,6 +445,82 @@ async function readIssue(pm: Pick<PmGate, 'vendorRead'>, e: PmEntry, t: TrackerS
   return { ok: true, title: decodeTitle(v['title']), body: typeof v['body'] === 'string' ? v['body'] : '', url: v['url'] };
 }
 
+/** fsync a directory (where the platform can open one). */
+async function syncDir(d: string): Promise<void> {
+  let fh;
+  try {
+    fh = await open(d, 'r');
+  } catch (err) {
+    if (process.platform === 'win32') return;
+    throw err;
+  }
+  try {
+    await fh.sync();
+  } catch (err) {
+    if (process.platform !== 'win32') throw err;
+  } finally {
+    await fh.close();
+  }
+}
+
+/** Create `d` (0700) so that it survives a crash: every directory this call created is synced into its parent. */
+async function durableDir(d: string): Promise<void> {
+  const made = await mkdir(d, { recursive: true, mode: 0o700 });
+  if (made === undefined) return;
+  const chain: string[] = [];
+  for (let x = d; x !== dirname(made); x = dirname(x)) chain.unshift(x);
+  chain.unshift(dirname(made));
+  for (const x of chain) await syncDir(x);
+}
+
+/** The publication locks this process holds now (one daemon may register its routes more than once in tests). */
+const HELD = new Set<string>();
+
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+};
+
+/**
+ * Take a publication's lock file across daemons sharing one state home (the in-memory slot holds within one). A lock
+ * left by a process of this host that is gone (or by this one, when it no longer holds it) is taken over: its sends fold to `unsure`, never to resent. Answers why
+ * not, or `null` once held.
+ */
+async function takeLock(path: string): Promise<string | null> {
+  await durableDir(dirname(path));
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fh = await open(path, 'wx', 0o600);
+      try {
+        await fh.writeFile(JSON.stringify({ pid: process.pid, host: hostname(), at: new Date().toISOString() }));
+        await fh.sync();
+      } finally {
+        await fh.close();
+      }
+      HELD.add(path);
+      return null;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+    let owner: { pid?: unknown; host?: unknown } = {};
+    try {
+      owner = JSON.parse(await readFile(path, 'utf8')) as typeof owner;
+    } catch {
+      // a lock being written right now, or torn: held
+    }
+    if (attempt === 0 && owner.host === hostname() && typeof owner.pid === 'number' && (owner.pid === process.pid ? !HELD.has(path) : !alive(owner.pid))) {
+      await unlink(path).catch(() => undefined);
+      continue;
+    }
+    break;
+  }
+  return `another crew daemon is sending or resolving this publication now; if none is, remove ${path.split(/[\\/]/).slice(-3).join('/')} under the mcp state directory`;
+}
+
 // ── The routes ─────────────────────────────────────────────────────────────────────────────────────────
 
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
@@ -444,8 +538,11 @@ export const ProductPublishSchema = z
   })
   .refine((b) => b.confirm === undefined || b.resolve === undefined, { error: 'confirm and resolve are separate requests' });
 
-/** Codes `vendorRead` answers before anything is sent: the only outcomes that prove an issue was not created. */
-const NOT_SENT = new Set(['source_off', 'busy', 'rate_limited', 'remote_work_pending', 'changed', 'secret_missing', 'credential_changed', 'gh_not_installed', 'gh_signed_out', 'gh_token_unavailable']);
+/**
+ * Codes `vendorRead` answers before anything is sent, from crew's own state: the only outcomes that prove an issue was
+ * not created. (`changed` too, but only when publish's own admission refused it: see `revoked`.)
+ */
+const NOT_SENT = new Set(['source_off', 'busy', 'rate_limited', 'remote_work_pending', 'secret_missing', 'credential_changed', 'gh_not_installed', 'gh_signed_out', 'gh_token_unavailable']);
 
 export function registerProductPublishRoutes(app: FastifyInstance, deps: ProductPublishDeps): void {
   /** Publications being sent or resolved now, taken before the first await (DES Send step 1). */
@@ -502,7 +599,7 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
   type Built = { card: ProductPublishCard; publishHash: string; contentSha: string; e: PmEntry; t: TrackerSetEntry; descriptor: string; principal: string; credential: string; es: PmEntry[]; f: Folded; publication: string; path: string };
 
   /** The card for `sel` built NOW (DES "The card"), or why there is none. */
-  async function build(projectId: string, runId: string, sel: RepoSelector, live: boolean): Promise<{ ok: true; b: Built } | Refusal> {
+  async function build(projectId: string, runId: string, sel: RepoSelector, holding: boolean): Promise<{ ok: true; b: Built } | Refusal> {
     if (!(await deps.projectExists(projectId))) return refuse(404, 'project_not_found', `no project ${projectId}`);
     const plan = await composedPlan(deps, projectId, runId);
     if (!plan.ok) return plan;
@@ -518,7 +615,7 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
     const path = journalPath(dir(), runId, publication);
     let f: Folded;
     try {
-      f = await fold(path, publication, live);
+      f = await fold(path, publication, holding ? () => false : () => slots.has(publication));
     } catch (err) {
       if (err instanceof JournalUnreadable) return refuse(409, 'journal_unreadable', `${err.message}; nothing is sent until it is repaired`);
       throw err;
@@ -542,12 +639,12 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
 
   const envelope = (b: { publication: string; runId: string; projectId: string; repo: string }, actor: Actor) => ({ v: 1 as const, publication: b.publication, runId: b.runId, projectId: b.projectId, repo: b.repo, at: nowIso(), by: actor.id });
   const write = async (path: string, line: Record<string, unknown>): Promise<void> => {
-    await mkdir(join(path, '..'), { recursive: true, mode: 0o700 });
+    await durableDir(dirname(path));
     await (deps.appendLine ?? appendLineSynced)(path, `${JSON.stringify(line)}\n`, 0o600);
   };
 
   async function confirm(projectId: string, runId: string, sel: RepoSelector, hash: string, actor: Actor, log: FastifyRequest['log']): Promise<{ ok: true; body: ProductPublishResponse } | Refusal> {
-    const built = await build(projectId, runId, sel, false);
+    const built = await build(projectId, runId, sel, true);
     if (!built.ok) return built;
     const b = built.b;
     if ([...b.f.items.values()].some((s) => s.state === 'unsure')) {
@@ -563,8 +660,15 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
       log.warn(`[publish] the approval for ${runId} could not be recorded: ${err instanceof Error ? err.message : String(err)}`);
       return refuse(503, 'journal_unavailable', 'crew could not record the approval, so nothing was sent');
     }
+    /** Whether THIS item's admission was refused here (a `changed` answer proves nothing was sent only then). */
+    let revoked = false;
     /** Immediately before each create, with the source's slot taken: still this project's tracker, unchanged, writable. */
     const admittedFor = async (): Promise<PmEntry | null> => {
+      const e = await admission();
+      if (e === null) revoked = true;
+      return e;
+    };
+    const admission = async (): Promise<PmEntry | null> => {
       try {
         const es = pmEntriesOf(await deps.store!.read());
         const adm = projectGithubTracker(es, projectId, sel);
@@ -590,9 +694,11 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
         log.warn(`[publish] the send of ${it.key} could not be recorded, so it was not sent: ${err instanceof Error ? err.message : String(err)}`);
         break;
       }
+      revoked = false;
       const r = await deps.pm!.vendorRead(b.e, 'issue_write', { method: 'create', owner, repo, title: it.title, body: bodyWith(it.body, parent) }, 'person', admittedFor, b.credential);
       let outcome: Record<string, unknown>;
-      if (!r.ok && NOT_SENT.has(r.code)) {
+      // `changed` is a refusal before dispatch only when this admission said so: never read from the vendor's words.
+      if (!r.ok && (r.code === 'changed' ? revoked : NOT_SENT.has(r.code))) {
         outcome = { kind: 'not_sent', key: it.key, reason: r.reason };
         tally.refused++;
       } else {
@@ -624,7 +730,7 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
     }
     let f: Folded;
     try {
-      f = await fold(b.path, b.publication, false);
+      f = await fold(b.path, b.publication, () => false);
     } catch (err) {
       if (err instanceof JournalUnreadable) return refuse(409, 'journal_unreadable', `${err.message}; nothing more is sent until it is repaired`);
       throw err;
@@ -642,7 +748,7 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
     const path = journalPath(dir(), runId, publication);
     let f: Folded;
     try {
-      f = await fold(path, publication, false);
+      f = await fold(path, publication, () => false);
     } catch (err) {
       if (err instanceof JournalUnreadable) return refuse(409, 'journal_unreadable', `${err.message}; nothing is changed until it is repaired`);
       throw err;
@@ -674,8 +780,8 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
       return refuse(503, 'journal_unavailable', 'crew could not record the answer; nothing changed');
     }
     deps.audit.record('product.publish.resolve', actor, { runId, detail: { projectId, repo: f.first.card.repo, key: it.key, issue: want.issue } });
-    const after = await fold(path, publication, false);
-    return { ok: true, body: { done: true, card: after.first!.card, publication: await stateOf(after, projectId, sel, es) } };
+    const after = await fold(path, publication, () => false);
+    return { ok: true, body: { done: true, card: after.last!.card, publication: await stateOf(after, projectId, sel, es) } };
   }
 
   app.post<{ Params: { id: string } }>(
@@ -691,7 +797,7 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
       const { runId, confirm: hash, resolve: want } = parsed.data;
       const projectId = req.params.id;
       if (hash === undefined && want === undefined) {
-        const built = await build(projectId, runId, sel, slots.has(publicationOf(runId, sel.repo)));
+        const built = await build(projectId, runId, sel, false);
         if (!built.ok) return send(reply, built);
         const b = built.b;
         const answer: ProductPublishResponse = { done: false, card: b.card, publishHash: b.publishHash, publication: b.f.first === null ? null : await stateOf(b.f, projectId, sel, b.es) };
@@ -701,13 +807,26 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
       const slot = publicationOf(runId, sel.repo);
       if (slots.has(slot)) return reply.code(409).send({ error: 'this publication is being sent or resolved right now; look again in a moment', code: 'in_progress' });
       slots.add(slot);
+      const lock = `${journalPath(dir(), runId, slot).slice(0, -'.ndjson'.length)}.lock`;
+      let locked = false;
+      let out: { ok: true; body: ProductPublishResponse } | Refusal;
+      // Released BEFORE the answer is sent: a client that acts on the answer at once finds the publication free.
       try {
-        const out = want !== undefined ? await resolve(projectId, runId, sel, want, actor) : await confirm(projectId, runId, sel, hash!, actor, req.log);
-        if (!out.ok) return send(reply, out);
-        return out.body;
+        const held = await takeLock(lock);
+        if (held !== null) out = refuse(409, 'in_progress', held);
+        else {
+          locked = true;
+          out = want !== undefined ? await resolve(projectId, runId, sel, want, actor) : await confirm(projectId, runId, sel, hash!, actor, req.log);
+        }
       } finally {
+        if (locked) {
+          HELD.delete(lock);
+          await unlink(lock).catch(() => undefined);
+        }
         slots.delete(slot);
       }
+      if (!out.ok) return send(reply, out);
+      return out.body;
     },
   );
 
@@ -723,7 +842,8 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
       const plan = await composedPlan(deps, projectId, runId);
       if (!plan.ok && plan.code === 'run_not_found') return send(reply, plan);
       const es = await entries();
-      const list = Array.isArray(es) ? es : null;
+      if (!Array.isArray(es)) return send(reply, es);
+      const list = es;
       const runDir = join(dir(), 'product-publish', sha256Hex(runId));
       let files: string[] = [];
       try {
@@ -736,7 +856,7 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
         const publication = n.slice(0, 64);
         let f: Folded;
         try {
-          f = await fold(join(runDir, n), publication, slots.has(publication));
+          f = await fold(join(runDir, n), publication, () => slots.has(publication));
         } catch (err) {
           if (err instanceof JournalUnreadable) return reply.code(409).send({ error: `${err.message}; nothing is sent until it is repaired`, code: 'journal_unreadable' });
           throw err;
@@ -747,7 +867,7 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
       const answer: ProductPublicationsResponse = {
         runId,
         publishable: plan.ok ? { ok: true, items: plan.items.length } : { ok: false, code: plan.code, error: plan.error },
-        targets: list === null ? [] : projectGithubTargets(list, projectId),
+        targets: projectGithubTargets(list, projectId),
         publications,
       };
       return answer;

@@ -17,7 +17,7 @@
 // <log-dir>: `createerror` (store it, then answer isError, as the server does for any error after the request),
 // `createexit` (store it, then the process dies before answering), `createjunk` (store it, answer text that is not
 // JSON), `createhost` / `createpull` (store it, answer a url on another host / a pull-request url), `createrefuse`
-// (answer isError and store nothing). A stored issue with `deleted: true` reads as GitHub's not-found tool error.
+// (answer isError and store nothing), `login` (get_me answers that account instead). A stored issue with `deleted: true` reads as GitHub's not-found tool error.
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -44,7 +44,11 @@ const stored = () => (existsSync(STORE()) ? JSON.parse(readFileSync(STORE(), 'ut
 const on = (f) => existsSync(join(dir, f));
 // pkg/sanitize/sanitize.go FilterInvisibleCharacters (the Cf ones and unpaired variation selectors).
 const invisible = (s) => String(s ?? '').replace(/\p{Cf}/gu, '').replace(/(^|[\s\uFE00-\uFE0F])[\uFE00-\uFE0F]+/gu, '$1');
-const plainTitle = (s) => invisible(s).replace(/&(?=[A-Za-z0-9#]+;)/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// sanitize.PlainText: the text token arrives DECODED (a character reference becomes its character), then `&`, `<` and `>`
+// are escaped again. A few references stand in for the decoder.
+const ENT = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+const decodeRefs = (s) => s.replace(/&(amp|lt|gt|quot|apos);?|&#([0-9]{1,7});?/g, (m, n, d) => (n ? ENT[n] : String.fromCodePoint(Number(d))));
+const plainTitle = (s) => decodeRefs(invisible(s)).replace(/&(?=[A-Za-z#])/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const str = { type: 'string' };
 const tools = [
   { name: 'get_me', description: 'me', inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: true } },
@@ -65,7 +69,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const repo = `${args.owner}/${args.repo}`;
   switch (name) {
     case 'get_me':
-      return json({ login: 'pat-bot', id: 7 });
+      return json(existsSync(join(dir, 'login')) ? { login: readFileSync(join(dir, 'login'), 'utf8').trim(), id: 8 } : { login: 'pat-bot', id: 7 });
     case 'search_repositories': {
       const q = String(args.query ?? '');
       const m = /repo:([^\s]+)/.exec(q);
