@@ -17330,12 +17330,12 @@ export interface ProductPublishCard {
 /**
  * One item of a publication now. `state`: `created`; `sending` (this daemon is sending it right now); `not_sent` (refused
  * before it was sent); `unsure` (crew cannot tell whether GitHub created it: resolve it); `absent` (a person said it was
- * not created); `missing` (planned, never sent). `readBack` (created items only): `ok` = the issue's title and body as
- * GitHub's MCP server shows them are the approved ones; `differs`; `unreadable` (the read failed, a deleted issue
- * included). An edit made only of characters that server strips is invisible to it. (wicked-crew#1911) When crew reads:
+ * not created); `missing` (planned, never sent). `readBack`: `ok` = the issue's title and body as GitHub's MCP server
+ * shows them are the approved ones; `differs`; `unreadable` (the read failed, a deleted issue included); `null` for an
+ * item that is not created, and for a created issue crew has not read back yet (not checked yet; wicked-crew#1919). An edit made only of characters that server strips is invisible to it. (wicked-crew#1911) When crew reads:
  * a send reads each issue back right after creating it; an `ok` read-back is not read again for 60 s, and one that differs
  * or was unreadable is read again on each answer. While any publication is being sent or resolved in the daemon, a GET or a
- * card reads nothing from GitHub and answers the last read-back whatever its age, or `unreadable` for an issue not read yet;
+ * card reads nothing from GitHub and answers the last read-back whatever its age, or `null` for an issue not read yet;
  * so an edit made on GitHub shows within 60 s of the last read, or after the send ends.
  */
 export interface PublicationItemState {
