@@ -17,10 +17,13 @@
  * before and after it is sent (`<mcp state>/product-publish/<sha256(runId)>/<publication>.ndjson`), so a crash never
  * resends: an item whose outcome crew cannot prove is `unsure` until a person resolves it. "Published" is the journal
  * plus a read-back of every created issue, never the run's own claim.
+ *
+ * A publication is sent or resolved by one request at a time IN THIS DAEMON (the slot), as tracker actions are
+ * (`actions.ts` inFlight) and settings writes (`adapter.ts` updateSettings): the state-home fence does not make one
+ * daemon per home, and a second daemon on the same state home is not covered here either.
  */
 
-import { hostname } from 'node:os';
-import { mkdir, open, readdir, readFile, unlink } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -73,6 +76,8 @@ export interface ProductPublishDeps {
   journalDir?: string;
   /** The flushed append (a test seam for a failing barrier). */
   appendLine?: (path: string, line: string, mode?: number) => Promise<void>;
+  /** The journal's directory syncs after its approval (a test seam for a failing barrier). */
+  syncJournalDirs?: (path: string) => Promise<void>;
   now?: () => number;
 }
 
@@ -463,62 +468,13 @@ async function syncDir(d: string): Promise<void> {
   }
 }
 
-/** Create `d` (0700) so that it survives a crash: every directory this call created is synced into its parent. */
-async function durableDir(d: string): Promise<void> {
-  const made = await mkdir(d, { recursive: true, mode: 0o700 });
-  if (made === undefined) return;
-  const chain: string[] = [];
-  for (let x = d; x !== dirname(made); x = dirname(x)) chain.unshift(x);
-  chain.unshift(dirname(made));
-  for (const x of chain) await syncDir(x);
-}
-
-/** The publication locks this process holds now (one daemon may register its routes more than once in tests). */
-const HELD = new Set<string>();
-
-const alive = (pid: number): boolean => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
-  }
-};
-
 /**
- * Take a publication's lock file across daemons sharing one state home (the in-memory slot holds within one). A lock
- * left by a process of this host that is gone (or by this one, when it no longer holds it) is taken over: its sends fold to `unsure`, never to resent. Answers why
- * not, or `null` once held.
+ * Make a journal durable where it lives: its directory (the file's entry), the run's directory and `product-publish/`
+ * (their entries), every call, so a retry or a concurrent caller never relies on a sync another one made. Strict: a
+ * failure stops the send.
  */
-async function takeLock(path: string): Promise<string | null> {
-  await durableDir(dirname(path));
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const fh = await open(path, 'wx', 0o600);
-      try {
-        await fh.writeFile(JSON.stringify({ pid: process.pid, host: hostname(), at: new Date().toISOString() }));
-        await fh.sync();
-      } finally {
-        await fh.close();
-      }
-      HELD.add(path);
-      return null;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-    }
-    let owner: { pid?: unknown; host?: unknown } = {};
-    try {
-      owner = JSON.parse(await readFile(path, 'utf8')) as typeof owner;
-    } catch {
-      // a lock being written right now, or torn: held
-    }
-    if (attempt === 0 && owner.host === hostname() && typeof owner.pid === 'number' && (owner.pid === process.pid ? !HELD.has(path) : !alive(owner.pid))) {
-      await unlink(path).catch(() => undefined);
-      continue;
-    }
-    break;
-  }
-  return `another crew daemon is sending or resolving this publication now; if none is, remove ${path.split(/[\\/]/).slice(-3).join('/')} under the mcp state directory`;
+async function syncChain(path: string): Promise<void> {
+  for (let d = dirname(path), i = 0; i < 3; d = dirname(d), i++) await syncDir(d);
 }
 
 // ── The routes ─────────────────────────────────────────────────────────────────────────────────────────
@@ -639,7 +595,7 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
 
   const envelope = (b: { publication: string; runId: string; projectId: string; repo: string }, actor: Actor) => ({ v: 1 as const, publication: b.publication, runId: b.runId, projectId: b.projectId, repo: b.repo, at: nowIso(), by: actor.id });
   const write = async (path: string, line: Record<string, unknown>): Promise<void> => {
-    await durableDir(dirname(path));
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     await (deps.appendLine ?? appendLineSynced)(path, `${JSON.stringify(line)}\n`, 0o600);
   };
 
@@ -656,6 +612,7 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
     const env = { publication: b.publication, runId, projectId, repo: b.card.repo };
     try {
       await write(b.path, { ...envelope(env, actor), kind: 'approved', publishHash: b.publishHash, contentSha: b.contentSha, card: b.card, sourceId: b.e.id, trackerId: b.t.trackerId, descriptor: b.descriptor, principal: b.principal });
+      await (deps.syncJournalDirs ?? syncChain)(b.path);
     } catch (err) {
       log.warn(`[publish] the approval for ${runId} could not be recorded: ${err instanceof Error ? err.message : String(err)}`);
       return refuse(503, 'journal_unavailable', 'crew could not record the approval, so nothing was sent');
@@ -807,22 +764,11 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
       const slot = publicationOf(runId, sel.repo);
       if (slots.has(slot)) return reply.code(409).send({ error: 'this publication is being sent or resolved right now; look again in a moment', code: 'in_progress' });
       slots.add(slot);
-      const lock = `${journalPath(dir(), runId, slot).slice(0, -'.ndjson'.length)}.lock`;
-      let locked = false;
       let out: { ok: true; body: ProductPublishResponse } | Refusal;
       // Released BEFORE the answer is sent: a client that acts on the answer at once finds the publication free.
       try {
-        const held = await takeLock(lock);
-        if (held !== null) out = refuse(409, 'in_progress', held);
-        else {
-          locked = true;
-          out = want !== undefined ? await resolve(projectId, runId, sel, want, actor) : await confirm(projectId, runId, sel, hash!, actor, req.log);
-        }
+        out = want !== undefined ? await resolve(projectId, runId, sel, want, actor) : await confirm(projectId, runId, sel, hash!, actor, req.log);
       } finally {
-        if (locked) {
-          HELD.delete(lock);
-          await unlink(lock).catch(() => undefined);
-        }
         slots.delete(slot);
       }
       if (!out.ok) return send(reply, out);

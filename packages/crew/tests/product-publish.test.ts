@@ -7,7 +7,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { hostname, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -180,6 +180,7 @@ beforeEach(() => {
   world();
   deps.journalDir = join(base, `j-${randomUUID().slice(0, 8)}`);
   delete deps.appendLine;
+  delete deps.syncJournalDirs;
   deps.pm = gate.pm;
   deps.store = store;
   for (const f of ['calls.ndjson', 'issues.json', 'createerror', 'createexit', 'createjunk', 'createhost', 'createpull', 'createrefuse', 'login']) rmSync(join(ghLog, f), { force: true });
@@ -306,10 +307,27 @@ describe('the barriers and the account', () => {
   });
 
   it('(6) no create is dispatched before its flushed approved and sending lines: each barrier is awaited', async () => {
-    let releaseApproved!: () => void;
-    const approvedHeld = new Promise<void>((r) => (releaseApproved = r));
+    const gateOf = () => {
+      let release!: () => void;
+      let reached!: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      const at = new Promise<void>((r) => (reached = r));
+      return { held, at, release, reached };
+    };
+    const approved = gateOf();
+    const firstSending = gateOf();
     deps.appendLine = async (p, l, m) => {
-      if (l.includes('"kind":"approved"')) await approvedHeld;
+      if (l.includes('"kind":"approved"')) {
+        approved.reached();
+        await approved.held;
+        return appendLineSynced(p, l, m);
+      }
+      if (l.includes('"kind":"sending"') && l.includes('"key":"e1"')) {
+        await appendLineSynced(p, l, m); // its bytes are on disk; its barrier has not returned
+        firstSending.reached();
+        await firstSending.held;
+        return;
+      }
       return appendLineSynced(p, l, m);
     };
     const seen: string[] = [];
@@ -325,12 +343,33 @@ describe('the barriers and the account', () => {
     };
     const c = await card();
     const sending = post({ confirm: c.publishHash });
-    await new Promise((r) => setTimeout(r, 1500));
+    await approved.at;
+    await new Promise((r) => setTimeout(r, 300));
     expect(creates()).toEqual([]);
-    expect(journal()).toEqual([]);
-    releaseApproved();
+    approved.release();
+    await firstSending.at;
+    await new Promise((r) => setTimeout(r, 300));
+    expect(journal().at(-1)).toMatchObject({ kind: 'sending', key: 'e1' });
+    expect(creates()).toEqual([]);
+    firstSending.release();
     expect((await sending).json()).toMatchObject({ publication: { published: true } });
     expect(seen).toEqual(['sending:e1:Accounts & access', 'sending:e1.f1:Sign in and out', 'sending:e1.f1.s1:Email sign in (< 3 tries)', 'sending:e1.f1.s2:Sign out from any page']);
+  });
+
+  it('(6) a journal directory that cannot be synced after the approval sends nothing (503); a retry syncs again and sends', async () => {
+    deps.syncJournalDirs = async () => {
+      throw Object.assign(new Error('fsync EIO'), { code: 'EIO' });
+    };
+    const a = await publish();
+    expect(a.status).toBe(503);
+    expect(a.body).toMatchObject({ code: 'journal_unavailable' });
+    expect(creates()).toEqual([]);
+    let synced = 0;
+    deps.syncJournalDirs = async () => {
+      synced++;
+    };
+    expect((await publish()).body).toMatchObject({ publication: { published: true } });
+    expect(synced).toBe(1);
   });
 
   it('(6) a sending line whose bytes landed but whose flush failed sends nothing (and reads unsure: a person says it is absent)', async () => {
@@ -352,43 +391,6 @@ describe('the barriers and the account', () => {
     };
     expect(states((await publish()).body)).toEqual(['unsure', 'missing', 'missing', 'missing']);
     expect(issues().issues).toHaveLength(1);
-  });
-
-  it('(9) a second daemon on the same state home is in_progress while one sends; a lock its gone owner left is taken over', async () => {
-    const other = Fastify({ logger: false });
-    registerProductPublishRoutes(other, deps);
-    await other.ready();
-    try {
-      let release!: () => void;
-      const held = new Promise<void>((r) => (release = r));
-      const real = gate.pm.vendorRead.bind(gate.pm);
-      deps.pm = {
-        vendorRead: async (e, tool, args, cls, before, cred) => {
-          if (tool === 'issue_write') await held;
-          return real(e, tool, args, cls, before, cred);
-        },
-      };
-      const c = await card();
-      const first = post({ confirm: c.publishHash });
-      for (let i = 0; i < 100 && !journal().some((l) => l['kind'] === 'sending'); i++) await new Promise((r) => setTimeout(r, 100));
-      const second = await other.inject({ method: 'POST', url: `/api/v1/projects/${PID}/product/publish`, payload: { runId: RUN, repo: 'owner/app', confirm: c.publishHash } });
-      expect(second.json()).toMatchObject({ code: 'in_progress' });
-      release();
-      await first;
-      expect(creates()).toHaveLength(4);
-    } finally {
-      await other.close();
-    }
-    // A lock left by a process that is gone: the next confirm takes it over.
-    deps.journalDir = join(base, `j-${randomUUID().slice(0, 8)}`);
-    const root = join(deps.journalDir, 'product-publish');
-    const c = await card();
-    const { publicationOf } = await import('../src/api/product-publish.js');
-    const { createHash } = await import('node:crypto');
-    const runDir = join(root, createHash('sha256').update(RUN).digest('hex'));
-    mkdirSync(runDir, { recursive: true });
-    writeFileSync(join(runDir, `${publicationOf(RUN, 'owner/app')}.lock`), JSON.stringify({ pid: 2 ** 22 + 7, host: hostname(), at: stamp }));
-    expect((await post({ confirm: c.publishHash })).json()).toMatchObject({ publication: { published: true } });
   });
 
   it('(8) a tracker registry that cannot be read is 503 on GET, never an empty list of repositories', async () => {
@@ -413,6 +415,8 @@ describe('uncertain outcomes are never resent', () => {
     expect(seven.json(), seven.body).toMatchObject({ code: 'resolve_differs' });
     const ok = await post({ resolve: { key: 'e1', issue: 100 } });
     expect(ok.statusCode, ok.body).toBe(200);
+    // The answer's card is the latest approval's (who posts, through which source), its items the frozen content.
+    expect(ok.json()).toMatchObject({ card: { identity: 'pat-bot', source: 'gh', items: KEYS.map((key) => ({ key })) } });
     expect(states(ok.json())).toEqual(['created', 'missing', 'missing', 'missing']);
     const done = await publish();
     expect(done.body).toMatchObject({ publication: { published: true } });

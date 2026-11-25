@@ -17132,15 +17132,14 @@ export interface ProductComposeResponse {
  *   when its title and body are the approved ones), `issue: null` = it was not created (a later confirm creates it).
  *
  * Refusals (`{error, code}`; each sends nothing, except a `journal_unreadable` answered after a confirm has sent: GitHub may
- * then hold some of the issues, and a GET shows which): 400 `bad_request`; 403 `publish_human_only`; 404
+ * then hold some of the issues, and GET answers `journal_unreadable` too until the journal is repaired): 400 `bad_request`; 403 `publish_human_only`; 404
  * `project_not_found` · `run_not_found` · `repo_not_linked`; 409 `not_a_compose` (no compose facts for this run on
  * this project: a run composed before publishing shipped; compose again) · `compose_unverified` (the run's draft or
  * review step is not the one Compose launched: for a plan edited at its gate `error` says so in plain words; `detail`
  * names what differs) · `run_not_finished` · `plan_unreadable` (the reason names the item) · `ambiguous` ·
  * `card_changed` (with the fresh `card` and `publishHash`) · `publication_differs` (this run was already published to
  * that repository with other content; with its `publication`) · `write_tool_off` · `credential_unpinned` ·
- * `unresolved` (with the `publication`) · `journal_unreadable` · `in_progress` (this daemon or another one on the same
- * state home is sending or resolving it) · `not_unsure` · `resolve_differs`;
+ * `unresolved` (with the `publication`) · `journal_unreadable` · `in_progress` (this daemon is sending or resolving it) · `not_unsure` · `resolve_differs`;
  * 503 `registry_unavailable` · `source_unavailable` · `journal_unavailable`. Audited `product.publish` and
  * `product.publish.resolve`.
  */
