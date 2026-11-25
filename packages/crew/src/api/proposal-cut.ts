@@ -12,7 +12,7 @@ import { z } from '../zod.js';
 import type { ArtifactProposal, CutOp, ProposalCut, ChatContextBinding } from '../core/types.js';
 import { LaunchRefusal, type ProposalDispatch, type ProposalDispatcher } from './chat-proposals.js';
 import { ARTIFACT_REF, parseArtifactRef } from './chat-context.js';
-import { CUT_OLD_TOOL, CUT_OPS_MAX, CUT_SAY_MAX, CUT_TITLE_MAX, headProblem, readCut, type CutBridgeCall, type CutRead, type CutUnavailable } from './cut-read.js';
+import { CUT_OLD_TOOL, CUT_OPS_MAX, CUT_SAY_MAX, CUT_TITLE_MAX, headProblem, readCut, unended, type CutBridgeCall, type CutRead, type CutUnavailable } from './cut-read.js';
 
 /** Words longer than this give no card at all (S7): resolve checks the real limits and says why below it. */
 const PARSE_TEXT_MAX = 4000;
@@ -95,11 +95,11 @@ export async function resolveCut(block: CutBlockBody, turn: CutTurn, deps: CutRe
   let blocked: string | null = null;
   let read: CutRead | null = null;
   if (open === undefined || open.ref !== ref.ref) blocked = `${quote(ref.doc)} isn't the video open here.`;
-  else if (open.viewed !== open.head) blocked = `They're looking at version ${open.viewed}. Only the latest (version ${open.head}) can be changed: open it and ask again.`;
+  else if (open.viewed !== open.head) blocked = `You're looking at version ${open.viewed}. Only the latest (version ${open.head}) can be changed: open it and ask again.`;
   else {
     // The video tool not starting (or too old to adopt) blocks the card with why, never drops it.
     const call = await deps.bridgeFor(ref.projectId).catch((err: unknown) => new Error(err instanceof Error ? err.message : String(err)));
-    const got = call instanceof Error ? ({ state: 'unavailable', why: `The video tool isn't running here: ${call.message}` } as CutUnavailable)
+    const got = call instanceof Error ? ({ state: 'unavailable', why: `The video tool isn't running here: ${unended(call.message)}.` } as CutUnavailable)
       : call === null ? ({ state: 'unavailable', why: 'This video is no longer on this daemon.', gone: true } as CutUnavailable) : await readCut(call, ref.doc);
     if ('state' in got) blocked = got.why;
     else if (got.head !== open.head) blocked = `The video changed while I was answering (now version ${got.head}). Ask again to change the new version.`;
@@ -135,7 +135,8 @@ export const CUT_BLOCKING = new Set(['cut_moved', 'cut_refused', 'cut_gone']);
 export function refusalWords(field: string, reason: string | undefined, ops: readonly CutOp[], changes: readonly string[]): string {
   const m = /^ops\.(\d+)(?:\.(\w+))?$/u.exec(field);
   const i = m === null ? -1 : Number(m[1]);
-  const which = i >= 0 && i < ops.length ? `Change ${i + 1} (${changes[i] ?? ops[i]!.op})` : 'A change';
+  // A change's own words can end in a parenthesis ("Drop “Setup” (Undo brings it back)"): drop it, never "))".
+  const which = i >= 0 && i < ops.length ? `Change ${i + 1} (${(changes[i] ?? ops[i]!.op).replace(/\s*\([^()]*\)$/u, '')})` : 'A change';
   const why = ((): string => {
     switch (reason) {
       case 'dropped': return 'it names a chapter an earlier change drops';
@@ -172,7 +173,7 @@ export class CutLauncher implements ProposalDispatcher {
       call = await this.deps.bridgeFor(r.projectId);
     } catch (err) {
       if (err instanceof LaunchRefusal) throw err;
-      throw new Error(`The video tool isn't running here: ${err instanceof Error ? err.message : String(err)}`);
+      throw new Error(`The video tool isn't running here: ${unended(err instanceof Error ? err.message : String(err))}.`);
     }
     if (call === null) throw new LaunchRefusal(409, { code: 'cut_gone', error: 'This video is no longer on this daemon.' });
     return { call, doc: r.doc };
@@ -241,4 +242,3 @@ export function cutInterruptedWords(msg: string): string {
 }
 
 /** A quoted fragment without its own trailing end marks, so crew's sentence around it ends once. */
-const unended = (s: string): string => s.trim().replace(/[.!?]+$/u, '');
