@@ -3463,9 +3463,11 @@ export function registerRoutes(
   });
 
   /**
-   * (wicked-core#1043) Turn this repo's seat toolchain layers off (`off: []` turns them all back on): the engine stores
-   * the switch and leaves those layers out of the repo's seat images. A person's choice: a seat's or agent's token is
-   * refused before the engine is asked. Answers the repo's row as `GET /repos` shows it.
+   * (wicked-core#1043) Turn this repo's seat toolchain layers off (`off: []` clears this repo's switch; a layer the
+   * daemon turned off stays off): the engine stores the switch and leaves those layers out of the repo's seat images.
+   * A person's choice: a seat's or agent's token is refused before anything is read. With auth off every request is
+   * the local person (docs/auth.md: the trust model is the loopback bind), as for every other person-only route.
+   * Answers the repo's row as `GET /repos` shows it.
    */
   app.put(`${V}/repos/:id/seat-layers`, { config: { manifest: { requestType: 'PutRepoSeatLayersBody', responseType: 'RepoEntry', statusCodes: [200, 400, 403, 404, 501] } } }, async (req, reply) => {
     const { id } = req.params as { id: string };

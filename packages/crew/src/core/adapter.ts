@@ -3591,7 +3591,7 @@ export class CoreAdapter {
   }
 
   /**
-   * (wicked-core#1043 part 2) Turn the seat layers `off` off for the repo `id` (`[]` turns every layer back on). The
+   * (wicked-core#1043 part 2) Turn the seat layers `off` off for the repo `id` (`[]` clears the repo's own switch). The
    * engine stores the list sorted and deduplicated and answers the repo's entry with its `seat_layers` rows, checked
    * here as `listRepos` checks a row (the folder-missing finding). It refuses an unknown repo or layer by name.
    */

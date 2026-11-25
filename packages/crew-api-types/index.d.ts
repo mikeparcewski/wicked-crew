@@ -1878,11 +1878,12 @@ export interface RepoSeatLayer {
 }
 
 /**
- * (api-types 0.232.0, wicked-core#1043) `PUT /repos/:id/seat-layers`: the full list of layer ids to turn off for the
- * repo (`[]` turns every layer back on), at most 32, each a layer id. A person's choice: any other actor gets 403
- * `human_operator_only`. 200 answers the repo's {@link RepoEntry} as `GET /repos` shows it; 400 `unknown_seat_layer`
- * names an id the engine has no layer for; 404 `repo_not_found`; 501 `repo_seat_layers_unsupported` on an engine
- * before the switch.
+ * (api-types 0.232.0, wicked-core#1043) `PUT /repos/:id/seat-layers`: the full list of layer ids this repo turns off,
+ * at most 32, each a layer id. `[]` clears this repo's switch only: a layer the daemon turned off (`off_by` `daemon`
+ * or `operator_base`) stays off. A person's choice: any other actor is refused 403 before anything is read, with
+ * `human_operator_only` (an observer token is refused by the daemon's trust check first, without that code). 200
+ * answers the repo's {@link RepoEntry} as `GET /repos` shows it; 400 `unknown_seat_layer` names an id the engine has
+ * no layer for; 404 `repo_not_found`; 501 `repo_seat_layers_unsupported` on an engine before the switch.
  */
 export interface PutRepoSeatLayersBody {
   off: string[];
