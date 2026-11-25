@@ -22,7 +22,7 @@ export function startLaunchFailure(status: number, body: unknown, statusText: st
   const head = `launch failed (${status}): ${typeof b.error === 'string' && b.error !== '' ? b.error : statusText}`;
   if (status !== 409 || b.code !== 'stand_in_choice') return head;
   return `${head}\n`
-    + '  To use stand-ins for this job, run the same command again with --stand-ins.\n'
+    + '  To use stand-ins for this job, run it again with the same options plus --stand-ins (wicked-crew start --stand-ins …).\n'
     + '  To use them for every job, choose "Use stand-ins for every job" in Settings (standInReview: always), then run it again.\n'
     + '  Or add another helper to the job, or run it with --reduced-assurance (the builder may review its own work, labelled).';
 }
