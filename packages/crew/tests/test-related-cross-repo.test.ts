@@ -227,13 +227,14 @@ describe('every test that reads the checkout is tagged cross-repo, on the test',
     expect(onSuites).toEqual([]);
   });
 
-  it('counts the seven cross-repo tests crew has today, in their four files', () => {
+  it('counts the eight cross-repo tests crew has today, in their five files', () => {
     expect(mod.crossRepoTests(CREW_DIR)).toEqual({
-      count: 7,
+      count: 8,
       files: [
         'tests/core-checkout-policy.test.ts',
         'tests/deliver-phase.test.ts',
         'tests/engine-range-admits-built.test.ts',
+        'tests/mcp-rename.test.ts', // core's result gate context (crew#1905)
         'tests/state-home-subtrees.test.ts',
       ],
     });

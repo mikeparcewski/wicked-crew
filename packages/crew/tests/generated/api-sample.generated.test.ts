@@ -60,7 +60,7 @@ describe('generated API suite (endpoint-manifest sample)', () => {
       const res = await app.inject({ method: "POST", url: "/api/v1/runs", payload: {"problem":"generated-suite smoke launch"} });
       expect(res.statusCode).toBe(201);
       // The manifest declares this route's codes — the positive must be one of them.
-      expect([201,400,404,409,422,501,503]).toContain(res.statusCode);
+      expect([201,400,403,404,409,422,501,503]).toContain(res.statusCode);
     });
 
     it('POST /api/v1/runs — 400 on a body the schema refuses', async () => {

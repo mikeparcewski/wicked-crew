@@ -253,7 +253,7 @@ describe('crew#418 A — a deliver lift collision strands the run, end-to-end th
     // need a real judge seat the stub engine cannot run). No gate, no race.
     const launch = await postJson('/api/v1/runs', {
       problem: 'e2e: write collision.txt and deliver it',
-      clisJson: SEATS,
+      clisJson: SEATS, standIns: true,
       workflow: WORK_WORKFLOW.id,
       repoRef: repoId,
       humanConfirm: 'none',

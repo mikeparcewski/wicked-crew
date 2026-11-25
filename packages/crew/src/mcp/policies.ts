@@ -52,6 +52,7 @@ import type {
 } from '../core/types.js';
 import { canonicalJson, type HashedRestTarget, MCP_SERVER_NAME_RE, parseMcpSubject } from './classify.js';
 import { McpRegistryError, type McpRegistry } from './registry.js';
+import { judgeTrigger } from './trigger-names.js';
 import { restTarget } from './rest.js';
 
 /**
@@ -407,23 +408,30 @@ export class McpPolicies {
 
   /**
    * Whether `from`'s rules hold for `to` once {@link copyRules} has run. Two checks, both fail-closed:
-   * - a rule whose `trigger.contains` contains either name, or is contained in one, is never judged equivalent (it may
-   *   match in a phase, or on a data source's gated tools, that no preview covers). It is a substring test, so a short
-   *   name can coincide with unrelated trigger text: that refuses (fail-closed), naming the rule. A trigger that only
-   *   straddles a name's edge (`"server":"prod-` for `prod-db`) is not caught here; the preview judges it where it can;
+   * - a rule whose `trigger.contains` may tell the two names apart in an MCP call's or result's context ({@link judgeTrigger}: some
+   *   match of it can consume a character of either name) is never judged equivalent (it may match in a phase, or on a
+   *   data source's gated tools, that no preview covers): that refuses, naming the rule and the names (crew#1905);
    * - every tool of `from` must be judged at least as strictly under `to` by the engine's own evaluation over the
    *   preview's cells (allow < ask < deny; an allow keeps every obligation), with each tool judged as callable whatever
    *   its switches (a disabled tool switched on later is held to the same rules).
-   * Answers the subjects that would loosen and the rules that name the server by content.
+   * Answers the subjects that would loosen, the rules whose trigger tells the names apart, per rule the names it
+   * matches (`from`, `to` or both), and the rules whose trigger crew could not judge (it counts for both names).
    */
-  async loosenedByRename(from: string, to: string): Promise<{ subjects: string[]; rules: string[] }> {
-    const overlaps = (c: string): boolean => c !== '' && (c.includes(from) || c.includes(to) || from.includes(c) || to.includes(c));
-    const rules = (await this.engine.listRules())
-      .filter((r) => r.retired !== true && typeof r.trigger?.contains === 'string' && overlaps(r.trigger.contains))
-      .map((r) => r.id);
+  async loosenedByRename(from: string, to: string): Promise<{ subjects: string[]; rules: string[]; names: Map<string, string[]>; unjudged: Set<string> }> {
     const server = await this.registry.get(from);
     const tools = server.tools.filter((t) => t.status !== 'gone');
-    if (tools.length === 0) return { subjects: [], rules };
+    // Every live rule with a trigger, whatever its applies_to: core selects by token equality with the unit's phase
+    // aliases, which a workflow may spell any way (`mcp:other`, `editor-origin:…`), so no token rules a call out.
+    const names = new Map<string, string[]>();
+    const unjudged = new Set<string>();
+    for (const r of await this.engine.listRules()) {
+      if (r.retired === true || typeof r.trigger?.contains !== 'string') continue;
+      const judged = judgeTrigger(r.trigger.contains, [from, to]);
+      if (judged.names.length > 0) names.set(r.id, judged.names);
+      if (!judged.judged) unjudged.add(r.id);
+    }
+    const rules = [...names.keys()];
+    if (tools.length === 0) return { subjects: [], rules, names, unjudged };
     const cells = this.cells({});
     const callsOf = (name: string): EngineCall[] => tools.map((t) => ({
       server: name,
@@ -447,7 +455,7 @@ export class McpPolicies {
       });
       if (looser) subjects.push(t.subject);
     });
-    return { subjects, rules };
+    return { subjects, rules, names, unjudged };
   }
 
   /** Every approval token that names `server` (the server's own and each of its tools'). */
