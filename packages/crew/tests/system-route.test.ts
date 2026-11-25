@@ -23,6 +23,13 @@ vi.mock('node:fs/promises', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:fs/promises')>()),
   statfs: async () => ({ bavail: 500_000, bsize: 1_000_000, blocks: 1_000_000 }),
 }));
+// The load row reads the real host too (`loadRow`: the 1-minute load per core, `down` and so red from 5 per core). A CI
+// runner under the full suite goes past that (crew main 5ea981c7, macOS), and a red load row decided the page level the
+// snooze tests assert on. Pin an idle host; the rest of the module stays real.
+vi.mock('node:os', async (importOriginal) => {
+  const os = await importOriginal<typeof import('node:os')>();
+  return { ...os, loadavg: () => [0.1, 0.1, 0.1] };
+});
 
 const ENV_KEYS = ['WICKED_SEAT_FLOOR', 'WICKED_CONTAINER_RUNTIME', 'WICKED_CORE_EXE', 'WICKED_MEMORY_DB', 'WICKED_ESTATE_EXE', 'WICKED_ESTATE_MCP_EXE', 'LOG_LEVEL'] as const;
 const saved: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
@@ -403,7 +410,7 @@ describe('GET /api/v1/system: snoozed items (studio#1416)', () => {
     await app.inject({ method: 'DELETE', url: `/api/v1/desk/snoozes/${encodeURIComponent(item.snooze!.key)}` });
   });
 
-  it('the level is the kept items\' worst: a snoozed item leaves it, and Wake puts it back', async () => {
+  it('the level is the kept items\' worst (the host\'s disk and load rows pinned): a snoozed item leaves it, and Wake puts it back', async () => {
     gateKind = 'escalation'; // the run is held: red, the worst on the page
     try {
       const before = (await snapshot()).body;
@@ -411,7 +418,8 @@ describe('GET /api/v1/system: snoozed items (studio#1416)', () => {
       expect(item.severity).toBe('red');
       expect(before.level).toBe('red');
       const rest = (before.attention as Snoozable[]).filter((a) => a.id !== item.id);
-      expect(levelOf(rest)).not.toBe('red'); // the held gate is what makes the page red
+      // The held gate is what makes the page red: no other item is (a host row that turned red would be named here).
+      expect(rest.filter((a) => a.severity === 'red').map((a) => a.id)).toEqual([]);
       expect((await put(item.snooze!.key, { until: hour(), severity: item.snooze!.rank })).statusCode).toBe(200);
       const held = (await snapshot()).body;
       expect(gateItem(held)).toBeUndefined();
