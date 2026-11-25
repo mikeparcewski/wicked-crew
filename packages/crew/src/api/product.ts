@@ -14,9 +14,8 @@
  * floor picks for a plan that writes no code; the step keeps its distinct evaluator (whose own
  * VERDICT gates it) and the human gate. No step of this plan may carry a validator pin.
  *
- * Publish (the second half of #372) is NOT registered: it is a remote write whose "published" must
- * be re-derived from a deterministic created-issue manifest plus a read-back, which does not exist
- * yet. An absent route is the honest answer until it does.
+ * Publish (the second half of #372) is `api/product-publish.ts`: a person's card and confirm over the plan a compose
+ * run drafted, recorded here as the launch's compose facts ({@link ComposeFacts}).
  */
 
 import type { FastifyBaseLogger, FastifyInstance, FastifyRequest } from 'fastify';
@@ -30,6 +29,9 @@ import { LOCAL_ACTOR } from './auth.js';
 import { codeGraphErrorStatus } from '../core/repoPaths.js';
 import { AggregateHttpError, membersOf } from './project-aggregates.js';
 import { getRequirement } from './requirements.js';
+import { type ComposeFacts, type ComposeLevel, composeFactsOf } from './compose-facts.js';
+
+export type { ComposeFacts, ComposeLevel } from './compose-facts.js';
 
 const V = '/api/v1';
 
@@ -51,9 +53,6 @@ export const ProductComposeSchema = z.strictObject({
    *  decides how far down the draft goes. */
   shape: LaunchShapeSchema.optional(),
 });
-
-/** How far down a draft goes (DES-CATALOG-002 §3.1 Backlog): epics, stories (today's default), or tasks too. */
-export type ComposeLevel = 'epics' | 'stories' | 'tasks';
 
 /** The compose level a Backlog shape names (the seed's own data; the shape itself is judged by the shared launch). */
 export function composeLevelOf(shape: { card: string; option: string | null } | undefined): ComposeLevel {
@@ -80,7 +79,7 @@ export interface ComposeLaunchExtra {
 }
 
 /** The shared launch function's shape here (DES-CHAT-FIRST-001 C3): the routes module passes its own. */
-export type ComposeLaunchRun = (raw: unknown, ctx: { actor: Actor; log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>; fromProposal?: string; target?: 'compose' }) => Promise<{ statusCode: number; payload: unknown }>;
+export type ComposeLaunchRun = (raw: unknown, ctx: { actor: Actor; log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>; fromProposal?: string; target?: 'compose'; compose?: ComposeFacts }) => Promise<{ statusCode: number; payload: unknown }>;
 
 const oneLine = (s: string): string => s.replace(/\s+/gu, ' ').trim();
 /** `s` cut to at most `max` UTF-8 bytes on a character boundary, `…` marking a cut. */
@@ -267,7 +266,7 @@ export async function composeLaunch(
             ],
           },
         },
-        { ...ctx, target: 'compose', ...(extra.fromProposal !== undefined ? { fromProposal: extra.fromProposal } : {}) },
+        { ...ctx, target: 'compose', compose: composeFactsOf(id, rows, level, draft, review), ...(extra.fromProposal !== undefined ? { fromProposal: extra.fromProposal } : {}) },
       );
       // POST /runs' own refusal (no eligible seat, a busy engine, an archived project, …) is
       // relayed as it answered; its 201 `{runId}` becomes this route's 202.

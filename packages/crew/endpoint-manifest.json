@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.226.0",
+  "apiTypesVersion": "0.228.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1828,6 +1828,34 @@
         409,
         422,
         501,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/projects/:id/product/publish",
+      "requestType": "ProductPublishBody",
+      "responseType": "ProductPublishResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/projects/:id/product/publish/:runId",
+      "requestType": null,
+      "responseType": "ProductPublicationsResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
         503
       ]
     },
