@@ -126,8 +126,12 @@ export const TEAM_EVENT_FIXTURES = [
     payload: {"run_id": "r1", "ord": 1, "attempt": 1, "by": "engine", "at": 1758700000026, "re": null, "from": "claude#1", "to": "codex", "reason": "timed_out", "selection": "random", "pick_seq": 1},
   },
   {
+    event_type: "wicked.team.council.convened",
+    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "engine", "at": 1758700000027, "re": "council.called#finding:4", "subject": "finding:4", "finding_id": "f-7bf84000911d564c", "seats": ["codex", "opencode", "pi"]},
+  },
+  {
     event_type: "wicked.team.finding.raised",
-    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "claude#2", "at": 1758700000026, "re": null, "raise_seq": 5, "finding_id": "f-3f16b20f4131ddc7", "member_id": "m1", "line_key": "l-3f16b20f4131ddc7", "anchor": null, "anchor_source": "none", "severity": "medium", "target": "output", "path": "answer-1", "line": 2, "evidence": "The retire flow cancels its fetch on unmount.", "claim": "the answer asserts cancellation the code does not show", "suggestion": "cite the effect cleanup", "tree": "t-k", "in_diff": false, "corroborated_by": [], "carried_from_attempt": null},
+    payload: {"run_id": "r1", "ord": 3, "attempt": 1, "by": "claude#2", "at": 1758700000026, "re": null, "raise_seq": 5, "finding_id": "f-5997e157b7b84a2e", "member_id": "m1", "line_key": "l-3f16b20f4131ddc7", "anchor": null, "anchor_source": "none", "severity": "medium", "target": "output", "path": "answer-1", "line": 2, "evidence": "The retire flow cancels its fetch on unmount.", "claim": "the answer asserts cancellation the code does not show", "suggestion": "cite the effect cleanup", "tree": "t-k", "in_diff": false, "corroborated_by": [], "carried_from_attempt": null},
   },
   {
     event_type: "wicked.team.help.answered",

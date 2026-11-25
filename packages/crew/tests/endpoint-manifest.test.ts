@@ -48,7 +48,7 @@ describe('endpoint-manifest.json (TH-11)', () => {
     const launch = byKey.get('POST /api/v1/runs');
     expect(launch?.requestType).toBe('LaunchRunBody');
     // 501: campaignId attach on an engine addon without the campaign bindings (wicked-studio#27).
-    expect(launch?.statusCodes).toEqual([201, 400, 404, 409, 422, 501, 503]);
+    expect(launch?.statusCodes).toEqual([201, 400, 403, 404, 409, 422, 501, 503]);
     expect(byKey.get('GET /api/v1/runs/:id/pr')).toMatchObject({
       responseType: 'RunPullRequest', statusCodes: [200, 404, 409, 500],
     });

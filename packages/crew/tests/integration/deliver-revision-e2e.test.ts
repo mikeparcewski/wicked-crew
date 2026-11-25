@@ -258,7 +258,7 @@ describe('DES-L9 §7 — revise an open PR: base on its head, a refused push →
     // the deliver gate fires (engine default) and we can approve it; deliver defaults to 'pr' (code-work).
     const launch = await postJson('/api/v1/runs', {
       problem: 'e2e: revise pull request #273',
-      clisJson: SEATS,
+      clisJson: SEATS, standIns: true,
       workflow: WORK_WORKFLOW.id,
       repoRef: repoId,
       revisesPr: PR_NUM,

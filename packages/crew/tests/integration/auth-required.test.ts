@@ -78,9 +78,13 @@ beforeAll(async () => {
   adapter.confirmGate = async () => 'resumed';
   adapter.upsertPolicy = async () => undefined;
   adapter.upsertConformanceRule = async () => undefined;
-  adapter.getSettings = async () => ({ graphNodeLimit: 150 });
-  adapter.updateSettings = async (patch: Partial<CrewSystemSettings>) =>
-    ({ graphNodeLimit: 150, ...patch }) as CrewSystemSettings; // the daemon's own type: baseSkillPolicy is 'require' only (D-8b)
+  // A write is read back (a saved `standInReview` is the consent a workload token's launch inherits).
+  let saved: Partial<CrewSystemSettings> = {};
+  adapter.getSettings = async () => ({ graphNodeLimit: 150, ...saved }) as CrewSystemSettings;
+  adapter.updateSettings = async (patch: Partial<CrewSystemSettings>) => {
+    saved = { ...saved, ...patch };
+    return { graphNodeLimit: 150, ...saved } as CrewSystemSettings; // the daemon's own type: baseSkillPolicy is 'require' only (D-8b)
+  };
   adapter.projectGet = async (id: string) =>
     ({ id, name: 'p', description: null, status: 'active', scope: `project:${id}`, created_at: 1, updated_at: 1 });
   adapter.projectUpdate = async (id: string, patch: { name?: string; status?: string }) =>
@@ -229,7 +233,8 @@ describe('observer — reads yes, writes no', () => {
 
 describe('operator — does the work, cannot govern', () => {
   it('launches a run and answers a gate; the gate-decision audit names the actor', async () => {
-    const launch = await call('POST', '/api/v1/runs', TOKENS.operator, { problem: 'build it' });
+    // A person's launch on this one-seat roster consents to stand-ins (DES-STANDIN-001 §4).
+    const launch = await call('POST', '/api/v1/runs', TOKENS.operator, { problem: 'build it', standIns: true });
     expect(launch.status).toBe(201);
 
     const gate = await call('POST', `/api/v1/runs/${PARKED}/gate`, TOKENS.operator, {
@@ -255,8 +260,11 @@ describe('operator — does the work, cannot govern', () => {
   });
 
   it('an agent-kind workload token does operator work under its own id', async () => {
+    // A workload token cannot consent to stand-ins itself; it inherits the consent a person saved (`standInReview`).
+    expect((await call('POST', '/api/v1/runs', TOKENS.agent, { problem: 'nightly job', standIns: true })).status).toBe(403);
+    expect((await call('PUT', '/api/v1/settings', TOKENS.admin, { standInReview: 'always' })).status).toBe(200);
     const res = await call('POST', '/api/v1/runs', TOKENS.agent, { problem: 'nightly job' });
-    expect(res.status).toBe(201);
+    expect(res.status, await res.clone().text()).toBe(201);
     const { entries } = (await (
       await call('GET', '/api/v1/audit?action=run.launched&limit=1', TOKENS.observer)
     ).json()) as { entries: AuditEntry[] };

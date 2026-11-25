@@ -156,6 +156,7 @@ beforeAll(async () => {
     body: JSON.stringify({
       problem: 'Functional 6a: resolve the acceptance gate from the QE ledger',
       clisJson: SEATS,
+      standIns: true, // a short roster: a person's consent (DES-STANDIN-001 §4)
       workflow: ACCEPT_WORKFLOW.id,
       repoRef: repo.id,
       humanConfirm: 'none',

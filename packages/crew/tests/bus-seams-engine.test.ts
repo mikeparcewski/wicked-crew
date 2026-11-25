@@ -135,7 +135,7 @@ describe.skipIf(!ENGINE_HAS_TEAM)('crew seams beside the real engine on one bus 
           json({
             problem: `bus 679 #${i}`,
             sessionId: `b679-${i}`,
-            clisJson: SEATS,
+            clisJson: SEATS, standIns: true,
             projectId,
             // A declared scope gates at launch; a plan with no `touch` would be scoped by the PA
             // first (wicked-core#633, X1), which on this supervisor-less teamed rig waits the

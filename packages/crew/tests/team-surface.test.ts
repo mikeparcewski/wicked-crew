@@ -284,6 +284,18 @@ describe('commands (T8 (c), (d), P1)', () => {
     expect(decided[0]).toMatchObject({ runId: 'r1', detail: { approve: true, action: 'edit_plan', planSteps: 1 } });
   });
 
+  // (crew#1698, codex delta on b7-standin) The edit is a gate answer: its confirm binds the engine to the opening the
+  // durable row shows, so a plan gate that closed and re-opened since (the same ord too) refuses it.
+  it('POST /runs/:id/plan binds its confirm to the open plan gate\'s opening (gateSeq)', async () => {
+    ctx.adapter.supportsPlanSendBack = () => true;
+    ctx.adapter.interactionRequests = async () =>
+      [{ kind: 'gate', ord: 0, prompt: 'Approve the plan?', gate_kind: 'plan_approval', created_at: 1, gate_seq: 3 }] as never;
+    const res = await fetch(`${ctx.baseUrl}/api/v1/runs/r1/plan`, json({ plan: { steps: [{ catalog: 'build', id: 'make' }] } }));
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect(gated).toHaveLength(1);
+    expect([gated[0]![3], gated[0]![7], gated[0]![9]]).toEqual(['edit_plan', 0, 3]);
+  });
+
   it('POST /runs/:id/plan: 404 unknown, 400 a bad body, 409 a refused gate edit, 501 no plan gate in the addon', async () => {
     expect((await fetch(`${ctx.baseUrl}/api/v1/runs/nope/plan`, json({ plan: { steps: [{ catalog: 'build' }] } }))).status).toBe(404);
     expect((await fetch(`${ctx.baseUrl}/api/v1/runs/r1/plan`, json({ plan: { steps: [] } }))).status).toBe(400);
