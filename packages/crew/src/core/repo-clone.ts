@@ -24,6 +24,7 @@ import { readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { ADO_RAW_ENV, execCapped, gitChildEnv, withoutAdoCredential } from './exec.js';
+import { childEnvWithBootEstateDb } from './governance-store.js';
 
 /** How a clone reaches Azure DevOps. Injectable so a test points it at a loopback server; production reads the URL. */
 export interface AdoCloneSeam {
@@ -117,7 +118,7 @@ function runContained(what: string, args: string[], env: NodeJS.ProcessEnv, time
       if (child.pid === undefined) return;
       try {
         if (posix) process.kill(-child.pid, 'SIGKILL');
-        else spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+        else spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true, env: childEnvWithBootEstateDb() });
       } catch {
         // The group is gone already.
       }

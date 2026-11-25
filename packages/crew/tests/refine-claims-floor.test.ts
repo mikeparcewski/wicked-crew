@@ -139,3 +139,69 @@ it.skipIf(!REQUIRED && !garden)('a refine lands when the repository changed unde
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// crew#1857: a refine that rewords a carried paragraph whose cited line moved was refused with only "claims: 1
+// cite-off", which does not say the repository changed since the draft. The refine writer has no repository folder, so
+// asking again gave the same refusal. The refusal now says why, names the citation and the nearest line, and what to do.
+it.skipIf(!REQUIRED && !garden)('a refused rewording of a carried citation says the repository changed since the draft (crew#1857)', async () => {
+  if (!garden) throw new Error('WICKED_CLAIMS_FLOOR=required but WICKED_GARDEN_ROOT is missing (expected a wicked-garden checkout)');
+  const dir = mkdtempSync(join(tmpdir(), 'crew-refine-moved-'));
+  try {
+    const repo = join(dir, 'widgets');
+    mkdirSync(join(repo, 'docs'), { recursive: true });
+    writeFileSync(join(repo, 'docs', 'perf.md'), '# Perf\n\nThe API serves 450 requests per second.\n');
+    const carried = '<p data-source="docs/perf.md:3">The API serves 450 requests per second.</p>';
+    const docsRoot = join(dir, 'docs');
+    mkdirSync(join(docsRoot, 'deck'), { recursive: true });
+    writeFileSync(join(docsRoot, 'deck', '_v0.html'), `<html><body>${carried}</body></html>`);
+    writeFileSync(join(docsRoot, 'deck', 'versions.json'), JSON.stringify({ head: 0, versions: [{ version: 0, parent: null, html_file: '_v0.html' }] }));
+    // The repository moves on after the draft: a line lands above the cited one.
+    writeFileSync(join(repo, 'docs', 'perf.md'), '# Perf\n\nMeasured on the staging cluster.\nThe API serves 450 requests per second.\n');
+    const out = join(dir, 'revised.html');
+    const notes = join(dir, 'revised.notes.json');
+    writeFileSync(notes, JSON.stringify({ left_out: [], sources: [], assumptions: [] }));
+    const keep = {
+      gardenRoot: () => '/garden',
+      run: async (argv: string[]) => (argv.includes('map')
+        ? { stdout: JSON.stringify({ ok: true, map: { texts: {}, attrs: {}, gone: [], added: [], order: null, labels: {} }, entries: [] }), code: 0 }
+        : { stdout: JSON.stringify({ ok: true, kept: 0, violations: [] }), code: 0 }),
+    };
+    const guard = async (body: string) => {
+      writeFileSync(out, `<html><body>${body}</body></html>`);
+      return guardRefine({
+        outPath: out, notesPath: notes, runId: RUN, docsRoot, doc: 'deck', base: 0, allow: [], allowOf: () => [],
+        claims: { files: [], packetBytes: () => Buffer.alloc(0), repos: [{ name: 'widgets', rootPath: repo }] },
+      }, { floor: { gardenRoot: () => garden }, garden: keep });
+    };
+    // The person asks to reword that paragraph.
+    const reworded = await guard(carried.replace('450 requests per second.', '450 requests per second at peak.'));
+    expect(reworded.ok).toBe(false);
+    const reason = reworded.ok ? '' : reworded.reason;
+    expect(reason).toContain('cite-off');
+    expect(reason).toContain('changed since the draft');
+    expect(reason).toContain('docs/perf.md:3');
+    expect(reason).toContain('the nearest matching line is now 4');
+    expect(reason).toMatch(/keep that paragraph's wording|new draft/);
+    // A citation the refine adds itself, wrong from the start, is refused without that explanation: it is not the
+    // repository that moved.
+    const added = await guard(`${carried}<p data-source="docs/perf.md:1">The API serves 450 requests per second.</p>`);
+    expect(added.ok).toBe(false);
+    expect(added.ok ? '' : added.reason).not.toContain('changed since the draft');
+    // Nor is a second paragraph the refine adds on the very citation it carried over unchanged (review r1): the one base
+    // finding is the carried paragraph's, set aside, and explains nothing else.
+    const duplicated = await guard(`${carried}<p data-source="docs/perf.md:3">The API serves 9999 requests per second.</p>`);
+    expect(duplicated.ok).toBe(false);
+    expect(duplicated.ok ? '' : duplicated.reason).not.toContain('changed since the draft');
+    // A reworded carrier beside a new paragraph on the same citation, in either order: the scan cannot tell which one is
+    // the reword, so neither is attributed to the repository (review r1 delta).
+    const reworded2 = carried.replace('450 requests per second.', '450 requests per second at peak.');
+    const extra = '<p data-source="docs/perf.md:3">The API serves 9999 requests per second.</p>';
+    for (const body of [`${reworded2}${extra}`, `${extra}${reworded2}`]) {
+      const both = await guard(body);
+      expect(both.ok).toBe(false);
+      expect(both.ok ? '' : both.reason).not.toContain('changed since the draft');
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

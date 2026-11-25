@@ -64,12 +64,13 @@ describe('crew#1843 gitChildEnv', () => {
     expect(Object.keys(withoutAdoCredential({ Azure_Devops_Ext_Pat: FAKE }, 'linux'))).toEqual(['Azure_Devops_Ext_Pat']);
   });
 
-  it('applies to git only: another program keeps the environment it was handed', () => {
+  it('fsmonitor off applies to git only; another program loses the raw credential too (crew#1843 residual)', () => {
     for (const git of ['git', '/usr/bin/git', 'C:\\Program Files\\Git\\cmd\\git.exe']) expect(isGitProgram(git), git).toBe(true);
     for (const other of ['bash', 'gh', 'node', '/usr/bin/gitk', 'git-lfs']) expect(isGitProgram(other), other).toBe(false);
     const env = childEnvFor('bash', { PATH: '/bin', [ADO_PAT_ENV]: FAKE });
-    // The deliver script and the minting helper read it.
-    expect(env[ADO_PAT_ENV]).toBe(FAKE);
+    // Every crew child runs without it; the deliver script and the minting helper ask for it back (ado-child-env.test.ts).
+    expect(env[ADO_PAT_ENV]).toBeUndefined();
+    expect(env['PATH']).toBe('/bin');
     expect(env['GIT_CONFIG_PARAMETERS']).toBeUndefined();
   });
 });

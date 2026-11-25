@@ -27,7 +27,7 @@ import { join } from 'node:path';
 
 import type { ClaimFinding, DraftFloorIo, DraftFloorVerdict } from './draft-skill.js';
 import { oneLine } from './draft-events.js';
-import { runDraftFloor } from './draft-skill.js';
+import { REPO_DEPENDENT_CLAIM_KINDS, runDraftFloor } from './draft-skill.js';
 import { keepCheck, lineageSteps, protectedEdits, type GardenIo } from './protected-edits.js';
 import { REPO_SNAPSHOT_MAX_BYTES, snapshotRepo, type SnapshotFailureReason, type SnapshotResult } from './repo-snapshot.js';
 import { packetDirOf } from './source-packet.js';
@@ -121,12 +121,69 @@ function missingReposNote(missing: readonly MissingRepo[]): string {
     .join('');
 }
 
+/** The `data-source` spec a `cite-off` finding is about (its detail starts with it, `claims_scan.py` `_check_cite_off`). Only
+ *  a cite-off names both the citation (detail) and the element's text (text): a `dangling-source` or `unsourced-url`
+ *  reports the path or URL as its text, so a reworded carrier of one is the same finding and was set aside already. */
+function citeOffSpec(f: ClaimFinding): string | null {
+  return f.kind === 'cite-off' ? (/^data-source (\S+)/.exec(f.detail)?.[1] ?? null) : null;
+}
+
+/**
+ * (crew#1857) The sentence a refused revision adds when a citation it was refused for also fails in the version the
+ * refine started from, with other element text: that paragraph's citation was checked when it was written, so the
+ * repository has most likely changed under it since. The refine writer has no repository folder to correct the line
+ * from, so asking again would be refused again: say which citation, the nearest line the scan found, and what to do.
+ * Matching is one to one (review r1): the findings carried over unchanged are set aside first, from both sides, and a
+ * citation is explained only when its refused carriers match its changed base carriers in number, so a carrier the
+ * refine adds beside a reworded one is never blamed on the repository. (A carrier deleted and another added on the same
+ * citation is indistinguishable from a reword: the citation itself does fail against the repository as it is now.)
+ */
+function movedCitationsNote(revision: readonly ClaimFinding[], base: readonly ClaimFinding[]): string {
+  const key = (f: ClaimFinding): string => JSON.stringify([f.kind, f.text, f.detail]);
+  const baseLeft = new Map<string, number>();
+  for (const f of base) if (REPO_DEPENDENT_CLAIM_KINDS.has(f.kind)) baseLeft.set(key(f), (baseLeft.get(key(f)) ?? 0) + 1);
+  // 1. Set aside what the revision carried over unchanged (as withoutCarriedClaims does), consuming those base findings.
+  const refused: ClaimFinding[] = [];
+  for (const f of revision) {
+    const n = baseLeft.get(key(f)) ?? 0;
+    if (REPO_DEPENDENT_CLAIM_KINDS.has(f.kind) && n > 0) baseLeft.set(key(f), n - 1);
+    else refused.push(f);
+  }
+  // 2. The base's cite-offs left over (their carriers the revision changed), counted per citation.
+  const byCite = new Map<string, number>();
+  for (const f of base) {
+    const n = baseLeft.get(key(f)) ?? 0;
+    if (n === 0) continue;
+    baseLeft.set(key(f), n - 1);
+    const spec = citeOffSpec(f);
+    if (spec !== null) byCite.set(spec, (byCite.get(spec) ?? 0) + 1);
+  }
+  // 3. A refused cite-off is explained only when its citation has exactly as many refused carriers as changed base ones
+  //    (review r1 delta): with more, the scan cannot tell the reworded carrier from one the refine added (document order
+  //    is no correspondence), so none of them is attributed.
+  const refusedByCite = new Map<string, number>();
+  for (const f of refused) { const spec = citeOffSpec(f); if (spec !== null) refusedByCite.set(spec, (refusedByCite.get(spec) ?? 0) + 1); }
+  const moved: string[] = [];
+  for (const f of refused) {
+    const spec = citeOffSpec(f);
+    if (spec === null || (byCite.get(spec) ?? 0) === 0 || refusedByCite.get(spec) !== byCite.get(spec)) continue;
+    const nearest = /nearest match: line (\d+)/.exec(f.detail)?.[1];
+    moved.push(`${spec}${nearest !== undefined ? ` (the nearest matching line is now ${nearest})` : ''} in "${oneLine(f.text, 80)}"`);
+  }
+  if (moved.length === 0) return '';
+  return ` The version this refine started from already fails on the same citation, so the cited repository has most ` +
+    `likely changed since the draft (or that citation never matched): ${moved.slice(0, 3).join('; ')}` +
+    `${moved.length > 3 ? ` and ${moved.length - 3} more` : ''}. A refine cannot re-check the repository's lines, so ` +
+    `asking again gives the same answer: keep that paragraph's wording as it was, or make a new draft from the ` +
+    `repository as it is now.`;
+}
+
 export type RefineGuardResult =
   | { ok: true; floor: DraftFloorVerdict; kept: number }
   | { ok: false; reason: string; floor?: DraftFloorVerdict };
 
 /** The floor on the revision, with its claims folders made and removed around it; `refused` when they cannot be made. */
-async function refineFloor(input: RefineGuardInput, io: RefineGuardIo): Promise<{ floor: DraftFloorVerdict; missing: MissingRepo[] } | { refused: string }> {
+async function refineFloor(input: RefineGuardInput, io: RefineGuardIo): Promise<{ floor: DraftFloorVerdict; missing: MissingRepo[]; base: ClaimFinding[] | null } | { refused: string }> {
   const root = mkdtempSync(join(tmpdir(), 'crew-refine-floor-'));
   try {
     let folders: { dirs: string[]; missing: MissingRepo[] };
@@ -144,13 +201,16 @@ async function refineFloor(input: RefineGuardInput, io: RefineGuardIo): Promise<
     // as it was then; it may have moved on since (a line inserted above a cited one, a file renamed). Only what the
     // revision adds or changes is judged: the version it started from is scanned against the same folders, and the
     // repository-dependent findings it already had are set aside (coord r2 on crew#1853). Asked only on a failure.
+    // Kept for the refusal's reason (crew#1857): a citation the base already fails on says the repository moved.
+    let baseFindings: ClaimFinding[] | null = null;
     const carried = async (): Promise<ClaimFinding[] | null> => {
       const base = lineageSteps(input.docsRoot, input.doc, input.base, input.allowOf)?.at(-1)?.html;
       if (base === undefined) return null;
-      return (await runDraftFloor(base, budget, folders.dirs, {}, io.floor ?? {})).claimFindings ?? null;
+      baseFindings = (await runDraftFloor(base, budget, folders.dirs, {}, io.floor ?? {})).claimFindings ?? null;
+      return baseFindings;
     };
     const floor = await runDraftFloor(input.outPath, budget, folders.dirs, { notes: input.notesPath, runId: input.runId, carried }, io.floor ?? {});
-    return { floor, missing: folders.missing };
+    return { floor, missing: folders.missing, base: baseFindings };
   } finally {
     removeFolder(root);
   }
@@ -182,9 +242,13 @@ export async function guardRefine(input: RefineGuardInput, io: RefineGuardIo = {
   //    repositories it may name (crew#1727). A refine keeps the page count the document has.
   const checked = await refineFloor(input, io);
   if ('refused' in checked) return { ok: false, reason: checked.refused };
-  const { floor, missing } = checked;
+  const { floor, missing, base } = checked;
   if (floor.verdict === 'fail') {
-    return { ok: false, reason: `the revision did not meet the document floor: ${oneLine(floor.breaches.join(' '), 400)}${missingReposNote(missing)}`, floor };
+    const notes = `${missingReposNote(missing)}${movedCitationsNote(floor.claimFindings ?? [], base ?? [])}`;
+    const breaches = oneLine(floor.breaches.join(' '), 400);
+    // A note is a sentence of its own: the breach before it ends with a full stop.
+    const ended = notes !== '' && !/[.!?…]$/.test(breaches) ? `${breaches}.` : breaches;
+    return { ok: false, reason: `the revision did not meet the document floor: ${ended}${notes}`, floor };
   }
   if (floor.verdict === 'unavailable') return { ok: false, reason: `the revision could not be checked on this host, so it was not applied (${oneLine(floor.summary, 300)})`, floor };
   // 2. The keep check, on crew's own map of the head the refine started from.
