@@ -6733,7 +6733,7 @@ export interface LaunchRunBody {
   /** (api-types 0.192.0, DES-CATALOG-002 §4.4) What this launch is the shape of ({@link LaunchShape}). Send only where
    *  `GET /health.capabilities.launchShape` is true. */
   shape?: LaunchShape;
-  /** (api-types 0.229.0, J6 K1) What a `domain-extraction` launch maps ({@link DomainScope}): REQUIRED on that
+  /** (api-types 0.230.0, J6 K1) What a `domain-extraction` launch maps ({@link DomainScope}): REQUIRED on that
    *  workflow (400 without it), refused on any other. Start sends the scope card's `scopeHash`, so a run whose code
    *  changed since the preview refuses before any model call. */
   domainScope?: DomainScope;
@@ -6841,12 +6841,12 @@ export interface LaunchPreviewBody {
   humanConfirm?: string;
   deliver?: 'pr' | 'none';
   deliverGate?: 'human' | 'auto';
-  /** (api-types 0.229.0, J6 K1) On a `domain-extraction` body with a `repoRef`: the scope to preview; the answer
+  /** (api-types 0.230.0, J6 K1) On a `domain-extraction` body with a `repoRef`: the scope to preview; the answer
    *  then carries its {@link DomainScopeCard}. */
   domainScope?: DomainScope;
 }
 
-/** (api-types 0.229.0, J6 K1) What a domain model run covers: the person's words, and the phrases they kept. */
+/** (api-types 0.230.0, J6 K1) What a domain model run covers: the person's words, and the phrases they kept. */
 export interface DomainScope {
   /** "What should the model cover?" (1–2000 chars). */
   intent: string;
@@ -6859,7 +6859,7 @@ export interface DomainScope {
 }
 
 /**
- * (api-types 0.229.0, J6 K1) The scope card of a `domain-extraction` preview: what the intent matched in the code,
+ * (api-types 0.230.0, J6 K1) The scope card of a `domain-extraction` preview: what the intent matched in the code,
  * computed by garden's `scripts/domain/scope.py` over the repository's checkout and estate store (no model call).
  */
 export interface DomainScopeCard {
@@ -6903,10 +6903,10 @@ export interface LaunchPreviewPosture {
 /** (api-types 0.212.0) `POST /runs/preview`'s answer. */
 export interface LaunchPreviewResponse {
   posture: LaunchPreviewPosture;
-  /** (api-types 0.229.0, J6 K1) On a `domain-extraction` body with a repository and a scope: its card. Absent
+  /** (api-types 0.230.0, J6 K1) On a `domain-extraction` body with a repository and a scope: its card. Absent
    *  otherwise. */
   scopeCard?: DomainScopeCard;
-  /** (api-types 0.229.0) Why no card could be computed (no checkout, no code graph, the scope failed), when one was
+  /** (api-types 0.230.0) Why no card could be computed (no checkout, no code graph, the scope failed), when one was
    *  asked for. */
   scopeError?: string;
 }
@@ -7928,19 +7928,19 @@ export interface RequirementsPage {
   /** (0.197.0) Rows of the whole corpus whose code does not meet them (`?mismatch=yes` lists them). ABSENT from an
    *  older daemon. */
   mismatches?: number;
-  /** (api-types 0.229.0, J6 K1) The domain model (schema 1.2.0) the rows come from: its statements, rule groups,
+  /** (api-types 0.230.0, J6 K1) The domain model (schema 1.2.0) the rows come from: its statements, rule groups,
    *  follow-ups and targets. Present only when the repository's model is a 1.2.0 one. */
   model?: DomainModel;
 }
 
-/** (api-types 0.229.0, J6 K1) Lines a claim cites: inclusive, 1-based. */
+/** (api-types 0.230.0, J6 K1) Lines a claim cites: inclusive, 1-based. */
 export interface DomainRange {
   file: string;
   from: number;
   to: number;
 }
 
-/** (api-types 0.229.0) A person's ruling, as the model shows it while it applies. */
+/** (api-types 0.230.0) A person's ruling, as the model shows it while it applies. */
 export interface DomainRuling {
   action: 'confirm' | 'reject';
   by: string;
@@ -7949,7 +7949,7 @@ export interface DomainRuling {
   note?: string;
 }
 
-/** (api-types 0.229.0) One claim of a statement. `when` / `unless` name the condition claims (by `i`) it depends on. */
+/** (api-types 0.230.0) One claim of a statement. `when` / `unless` name the condition claims (by `i`) it depends on. */
 export interface DomainClaim {
   i: number;
   type: string;
@@ -7962,7 +7962,7 @@ export interface DomainClaim {
 }
 
 /**
- * (api-types 0.229.0) One stated decision. `status`: `Checked` (a second seat confirmed it against the code), `open`
+ * (api-types 0.230.0) One stated decision. `status`: `Checked` (a second seat confirmed it against the code), `open`
  * (not confirmed: see its follow-up), `confirmed` (a person confirmed it) or `stale` (the code changed since; the next
  * run checks it again). A rejected statement is not here: it is under its target's `rejected`.
  */
@@ -7986,19 +7986,19 @@ export interface DomainStatement {
   ruling: DomainRuling | null;
 }
 
-/** (api-types 0.229.0) A sentence of a rule group, citing the statements it rests on (by id). */
+/** (api-types 0.230.0) A sentence of a rule group, citing the statements it rests on (by id). */
 export interface DomainGroupSentence {
   id: string;
   text: string;
   cites: string[];
 }
 
-/** (api-types 0.229.0) A sentence the check could not support: kept out of the group, with why. */
+/** (api-types 0.230.0) A sentence the check could not support: kept out of the group, with why. */
 export interface DomainWithheldSentence extends DomainGroupSentence {
   reason: string;
 }
 
-/** (api-types 0.229.0) Plain-words sentences over Checked statements. Business groups first, housekeeping last. */
+/** (api-types 0.230.0) Plain-words sentences over Checked statements. Business groups first, housekeeping last. */
 export interface DomainRuleGroup {
   id: string;
   title: string;
@@ -8012,7 +8012,7 @@ export interface DomainRuleGroup {
   stale: boolean;
 }
 
-/** (api-types 0.229.0) What a person should look at, with the action that settles it. */
+/** (api-types 0.230.0) What a person should look at, with the action that settles it. */
 export interface DomainFollowup {
   id: string;
   n: number;
@@ -8029,7 +8029,7 @@ export interface DomainFollowup {
   ruling: DomainRuling | null;
 }
 
-/** (api-types 0.229.0) A statement a person rejected: out of the model, kept here so the reject can be undone. */
+/** (api-types 0.230.0) A statement a person rejected: out of the model, kept here so the reject can be undone. */
 export interface DomainRejectedStatement {
   id: string;
   key: string;
@@ -8037,7 +8037,7 @@ export interface DomainRejectedStatement {
   ruling: DomainRuling;
 }
 
-/** (api-types 0.229.0) A unit or line range in scope, and whether its lines are accounted for. */
+/** (api-types 0.230.0) A unit or line range in scope, and whether its lines are accounted for. */
 export interface DomainTarget {
   id: string;
   file: string;
@@ -8053,7 +8053,7 @@ export interface DomainTarget {
   ruling: DomainRuling | null;
 }
 
-/** (api-types 0.229.0, J6 K1) The domain model of a repository (schema 1.2.0), read from its estate store. */
+/** (api-types 0.230.0, J6 K1) The domain model of a repository (schema 1.2.0), read from its estate store. */
 export interface DomainModel {
   schemaVersion: string;
   /** `open` counts open and rejected statements (a reject waits for the next run). */
@@ -8067,7 +8067,7 @@ export interface DomainModel {
 }
 
 /**
- * (api-types 0.229.0, J6 K1) Body for `POST /repos/:id/requirements/rulings`: a person's Confirm or Reject on an open
+ * (api-types 0.230.0, J6 K1) Body for `POST /repos/:id/requirements/rulings`: a person's Confirm or Reject on an open
  * statement (`statement` + `expect`), or Confirm on an unaccounted target (`target`). `expectTarget` is the target's
  * `targetHash` as read; a reject needs a `note` (what is wrong, 1–2000 chars).
  */
@@ -8081,7 +8081,7 @@ export interface DomainRulingBody {
   note?: string;
 }
 
-/** (api-types 0.229.0) `POST /repos/:id/requirements/rulings`'s 200: saved, and the model rebuilt. */
+/** (api-types 0.230.0) `POST /repos/:id/requirements/rulings`'s 200: saved, and the model rebuilt. */
 export interface DomainRulingResponse {
   ruling: DomainRuling & { subject: 'statement' | 'target'; id: string };
   /** The rebuilt model's counts; `rebuilt: false` with `error` when the ruling was saved but the rebuild failed. */
@@ -17399,6 +17399,107 @@ export interface ProductComposeResponse {
   runId: string;
   /** How many requirements the draft was handed. */
   requirements: number;
+}
+
+// ── Product publish (api-types 0.229.0, wicked-crew#372; /projects/:id/product/publish) ─────────────
+/**
+ * `POST /projects/:id/product/publish` (a person at operator trust). Publishes a finished compose run's plan as GitHub
+ * issues in a repository linked to the project itself as a tracker (`owner/repo`, or `<source>:owner/repo` when two
+ * sources link it). Three modes:
+ * - no `confirm`, no `resolve`: the card and its `publishHash`; nothing is sent;
+ * - `confirm` = the card's `publishHash`: the items not yet created are created in order, each journaled before and
+ *   after it is sent, then every created issue is read back;
+ * - `resolve`: a person settles one `unsure` item: `issue: N` = it was created as #N (crew reads #N and records it only
+ *   when its title and body are the approved ones), `issue: null` = it was not created (a later confirm creates it).
+ *
+ * Refusals (`{error, code}`; each sends nothing, except a `journal_unreadable` answered after a confirm has sent: GitHub may
+ * then hold some of the issues, and GET answers `journal_unreadable` too until the journal is repaired): 400 `bad_request`; 403 `publish_human_only`; 404
+ * `project_not_found` · `run_not_found` · `repo_not_linked`; 409 `not_a_compose` (no compose facts for this run on
+ * this project: a run composed before publishing shipped; compose again) · `compose_unverified` (the run's draft or
+ * review step is not the one Compose launched: for a plan edited at its gate `error` says so in plain words; `detail`
+ * names what differs) · `run_not_finished` · `plan_unreadable` (the reason names the item) · `ambiguous` ·
+ * `card_changed` (with the fresh `card` and `publishHash`) · `publication_differs` (this run was already published to
+ * that repository with other content; with its `publication`) · `write_tool_off` · `credential_unpinned` ·
+ * `unresolved` (with the `publication`) · `journal_unreadable` · `in_progress` (this daemon is sending or resolving it) · `not_unsure` · `resolve_differs`;
+ * 503 `registry_unavailable` · `source_unavailable` · `journal_unavailable`. Audited `product.publish` and
+ * `product.publish.resolve`.
+ */
+export interface ProductPublishBody {
+  runId: string;
+  repo: string;
+  confirm?: string;
+  resolve?: { key: string; issue: number | null };
+}
+
+/**
+ * One issue a publication creates. `key` is positional (`e1`, `e1.f2`, `e1.f2.s3`), in depth-first order, a parent
+ * before its children. `body` is crew's text and ends with a footer naming the run and the key; `{{parent}}` in it
+ * becomes `#<number>` of the parent's issue when it is sent (show it as the parent's key until then).
+ */
+export interface PublishItem {
+  key: string;
+  kind: 'epic' | 'feature' | 'story';
+  title: string;
+  body: string;
+  parentKey: string | null;
+}
+
+/** What a confirm would create, where, and as whom. */
+export interface ProductPublishCard {
+  runId: string;
+  projectId: string;
+  /** `owner/repo`, lower-cased. */
+  repo: string;
+  /** The tracker source it posts through. */
+  source: string;
+  /** The GitHub account it posts as. */
+  identity: string;
+  items: PublishItem[];
+}
+
+/**
+ * One item of a publication now. `state`: `created`; `sending` (this daemon is sending it right now); `not_sent` (refused
+ * before it was sent); `unsure` (crew cannot tell whether GitHub created it: resolve it); `absent` (a person said it was
+ * not created); `missing` (planned, never sent). `readBack` (created items only): `ok` = the issue's title and body as
+ * GitHub's MCP server shows them are the approved ones; `differs`; `unreadable` (the read failed, a deleted issue
+ * included). An edit made only of characters that server strips is invisible to it.
+ */
+export interface PublicationItemState {
+  key: string;
+  kind: 'epic' | 'feature' | 'story';
+  title: string;
+  state: 'created' | 'sending' | 'not_sent' | 'unsure' | 'absent' | 'missing';
+  number: number | null;
+  url: string | null;
+  readBack: 'ok' | 'differs' | 'unreadable' | null;
+  /** Why it is `not_sent` or `unsure`. */
+  why?: string;
+}
+
+/** One run published to one repository. `published`: every item `created` and read back `ok`. */
+export interface PublicationState {
+  repo: string;
+  source: string;
+  publishHash: string;
+  items: PublicationItemState[];
+  published: boolean;
+}
+
+/** `POST /projects/:id/product/publish` 200. `done: true` = the attempt finished; `publication.published` is the verdict. */
+export type ProductPublishResponse =
+  | { done: false; card: ProductPublishCard; publishHash: string; publication: PublicationState | null }
+  | { done: true; card: ProductPublishCard; publication: PublicationState };
+
+/**
+ * `GET /projects/:id/product/publish/:runId` (a person at operator trust): whether the run can be published now
+ * (`publishable.ok: false` carries the same `code` and plain-words `error` a POST would answer, so a client shows it
+ * before the click; a tracker registry that cannot be read is 503 `registry_unavailable`, never an empty `targets`), the project's own GitHub repositories, and every publication of the run, each read back now.
+ */
+export interface ProductPublicationsResponse {
+  runId: string;
+  publishable: { ok: true; items: number } | { ok: false; code: string; error: string };
+  targets: Array<{ repo: string; source: string }>;
+  publications: PublicationState[];
 }
 
 // ── learn schedules (DES-learn-workflow §5) ────────────────────────────────────────────────────

@@ -185,6 +185,7 @@ import { estateExe, parseEstateTotals, projectGraphRefreshDiagnostics, readBlast
 import { attachRepoToProject, createProjectRecorded, registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { registerProjectAggregateRoutes } from './project-aggregates.js';
 import { composeLaunch, composePreflight, registerProductRoutes } from './product.js';
+import { registerProductPublishRoutes } from './product-publish.js';
 import { buildWorkflowCatalogV2, parseCommand, resolveOption } from '../workflow-catalog/build-v2.js';
 import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import { DETECT_MAX_CHARS, DETECT_TIMEOUT_MS, DetectService, shadowCheck } from '../workflow-catalog/detect-service.js';
@@ -627,6 +628,8 @@ export interface LaunchContext {
   fromProposal?: string;
   /** The compose route's own plan launch: a `shape` is judged as a compose, not as a run. */
   target?: 'compose';
+  /** (crew#372) The compose route's own facts, recorded on the launch entry for publish (only with `target: 'compose'`). */
+  compose?: import('./compose-facts.js').ComposeFacts;
   /** (api-types 0.196.0) A chat job's Start chose a power run: a launch that would run phased is refused (409
    *  `power_unavailable`) before the engine is called, never started phased with a notice. */
   powerRequired?: boolean;
@@ -922,7 +925,7 @@ export function primaryRefusal(primary: string, clisJson: string): string | null
   return null;
 }
 
-/** (api-types 0.229.0, J6 K1) {@link DomainScope}: what a domain model run covers. */
+/** (api-types 0.230.0, J6 K1) {@link DomainScope}: what a domain model run covers. */
 const DomainScopeSchema = z.strictObject({
   intent: z.string().trim().min(1).max(2000),
   phrases: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
@@ -1021,7 +1024,7 @@ export const LaunchSchema = z.strictObject({
   documents: z.array(z.string().trim().min(1).max(300)).max(RUN_DOCS_TOKENS_MAX).optional(),
   /** (DES-CATALOG-002 §2.d piece 4, CS4) The run's source pick (registered source names); `[]` = none. */
   sources: z.array(z.string().trim().min(1).max(100)).max(RUN_SOURCES_MAX).optional(),
-  /** (api-types 0.229.0, J6 K1) A domain-extraction launch's scope: required on that workflow, refused on any other. */
+  /** (api-types 0.230.0, J6 K1) A domain-extraction launch's scope: required on that workflow, refused on any other. */
   domainScope: DomainScopeSchema.optional(),
 }).refine((b) => b.domainScope === undefined || b.workflow === DOMAIN_EXTRACTION_WORKFLOW, {
   path: ['domainScope'],
@@ -4348,6 +4351,8 @@ export function registerRoutes(
         // DES-CATALOG-002 §4.4: the shape it was launched as, what it was launched with, and the proposal behind it.
         ...(b.shape !== undefined ? { shape: launchShapeOf(b.shape) } : {}),
         ...(ctx.fromProposal !== undefined ? { fromProposal: ctx.fromProposal } : {}),
+        // crew#372: what a compose launched with (its requirements, level and steps), the only source publish trusts.
+        ...(ctx.target === 'compose' && ctx.compose !== undefined ? { compose: ctx.compose } : {}),
         envelope: {
           words: envelopeWords,
           ...(b.repoRef !== undefined ? { repoRef: b.repoRef } : {}),
@@ -12108,6 +12113,17 @@ export function registerRoutes(
       return { projectId, repoId: run.session.repo_ref ?? null };
     },
     members: repoMembersOf,
+    audit,
+    actorOf,
+  });
+  // crew#372: publish a finished compose's plan as GitHub issues of a project-linked tracker (human-only, card first).
+  registerProductPublishRoutes(app, {
+    ...(runtime.mcpRegistryStore !== undefined ? { store: runtime.mcpRegistryStore } : {}),
+    ...(runtime.dataGate !== undefined ? { pm: runtime.dataGate.pm } : {}),
+    projectExists: async (id) => (await adapter.projectGet(id).catch(() => null)) !== null,
+    composeOf: (runId) => runTimingIndex.composeOf(runId),
+    runView: (runId) => adapter.runView(runId),
+    workOutput: (unitId) => adapter.workOutput(unitId),
     audit,
     actorOf,
   });

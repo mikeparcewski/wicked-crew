@@ -105,3 +105,43 @@ export function trackerSetOf(entries: readonly PmEntry[], projectId: string | nu
 export function linkedSetOf(set: readonly TrackerSetEntry[], sourceId: string): LinkedTracker[] {
   return set.filter((t) => t.sourceId === sourceId).map((t) => ({ trackerId: t.trackerId, tenant: t.tenant, key: t.key, siteHost: t.siteHost }));
 }
+
+/** A GitHub repository a person names for a project's act: `owner/repo`, or `<source>:owner/repo` to pick the source. */
+export interface RepoSelector {
+  source: string | null;
+  /** `owner/repo`, lower-cased. */
+  repo: string;
+}
+
+/** `owner/repo` or `<source>:owner/repo`, or `null` when it is neither. */
+export function parseRepoSelector(raw: string): RepoSelector | null {
+  const m = /^(?:([^\s:/]{1,100}):)?([A-Za-z0-9_.-]{1,100})\/([A-Za-z0-9_.-]{1,100})$/.exec(raw.trim());
+  return m === null ? null : { source: m[1] ?? null, repo: `${m[2]}/${m[3]}`.toLowerCase() };
+}
+
+/**
+ * (crew#372) The ONE GitHub tracker a project's own act may use for `sel`: from {@link trackerSetOf} over the project
+ * alone (no unit repositories, so the source-visibility policy is the set's own), a GitHub tracker linked to the
+ * project ITSELF (a link inherited through a repository does not count) for that repository, of the named source when
+ * one is named. Product publish's card, its confirm and every dispatch re-check go through this.
+ */
+export function projectGithubTracker(
+  entries: readonly PmEntry[],
+  projectId: string,
+  sel: RepoSelector,
+): { ok: true; t: TrackerSetEntry; e: PmEntry } | { ok: false; code: 'repo_not_linked' | 'ambiguous'; error: string } {
+  const hits = trackerSetOf(entries, projectId, []).filter(
+    (t) => t.system === 'github' && t.tenant === 'github.com' && t.via.some((v) => v.kind === 'project') && t.key.toLowerCase() === sel.repo && (sel.source === null || t.source === sel.source),
+  );
+  if (hits.length === 0) return { ok: false, code: 'repo_not_linked', error: `${sel.source !== null ? `${sel.source}:` : ''}${sel.repo} is not a GitHub repository linked to this project as a tracker` };
+  if (hits.length > 1) return { ok: false, code: 'ambiguous', error: `${hits.length} GitHub sources link ${sel.repo} to this project: name it as <source>:${sel.repo} (${hits.map((h) => `${h.source}:${sel.repo}`).join(', ')})` };
+  const t = hits[0]!;
+  return { ok: true, t, e: entries.find((x) => x.id === t.sourceId)! };
+}
+
+/** The GitHub repositories linked to `projectId` itself, as {@link projectGithubTracker} admits them. */
+export function projectGithubTargets(entries: readonly PmEntry[], projectId: string): Array<{ repo: string; source: string }> {
+  return trackerSetOf(entries, projectId, [])
+    .filter((t) => t.system === 'github' && t.tenant === 'github.com' && t.via.some((v) => v.kind === 'project'))
+    .map((t) => ({ repo: t.key.toLowerCase(), source: t.source }));
+}

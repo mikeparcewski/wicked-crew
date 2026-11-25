@@ -8,7 +8,17 @@
 // Every tools/call appends `{tool, args}` to <log-dir>/calls.ndjson. `search_issues` ignores its query and answers
 // issues of owner/app AND owner/other; `list_issues` slips in one foreign issue; so only crew's response projector
 // keeps foreign items out. Each item carries `_debug: <token>`. `<log-dir>/body.txt`, when present, is every issue's body.
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+//
+// (crew#372) `issue_write` method `create` is real: it allocates a number (from 100), stores the title and body as
+// github-mcp-server's sanitizing leaves them (invisible characters out; a title's `&`, `<`, `>` escaped, as
+// `sanitize.PlainText` does) in <log-dir>/issues.json, and answers the server's create result, `MinimalResponse{ID,
+// URL}` (pkg/github/minimal_types.go `MinimalResponse`; issues.go `CreateIssue` marshals `{id: fmt.Sprintf("%d",
+// issue.GetID()), url: issue.GetHTMLURL()}`). `issue_read` get answers a stored issue as stored. Switch files in
+// <log-dir>: `createerror` (store it, then answer isError, as the server does for any error after the request),
+// `createexit` (store it, then the process dies before answering), `createjunk` (store it, answer text that is not
+// JSON), `createhost` / `createpull` (store it, answer a url on another host / a pull-request url), `createrefuse`
+// (answer isError and store nothing), `login` (get_me answers that account instead). A stored issue with `deleted: true` reads as GitHub's not-found tool error.
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -29,6 +39,16 @@ const issue = (repo, n) => ({
   _debug: token,
 });
 const REPOS = ['owner/app', 'owner/other'];
+const STORE = () => join(dir, 'issues.json');
+const stored = () => (existsSync(STORE()) ? JSON.parse(readFileSync(STORE(), 'utf8')) : { next: 100, issues: [] });
+const on = (f) => existsSync(join(dir, f));
+// pkg/sanitize/sanitize.go FilterInvisibleCharacters (the Cf ones and unpaired variation selectors).
+const invisible = (s) => String(s ?? '').replace(/\p{Cf}/gu, '').replace(/(^|[\s\uFE00-\uFE0F])[\uFE00-\uFE0F]+/gu, '$1');
+// sanitize.PlainText: the text token arrives DECODED (a character reference becomes its character), then `&`, `<` and `>`
+// are escaped again. A few references stand in for the decoder.
+const ENT = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+const decodeRefs = (s) => s.replace(/&(amp|lt|gt|quot|apos);?|&#([0-9]{1,7});?/g, (m, n, d) => (n ? ENT[n] : String.fromCodePoint(Number(d))));
+const plainTitle = (s) => decodeRefs(invisible(s)).replace(/&(?=[A-Za-z#])/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const str = { type: 'string' };
 const tools = [
   { name: 'get_me', description: 'me', inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: true } },
@@ -37,7 +57,7 @@ const tools = [
   { name: 'list_issues', description: 'list issues', inputSchema: { type: 'object', properties: { owner: str, repo: str, state: str, perPage: { type: 'number' }, after: str }, required: ['owner', 'repo'] }, annotations: { readOnlyHint: true } },
   { name: 'search_issues', description: 'search issues', inputSchema: { type: 'object', properties: { query: str, owner: str, repo: str, perPage: { type: 'number' }, page: { type: 'number' } }, required: ['query'] }, annotations: { readOnlyHint: true } },
   { name: 'add_issue_comment', description: 'comment', inputSchema: { type: 'object', properties: { owner: str, repo: str, issue_number: { type: 'number' }, body: str }, required: ['owner', 'repo', 'issue_number', 'body'] }, annotations: { destructiveHint: false } },
-  { name: 'issue_write', description: 'write an issue', inputSchema: { type: 'object', properties: { method: str, owner: str, repo: str, issue_number: { type: 'number' }, state: str }, required: ['method', 'owner', 'repo'] }, annotations: { destructiveHint: false } },
+  { name: 'issue_write', description: 'write an issue', inputSchema: { type: 'object', properties: { method: str, owner: str, repo: str, issue_number: { type: 'number' }, state: str, title: str, body: str }, required: ['method', 'owner', 'repo'] }, annotations: { destructiveHint: false } },
 ];
 const server = new Server({ name: 'fake-github', version: '1.0.0' }, { capabilities: { tools: {} } });
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
@@ -49,25 +69,42 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const repo = `${args.owner}/${args.repo}`;
   switch (name) {
     case 'get_me':
-      return json({ login: 'pat-bot', id: 7 });
+      return json(existsSync(join(dir, 'login')) ? { login: readFileSync(join(dir, 'login'), 'utf8').trim(), id: 8 } : { login: 'pat-bot', id: 7 });
     case 'search_repositories': {
       const q = String(args.query ?? '');
       const m = /repo:([^\s]+)/.exec(q);
       const items = REPOS.filter((r) => (m ? r === m[1].toLowerCase() : true)).map((r, i) => ({ id: i + 1, name: r.split('/')[1], full_name: r, html_url: `https://github.com/${r}`, private: false, fork: false, archived: false, stargazers_count: 0, forks_count: 0, open_issues_count: 2 }));
       return json({ total_count: items.length, incomplete_results: false, items });
     }
-    case 'issue_read':
+    case 'issue_read': {
       if (!REPOS.includes(repo)) return { isError: true, content: [{ type: 'text', text: 'Not Found' }] };
+      const kept = stored().issues.find((i) => i.repo === repo && i.number === args.issue_number);
+      if (kept !== undefined && args.method === 'get') {
+        if (kept.deleted) return { isError: true, content: [{ type: 'text', text: 'failed to get issue: GET https://api.github.com/repos/' + repo + '/issues/' + kept.number + ': 404 Not Found []' }] };
+        return json({ ...issue(repo, kept.number), title: kept.title, body: kept.body, user: { login: 'pat-bot' } });
+      }
       if (args.method === 'get_comments') return json([{ id: 1, body: 'a comment', html_url: `https://github.com/${repo}/issues/${args.issue_number}#issuecomment-1`, user: { login: 'filer' } }, { id: 2, body: 'foreign', html_url: 'https://github.com/owner/other/issues/9#issuecomment-2', user: { login: 'x' } }]);
       return json(issue(repo, args.issue_number));
+    }
     case 'list_issues':
       return json({ issues: [issue(repo, 1), issue(repo, 2), issue('owner/other', 5)], totalCount: 3, pageInfo: { hasNextPage: true, endCursor: 'cur-2' } });
     case 'search_issues':
       return json({ total_count: 4, incomplete_results: false, items: [issue('owner/app', 1), issue('owner/other', 1), issue('owner/app', 2), issue('owner/other', 2)] });
     case 'add_issue_comment':
       return json({ id: 99, body: args.body, html_url: `https://github.com/${repo}/issues/${args.issue_number}#issuecomment-99` });
-    case 'issue_write':
-      return json({ ...issue(repo, args.issue_number), state: args.state ?? 'open' });
+    case 'issue_write': {
+      if (args.method !== 'create') return json({ ...issue(repo, args.issue_number), state: args.state ?? 'open' });
+      if (on('createrefuse')) return { isError: true, content: [{ type: 'text', text: 'failed to create issue: 422 Validation Failed' }] };
+      const st = stored();
+      const number = st.next++;
+      st.issues.push({ repo, number, title: plainTitle(args.title), body: invisible(args.body) });
+      writeFileSync(STORE(), JSON.stringify(st));
+      const url = on('createhost') ? `https://github.example.com/${repo}/issues/${number}` : on('createpull') ? `https://github.com/${repo}/pull/${number}` : `https://github.com/${repo}/issues/${number}`;
+      if (on('createerror')) return { isError: true, content: [{ type: 'text', text: 'failed to create issue: context deadline exceeded' }] };
+      if (on('createexit')) process.exit(3);
+      if (on('createjunk')) return { content: [{ type: 'text', text: 'created' }] };
+      return json({ id: String(9_000_000 + number), url });
+    }
     default:
       return { isError: true, content: [{ type: 'text', text: `unknown tool ${name}` }] };
   }

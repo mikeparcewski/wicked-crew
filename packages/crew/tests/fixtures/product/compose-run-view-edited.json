@@ -1,0 +1,696 @@
+{
+ "_provenance": "crew#372: a compose launch held at its plan gate (humanConfirm before:1); the plan was EDITED there through adapter.confirmGate(plan), the held proposal's own steps with the draft's instructions changed (both step ids kept); the engine accepted it (plan rev 2 -> 3) and the run was confirmed to completion on the stub-runner CoreAdapter, read with adapter.runView (b7-crew probe/compose-edit.mts). draft/review are the instructions it LAUNCHED with.",
+ "projectId": "proj_179558456931200000",
+ "draft": "Compose a product plan for project proj_179558456931200000 from these 2 requirement(s):\n- repo-a REQ-1: Sign in \u2014 A user signs in with email.\n- repo-a REQ-2: Sign out \u2014 A user signs out.\n\nGroup them into epics, each epic into features, each feature into user stories with acceptance\ncriteria. Every feature names the requirement refs it covers ({\"repoId\",\"key\"}, exactly as listed);\nevery listed requirement is covered at least once, and nothing is invented that no requirement asks for.\nDo not create issues or change any repository. End with ONE fenced ```json block, the plan:\n{\"epics\":[{\"title\":\"\",\"features\":[{\"title\":\"\",\"requirementRefs\":[{\"repoId\":\"\",\"key\":\"\"}],\n\"stories\":[{\"title\":\"\",\"acceptance\":[\"\"]}]}]}]}",
+ "review": "Review the drafted product plan for project proj_179558456931200000 against the 2 requirement(s) it was drafted from:\n- repo-a REQ-1: Sign in \u2014 A user signs in with email.\n- repo-a REQ-2: Sign out \u2014 A user signs out.\n\nEvery listed requirement is covered at least once; every feature's requirementRefs are refs from this list,\nexactly; nothing is invented that no requirement asks for; the stories are testable; the plan is ONE\nwell-formed fenced JSON block. A gap, an unknown ref or an invented item is a FAIL naming it.",
+ "view": {
+  "session": {
+   "archive_note": null,
+   "archived_at": null,
+   "assurance": {
+    "mode": "full",
+    "required": [
+     "distinct_evaluator",
+     "judge"
+    ]
+   },
+   "attempt": 0,
+   "auto_deliver": false,
+   "clis": [
+    "beta",
+    "alpha"
+   ],
+   "collection_scope": "wicked-agent/run-compose-edited/shared",
+   "entity_mode": "shared",
+   "extra_read_roots": [],
+   "extra_write_roots": [],
+   "finished_at": 1795584569872,
+   "human_confirm": {
+    "before": 1
+   },
+   "id": "run-compose-edited",
+   "problem": "Compose the product plan for project proj_179558456931200000 (2 requirement(s))",
+   "project_graph": null,
+   "project_id": "proj_179558456931200000",
+   "repo_ref": null,
+   "status": "completed",
+   "team": {
+    "gate_seq": 1,
+    "no_bus": true,
+    "primary": {
+     "cli": "beta",
+     "pick_seq": 0,
+     "selection": "random"
+    },
+    "reason": "team transport unavailable: no bus (WICKED_BUS_DB unset)",
+    "transport": "none"
+   },
+   "team_plan": {
+    "accepted": {
+     "auto": false,
+     "band": "70-100",
+     "by": "human",
+     "floor_override": null,
+     "high_risk": true,
+     "proposal_id": "p-fb2a48cff8499a36212611002f7bbb7c",
+     "rev": 3,
+     "steps": {
+      "steps": [
+       {
+        "added_by": "plan",
+        "catalog": "understand",
+        "id": "pa-scope",
+        "instructions": "Rate this run's risk before any work starts (READ ONLY: change nothing). The plan: produce -> critique. There is no repo: judge the content and its audience; client-facing work (a customer deliverable, an RFP answer, a demo shown outside) rates higher than internal work. End with exactly one line:\nRISK {\"score\":N,\"reasons\":[\"...\"]}\nN is 0-100: 0-19 internal and routine, 20-39 shared internally, 40-69 client-facing, 70-100 high stakes (pauses for approval). A missing or malformed RISK line scores 100."
+       },
+       {
+        "added_by": "floor",
+        "catalog": "test_plan",
+        "floor_reason": "band 70-100 requires test_plan",
+        "id": "test_plan"
+       },
+       {
+        "added_by": "floor",
+        "catalog": "design",
+        "floor_reason": "band 70-100 requires design",
+        "id": "design"
+       },
+       {
+        "added_by": "floor",
+        "catalog": "architecture",
+        "floor_reason": "band 70-100 requires architecture",
+        "id": "architecture"
+       },
+       {
+        "added_by": "plan",
+        "catalog": "produce",
+        "id": "draft",
+        "instructions": "Compose a product plan for project proj_179558456931200000 from these 2 requirement(s):\n- repo-a REQ-1: Sign in \u2014 A user signs in with email.\n- repo-a REQ-2: Sign out \u2014 A user signs out.\n\nGroup them into epics, each epic into features, each feature into user stories with acceptance\ncriteria. Every feature names the requirement refs it covers ({\"repoId\",\"key\"}, exactly as listed);\nevery listed requirement is covered at least once, and nothing is invented that no requirement asks for.\nDo not create issues or change any repository. End with ONE fenced ```json block, the plan:\n{\"epics\":[{\"title\":\"\",\"features\":[{\"title\":\"\",\"requirementRefs\":[{\"repoId\":\"\",\"key\":\"\"}],\n\"stories\":[{\"title\":\"\",\"acceptance\":[\"\"]}]}]}]}"
+       },
+       {
+        "added_by": "plan",
+        "catalog": "critique",
+        "gate": {
+         "human_confirm": {
+          "unconditional": true
+         }
+        },
+        "id": "review",
+        "instructions": "Review the drafted product plan for project proj_179558456931200000 against the 2 requirement(s) it was drafted from:\n- repo-a REQ-1: Sign in \u2014 A user signs in with email.\n- repo-a REQ-2: Sign out \u2014 A user signs out.\n\nEvery listed requirement is covered at least once; every feature's requirementRefs are refs from this list,\nexactly; nothing is invented that no requirement asks for; the stories are testable; the plan is ONE\nwell-formed fenced JSON block. A gap, an unknown ref or an invented item is a FAIL naming it."
+       }
+      ]
+     },
+     "touch_source": "none"
+    },
+    "accepted_high_risk": true,
+    "accepted_rev": 3,
+    "approved_high_risk": true,
+    "destructive": false,
+    "max_score": 100,
+    "requires_evaluator": true,
+    "rev": 3,
+    "roster": [
+     {
+      "alt_binaries": [],
+      "binary": "beta",
+      "category": "agentic-coder",
+      "confidence": "confirm-on-probe",
+      "display_name": "Beta",
+      "enabled_for_council": true,
+      "headless_invocation": "beta {PROMPT}",
+      "input_mode": "prompt-arg",
+      "key": "beta",
+      "seat_eligible_for_work": true,
+      "trust_flags": [],
+      "version_probe": []
+     },
+     {
+      "alt_binaries": [],
+      "binary": "alpha",
+      "category": "agentic-coder",
+      "confidence": "confirm-on-probe",
+      "display_name": "Alpha",
+      "enabled_for_council": true,
+      "headless_invocation": "alpha {PROMPT}",
+      "input_mode": "prompt-arg",
+      "key": "alpha",
+      "seat_eligible_for_work": true,
+      "trust_flags": [],
+      "version_probe": []
+     }
+    ]
+   },
+   "unit_ix": 6,
+   "workdir": null,
+   "workflow_id": "wf-run-compose-edited",
+   "run_identity": {
+    "kind": "user_plan",
+    "name": null,
+    "user_plan": true,
+    "system": false
+   }
+  },
+  "units": [
+   {
+    "allowed_skills": [],
+    "assigned_cli": "beta",
+    "assigned_invocation": "beta {PROMPT}",
+    "assurance": {
+     "attempt": 0,
+     "creator": "beta",
+     "evaluator": null,
+     "judge": null,
+     "mode": "full",
+     "ran": [],
+     "required": [
+      "distinct_evaluator",
+      "judge"
+     ],
+     "skipped": [
+      {
+       "detail": "unit 1 is a step its phase declares read-only: the judge reviews a changed tree, and this step's phase may not change one",
+       "instrument": "judge",
+       "reason": "not_applicable"
+      }
+     ],
+     "tree": null
+    },
+    "catalog": "understand",
+    "collection_scope": "wicked-agent/run-compose-edited/shared",
+    "conformance_ref": "4ba1e7ed8be31342330d9e8e0af92e874b35e0241b164fc2fb847eb4a331701f",
+    "council_task_ref": null,
+    "default_floor": true,
+    "denial_reason": null,
+    "denials_behind": [],
+    "description": "pa-scope \u2014 Compose the product plan for project proj_179558456931200000 (2 requirement(s)) ||| Rate this run's risk before any work starts (READ ONLY: change nothing). The plan: produce -> critique. There is no repo: judge the content and its audience; client-facing work (a customer deliverable, an RFP answer, a demo shown outside) rates higher than internal work. End with exactly one line:\nRISK {\"score\":N,\"reasons\":[\"...\"]}\nN is 0-100: 0-19 internal and routine, 20-39 shared internally, 40-69 client-facing, 70-100 high stakes (pauses for approval). A missing or malformed RISK line scores 100.",
+    "gate": "auto",
+    "id": "run-compose-edited:pa-scope",
+    "instructions": "Rate this run's risk before any work starts (READ ONLY: change nothing). The plan: produce -> critique. There is no repo: judge the content and its audience; client-facing work (a customer deliverable, an RFP answer, a demo shown outside) rates higher than internal work. End with exactly one line:\nRISK {\"score\":N,\"reasons\":[\"...\"]}\nN is 0-100: 0-19 internal and routine, 20-39 shared internally, 40-69 client-facing, 70-100 high stakes (pauses for approval). A missing or malformed RISK line scores 100.",
+    "last_attempt": 0,
+    "ord": 1,
+    "phase_ref": "wf-run-compose-edited:unit-1",
+    "phase_status": "approved",
+    "providers_unobserved": true,
+    "required_deliverables": [],
+    "role": "neutral",
+    "routing": {
+     "method": "teamed",
+     "winner": "beta"
+    },
+    "session_id": "run-compose-edited",
+    "skill_ref": null,
+    "stage": "recon",
+    "status": "done",
+    "structured_description": true,
+    "team": {
+     "ledger": {
+      "finalPass": "skipped",
+      "findings": [],
+      "monitors": [],
+      "rejected": {
+       "belowBar": 0,
+       "duplicate": 0,
+       "malformed": 0,
+       "unconfirmed": 0
+      },
+      "renderedToJudge": false,
+      "teamPause": false
+     },
+     "ledger_source": "no_bus",
+     "reason": "team transport unavailable: no bus (WICKED_BUS_DB unset)",
+     "transcript": {
+      "count": 0,
+      "events": [],
+      "from_event_id": 0,
+      "to_event_id": 0,
+      "truncated": false
+     },
+     "transport": "none"
+    },
+    "team_run": true,
+    "validator": null,
+    "worktree_guarded": true
+   },
+   {
+    "allowed_skills": [],
+    "assigned_cli": "alpha",
+    "assigned_invocation": "alpha {PROMPT}",
+    "assurance": {
+     "attempt": 0,
+     "creator": "alpha",
+     "evaluator": null,
+     "judge": null,
+     "mode": "full",
+     "ran": [],
+     "required": [
+      "distinct_evaluator",
+      "judge"
+     ],
+     "skipped": [
+      {
+       "detail": "unit 2 is a step its phase declares read-only: the judge reviews a changed tree, and this step's phase may not change one",
+       "instrument": "judge",
+       "reason": "not_applicable"
+      }
+     ],
+     "tree": null
+    },
+    "catalog": "test_plan",
+    "collection_scope": "wicked-agent/run-compose-edited/shared",
+    "conformance_ref": "948b6e941e6fe49a3cd91dd7e58c0c1d0f4eee4b30003aa5a80b7ca9f096cec3",
+    "council_task_ref": null,
+    "default_floor": true,
+    "denial_reason": null,
+    "denials_behind": [],
+    "description": "test_plan \u2014 Compose the product plan for project proj_179558456931200000 (2 requirement(s))",
+    "gate": "auto",
+    "id": "run-compose-edited:test_plan",
+    "last_attempt": 0,
+    "ord": 2,
+    "phase_ref": "wf-run-compose-edited:unit-2",
+    "phase_status": "approved",
+    "providers_unobserved": true,
+    "required_deliverables": [],
+    "role": "neutral",
+    "routing": {
+     "method": "evaluator_distinct",
+     "was": "beta",
+     "winner": "alpha"
+    },
+    "session_id": "run-compose-edited",
+    "skill_ref": null,
+    "stage": "test",
+    "status": "done",
+    "structured_description": true,
+    "team": {
+     "ledger": {
+      "finalPass": "skipped",
+      "findings": [],
+      "monitors": [],
+      "rejected": {
+       "belowBar": 0,
+       "duplicate": 0,
+       "malformed": 0,
+       "unconfirmed": 0
+      },
+      "renderedToJudge": false,
+      "teamPause": false
+     },
+     "ledger_source": "no_bus",
+     "reason": "team transport unavailable: no bus (WICKED_BUS_DB unset)",
+     "transcript": {
+      "count": 0,
+      "events": [],
+      "from_event_id": 0,
+      "to_event_id": 0,
+      "truncated": false
+     },
+     "transport": "none"
+    },
+    "team_run": true,
+    "validator": null,
+    "worktree_guarded": true
+   },
+   {
+    "allowed_skills": [],
+    "assigned_cli": "beta",
+    "assigned_invocation": "beta {PROMPT}",
+    "assurance": {
+     "attempt": 0,
+     "creator": "beta",
+     "evaluator": null,
+     "judge": null,
+     "mode": "full",
+     "ran": [],
+     "required": [
+      "distinct_evaluator",
+      "judge"
+     ],
+     "skipped": [
+      {
+       "detail": "unit 3 is a step its phase declares read-only: the judge reviews a changed tree, and this step's phase may not change one",
+       "instrument": "judge",
+       "reason": "not_applicable"
+      }
+     ],
+     "tree": null
+    },
+    "catalog": "design",
+    "collection_scope": "wicked-agent/run-compose-edited/shared",
+    "conformance_ref": "9d3886eb9b6529bcdf207f95223b72a84ba683a2461b0208ebb23b735d694bd9",
+    "council_task_ref": null,
+    "default_floor": true,
+    "denial_reason": null,
+    "denials_behind": [],
+    "description": "design \u2014 Compose the product plan for project proj_179558456931200000 (2 requirement(s))",
+    "gate": "auto",
+    "id": "run-compose-edited:design",
+    "last_attempt": 0,
+    "ord": 3,
+    "phase_ref": "wf-run-compose-edited:unit-3",
+    "phase_status": "approved",
+    "providers_unobserved": true,
+    "required_deliverables": [],
+    "role": "neutral",
+    "routing": {
+     "method": "teamed",
+     "winner": "beta"
+    },
+    "session_id": "run-compose-edited",
+    "skill_ref": null,
+    "stage": "recon",
+    "status": "done",
+    "structured_description": true,
+    "team": {
+     "ledger": {
+      "finalPass": "skipped",
+      "findings": [],
+      "monitors": [],
+      "rejected": {
+       "belowBar": 0,
+       "duplicate": 0,
+       "malformed": 0,
+       "unconfirmed": 0
+      },
+      "renderedToJudge": false,
+      "teamPause": false
+     },
+     "ledger_source": "no_bus",
+     "reason": "team transport unavailable: no bus (WICKED_BUS_DB unset)",
+     "transcript": {
+      "count": 0,
+      "events": [],
+      "from_event_id": 0,
+      "to_event_id": 0,
+      "truncated": false
+     },
+     "transport": "none"
+    },
+    "team_run": true,
+    "validator": null,
+    "worktree_guarded": true
+   },
+   {
+    "allowed_skills": [],
+    "assigned_cli": "beta",
+    "assigned_invocation": "beta {PROMPT}",
+    "assurance": {
+     "attempt": 0,
+     "creator": "beta",
+     "evaluator": null,
+     "judge": null,
+     "mode": "full",
+     "ran": [],
+     "required": [
+      "distinct_evaluator",
+      "judge"
+     ],
+     "skipped": [
+      {
+       "detail": "unit 4 is a step its phase declares read-only: the judge reviews a changed tree, and this step's phase may not change one",
+       "instrument": "judge",
+       "reason": "not_applicable"
+      }
+     ],
+     "tree": null
+    },
+    "catalog": "architecture",
+    "collection_scope": "wicked-agent/run-compose-edited/shared",
+    "conformance_ref": "92bf038b05c48bb1b3c955c6752876583247e0695c8253770d6228b08be191db",
+    "council_task_ref": null,
+    "default_floor": true,
+    "denial_reason": null,
+    "denials_behind": [],
+    "description": "architecture \u2014 Compose the product plan for project proj_179558456931200000 (2 requirement(s))",
+    "gate": "auto",
+    "id": "run-compose-edited:architecture",
+    "last_attempt": 0,
+    "ord": 4,
+    "phase_ref": "wf-run-compose-edited:unit-4",
+    "phase_status": "approved",
+    "providers_unobserved": true,
+    "required_deliverables": [],
+    "role": "neutral",
+    "routing": {
+     "method": "teamed",
+     "winner": "beta"
+    },
+    "session_id": "run-compose-edited",
+    "skill_ref": null,
+    "stage": "recon",
+    "status": "done",
+    "structured_description": true,
+    "team": {
+     "ledger": {
+      "finalPass": "skipped",
+      "findings": [],
+      "monitors": [],
+      "rejected": {
+       "belowBar": 0,
+       "duplicate": 0,
+       "malformed": 0,
+       "unconfirmed": 0
+      },
+      "renderedToJudge": false,
+      "teamPause": false
+     },
+     "ledger_source": "no_bus",
+     "reason": "team transport unavailable: no bus (WICKED_BUS_DB unset)",
+     "transcript": {
+      "count": 0,
+      "events": [],
+      "from_event_id": 0,
+      "to_event_id": 0,
+      "truncated": false
+     },
+     "transport": "none"
+    },
+    "team_run": true,
+    "validator": null,
+    "worktree_guarded": true
+   },
+   {
+    "allowed_skills": [],
+    "assigned_cli": "beta",
+    "assigned_invocation": "beta {PROMPT}",
+    "assurance": {
+     "attempt": 0,
+     "creator": "beta",
+     "evaluator": null,
+     "judge": null,
+     "mode": "full",
+     "ran": [],
+     "required": [
+      "distinct_evaluator",
+      "judge"
+     ],
+     "skipped": [
+      {
+       "detail": "unit 5 ran without a worktree: no change for a judge to review",
+       "instrument": "judge",
+       "reason": "not_applicable"
+      }
+     ],
+     "tree": null
+    },
+    "authored_binaries": [
+     "beta"
+    ],
+    "authored_by": [
+     "beta"
+    ],
+    "catalog": "produce",
+    "collection_scope": "wicked-agent/run-compose-edited/shared",
+    "conformance_ref": "3d643e8d7ba69cbb0e0433f97fb7346d7d29f63c9c87137b0f31aafd307dfba0",
+    "council_task_ref": null,
+    "default_floor": true,
+    "denial_reason": null,
+    "denials_behind": [],
+    "description": "draft \u2014 Compose the product plan for project proj_179558456931200000 (2 requirement(s)) ||| Compose a product plan for project proj_179558456931200000 from these 2 requirement(s):\n- repo-a REQ-1: Sign in \u2014 A user signs in with email.\n- repo-a REQ-2: Sign out \u2014 A user signs out.\n\nGroup them into epics, each epic into features, each feature into user stories with acceptance\ncriteria. Every feature names the requirement refs it covers ({\"repoId\",\"key\"}, exactly as listed);\nevery listed requirement is covered at least once, and nothing is invented that no requirement asks for.\nDo not create issues or change any repository. End with ONE fenced ```json block, the plan:\n{\"epics\":[{\"title\":\"\",\"features\":[{\"title\":\"\",\"requirementRefs\":[{\"repoId\":\"\",\"key\":\"\"}],\n\"stories\":[{\"title\":\"\",\"acceptance\":[\"\"]}]}]}]}",
+    "gate": "auto",
+    "id": "run-compose-edited:draft",
+    "instructions": "Compose a product plan for project proj_179558456931200000 from these 2 requirement(s):\n- repo-a REQ-1: Sign in \u2014 A user signs in with email.\n- repo-a REQ-2: Sign out \u2014 A user signs out.\n\nGroup them into epics, each epic into features, each feature into user stories with acceptance\ncriteria. Every feature names the requirement refs it covers ({\"repoId\",\"key\"}, exactly as listed);\nevery listed requirement is covered at least once, and nothing is invented that no requirement asks for.\nDo not create issues or change any repository. End with ONE fenced ```json block, the plan:\n{\"epics\":[{\"title\":\"\",\"features\":[{\"title\":\"\",\"requirementRefs\":[{\"repoId\":\"\",\"key\":\"\"}],\n\"stories\":[{\"title\":\"\",\"acceptance\":[\"\"]}]}]}]}",
+    "last_attempt": 0,
+    "ord": 5,
+    "phase_ref": "wf-run-compose-edited:unit-5",
+    "phase_status": "approved",
+    "providers_unobserved": true,
+    "required_deliverables": [],
+    "role": "creator",
+    "routing": {
+     "method": "teamed",
+     "winner": "beta"
+    },
+    "session_id": "run-compose-edited",
+    "skill_ref": null,
+    "stage": "build",
+    "status": "done",
+    "structured_description": true,
+    "team": {
+     "ledger": {
+      "finalPass": "skipped",
+      "findings": [],
+      "monitors": [],
+      "rejected": {
+       "belowBar": 0,
+       "duplicate": 0,
+       "malformed": 0,
+       "unconfirmed": 0
+      },
+      "renderedToJudge": false,
+      "teamPause": false
+     },
+     "ledger_source": "no_bus",
+     "reason": "team transport unavailable: no bus (WICKED_BUS_DB unset)",
+     "transcript": {
+      "count": 0,
+      "events": [],
+      "from_event_id": 0,
+      "to_event_id": 0,
+      "truncated": false
+     },
+     "transport": "none"
+    },
+    "team_run": true,
+    "validator": null
+   },
+   {
+    "allowed_skills": [],
+    "assigned_cli": "alpha",
+    "assigned_invocation": "alpha {PROMPT}",
+    "assurance": {
+     "attempt": 0,
+     "creator": "beta",
+     "evaluator": "alpha",
+     "judge": null,
+     "mode": "full",
+     "ran": [
+      "distinct_evaluator"
+     ],
+     "required": [
+      "distinct_evaluator",
+      "judge"
+     ],
+     "skipped": [
+      {
+       "detail": "unit 6 is a review its phase declares read-only: its evaluator's own verdict decides this gate (a judge reviews a changed tree, or a report under a cited-findings rubric)",
+       "instrument": "judge",
+       "reason": "not_applicable"
+      }
+     ],
+     "tree": null
+    },
+    "catalog": "critique",
+    "collection_scope": "wicked-agent/run-compose-edited/shared",
+    "conformance_ref": "acb4e1e6b4f71716392656e0a626184c05c956ad9d22d6fb44a054d2b344ecb9",
+    "council_task_ref": null,
+    "default_floor": true,
+    "denial_reason": null,
+    "denials_behind": [],
+    "depends_on": [
+     "draft"
+    ],
+    "description": "review \u2014 Compose the product plan for project proj_179558456931200000 (2 requirement(s)) ||| Review the drafted product plan for project proj_179558456931200000 against the 2 requirement(s) it was drafted from:\n- repo-a REQ-1: Sign in \u2014 A user signs in with email.\n- repo-a REQ-2: Sign out \u2014 A user signs out.\n\nEvery listed requirement is covered at least once; every feature's requirementRefs are refs from this list,\nexactly; nothing is invented that no requirement asks for; the stories are testable; the plan is ONE\nwell-formed fenced JSON block. A gap, an unknown ref or an invented item is a FAIL naming it.",
+    "gate": {
+     "human_confirm": {
+      "unconditional": true
+     }
+    },
+    "id": "run-compose-edited:review",
+    "instructions": "Review the drafted product plan for project proj_179558456931200000 against the 2 requirement(s) it was drafted from:\n- repo-a REQ-1: Sign in \u2014 A user signs in with email.\n- repo-a REQ-2: Sign out \u2014 A user signs out.\n\nEvery listed requirement is covered at least once; every feature's requirementRefs are refs from this list,\nexactly; nothing is invented that no requirement asks for; the stories are testable; the plan is ONE\nwell-formed fenced JSON block. A gap, an unknown ref or an invented item is a FAIL naming it.",
+    "last_attempt": 0,
+    "ord": 6,
+    "phase_ref": "wf-run-compose-edited:unit-6",
+    "phase_status": "approved",
+    "providers_unobserved": true,
+    "required_deliverables": [],
+    "role": "evaluator",
+    "routing": {
+     "method": "evaluator_distinct",
+     "was": "beta",
+     "winner": "alpha"
+    },
+    "rule_instructions": "Compose the product plan for project proj_179558456931200000 (2 requirement(s))",
+    "rule_steps": [
+     {
+      "kind": "understand",
+      "tokens": [
+       "unit-1",
+       "pa-scope",
+       "understand"
+      ]
+     },
+     {
+      "kind": "test_plan",
+      "tokens": [
+       "unit-2",
+       "test_plan"
+      ]
+     },
+     {
+      "kind": "design",
+      "tokens": [
+       "unit-3",
+       "design"
+      ]
+     },
+     {
+      "kind": "architecture",
+      "tokens": [
+       "unit-4",
+       "architecture"
+      ]
+     },
+     {
+      "kind": "produce",
+      "tokens": [
+       "unit-5",
+       "draft",
+       "produce"
+      ]
+     },
+     {
+      "kind": "critique",
+      "tokens": [
+       "unit-6",
+       "review",
+       "critique"
+      ]
+     }
+    ],
+    "session_id": "run-compose-edited",
+    "skill_ref": null,
+    "stage": "review",
+    "status": "done",
+    "structured_description": true,
+    "team": {
+     "ledger": {
+      "finalPass": "skipped",
+      "findings": [],
+      "monitors": [],
+      "rejected": {
+       "belowBar": 0,
+       "duplicate": 0,
+       "malformed": 0,
+       "unconfirmed": 0
+      },
+      "renderedToJudge": false,
+      "teamPause": false
+     },
+     "ledger_source": "no_bus",
+     "reason": "team transport unavailable: no bus (WICKED_BUS_DB unset)",
+     "transcript": {
+      "count": 0,
+      "events": [],
+      "from_event_id": 0,
+      "to_event_id": 0,
+      "truncated": false
+     },
+     "transport": "none"
+    },
+    "team_run": true,
+    "validator": null,
+    "worktree_guarded": true
+   }
+  ]
+ }
+}

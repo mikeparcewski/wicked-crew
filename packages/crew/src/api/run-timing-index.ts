@@ -19,6 +19,7 @@ import type { AuditLog } from './audit.js';
 import type { Actor, AuditEntry, LaunchEnvelope, LaunchShape, RecordedEvent, SessionView } from '../core/types.js';
 import type { RunAddress } from '../knowledge/trackers/addresses.js';
 import { MCP_SERVER_NAME_RE } from '../mcp/classify.js';
+import { type ComposeFacts, readComposeFacts } from './compose-facts.js';
 import { factsFromEvents } from '../core/run-log-facts.js';
 
 /** The run statuses that are terminal (`SessionStatus`): the only runs `ended_at` may date. */
@@ -89,7 +90,7 @@ export class RunTimingIndex {
   private readonly runToLandingFailed = new Map<string, { reason: string; at: number }>();
   /** (DES-CATALOG-002 §4.4) The launch's shape, its envelope and the chat proposal whose Go launched it (`detail.shape`,
    *  `detail.envelope`, `detail.fromProposal`): usage by shape, the reshape's relaunch, and the plan-gate binding. */
-  private readonly runToLaunchFacts = new Map<string, { shape?: LaunchShape; envelope?: LaunchEnvelope; fromProposal?: string }>();
+  private readonly runToLaunchFacts = new Map<string, { shape?: LaunchShape; envelope?: LaunchEnvelope; fromProposal?: string; compose?: ComposeFacts }>();
   /** crew#1352: the issues a run addresses, as its launch recorded them (`detail.trackerAddresses`), with its scope. */
   private readonly runToAddresses = new Map<string, LaunchedAddresses>();
   /** crew#1442: the source pick a run was launched with (`detail.sourcePick`). */
@@ -242,7 +243,9 @@ export class RunTimingIndex {
     const shape = detail?.['shape'];
     const envelope = detail?.['envelope'];
     const from = detail?.['fromProposal'];
-    const facts: { shape?: LaunchShape; envelope?: LaunchEnvelope; fromProposal?: string } = {};
+    const facts: { shape?: LaunchShape; envelope?: LaunchEnvelope; fromProposal?: string; compose?: ComposeFacts } = {};
+    const compose = readComposeFacts(detail?.['compose']);
+    if (compose !== null) facts.compose = compose;
     if (shape !== null && typeof shape === 'object' && typeof (shape as { card?: unknown }).card === 'string') facts.shape = shape as LaunchShape;
     if (envelope !== null && typeof envelope === 'object') facts.envelope = envelope as LaunchEnvelope;
     if (typeof from === 'string' && from !== '') facts.fromProposal = from;
@@ -257,6 +260,11 @@ export class RunTimingIndex {
   /** What a run was launched with (a reshape relaunches from it), or `undefined` for a run from before it was recorded. */
   envelopeOf(runId: string): LaunchEnvelope | undefined {
     return this.runToLaunchFacts.get(runId)?.envelope;
+  }
+
+  /** (crew#372) What a compose run launched with, or `undefined` (not a compose, or launched before it was recorded). */
+  composeOf(runId: string): ComposeFacts | undefined {
+    return this.runToLaunchFacts.get(runId)?.compose;
   }
 
   /** The chat proposal whose Go launched a run, or `undefined`. */
