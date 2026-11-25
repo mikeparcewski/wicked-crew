@@ -281,6 +281,23 @@ export function rulingAnswerOf(raw: string): RulingAnswer {
 /** The preset a domain model run launches (garden's `domain-run` step, then core's graph build). */
 export const DOMAIN_EXTRACTION_WORKFLOW = 'domain-extraction';
 
+/** The most words a scope's intent takes (`LaunchRunBody.domainScope.intent`). */
+export const DOMAIN_INTENT_MAX = 2000;
+
+/**
+ * (J6 K1, coord R2 F1-F3) The scope of a domain model launch made from a person's words alone (a chat job's Start, the
+ * CLI's `--problem`, MCP's `problem`): the words are what the model covers, with no card shown and no hash, so the run
+ * derives the scope from them. Or why the words cannot be one, said in words that end with `how` to fix it.
+ */
+export function domainScopeOfWords(words: string, how: string): { scope: { intent: string } } | { refusal: string } {
+  const intent = words.trim();
+  if (intent === '') return { refusal: `a domain model run needs to know what it should cover (a program, a job or a feature): ${how}` };
+  if (intent.length > DOMAIN_INTENT_MAX) {
+    return { refusal: `say what the model should cover in at most ${DOMAIN_INTENT_MAX.toLocaleString('en-US')} characters (these words have ${intent.length.toLocaleString('en-US')}): ${how}` };
+  }
+  return { scope: { intent } };
+}
+
 /** A launch's scope as core's `scopeJson` carries it to the run's domain-run step (garden `scope.py` reads it). */
 export function domainScopeJsonOf(s: { intent: string; phrases?: string[] | undefined; scopeHash?: string | undefined; description?: string | undefined }): string {
   return JSON.stringify({

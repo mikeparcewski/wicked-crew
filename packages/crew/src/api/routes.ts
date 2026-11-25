@@ -22,7 +22,7 @@ import {
   REQUIREMENTS_NOT_GENERATED,
   forgetRequirementsReads,
 } from './requirements.js';
-import { DOMAIN_EXTRACTION_WORKFLOW, domainScopeJsonOf, rulingAnswerOf, rulingRequestOf } from './domain-model.js';
+import { DOMAIN_EXTRACTION_WORKFLOW, domainScopeJsonOf, domainScopeOfWords, rulingAnswerOf, rulingRequestOf } from './domain-model.js';
 import { scopeCardFor } from './domain-scope.js';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -4657,11 +4657,19 @@ export function registerRoutes(
       }
       if (p.launch === 'run' || p.launch === undefined) {
         if (resolved.workflow === null) throw new Error(`${p.what.label} has no workflow to run`);
+        // (J6 K1, coord R2 F1) A domain model job started from a chat maps what the person's words say it covers.
+        let domainScope: { intent: string } | undefined;
+        if (resolved.workflow === DOMAIN_EXTRACTION_WORKFLOW) {
+          const s = domainScopeOfWords(words, 'say it in this chat, then press Start again');
+          if ('refusal' in s) throw new Error(s.refusal);
+          domainScope = s.scope;
+        }
         const lines = inputLines(p);
         const out = await launchRun(
           {
             problem: [words === '' ? p.what.label : words, ...(lines.length > 0 ? [`Inputs:\n${lines.map((l) => `- ${l}`).join('\n')}`] : [])].join('\n\n'),
             workflow: resolved.workflow,
+            ...(domainScope !== undefined ? { domainScope } : {}),
             ...(p.repoRefs?.[0] !== undefined ? { repoRef: p.repoRefs[0] } : {}),
             ...(projectId !== null && projectId !== DEFAULT_PROJECT_ID ? { projectId } : {}),
             ...common,

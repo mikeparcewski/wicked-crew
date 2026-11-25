@@ -16,6 +16,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from '../zod.js';
 
 import { missingBearerAdvice, withBearerHeader } from './bearer.js';
+import { DOMAIN_EXTRACTION_WORKFLOW, domainScopeOfWords } from '../api/domain-model.js';
 
 // ─── Crew daemon client ───────────────────────────────────────────────────────
 
@@ -83,6 +84,23 @@ function ok(data: unknown): { content: [{ type: 'text'; text: string }] } {
   return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
 }
 
+/**
+ * `launch_run`'s `POST /runs` body. (J6 K1, coord R2 F3) A domain model run maps what `problem` says it should cover,
+ * or is refused here, in words, before anything is sent.
+ */
+export function launchRunToolBody(a: { problem: string; workflow?: string | undefined; repo?: string | undefined; project_id?: string | undefined }): { body: Record<string, unknown> } | { refusal: string } {
+  const body: Record<string, unknown> = { problem: a.problem };
+  if (a.workflow) body['workflow'] = a.workflow;
+  if (a.workflow === DOMAIN_EXTRACTION_WORKFLOW) {
+    const s = domainScopeOfWords(a.problem, 'say it in `problem`');
+    if ('refusal' in s) return { refusal: s.refusal };
+    body['domainScope'] = s.scope;
+  }
+  if (a.repo) body['repoRef'] = a.repo;
+  if (a.project_id) body['projectId'] = a.project_id;
+  return { body };
+}
+
 // ─── MCP server ──────────────────────────────────────────────────────────────
 
 export async function runMcpServer(port: number): Promise<void> {
@@ -108,7 +126,7 @@ export async function runMcpServer(port: number): Promise<void> {
     'Launch a new governed workflow run on the wicked-crew daemon. ' +
     'Returns the run ID which can be used with the other tools.',
     {
-      problem: z.string().min(1).describe('The task description / problem statement for the run'),
+      problem: z.string().min(1).describe('The task description / problem statement for the run. For "domain-extraction": what the domain model should cover (a program, a job or a feature), at most 2000 characters.'),
       workflow: z.string().optional().describe(
         'Workflow id (e.g. "feature", "bug", "domain-extraction"). ' +
         'Use list_workflows to see available ids.',
@@ -121,12 +139,10 @@ export async function runMcpServer(port: number): Promise<void> {
         'File the run into a project. The project must exist and be active.',
       ),
     },
-    async ({ problem, workflow, repo, project_id }) => {
-      const body: Record<string, string> = { problem };
-      if (workflow) body['workflow'] = workflow;
-      if (repo) body['repoRef'] = repo;
-      if (project_id) body['projectId'] = project_id;
-      return ok(await client.post('/runs', body));
+    async (args) => {
+      const built = launchRunToolBody(args);
+      if ('refusal' in built) return { ...ok({ error: built.refusal }), isError: true };
+      return ok(await client.post('/runs', built.body));
     },
   );
 

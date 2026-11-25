@@ -54,6 +54,7 @@ import {
 } from './service.js';
 import { homedir } from 'node:os';
 import { configureInstallerToolPath } from '../setup/tool-path.js';
+import { DOMAIN_EXTRACTION_WORKFLOW, domainScopeOfWords } from '../api/domain-model.js';
 
 const [, , command, ...argv] = process.argv;
 
@@ -657,6 +658,14 @@ async function main(): Promise<void> {
       console.error(`--repo requires a value (got: ${repoRef ?? '(missing)'})`);
       process.exit(1);
     }
+    // (J6 K1, coord R2 F2) A domain model run maps what `--problem` says it should cover; refused before anything starts.
+    const domainScope = workflow === DOMAIN_EXTRACTION_WORKFLOW
+      ? domainScopeOfWords(flag(argv, '--problem') ?? '', 'wicked-crew start --workflow domain-extraction --problem "<what the model should cover>"')
+      : null;
+    if (domainScope !== null && 'refusal' in domainScope) {
+      console.error(domainScope.refusal);
+      process.exit(1);
+    }
     const { adapter, port } = await bootstrap(opts);
     // crew#632: send through the HTTP route so `run.launched` is stamped with channel: 'cli'.
     const launchBody: Record<string, unknown> = {
@@ -669,6 +678,7 @@ async function main(): Promise<void> {
     };
     if (humanConfirm !== undefined) launchBody['humanConfirm'] = humanConfirm;
     if (workflow !== undefined) launchBody['workflow'] = workflow;
+    if (domainScope !== null) launchBody['domainScope'] = domainScope.scope;
     if (repoRef !== undefined) launchBody['repoRef'] = repoRef;
     // wicked-core#850: the EXPLICIT reduced-assurance opt-in (the creator's seat may evaluate its own
     // work, disclosed on every receipt). Only the flag sends it; nothing defaults it on.
