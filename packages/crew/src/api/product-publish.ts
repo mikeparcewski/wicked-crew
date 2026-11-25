@@ -506,6 +506,14 @@ export const READ_BACK_FRESH_MS = 60_000;
 export function registerProductPublishRoutes(app: FastifyInstance, deps: ProductPublishDeps): void {
   /** Publications being sent or resolved now, taken before the first await (DES Send step 1). */
   const slots = new Set<string>();
+  /**
+   * (crew#1911) The last read-back of each created issue, by publication and item key, for the content it was read
+   * against. A GET reads GitHub again only where this has no fresh match, and never while the publication's slot is
+   * held: then the sender, reading each issue back right after creating it, is the only reader, so a poll never queues
+   * reads beside a create on the source's scheduler (knowledge/gate/scheduler.ts refuses a full queue `busy`).
+   */
+  const readBacks = new Map<string, { number: number; expect: string; readBack: 'ok' | 'differs' | 'unreadable'; url: string | null; at: number }>();
+  const clock = (): number => (deps.now ?? Date.now)();
   const dir = (): string => deps.journalDir ?? mcpStateDir();
   const nowIso = (): string => new Date((deps.now ?? Date.now)()).toISOString();
   const humanOnly = (actor: Actor) => ({
@@ -524,8 +532,29 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
     }
   }
 
-  /** A publication's state now: its journal, each created issue read back. */
-  async function stateOf(f: Folded, projectId: string, sel: RepoSelector, es: PmEntry[] | null): Promise<PublicationState> {
+  /** One created issue read back against what was sent, or the last read-back of it when that is trusted for `reads`. */
+  async function readBackOf(publication: string, reader: { e: PmEntry; t: TrackerSetEntry } | null, it: PublishItem, number: number, parent: number | null, reads: 'fresh' | 'held'): Promise<{ readBack: 'ok' | 'differs' | 'unreadable'; url: string | null }> {
+    const expectBody = normal(bodyWith(it.body, parent));
+    const expect = sha256Hex(`${it.title}\u0000${expectBody}`);
+    const key = `${publication}\u0000${it.key}`;
+    const memo = readBacks.get(key);
+    const known = memo !== undefined && memo.number === number && memo.expect === expect ? memo : undefined;
+    if (known !== undefined && (reads === 'held' || (known.readBack === 'ok' && clock() - known.at < READ_BACK_FRESH_MS))) {
+      return { readBack: known.readBack, url: known.url };
+    }
+    const read = reader === null ? ({ ok: false } as Read) : await readIssue(deps.pm!, reader.e, reader.t, number);
+    const readBack = !read.ok ? 'unreadable' : read.title === it.title && read.body === expectBody ? 'ok' : 'differs';
+    const url = read.ok ? read.url : null;
+    readBacks.set(key, { number, expect, readBack, url, at: clock() });
+    return { readBack, url };
+  }
+
+  /**
+   * A publication's state now: its journal, each created issue read back. `reads`: `fresh` reads every issue without a
+   * fresh matching read-back (the sender, the resolver, and a GET when no one holds the slot); `held` reads only an
+   * issue never read at all (a GET while the slot is held).
+   */
+  async function stateOf(f: Folded, projectId: string, sel: RepoSelector, es: PmEntry[] | null, reads: 'fresh' | 'held' = 'fresh'): Promise<PublicationState> {
     const approved = f.last!;
     const card = f.first!.card;
     let reader: { e: PmEntry; t: TrackerSetEntry } | null = null;
@@ -542,13 +571,10 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
       let readBack: PublicationItemState['readBack'] = null;
       let url = s?.url ?? null;
       if (state === 'created' && s!.number !== null) {
-        const read = reader === null ? ({ ok: false } as Read) : await readIssue(deps.pm!, reader.e, reader.t, s!.number);
-        if (!read.ok) readBack = 'unreadable';
-        else {
-          const parent = it.parentKey === null ? null : (numbers.get(it.parentKey) ?? null);
-          readBack = read.title === it.title && read.body === normal(bodyWith(it.body, parent)) ? 'ok' : 'differs';
-          url = read.url;
-        }
+        const parent = it.parentKey === null ? null : (numbers.get(it.parentKey) ?? null);
+        const got = await readBackOf(f.first!.publication, reader, it, s!.number, parent, reads);
+        readBack = got.readBack;
+        if (got.url !== null) url = got.url;
       }
       items.push({ key: it.key, kind: it.kind, title: it.title, state, number: s?.number ?? null, url, readBack, ...(s?.why != null ? { why: s.why } : {}) });
     }
@@ -687,6 +713,8 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
         break;
       }
       if (outcome['kind'] !== 'created') break;
+      // (crew#1911) Read it back now, inside the slot and in turn with the creates, so no GET has to.
+      await readBackOf(b.publication, { e: b.e, t: b.t }, it, outcome['number'] as number, parent, 'fresh');
     }
     let f: Folded;
     try {
@@ -811,7 +839,7 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
           throw err;
         }
         if (f.first === null || f.first.projectId !== projectId || f.first.runId !== runId) continue;
-        publications.push(await stateOf(f, projectId, { source: null, repo: f.first.card.repo }, list));
+        publications.push(await stateOf(f, projectId, { source: null, repo: f.first.card.repo }, list, slots.has(publication) ? 'held' : 'fresh'));
       }
       const answer: ProductPublicationsResponse = {
         runId,
