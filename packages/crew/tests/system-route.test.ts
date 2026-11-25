@@ -343,3 +343,48 @@ describe('seat images on GET /system', () => {
   }, 60_000);
 
 });
+
+// studio#1416 (crew#1124 on the ranked /needs page): a person snoozes an attention item. crew names the item's
+// occurrence (`snooze.key`: its id and crew's own `waitedSince`, so a gate asked again is a new key) and its rank;
+// while the snooze holds (end ahead, rank no higher than the one stored) the item leaves attention[] and the level, and
+// waits in `snoozed[]` with its end.
+describe('GET /api/v1/system: snoozed items (studio#1416)', () => {
+  type Snoozable = SystemSnapshot['attention'][number] & { snooze?: { key: string; rank: number } };
+  type Held = Snoozable & { until: string };
+  const gateItem = (b: SystemSnapshot): Snoozable | undefined => (b.attention as Snoozable[]).find((a) => a.id === 'run:run-gate');
+  const put = (key: string, body: Record<string, unknown>) =>
+    app.inject({ method: 'PUT', url: `/api/v1/desk/snoozes/${encodeURIComponent(key)}`, payload: body });
+
+  it('an item a person may snooze carries its key and rank; a component (infra) item carries none', async () => {
+    const { body } = await snapshot();
+    const item = gateItem(body)!;
+    expect(item.waitedSince).toEqual(expect.any(String));
+    expect(item.snooze).toEqual({ key: `attention:run:run-gate@${item.waitedSince}`, rank: expect.any(Number) });
+    for (const a of body.attention as Snoozable[]) if (a.source !== 'run') expect(a.snooze).toBeUndefined();
+  });
+
+  it('a snooze in force takes the item out of attention[] into snoozed[]; Wake brings it back', async () => {
+    const before = (await snapshot()).body;
+    const item = gateItem(before)!;
+    const until = new Date(Date.now() + 3_600_000).toISOString();
+    expect((await put(item.snooze!.key, { until, severity: item.snooze!.rank })).statusCode).toBe(200);
+    const held = (await snapshot()).body as SystemSnapshot & { snoozed?: Held[] };
+    expect(gateItem(held)).toBeUndefined();
+    expect(held.attention.length).toBe(before.attention.length - 1);
+    expect(held.snoozed).toEqual([expect.objectContaining({ id: 'run:run-gate', until, snooze: item.snooze })]);
+    const woke = await app.inject({ method: 'DELETE', url: `/api/v1/desk/snoozes/${encodeURIComponent(item.snooze!.key)}` });
+    expect(woke.statusCode).toBe(200);
+    const back = (await snapshot()).body as SystemSnapshot & { snoozed?: Held[] };
+    expect(gateItem(back)).toBeDefined();
+    expect(back.snoozed).toEqual([]);
+  });
+
+  it('an item worse than when it was snoozed stays in attention[]', async () => {
+    const item = gateItem((await snapshot()).body)!;
+    expect((await put(item.snooze!.key, { until: new Date(Date.now() + 3_600_000).toISOString(), severity: item.snooze!.rank - 1 })).statusCode).toBe(200);
+    const body = (await snapshot()).body as SystemSnapshot & { snoozed?: Held[] };
+    expect(gateItem(body)).toBeDefined();
+    expect(body.snoozed).toEqual([]);
+    await app.inject({ method: 'DELETE', url: `/api/v1/desk/snoozes/${encodeURIComponent(item.snooze!.key)}` });
+  });
+});
