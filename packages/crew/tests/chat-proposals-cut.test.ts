@@ -429,6 +429,7 @@ describe('cut proposals: round-2 folds (crew#1814 R2 C1, C2)', () => {
       [{ method: 'POST', path: '', status: 400, answer: { error: 'ffmpeg_failed', detail: 'frame 1\nConversion failed!' } }, "The new version couldn't be made: Conversion failed. Nothing changed. Go again to try once more."],
       [{ method: 'POST', path: '', status: 400, answer: { error: 'ffmpeg_missing' } }, "The new version couldn't be made: ffmpeg isn't installed. Install ffmpeg. Nothing changed. Go again to try once more."],
       [{ method: 'POST', path: '', status: 500, answer: { error: 'internal' } }, "The new version couldn't be made (the video tool answered 500: internal). Nothing changed. Go again to try once more."],
+      [{ method: 'POST', path: '', status: 500, answer: { error: '' } }, "The new version couldn't be made (the video tool answered 500). Nothing changed. Go again to try once more."],
       ['old', CUT_OLD_TOOL],
       ['broken', "The video tool isn't running here: the bridge on port 4100 is 0.16.2. Go again to try once more."],
     ];
@@ -522,6 +523,10 @@ describe('cut card words (coord R2 F6 on studio#1409)', () => {
     const r = rig({ bridge: async () => { throw new Error('the bridge on port 4100 is 0.16.2.'); } });
     const p = (await propose(r, 'c1', turn(r, 'c1'), block()))!;
     expect(p.blocked).toBe("The video tool isn't running here: the bridge on port 4100 is 0.16.2.");
+  });
+
+  it.each([['stopped. …', 'stopped'], [':', ''], ['. .', ''], ['Connection refused.\n  The bridge exited', 'Connection refused. The bridge exited']])('the error %j is said as %j', (msg, said) => {
+    expect(toolNotRunning(new Error(msg))).toBe(said === '' ? "The video tool isn't running here." : `The video tool isn't running here: ${said}.`);
   });
 
   it.each(['', '   ', '...', 'stopped…'])('a video tool that will not start with the error %j still reads as one sentence', async (msg) => {

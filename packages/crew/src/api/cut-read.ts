@@ -44,9 +44,11 @@ export const CUT_OLD_TOOL = "This computer's video tool is older than this studi
 /** `s` without its closing full stop (or !, ? or …), so a sentence that quotes it ends once. */
 export const unended = (s: string): string => s.trim().replace(/[.!?…]+$/u, '').trimEnd();
 
-/** The sentence for a video tool that didn't answer, from its error: one full stop, and no ": ." when it said nothing. */
+/** The sentence for a video tool that didn't answer, from its error: on one line, one full stop, and no ": ." when it
+ *  said nothing (or only punctuation). */
 export function toolNotRunning(err: unknown): string {
-  const why = unended(err instanceof Error ? err.message : String(err));
+  const raw = (err instanceof Error ? err.message : String(err)).replace(/\s+/gu, ' ').replace(/[\s.!?…:;,]+$/u, '').trim();
+  const why = /[\p{L}\p{N}]/u.test(raw) ? raw : '';
   return why === '' ? "The video tool isn't running here." : `The video tool isn't running here: ${why}.`;
 }
 
