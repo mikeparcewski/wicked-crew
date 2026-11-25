@@ -5,9 +5,12 @@
  *   PUT    /api/v1/desk/snoozes/:key   { until, severity? } → DeskSnooze; audited `desk.need.snoozed`
  *   DELETE /api/v1/desk/snoozes/:key   → { key, woken }; audited `desk.need.woken` when one was in force
  *
- * The key is the skin's own id for the item (studio's need-row key, `infra:disk`, `run:<id>`): opaque here. A snooze
- * only DEFERS an item on the Desk: every need is still in `/system.attention[]`, and the skin brings a snoozed item
- * back when its time passes or it gets worse (`severity` is what the person saw when they snoozed it).
+ * The key is the skin's own id for the item (studio's need-row key): opaque here, with one exception crew reads
+ * itself. An attention item a person may snooze carries `snooze: {key, rank}` (studio#1416, {@link attentionSnooze});
+ * while a snooze on that key is in force and the item is no worse (`rank` at most the stored `severity`; a snooze stored
+ * with no severity holds nothing back), `GET /system` moves it out of `attention[]` (and the level) into `snoozed[]`
+ * ({@link holdSnoozed}). Every other key only defers an item in the skin, which brings it back when its time passes or
+ * it gets worse.
  *
  * One mechanism for durability: the audit trail. The snoozes are folded from the trail's `desk.need.*` entries of the
  * last {@link DESK_SNOOZE_MAX_MS} at first use and kept in memory after it (this daemon is the trail's only writer),
@@ -16,7 +19,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import type { Actor, DeskSnooze, DeskSnoozesResponse, DeskSnoozeWakeResponse } from 'wicked-crew-api-types';
+import type { Actor, DeskSnooze, DeskSnoozesResponse, DeskSnoozeWakeResponse, SystemAttentionItem, SystemAttentionSnooze, SystemSnoozedItem } from 'wicked-crew-api-types';
 
 import { z } from '../zod.js';
 import { API_PREFIX } from './api-prefix.js';
@@ -37,6 +40,46 @@ export const PutDeskSnoozeSchema = z.strictObject({
   /** The skin's own rank of the item when it was snoozed, higher is worse (studio's need-row severity). */
   severity: z.number().int().min(0).max(1000).optional(),
 });
+
+/**
+ * How a person snoozes one attention item, or null when they can't: only one run's own open gate or question (`run:<id>`),
+ * the one cause whose occurrence crew can name. A component of the system is never hidden; an item that gathers several
+ * runs (a reviewer gap, a red floor) is not offered, since its time is its oldest member's; and a failed run is not
+ * offered (its time falls back to the run's launch when crew has no end, so a later failure could match an older
+ * snooze). The occurrence
+ * is the open interaction's id and its opening (`waitedSince`, the interaction row's `created_at`): the engine reuses an
+ * unkeyed gate's id when the run pauses at the same gate again, and stamps a new `created_at` each time it opens, so a
+ * gate asked again is a new key. `rank`, higher is worse: `(red ? 200 : 100) + min(blocks, 99)`, so 100 to 299.
+ */
+export function attentionSnooze(item: SystemAttentionItem): SystemAttentionSnooze | null {
+  if (item.source !== 'run' || item.target.kind !== 'run' || item.id !== `run:${item.target.runId}`) return null;
+  const interaction = typeof item.target.interactionId === 'string' && item.target.interactionId !== '' ? item.target.interactionId : null;
+  const opened = typeof item.waitedSince === 'string' && item.waitedSince !== '' ? item.waitedSince : null;
+  if (interaction === null || opened === null) return null;
+  const key = `attention:${item.id}@${interaction}@${opened}`;
+  if (key.length > DESK_SNOOZE_KEY_MAX) return null;
+  return { key, rank: (item.severity === 'red' ? 200 : 100) + Math.min(Math.max(item.blocks, 0), 99) };
+}
+
+/**
+ * Split `attention[]` by the snoozes in force: an item whose snooze key has one, with a stored severity and its rank no
+ * higher than it, is held back in `snoozed[]` with the snooze's end, soonest first. Every item a person may snooze
+ * carries its `snooze` either way. Order is kept.
+ */
+export function holdSnoozed(attention: readonly SystemAttentionItem[], snoozes: readonly DeskSnooze[], now: number): { attention: SystemAttentionItem[]; snoozed: SystemSnoozedItem[] } {
+  const byKey = new Map(snoozes.map((s) => [s.key, s]));
+  const kept: SystemAttentionItem[] = [];
+  const snoozed: SystemSnoozedItem[] = [];
+  for (const item of attention) {
+    const snooze = attentionSnooze(item);
+    const marked = snooze !== null ? { ...item, snooze } : item;
+    const s = snooze !== null ? byKey.get(snooze.key) : undefined;
+    if (s !== undefined && Date.parse(s.until) > now && s.severity !== null && snooze!.rank <= s.severity) snoozed.push({ ...marked, until: s.until });
+    else kept.push(marked);
+  }
+  snoozed.sort((a, b) => Date.parse(a.until) - Date.parse(b.until));
+  return { attention: kept, snoozed };
+}
 
 export class DeskSnoozes {
   private map: Map<string, DeskSnooze> | null = null;

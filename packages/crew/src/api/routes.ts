@@ -245,7 +245,7 @@ import type { EvalRunStore } from './eval-store.js';
 import { isSeatKeyList } from '../core/job-seats.js';
 import { engineRosterJson, noEligibleSeatBody, parseNoEligibleSeat, toEngineSeat } from '../core/engine-roster.js';
 import { launchAssuranceNotice, readJudgeCoverage } from '../core/assurance.js';
-import { STAND_IN_NEEDED_GATE, USE_STAND_INS_ACTION, consentFor, isStandInReview, preflightRefusal, readPreflight } from '../core/stand-in.js';
+import { STAND_IN_NEEDED_GATE, USE_STAND_INS_ACTION, consentFor, isStandInReview, preflightRefusal, readPreflight, settingConsent } from '../core/stand-in.js';
 import { launchPosture, type PostureFacts } from '../core/launch-posture.js';
 import { launchRequiresQe, mayRequireQe, qeAcceptanceMode, qeSettingSkipReason } from '../core/qe-acceptance-setting.js';
 import {
@@ -423,7 +423,7 @@ import { VoiceService, defaultVoiceDir } from '../voice/service.js';
 import { TtsService } from '../voice/tts.js';
 import { VoiceDashboardStore } from '../voice/dashboard.js';
 import { registerVoiceRoutes } from '../voice/routes.js';
-import { DeskSnoozes, registerDeskSnoozeRoutes } from './desk-snoozes.js';
+import { DeskSnoozes, holdSnoozed, registerDeskSnoozeRoutes } from './desk-snoozes.js';
 import { VoiceInjectInputs } from '../voice/inject-input.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
@@ -2013,7 +2013,9 @@ export function registerRoutes(
     service: new VoiceService({ dir: defaultVoiceDir() }),
     dashboard: (() => { try { return VoiceDashboardStore.under(crewStateHome()); } catch { return null; } })(),
   };
-  registerDeskSnoozeRoutes(app, { snoozes: new DeskSnoozes(audit) });
+  // One store for the snooze routes and `GET /system`, which holds back the attention items snoozed (studio#1416).
+  const deskSnoozes = new DeskSnoozes(audit);
+  registerDeskSnoozeRoutes(app, { snoozes: deskSnoozes });
   registerVoiceRoutes(app, { voice: voice.service, tts: voice.tts ?? new TtsService({ dir: defaultVoiceDir() }), dashboard: voice.dashboard, audit });
   const voiceInputs = runtime.voiceInputs ?? new VoiceInjectInputs();
   const openWithOs = runtime.openWithOs ?? openWithSystemDefault;
@@ -4008,8 +4010,8 @@ export function registerRoutes(
     // A draining daemon refuses the launch before it asks anything (the choice would only lead to the 503).
     if (typeof adapter.isDraining === 'function' && adapter.isDraining()) return reply.code(503).send(maintenanceDrainBody(new MaintenanceDrainError()));
     if (standInEligible && standInsSupported) {
-      const setting = await Promise.resolve().then(() => adapter.getSettings()).then((s) => s.standInReview).catch(() => undefined);
-      const consent = consentFor(b.standIns === true, setting, `${req.actor.id} (${req.actor.kind})`);
+      const saved = await Promise.resolve().then(() => adapter.getSettings()).catch(() => undefined);
+      const consent = consentFor(b.standIns === true, saved?.standInReview, `${req.actor.id} (${req.actor.kind})`, Date.now(), saved?.standInConsent);
       // The launcher that can show the choice asks the preflight with or without consent (codex r1 on b7-standin):
       // consent answers only the choice; a role no signed-in helper can stand in for is no_usable_helper either way.
       let preflight: ReturnType<typeof readPreflight> = null;
@@ -8111,7 +8113,8 @@ export function registerRoutes(
     let setting: 'saved' | 'failed' | undefined;
     if (scope === 'always') {
       try {
-        await adapter.updateSettings({ standInReview: 'always' });
+        // The person who answered every job is the setting's author (wicked-core#1930 F6).
+        await adapter.updateSettings({ standInReview: 'always', standInConsent: settingConsent(who) });
         audit.record('settings.updated', actor, { detail: { changed: ['standInReview'], via: 'gate', runId: id } });
         setting = 'saved';
       } catch (err) {
@@ -10939,9 +10942,25 @@ export function registerRoutes(
     const changed = watchNext === undefined ? Object.keys(safe) : [...Object.keys(safe), 'watch'];
     const ignored = Object.keys(patch).filter((k) => !Object.hasOwn(safe, k) && !(k === 'watch' && watchNext !== undefined));
     const derive = watchNext;
-    const settings = derive === undefined
+    // standInConsent (wicked-core#1930 F6) is the daemon's, never a body's (not in `allowed`): the person who turns
+    // standInReview to 'always' is its author, read against the STORED value inside the write queue. Saving 'always'
+    // again keeps the author who turned it on (a client that re-sends every key must not re-sign it); 'ask' clears it.
+    const consentWho = `${actorOf(req).id} (${actorOf(req).kind})`;
+    const consentAt = Date.now();
+    const consent = !Object.hasOwn(safe, 'standInReview')
+      ? undefined
+      : (current: import('../core/types.js').CrewSystemSettings): Partial<import('../core/types.js').CrewSystemSettings> =>
+        safe.standInReview !== 'always'
+          ? { standInConsent: undefined }
+          : current.standInReview === 'always' && current.standInConsent !== undefined
+            ? {}
+            : { standInConsent: settingConsent(consentWho, consentAt) };
+    const settings = derive === undefined && consent === undefined
       ? await adapter.updateSettings(safe)
-      : await adapter.updateSettings(safe, (current) => ({ watch: derive(current) }));
+      : await adapter.updateSettings(safe, (current) => ({
+        ...(derive !== undefined ? { watch: derive(current) } : {}),
+        ...(consent !== undefined ? consent(current) : {}),
+      }));
     if (watchNext !== undefined) runtime.watchRegistry?.()?.applySettings(settings.watch);
     // Re-apply the worker-config root to this process's env (seat sign-in). The engine reads
     // WICKED_WORKER_HOME per worker spawn — never cached — so this alone makes the change live
@@ -12217,6 +12236,8 @@ export function registerRoutes(
     ...(runtime.mcpCalls !== undefined ? { usage: runtime.mcpCalls } : {}),
     // (crew#1514) A rename lists the apps that use the source.
     ...(runtime.apps !== undefined ? { appsUsing: (name: string) => runtime.apps!.appsUsing(name) } : {}),
+    // (crew#1906) A rename withdraws the old name's row-write grants.
+    ...(appsWritePath !== undefined ? { rowWriteGrants: appsWritePath } : {}),
     audit,
     actorOf,
   });
@@ -12446,6 +12467,8 @@ export function registerRoutes(
       })();
 
       // Reads the folds and the run list depend on, each bounded.
+      // The snoozes in force (studio#1416): a read that fails or runs late holds nothing back.
+      const snoozesP = settleWithin(() => deskSnoozes.list(), PROBE_TIMEOUT_MS);
       const viewsP = settleWithin(async () => {
         const detail = await adapter.sessionsDetail();
         await backfillEndedAt(detail);
@@ -12745,6 +12768,8 @@ export function registerRoutes(
         engine: clusterReader.engine(),
       });
       const toReview = await toReviewP;
+      const snoozes = await snoozesP;
+      const held = holdSnoozed(needs.attention, snoozes.kind === 'ok' ? snoozes.value : [], Date.now());
       // A run list that could not be read never reads green: the daemon row (degraded, "did not list
       // its runs") is in attention as a slowdown, and the level stays at least yellow.
       return assembleSnapshot({
@@ -12753,7 +12778,8 @@ export function registerRoutes(
         runs,
         infra,
         governance,
-        attention: needs.attention,
+        attention: held.attention,
+        snoozed: held.snoozed,
         unresolved: needs.unresolved,
         unresolvedSpend: needs.unresolvedSpend,
         toReview: toReview.kind === 'ok' ? toReview.value : null,

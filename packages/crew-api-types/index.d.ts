@@ -7633,6 +7633,17 @@ export interface SystemSettings {
    */
   standInReview?: 'ask' | 'always' | undefined;
   /**
+   * (api-types next, wicked-core#1930 F6) Who turned `standInReview` to `always`, and when: the consent a launch under
+   * the setting records (`RunAssurance.standIn`, `via: 'setting'`), so a workload token's launch names the person and
+   * not itself. The daemon writes it from the person's own request (`PUT /settings`, or a `use_stand_ins` answer with
+   * `scope: 'always'`); a body that sends it has it dropped (named in the audit entry's `ignored`). A `PUT` of `always`
+   * when it is already `always` keeps the author; a `use_stand_ins` every-job answer records its person afresh; saving
+   * `ask` clears it. ABSENT when no author is recorded (a setting saved before this field, or turned on by hand): a
+   * launch then records
+   * `by: 'the standInReview setting (author not recorded)'`.
+   */
+  standInConsent?: StandInConsent | undefined;
+  /**
    * (api-types 0.214.0; F1/F2, B7) "Use <seat> for new work": the seats new chats and jobs are drawn from (roster keys). ABSENT or `null`
    * = the default rule (every seat that can work, opt-in seats left out). A seat named on a job is still used.
    * Human actors only.
@@ -12475,8 +12486,16 @@ export interface SystemSnapshot {
    *  failed runs older than 7 days, benches with an alternative and pending proposals are not in it
    *  (the first three move to `unresolved[]`; proposals are `toReview`). Sorted by runs held, then
    *  prevents before slows, then a component (infra, or no seat at all) before one run's own cause,
-   *  then the longest wait, then the units left. Its length is the number. */
+   *  then the longest wait, then the units left. Its length is the number. A person's snooze in force
+   *  (`/desk/snoozes`, keyed by {@link SystemAttentionItem.snooze}) takes an item out of it into `snoozed`. */
   attention: SystemAttentionItem[];
+  /**
+   * (api-types next, studio#1416) The items a person snoozed, still held back: the snooze's end is ahead and the
+   * item is no worse than when it was snoozed (its `snooze.rank` at most the `severity` stored; a snooze stored with no
+   * severity holds nothing back). Not in `attention[]` and not
+   * in `level`. Its length is the "N snoozed" number. Soonest end first. ABSENT on an older daemon.
+   */
+  snoozed?: SystemSnoozedItem[];
   /**
    * (api-types 0.140.0) Work nobody has resolved: failed runs not retried and not archived,
    * superseded runs still open, asks parked at their turn gate past a day. Each carries what it cost
@@ -12529,6 +12548,27 @@ export interface SystemAttentionItem {
   waitedSince?: string | null;
   /** (api-types 0.140.0) Units not yet done across the held runs. ABSENT on an older daemon. */
   unitsLeft?: number;
+  /** (api-types next, studio#1416) Present when a person may snooze this item: one run's own open gate or question
+   *  (`id` `run:<runId>`, the target naming its interaction), the one cause whose occurrence crew can name. `key` names
+   *  this occurrence, `attention:<id>@<interactionId>@<waitedSince>`: the engine keeps an unkeyed gate's interaction id
+   *  when the run pauses at the same gate again, and `waitedSince` is that opening's own time, so a gate asked again is
+   *  a new key. `PUT /desk/snoozes/:key {until, severity: rank}` snoozes it. `rank` is how bad it is now, higher is
+   *  worse: an item whose rank goes above the stored one comes back. ABSENT otherwise (a component of the system is
+   *  never hidden; a failed run or an item gathering several runs has no occurrence crew can name) and on an older
+   *  daemon. */
+  snooze?: SystemAttentionSnooze;
+}
+
+/** (api-types next) How to snooze one attention item: see {@link SystemAttentionItem.snooze}. */
+export interface SystemAttentionSnooze {
+  key: string;
+  /** A whole number, 100 to 299: `(red ? 200 : 100) + min(blocks, 99)` (blocks below 0 count as 0). */
+  rank: number;
+}
+
+/** (api-types next) An attention item held back by a snooze, with the snooze's end (ISO-8601). */
+export interface SystemSnoozedItem extends SystemAttentionItem {
+  until: string;
 }
 
 /** (api-types 0.140.0) Why a run is in `unresolved[]`. `failed`: it failed and was neither retried
@@ -15563,16 +15603,21 @@ export interface PatchMcpServerBody {
 /**
  * (api-types 0.227.0, wicked-crew#1514) `POST /mcp/servers/:name/rename`: a human operator's only. Answers the renamed
  * {@link McpServer}. The entry keeps its id, secret reference, tools, switches, grants, agents and links; its old name
- * is retired (in `formerNames`) while it exists. Refusals (409, `{error, code, ...}`): `apps_bound` with
+ * is retired (in `formerNames`) while it exists. Apps' row-write grants on the old name are withdrawn once the rename
+ * lands (an app that names it needs a new grant; wicked-crew#1906): a failure is audited, and the grants it leaves name no
+ * source and go before any source takes that name again. Grants an earlier holder left on the new name are withdrawn
+ * once the rename's checks and rules allow it, before it lands (a refused rename changes no grant). Removing the entry later withdraws every name's approvals. Refusals (409, `{error, code, ...}`): `apps_bound` with
  * `apps: Array<{slug, name}>` (the apps that use the source; send the same slugs in `apps` to rename anyway),
  * `name_taken`, `name_retired`, `name_unchanged`, `reserved_name`, `not_renamable`, and `rules_differ` with
  * `subjects: string[]` (tools the engine would judge more loosely under the new name) and/or `rules: string[]`
  * (rules whose `trigger.contains` may tell the two names apart: some match of it can take in a character of either name
  * where an MCP call's or result's context carries it; the error says which name each can match, or that crew could not
- * judge the trigger, and names the rules to change first when one matches the current name; wicked-crew#1905). 403
+ * judge the trigger, and names the rules to change first when one matches the current name, or says the name stays
+ * when that rule ships with crew, as core seeds it from a pack under its own id; wicked-crew#1905, #1906). 403
  * `rename_human_only` for any other actor;
  * 500 `rules_unrestored` with `rules` when a refused rename's copied rules could not be put back (they still name the new
- * name); 501 `mcp_preview_unsupported` when the engine cannot judge the rules; 502 `preview_failed` when it answered no
+ * name), or `withdraw_failed` when grants left on the new name could not be withdrawn (nothing was renamed);
+ * 501 `mcp_preview_unsupported` when the engine cannot judge the rules; 502 `preview_failed` when it answered no
  * judgement, or `renamed_unread` when the rename landed but its record could not be read back (read the list again). A
  * restore of a generation that would undo a rename is refused 409 `restore_crosses_rename`.
  */
@@ -18438,11 +18483,14 @@ export interface VoiceTtsStatus {
  * `desk_snooze_invalid` for a time not in the future, more than 7 days ahead, or a key over 200 characters);
  * `DELETE /desk/snoozes/:key` → {@link DeskSnoozeWakeResponse} (audited `desk.need.woken`). Both are on disk before
  * the answer (500 `desk_snooze_unsaved` when the trail could not take them; nothing changed). Setting or ending one
- * is a human operator's (403 `human_operator_only`; an observer token gets the auth boundary's own trust 403). A snooze only defers the item on the Desk: it stays in
- * `/system.attention[]`, and the skin brings it back when `until` passes or its rank rises above `severity`.
+ * is a human operator's (403 `human_operator_only`; an observer token gets the auth boundary's own trust 403). A snooze on
+ * an attention item's own key ({@link SystemAttentionItem.snooze}) moves it out of `/system.attention[]` into
+ * `/system.snoozed[]` while `until` is ahead and its rank is at most `severity`. Any other key only defers the item on
+ * the Desk: the skin brings it back when `until` passes or its rank rises above `severity`.
  */
 export interface DeskSnooze {
-  /** The skin's own id for the item (`run:<id>`, `infra:disk`, a need-row key); opaque to the daemon. */
+  /** An attention item's own key ({@link SystemAttentionSnooze.key}), which `/system` reads; else the skin's own id
+   *  for the item (a need-row key), opaque to the daemon. */
   key: string;
   /** ISO-8601: when the snooze ends by itself. */
   until: string;
