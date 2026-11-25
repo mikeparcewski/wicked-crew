@@ -725,6 +725,8 @@ const VENV_STATES: ReadonlySet<string> = new Set<SkillVenvState>(['pending', 'sy
 /** The persisted enums `manifest.json` may carry — the schema validator refuses anything else (codex round 7). */
 const SKILL_KINDS: ReadonlySet<string> = new Set<SkillKind>(['router', 'fork-worker', 'module']);
 const PROVENANCES: ReadonlySet<string> = new Set<SkillProvenance>(['shipped', 'override', 'user-added']);
+/** crew#1703: a skill an editor pack installed carries `origin: pack:<pack name>` (the pack name is an editor id). */
+export const SKILL_ORIGIN_RE = /^pack:[a-z0-9][a-z0-9._-]{0,127}$/;
 /** POSIX write bits — a locked env / snapshot carries none (mirrors tree.ts). */
 const WRITE_BITS = 0o222;
 
@@ -1043,7 +1045,7 @@ export class SkillsStore {
       const e = record(value, where);
       // `portability` (F-079) is OPTIONAL: a manifest written before 0.7.30 carries `portable` alone
       // and still loads — the next recompute (any mutation, analyze, publish) fills the field in.
-      exactKeys(e, ['dir', 'kind', 'core', 'portable', 'enabled', 'provenance', 'editedAt', 'upgradeAvailable', 'conflict', 'upstreamDir'], where, ['portability']);
+      exactKeys(e, ['dir', 'kind', 'core', 'portable', 'enabled', 'provenance', 'editedAt', 'upgradeAvailable', 'conflict', 'upstreamDir'], where, ['portability', 'origin']);
       const dir = str(e['dir'], `${where}.dir`);
       const bad = unsafeSkillDir(dir);
       if (bad !== null) fail(`${where}: ${bad}`);
@@ -1062,6 +1064,12 @@ export class SkillsStore {
         conflict: bool(e['conflict'], `${where}.conflict`),
         upstreamDir: strOrNull(e['upstreamDir'], `${where}.upstreamDir`),
       };
+      // crew#1703: `origin` is optional (`pack:<name>`), written only by an editor pack's install.
+      if (Object.hasOwn(e, 'origin')) {
+        const origin = e['origin'];
+        if (typeof origin !== 'string' || !SKILL_ORIGIN_RE.test(origin)) fail(`${where}.origin must be pack:<pack name>`);
+        (skills[name] as SkillEntry).origin = origin as string;
+      }
       if (Object.hasOwn(e, 'portability')) {
         const problem = portabilityProblem(e['portability'], portable);
         if (problem !== null) fail(`${where}.portability ${problem}`);
@@ -3076,7 +3084,8 @@ export class SkillsStore {
   }
 
   /** Add a user skill at `skills/<name minus the prefix>` — staged, then swapped in (`swapOwnFiles`). */
-  add(name: string, files: Readonly<Record<string, string>>, expectedRevision: number): SkillMutationResult {
+  add(name: string, files: Readonly<Record<string, string>>, expectedRevision: number, opts: { origin?: string } = {}): SkillMutationResult {
+    if (opts.origin !== undefined && !SKILL_ORIGIN_RE.test(opts.origin)) throw new Error(`a skill origin must be pack:<pack name>, not ${JSON.stringify(opts.origin)}`);
     const m = this.manifest();
     this.refuseDuringPublish();
     this.assertRevision(m, expectedRevision);
@@ -3104,6 +3113,7 @@ export class SkillsStore {
         upgradeAvailable: false,
         conflict: false,
         upstreamDir: null,
+        ...(opts.origin !== undefined ? { origin: opts.origin } : {}),
       };
       this.refreshRecords(m, dir);
       findings.push(...this.recomputeWarnings(m));
@@ -3268,12 +3278,17 @@ export class SkillsStore {
    */
   pristine(): { pristine: true } | { pristine: false; reason: string } {
     const m = this.manifest();
+    // crew#1703: a skill an editor pack installed is the pack's, not an operator change, and a refresh leaves it be.
+    const packDirs = Object.values(m.skills).filter((e) => e.origin !== undefined).map((e) => `${e.dir}/`);
+    const packOwned = (rel: string): boolean => packDirs.some((d) => rel.startsWith(d));
     for (const [name, entry] of Object.entries(m.skills)) {
+      if (entry.origin !== undefined) continue;
       if (entry.provenance !== 'shipped') return { pristine: false, reason: `skill ${name} is ${entry.provenance}` };
       if (entry.editedAt !== null) return { pristine: false, reason: `skill ${name} was edited at ${entry.editedAt}` };
       if (entry.conflict) return { pristine: false, reason: `skill ${name} carries a refresh conflict` };
     }
     for (const [rel, record] of Object.entries(m.files)) {
+      if (packOwned(rel)) continue;
       if (record.baselineHash === null) return { pristine: false, reason: `${rel} was added by the operator` };
       if (record.effectiveHash !== record.baselineHash) return { pristine: false, reason: `${rel} differs from its baseline` };
       if (record.conflict) return { pristine: false, reason: `${rel} carries a refresh conflict` };
@@ -3281,12 +3296,14 @@ export class SkillsStore {
     const scan = this.scanEffective();
     if (scan.links.length > 0 || scan.others.length > 0) return { pristine: false, reason: 'effective/ holds a link or special file' };
     for (const f of scan.files) {
+      if (packOwned(f.rel)) continue;
       const record = m.files[f.rel];
       if (record === undefined) return { pristine: false, reason: `${f.rel} is on disk but not in the manifest` };
       if (record.baselineHash !== f.sha) return { pristine: false, reason: `${f.rel} on disk differs from its baseline` };
     }
     const onDisk = new Set(scan.files.map((f) => f.rel));
     for (const rel of Object.keys(m.files)) {
+      if (packOwned(rel)) continue;
       if (!onDisk.has(rel)) return { pristine: false, reason: `${rel} was deleted from effective/` };
     }
     return { pristine: true };
@@ -3594,7 +3611,7 @@ export class SkillsStore {
           else taken.add(name);
         }
         for (const [name, entry] of Object.entries(m.skills)) {
-          if (entry.provenance !== 'shipped' && !added.includes(name) && !taken.has(name)) kept.add(name);
+          if (entry.provenance !== 'shipped' && entry.origin === undefined && !added.includes(name) && !taken.has(name)) kept.add(name);
         }
         for (const name of conflicts) {
           const entry = m.skills[name];

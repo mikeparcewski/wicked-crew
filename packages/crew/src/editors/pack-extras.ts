@@ -252,6 +252,12 @@ function stepsOf(phases: readonly string[]): PresetStep[] {
 }
 
 /** The preset owner stamp a pack's block presets carry (`created_by`). */
+/** The origin a pack's skills carry in the skills root (`SkillEntry.origin`): they are the pack's, not an operator
+ *  change, so the daemon's garden auto-refresh keeps running. */
+export function packSkillOrigin(packName: string): string {
+  return `pack:${packName}`;
+}
+
 export function packPresetOwner(packName: string): string {
   return `pack:${packName}`;
 }
@@ -429,7 +435,7 @@ function preImage(store: PackSkillsPort['store'], key: string): { files: Record<
  * or the publish is blocked, the pass is put back: each replaced skill gets its earlier files and switch, and each
  * added one is switched off. Answers `null`, or the reason workers do not have the skills yet (the install stands).
  */
-export async function writeSkills(plan: ExtrasPlan, port: PackSkillsPort | null, opts: { waitMs?: number } = {}): Promise<string | null> {
+export async function writeSkills(plan: ExtrasPlan, port: PackSkillsPort | null, opts: { waitMs?: number; origin?: string } = {}): Promise<string | null> {
   if (plan.skills.length === 0 || port === null) return null;
   const store = port.store;
   const deadline = Date.now() + (opts.waitMs ?? 30_000);
@@ -477,7 +483,7 @@ export async function writeSkills(plan: ExtrasPlan, port: PackSkillsPort | null,
     try {
       // Marked before the call: a write that fails partway may have changed the skill, and its copy is put back.
       if (s.own) done.add(s.key);
-      const r = s.own ? store.replace(s.key, s.files, store.revision()) : store.add(s.key, s.files, store.revision());
+      const r = s.own ? store.replace(s.key, s.files, store.revision()) : store.add(s.key, s.files, store.revision(), opts.origin !== undefined ? { origin: opts.origin } : {});
       if (r.verdict === 'blocked') why = r.findings.filter((f) => f.severity === 'blocking').map((f) => f.evidence).join('; ');
       else {
         if (!s.own) added.push(s.key);
@@ -503,4 +509,75 @@ export async function writeSkills(plan: ExtrasPlan, port: PackSkillsPort | null,
     return `installed, but the skills root could not be published (${err instanceof Error ? err.message : String(err)}), so workers do not get the pack’s skills yet; publish from Skills`;
   }
   return null;
+}
+
+/** What a withdrawal switched off and deleted, and what it could not do. */
+export interface PackWithdrawal {
+  /** Pack skills switched off (they stay in the skills root, out of every published generation). */
+  skills: string[];
+  /** Presets deleted (only those still carrying the pack's stamp). */
+  presets: string[];
+  error?: string;
+}
+
+/**
+ * Withdraw what a pack added (crew#1703, coord round 2 F1): when its last editor is removed, or an update no longer
+ * ships a skill or block. The skills root has no removal, so each skill is switched off and the root published, so
+ * workers stop getting it; a preset is deleted while it still carries the pack's stamp (one someone else saved
+ * since is theirs). The pack keeps them as its own, so installing it again brings them back.
+ */
+export async function withdrawPackExtras(input: {
+  packName: string;
+  skills: readonly string[];
+  presets: readonly string[];
+  skillsPort: PackSkillsPort | null;
+  presetsPort: PackPresetsPort | null;
+  waitMs?: number;
+}): Promise<PackWithdrawal> {
+  const out: PackWithdrawal = { skills: [], presets: [] };
+  const problems: string[] = [];
+  if (input.presets.length > 0 && input.presetsPort !== null) {
+    try {
+      const rows = new Map((await input.presetsPort.listPresets()).map((p) => [p.name, p]));
+      for (const id of input.presets) {
+        if (rows.get(id)?.created_by !== packPresetOwner(input.packName)) continue;
+        try {
+          if (await input.presetsPort.deletePreset(id)) out.presets.push(id);
+        } catch (err) {
+          problems.push(`the preset ${id} could not be deleted (${err instanceof Error ? err.message : String(err)})`);
+        }
+      }
+    } catch (err) {
+      problems.push(`the presets could not be read (${err instanceof Error ? err.message : String(err)})`);
+    }
+  }
+  if (input.skills.length > 0 && input.skillsPort !== null) {
+    const port = input.skillsPort;
+    try {
+      await port.ready?.();
+      const deadline = Date.now() + (input.waitMs ?? 30_000);
+      while (port.store.isPublishing()) {
+        if (Date.now() > deadline) throw new Error('the skills root was busy publishing');
+        await sleep(100);
+      }
+      for (const key of input.skills) {
+        // Only one still marked as this pack's: a skill the operator took over (or never the pack's) stays.
+        const entry = port.store.manifest().skills[key];
+        if (entry?.enabled !== true || entry.origin !== packSkillOrigin(input.packName)) continue;
+        const r = port.store.disable(key, port.store.revision());
+        if (r.verdict === 'blocked') problems.push(`the skill ${key} could not be switched off (${r.findings.filter((f) => f.severity === 'blocking').map((f) => f.evidence).join('; ')})`);
+        else out.skills.push(key);
+      }
+      if (out.skills.length > 0) {
+        const published = await port.publish();
+        if (published.verdict === 'blocked') {
+          problems.push(`the skills root could not be published (${published.findings.filter((f) => f.severity === 'blocking').map((f) => f.evidence).join('; ')}), so workers keep the switched-off skills until the next publish`);
+        }
+      }
+    } catch (err) {
+      problems.push(`the pack’s skills could not be switched off (${err instanceof Error ? err.message : String(err)}); switch them off in Skills`);
+    }
+  }
+  if (problems.length > 0) out.error = problems.join('; ');
+  return out;
 }

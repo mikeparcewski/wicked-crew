@@ -751,7 +751,7 @@ export class EditorRegistry {
     return { read, held: anyHeld };
   }
 
-  installPack(packs: Array<{ id: string; pack: InstalledPack }>, enabled: boolean | undefined): { records: RegisteredRecord[]; updated: boolean; removed: string[] } {
+  installPack(packs: Array<{ id: string; pack: InstalledPack }>, enabled: boolean | undefined, owned?: PackExtrasOwned): { records: RegisteredRecord[]; updated: boolean; removed: string[] } {
     const name = packs[0]?.pack.name;
     const incoming = new Set(packs.map(({ id }) => id));
     const dropped = [...this.installed].filter(([id, pack]) => pack.name === name && !incoming.has(id)).map(([id]) => id).sort();
@@ -776,12 +776,45 @@ export class EditorRegistry {
       }
       // crew#1703: the pack's skills and presets, kept by name beyond its editor rows.
       const first = packs[0]?.pack;
-      if (name !== undefined && first !== undefined) {
-        if ((first.skills?.length ?? 0) > 0 || (first.presets?.length ?? 0) > 0) this.extras.set(name, { skills: first.skills ?? [], presets: first.presets ?? [] });
+      const keep = owned ?? (first !== undefined ? { skills: first.skills ?? [], presets: first.presets ?? [] } : undefined);
+      if (name !== undefined && keep !== undefined) {
+        if (keep.skills.length > 0 || keep.presets.length > 0) this.extras.set(name, { skills: [...keep.skills], presets: [...keep.presets] });
         else this.extras.delete(name);
       }
     });
     return { records: out, updated, removed: dropped };
+  }
+
+  /**
+   * (crew#1703) Name the pack's skills and presets on each of its rows (`current`, what the skills root and the preset
+   * store hold now), and keep `owned` (everything the pack added, a withdrawn skill included) as its own.
+   */
+  setPackExtras(name: string, current: PackExtrasOwned, owned: PackExtrasOwned): void {
+    this.commit(() => {
+      for (const [id, p] of this.installed) {
+        if (p.name !== name) continue;
+        const next: InstalledPack = { ...p };
+        delete next.skills;
+        delete next.presets;
+        if (current.skills.length > 0) next.skills = [...current.skills];
+        if (current.presets.length > 0) next.presets = [...current.presets];
+        this.installed.set(id, next);
+        const r = this.records.get(id);
+        if (r !== undefined && r.pack !== undefined) this.records.set(id, { ...r, pack: next } as RegisteredRecord);
+      }
+      if (owned.skills.length > 0 || owned.presets.length > 0) this.extras.set(name, { skills: [...owned.skills], presets: [...owned.presets] });
+      else this.extras.delete(name);
+    });
+  }
+
+  /** (crew#1703) The pack an installed editor or plugin came from, or `null`. */
+  packNameOf(id: string): string | null {
+    return this.installed.get(id)?.name ?? null;
+  }
+
+  /** (crew#1703) Whether any installed editor or plugin still comes from the pack `name`. */
+  hasPack(name: string): boolean {
+    return [...this.installed.values()].some((p) => p.name === name);
   }
 
   /** Remove an installed pack editor (the pack's files are the installer's to delete). `false` when it is not one. */

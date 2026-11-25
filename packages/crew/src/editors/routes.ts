@@ -50,6 +50,7 @@ import { z } from '../zod.js';
 import { LOCAL_ACTOR, trustAtLeast } from '../api/auth.js';
 import type { Actor, ConformanceRule, CoreEvent, EditorGrantsChangedFrame, EditorGrantsResponse, EditorView, ListEditorsResponse } from '../core/types.js';
 import { bundleHeaders } from './csp.js';
+import { withdrawPackExtras } from './pack-extras.js';
 import { installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner, type PackPresetsPort, type PackSkillsPort } from './pack-install.js';
 import { EDITOR_ID, EDITOR_VERSION, EditorRegistry, HOST_BUNDLE_CAP_BYTES, notRealEntry, readCapped, type EditorRecord, type PluginRecord, type RegisteredRecord } from './registry.js';
 import { guardBundle, MAX_INLINE_SCRIPTS, type GuardedBundle } from './webrtc-guard.js';
@@ -358,7 +359,7 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
 
   app.delete(
     `${V}/editors/:id`,
-    { config: { manifest: { statusCodes: [200, 403, 404, 409, 503] } } },
+    { config: { manifest: { responseType: 'RemoveEditorResponse', statusCodes: [200, 403, 404, 409, 503] } } },
     async (req, reply) => {
       if (!humanOnly(req, reply)) return reply;
       const id = idOf(req);
@@ -377,9 +378,24 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
         } catch (err) {
           return reply.code(503).send({ error: `${id} was not removed: its grants could not be withdrawn (${err instanceof Error ? err.message : String(err)}); try again` });
         }
+        const packName = registry.packNameOf(id);
         if (!registry.removeInstalled(id)) return reply.code(404).send({ error: `no editor '${id}' is installed` });
         deps.broadcast?.({ type: 'editorGrantsChanged', id, reason: 'removed' } satisfies EditorGrantsChangedFrame);
-        return { removed: true, id };
+        // (crew#1703 round 2) The pack's last editor gone: its skills leave every worker's set and its
+        // presets leave the catalog, and the response says which. The record of them stays, so a reinstall
+        // turns the same skills back on.
+        if (packName === null || registry.hasPack(packName)) return { removed: true, id };
+        const owned = registry.packExtrasOwned(packName);
+        if (owned.skills.length === 0 && owned.presets.length === 0) return { removed: true, id };
+        const withdrawn = await withdrawPackExtras({
+          packName,
+          skills: owned.skills.map((k) => k.key),
+          presets: owned.presets,
+          skillsPort: deps.skills ?? null,
+          presetsPort: deps.presets ?? null,
+        });
+        if (withdrawn.error !== undefined) deps.log?.(`editors: ${packName} removed, but ${withdrawn.error}`);
+        return { removed: true, id, withdrawn };
       });
     },
   );

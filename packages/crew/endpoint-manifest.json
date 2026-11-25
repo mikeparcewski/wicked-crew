@@ -704,7 +704,7 @@
       "method": "DELETE",
       "path": "/api/v1/editors/:id",
       "requestType": null,
-      "responseType": null,
+      "responseType": "RemoveEditorResponse",
       "statusCodes": [
         200,
         403,

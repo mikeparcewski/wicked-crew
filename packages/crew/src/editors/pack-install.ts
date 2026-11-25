@@ -30,7 +30,7 @@ import type { EditorConformanceSummary, InstallEditorRefusal, InstallEditorRespo
 import { execCapped } from '../core/exec.js';
 import { EditorInstallConflict, EditorRegistry, PackEditorSchema, PluginManifestSchema, RUN_PLUGIN_CASES, editorEntryDigest, packEditorDigest, type InstalledPack } from './registry.js';
 import type { ConformanceProvisioner } from './conformance-runtime.js';
-import { approvalDiff, installedSkillsOf, PackExtrasRefusal, planExtras, writePresets, writeSkills, type ExtrasPlan, type PackApproval, type PackPresetsPort, type PackSkillsPort } from './pack-extras.js';
+import { approvalDiff, installedSkillsOf, PackExtrasRefusal, packSkillOrigin, planExtras, withdrawPackExtras, writePresets, writeSkills, type ExtrasPlan, type PackApproval, type PackPresetsPort, type PackSkillsPort } from './pack-extras.js';
 
 export type { PackApproval, PackPresetsPort, PackSkillsPort } from './pack-extras.js';
 
@@ -451,12 +451,12 @@ export async function installPack(
     );
   }
   const now = new Date().toISOString();
-  // The record keeps what this pack added earlier and no longer ships: it stays installed (the skills root has no
-  // removal) and stays its own. Kept from the record alone, so an install never waits on the skills root for it.
-  const keptSkills = earlier.skills.filter((k) => !plan.skills.some((s) => s.key === k.key));
-  const keptPresets = [...owned.presets].filter((id) => !plan.blocks.some((b) => b.id === id));
-  const packSkills = [...plan.skills.map((k) => ({ name: k.name, key: k.key })), ...keptSkills.filter((k, i, a) => a.findIndex((x) => x.key === k.key) === i)];
-  const packPresets = [...plan.blocks.map((b) => b.id), ...keptPresets];
+  // The record names only skills the skills root holds (a new one is named once it is written, below) and the presets
+  // this install writes. What an earlier version added and this one no longer ships is withdrawn after the write.
+  const packSkills = plan.skills.filter((k) => k.own).map((k) => ({ name: k.name, key: k.key }));
+  const packPresets = plan.blocks.map((b) => b.id);
+  const droppedSkills = earlier.skills.filter((k) => !plan.skills.some((s) => s.key === k.key));
+  const droppedPresets = earlier.presets.filter((id) => !plan.blocks.some((b) => b.id === id));
   const extrasRecord = {
     ...(packSkills.length > 0 ? { skills: packSkills } : {}),
     ...(packPresets.length > 0 ? { presets: packPresets } : {}),
@@ -508,7 +508,7 @@ export async function installPack(
   }
   let installed: ReturnType<EditorRegistry['installPack']>;
   try {
-    installed = deps.registry.installPack(packs, enabled);
+    installed = deps.registry.installPack(packs, enabled, { skills: earlier.skills, presets: [...new Set([...earlier.presets, ...packPresets])] });
   } catch (err) {
     const undone = await presetsWritten.undo();
     // A preset that could not be put back is said, not swallowed: the next install of this pack sees its own stamp
@@ -518,14 +518,33 @@ export async function installPack(
     if (left !== '' && err instanceof Error) err.message = `${err.message}${left}`;
     throw err;
   }
-  const skillsError = await writeSkills(plan, deps.skills ?? null);
+  let skillsError = await writeSkills(plan, deps.skills ?? null, { origin: packSkillOrigin(name) });
+  // What an earlier version of the pack added and this one dropped is switched off (skills) or deleted (presets
+  // still carrying the pack's stamp), and said.
+  const withdrawn = droppedSkills.length > 0 || droppedPresets.length > 0
+    ? await withdrawPackExtras({ packName: name, skills: droppedSkills.map((k) => k.key), presets: droppedPresets, skillsPort: deps.skills ?? null, presetsPort: deps.presets ?? null })
+    : null;
+  // The record now names the skills the root holds; the pack keeps every skill it ever added as its own, so a later
+  // version can bring a withdrawn one back.
+  const held = deps.skills && plan.skills.length > 0 ? deps.skills.store.manifest().skills : {};
+  const current = plan.skills.filter((k) => Object.hasOwn(held, k.key)).map((k) => ({ name: k.name, key: k.key }));
+  const ownedSkills = [...earlier.skills, ...current].filter((k, i, a) => a.findIndex((x) => x.key === k.key) === i);
+  const ownedPresets = [...new Set([...earlier.presets, ...packPresets])].filter((id) => !(withdrawn?.presets.includes(id) ?? false));
+  try {
+    deps.registry.setPackExtras(name, { skills: current, presets: packPresets }, { skills: ownedSkills, presets: ownedPresets });
+  } catch (err) {
+    const why = `the install record could not name the pack’s skills (${err instanceof Error ? err.message : String(err)}); install the pack again`;
+    skillsError = skillsError === null ? why : `${skillsError}; ${why}`;
+  }
+  const records = installed.records.map((r) => deps.registry.get(r.manifest.id) ?? r);
   return {
-    ...(packSkills.length > 0 ? { skills: packSkills } : {}),
+    ...(current.length > 0 ? { skills: current } : {}),
     ...(packPresets.length > 0 ? { presets: packPresets } : {}),
     ...(skillsError !== null ? { skillsError } : {}),
+    ...(withdrawn !== null ? { withdrawn } : {}),
     installed: true,
     updated: installed.updated,
-    editors: installed.records.map((r) => EditorRegistry.view(r)),
+    editors: records.map((r) => EditorRegistry.view(r)),
     ...(installed.removed.length > 0 ? { removed: installed.removed } : {}),
     check: verdict,
     conformance,

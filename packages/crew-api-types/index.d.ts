@@ -5480,6 +5480,10 @@ export interface SkillEntry {
    *  so the two sides of the collision are comparable — the answer's `path` names the file actually
    *  read (api-types 0.28.0). Re-derived by every refresh. */
   upstreamDir: string | null;
+  /** (api-types 0.227.0, crew#1703) Who added it, when it was not the operator: `pack:<pack name>` for a skill an editor
+   *  pack installed. Such a skill is the pack's, not an operator change: it never stops the daemon's garden
+   *  auto-refresh, and a refresh leaves it as it is. Absent for every other skill. */
+  origin?: string;
 }
 
 /** One managed file (plugin-relative path → hashes). `baselineHash` `null` = user-added file;
@@ -16893,13 +16897,37 @@ export interface InstallEditorResponse {
    */
   granted?: string[];
   grantError?: string;
-  /** (api-types 0.227.0, crew#1703) The pack's skills, added to the daemon skills root. Absent when it ships none. */
+  /** (api-types 0.227.0, crew#1703) The pack's skills the daemon skills root now holds (only those written; a
+   *  `skillsError` names any that were not). Absent when there is none. */
   skills?: InstalledPackSkill[];
   /** (api-types 0.227.0, crew#1703) The presets written for the pack's blocks. Absent when it ships none. */
   presets?: string[];
   /** (api-types 0.227.0, crew#1703) Installed, but the skills root could not be published, so workers do not get the
    *  new skills yet: the reason, and what to do (publish from Skills once it is fixed). */
   skillsError?: string;
+  /** (api-types 0.227.0, crew#1703) An update that no longer ships some of the pack's skills or blocks: what it
+   *  switched off and deleted. Absent when the update dropped none. */
+  withdrawn?: PackWithdrawn;
+}
+
+/** (api-types 0.227.0, crew#1703) What a pack's removal or update withdrew. */
+export interface PackWithdrawn {
+  /** Pack skills switched off: workers stop getting them (they stay in the skills root, and an install of the
+   *  pack switches them back on). */
+  skills: string[];
+  /** Presets deleted (only those still carrying the pack's stamp). */
+  presets: string[];
+  /** Some could not be withdrawn: which, and why. */
+  error?: string;
+}
+
+/** `DELETE /editors/:id` → 200. */
+export interface RemoveEditorResponse {
+  removed: true;
+  id: string;
+  /** (api-types 0.227.0, crew#1703) The pack's last editor was removed: the pack's skills and presets this
+   *  withdrew. Absent when the pack added none, or another of its editors is still installed. */
+  withdrawn?: PackWithdrawn;
 }
 
 /**
