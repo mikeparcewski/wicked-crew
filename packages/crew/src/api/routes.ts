@@ -6456,6 +6456,11 @@ export function registerRoutes(
               ],
             }
             : {}),
+          // wicked-core#1463: an "All repos" chat reads every registered repository; a unit whose
+          // repositories pass the container copy-in's cap leaves out those that do not fit (each
+          // with a note in its place) instead of failing every turn. A repo or project scope names
+          // what the person asked about, so its repositories stay required.
+          ...(scope?.kind === 'everything' && readRoots.length > 0 ? { optionalReadRoots: [...readRoots] } : {}),
         };
         const runId = await adapter.launchRun(input);
         // The scope's roots (not the attachments directory) are what a later turn compares against.
