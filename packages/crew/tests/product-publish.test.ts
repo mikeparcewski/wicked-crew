@@ -680,9 +680,9 @@ describe('reading issues back (crew#1911)', () => {
   });
 
   it('freshness runs on a monotonic clock: a wall clock stepped back keeps no read-back fresh (crew#1919)', async () => {
-    const saved = deps.now;
+    const saved = deps.now!;
     delete deps.now;
-    let mono = 1_000_000;
+    let mono = nowMs + 10 * READ_BACK_FRESH_MS; // past every read-back earlier tests left on the tests' clock
     const perf = vi.spyOn(performance, 'now').mockImplementation(() => mono);
     const wall = vi.spyOn(Date, 'now');
     try {
@@ -696,6 +696,7 @@ describe('reading issues back (crew#1911)', () => {
       perf.mockRestore();
       wall.mockRestore();
       deps.now = saved;
+      nowMs = mono; // the read-backs this test left are on its clock: later tests start past them
     }
   });
 

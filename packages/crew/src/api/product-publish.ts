@@ -521,7 +521,8 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
    * refuses a full queue `busy`), for this publication or another on the same source.
    */
   const readBacks = new Map<string, { number: number; expect: string; readBack: 'ok' | 'differs' | 'unreadable'; url: string | null; at: number }>();
-  const clock = (): number => (deps.now ?? Date.now)();
+  // Monotonic (crew#1919): a wall clock stepped back never keeps a read-back fresh. `now` is the tests' clock.
+  const clock = (): number => (deps.now !== undefined ? deps.now() : performance.now());
   /** Observer reads running now, and the slots waiting for them to finish. */
   let observing = 0;
   const drained: Array<() => void> = [];
