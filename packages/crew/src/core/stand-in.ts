@@ -46,8 +46,11 @@ export function settingConsent(who: string, now: number = Date.now()): StandInCo
 export function isSettingConsent(v: unknown): v is StandInConsent {
   if (typeof v !== 'object' || v === null) return false;
   const c = v as Record<string, unknown>;
-  // The engine refuses a blank author and reads `at` as an i64 (ms), so a record it would refuse is no record.
-  return c['scope'] === 'always' && c['via'] === 'setting' && typeof c['by'] === 'string' && c['by'].trim() !== ''
+  // The engine refuses a blank author (Rust's Unicode White_Space), an author that is not valid Unicode (a lone
+  // surrogate), and reads `at` as an i64 (ms): a record it would refuse is no record.
+  const by = c['by'];
+  return c['scope'] === 'always' && c['via'] === 'setting' && typeof by === 'string'
+    && !/^\p{White_Space}*$/u.test(by) && !/\p{Cs}/u.test(by)
     && Number.isSafeInteger(c['at']) && (c['at'] as number) >= 0;
 }
 

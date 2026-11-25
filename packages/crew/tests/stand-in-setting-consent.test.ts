@@ -166,7 +166,8 @@ describe("a launch under standInReview 'always' records the person who saved it 
     expect(launched[0]?.standIn).toMatchObject({ scope: 'always', by: STAND_IN_SETTING_UNRECORDED, via: 'setting' });
     // Out of shape, or a record the engine would refuse (a blank author, a timestamp that is not an i64 of ms).
     const bad = [{ scope: 'job', by: 7 }, { scope: 'always', by: '   ', at: 5, via: 'setting' }, { scope: 'always', by: 'x (human)', at: 1.5, via: 'setting' },
-      { scope: 'always', by: 'x (human)', at: 1e100, via: 'setting' }];
+      { scope: 'always', by: 'x (human)', at: 1e100, via: 'setting' }, { scope: 'always', by: '\u0085 \u2003', at: 5, via: 'setting' },
+      { scope: 'always', by: 'x\ud800 (human)', at: 5, via: 'setting' }];
     for (const [i, standInConsent] of bad.entries()) {
       writeFileSync(file, JSON.stringify({ standInReview: 'always', standInConsent }, null, 2));
       await launch();
