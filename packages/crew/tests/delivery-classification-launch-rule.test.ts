@@ -19,7 +19,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CoreAdapter } from '../src/core/adapter.js';
+import { addonSupportsDomainScope, CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
 import { isCodeWorkDef } from '../src/api/delivery-index.js';
 import { DEFAULT_SETTINGS } from '../src/core/types.js';
@@ -96,6 +96,8 @@ describe('§4.8 — isCodeWorkDef equals the LIVE POST /runs deliver-default rul
     // The defs a plain `POST /runs` launches (X-MIG M11: the catalog now carries every built-in
     // preset; `demo` and the interactive documents launch through their own surfaces, not here).
     const launchable = new Set(['feature', 'bug', 'migration', 'capture-learnings', 'steering-author', 'domain-extraction', 'mcp-server', 'qe-author-tests']);
+    // (J6 K1) A domain model run launches only with its scope, on an engine that carries it (wicked-core#1922).
+    if (!addonSupportsDomainScope()) launchable.delete('domain-extraction');
     const shipped: WorkflowDef[] = adapter.listWorkflows().filter((w) => launchable.has(w.id));
     expect(shipped.map((w) => w.id)).toEqual(expect.arrayContaining(['feature', 'bug', 'capture-learnings', 'qe-author-tests']));
     const decided: Array<{ id: string; deliver: unknown; defaulted: unknown }> = [];
@@ -105,6 +107,7 @@ describe('§4.8 — isCodeWorkDef equals the LIVE POST /runs deliver-default rul
         clisJson: SEATS,
         workflow: def.id,
         repoRef: 'repo-alpha',
+        ...(def.id === 'domain-extraction' ? { domainScope: { intent: 'the rules of the alpha repo' } } : {}),
       });
       expect(status, `${def.id}: ${JSON.stringify(body)}`).toBe(201);
       const runId = body['runId'] as string;

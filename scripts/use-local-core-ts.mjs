@@ -258,33 +258,43 @@ if (missingInputs.length > 0 || newerInputs.length > 0) {
 // directly: the &str constant survives into the cdylib's bytes (verified against a release build
 // with lto=true, strip="symbols").
 const coreRepo = resolve(srcDir, '..', '..');
-const pinSource = join(coreRepo, 'src', 'domain_extraction.rs');
-if (!existsSync(pinSource)) {
-  die(
-    `cannot verify ${addonName}: ${pinSource} not found above the package dir.\n` +
-      `  The pin constant moved, or WICKED_CORE_TS_DIR points outside a wicked-core checkout.\n` +
-      `  Update this check rather than deleting it (FINDING-090; same constant install-local.py reads).`,
+// (J6 K1) From wicked-core#1922 on, `domain-extraction` runs no coverage validator: its steps are two host tools
+// (garden's domain-run, then core's domain-graph), no plan seeds or resolves the pin, and the built addon no longer
+// carries the constant (crew#1909 CI, macOS). An engine of that line says so in its core-ts source
+// (`supports_domain_scope`); for it the pin check has no subject and IDENTITY + FRESHNESS above are the skew guard.
+const coreTsLib = join(srcDir, 'src', 'lib.rs');
+const pinRetired = existsSync(coreTsLib) && /pub fn supports_domain_scope\(/.test(readFileSync(coreTsLib, 'utf8'));
+let pin = null;
+if (!pinRetired) {
+  const pinSource = join(coreRepo, 'src', 'domain_extraction.rs');
+  if (!existsSync(pinSource)) {
+    die(
+      `cannot verify ${addonName}: ${pinSource} not found above the package dir.\n` +
+        `  The pin constant moved, or WICKED_CORE_TS_DIR points outside a wicked-core checkout.\n` +
+        `  Update this check rather than deleting it (FINDING-090; same constant install-local.py reads).`,
+    );
+  }
+  const pinMatch = /COVERAGE_VALIDATOR_PIN:\s*&str\s*=\s*"([0-9a-f]+)"/.exec(
+    readFileSync(pinSource, 'utf8'),
   );
+  if (pinMatch === null) {
+    die(
+      `no COVERAGE_VALIDATOR_PIN in ${pinSource} — the constant moved or was renamed.\n` +
+        `  Update this check rather than deleting it (install-local.py reads the same constant).`,
+    );
+  }
+  pin = pinMatch[1];
+  if (!addonBytes.includes(pin)) {
+    die(
+      `PIN SKEW: the checkout declares coverage validator pin ${pin} but ${addonName} does not\n` +
+        `  carry it — the addon was built from a different revision than this checkout.\n` +
+        `  A daemon on this engine plans with a pin the gate hook will refuse to resolve, and every\n` +
+        `  domain-extraction run fails closed (FINDING-081/-090).\n` +
+        `  Fix: cd ${srcDir} && npm run build   (then re-run this script)`,
+    );
+  }
 }
-const pinMatch = /COVERAGE_VALIDATOR_PIN:\s*&str\s*=\s*"([0-9a-f]+)"/.exec(
-  readFileSync(pinSource, 'utf8'),
-);
-if (pinMatch === null) {
-  die(
-    `no COVERAGE_VALIDATOR_PIN in ${pinSource} — the constant moved or was renamed.\n` +
-      `  Update this check rather than deleting it (install-local.py reads the same constant).`,
-  );
-}
-const pin = pinMatch[1];
-if (!addonBytes.includes(pin)) {
-  die(
-    `PIN SKEW: the checkout declares coverage validator pin ${pin} but ${addonName} does not\n` +
-      `  carry it — the addon was built from a different revision than this checkout.\n` +
-      `  A daemon on this engine plans with a pin the gate hook will refuse to resolve, and every\n` +
-      `  domain-extraction run fails closed (FINDING-081/-090).\n` +
-      `  Fix: cd ${srcDir} && npm run build   (then re-run this script)`,
-  );
-}
+const pinSaid = pin === null ? 'no coverage validator pin (the engine runs none)' : `pin ${pin}`;
 
 if (checkOnly) {
   // Verify the LINKED addon too — `--check` answers "is the platform current?", and the linked
@@ -299,7 +309,7 @@ if (checkOnly) {
         `  Fix: node scripts/use-local-core-ts.mjs   (without --check)`,
     );
   }
-  if (!readFileSync(linked).includes(pin)) {
+  if (pin !== null && !readFileSync(linked).includes(pin)) {
     die(
       `PIN SKEW: the LINKED addon at ${linked} does not carry pin ${pin} declared by the\n` +
         `  checkout — it was linked from an older build (FINDING-090).\n` +
@@ -307,7 +317,7 @@ if (checkOnly) {
     );
   }
   console.log(
-    `use-local-core-ts: verified — build current (${artifact}), pin ${pin} carried by source and linked addon.`,
+    `use-local-core-ts: verified — build current (${artifact}), ${pinSaid}${pin === null ? '' : ' carried by source and linked addon'}.`,
   );
   process.exit(0);
 }
@@ -340,7 +350,7 @@ if (process.platform === 'darwin') {
 // The artifact that will actually load, asked directly. The copy and the re-sign both just ran, so
 // this can only fail if one of them corrupted the file — in which case exit 1 is the difference
 // between a diagnosis here and a SIGKILL three commands later.
-if (!readFileSync(join(destDir, addonName)).includes(pin)) {
+if (pin !== null && !readFileSync(join(destDir, addonName)).includes(pin)) {
   die(
     `the copied addon at ${join(destDir, addonName)} lost pin ${pin} between source and\n` +
       `  destination — the copy or the re-sign corrupted it. Do not use this install.`,
@@ -353,5 +363,5 @@ console.log(
     `  -> ${destDir}\n` +
     `  ${files.join(', ')} (${(size / 1024 / 1024).toFixed(1)} MiB addon)` +
     (process.platform === 'darwin' ? ', re-signed ad-hoc' : '') +
-    `\n  verified: addon is the current build (${artifact}), carries pin ${pin}`,
+    `\n  verified: addon is the current build (${artifact}), ${pin === null ? pinSaid : `carries pin ${pin}`}`,
 );

@@ -11,6 +11,7 @@ import { join } from 'node:path';
 
 import type { DomainScopeCard } from 'wicked-crew-api-types';
 
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { gardenLauncher, unmarkedEnv } from '../learn/scheduler.js';
 
 /** How the scope's process ended: its exit code, killed at the time limit, or never started. */
@@ -40,7 +41,8 @@ export const execScope: ScopeExec = (cmd, args, opts) =>
       clearTimeout(timer);
       resolve(r);
     };
-    const child = spawn(cmd, args, { env: opts.env, stdio: ['ignore', 'ignore', 'pipe'], detached: group });
+    // childEnvWithBootEstateDb: no daemon governance store and no raw credential reach garden (crew#495, crew#1843).
+    const child = spawn(cmd, args, { env: childEnvWithBootEstateDb(opts.env), stdio: ['ignore', 'ignore', 'pipe'], detached: group });
     const timer = setTimeout(() => {
       timedOut = true;
       try {
@@ -48,7 +50,7 @@ export const execScope: ScopeExec = (cmd, args, opts) =>
         else if (child.pid !== undefined) {
           // Windows has no process groups: taskkill ends the tree, and the limit answers when it is done, whether or
           // not a descendant still holds stderr.
-          spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' }).on('close', () => done({ outcome: 'timeout', stderr }));
+          spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { env: childEnvWithBootEstateDb(process.env), stdio: 'ignore' }).on('close', () => done({ outcome: 'timeout', stderr }));
         }
       } catch {
         // already gone

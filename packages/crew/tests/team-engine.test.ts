@@ -9,7 +9,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
-import { CoreAdapter, engineSupportsPlanLaunch } from '../src/core/adapter.js';
+import { addonSupportsDomainScope, CoreAdapter, engineSupportsPlanLaunch } from '../src/core/adapter.js';
 import { busTesting, readBus } from '../src/core/bus.js';
 import { createServer } from '../src/api/server.js';
 import type {
@@ -250,8 +250,11 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
       // Tool step inserted after `test` in catalog order. CI builds the engine from core main while the
       // published wicked-core-ts may predate it, so pin the exact set for whichever engine is linked.
       const walkthrough = entries.some((e) => e.id === 'walkthrough_review');
+      // wicked-core#1922 (J6 C1b) retires `domain_coverage`: the domain model run is two host tool steps. Its engine
+      // says so (`Core.supportsDomainScope`); an older linked engine still carries the step.
+      const coverage = addonSupportsDomainScope() ? [] : ['domain_coverage'];
       expect(entries.filter((e) => e.verified_evidence === true).map((e) => e.id)).toEqual(
-        walkthrough ? ['test', 'walkthrough_review', 'domain_coverage'] : ['test', 'domain_coverage'],
+        walkthrough ? ['test', 'walkthrough_review', ...coverage] : ['test', ...coverage],
       );
     }
     expect(entries.map((e) => e.id)).toEqual(expect.arrayContaining(['understand', 'build', 'review', 'deliver']));
