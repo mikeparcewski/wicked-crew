@@ -207,9 +207,9 @@ describe('the other request surfaces reject unknown fields too', () => {
 // showed crew's bare 404 sentence as "the daemon refused this — requirements_graph.json not
 // generated for this repo yet". The fixture repo has never had the graph generated.
 describe('requirements not generated yet (repo page)', () => {
-  it('answers 404 with code notGenerated and the workflow that generates it', async () => {
+  it('answers 200 with code notGenerated and the workflow that generates it (studio#986: not a 404)', async () => {
     const res = await fetch(`${baseUrl}/api/v1/repos/${encodeURIComponent(repoId)}/requirements`);
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       error: 'No requirements graph yet for this repository',
       code: 'notGenerated',
