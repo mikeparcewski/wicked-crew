@@ -171,6 +171,7 @@ export class CutLauncher implements ProposalDispatcher {
     try {
       call = await this.deps.bridgeFor(r.projectId);
     } catch (err) {
+      if (err instanceof LaunchRefusal) throw err;
       throw new Error(`The video tool isn't running here: ${err instanceof Error ? err.message : String(err)}`);
     }
     if (call === null) throw new LaunchRefusal(409, { code: 'cut_gone', error: 'This video is no longer on this daemon.' });
@@ -218,13 +219,14 @@ export class CutLauncher implements ProposalDispatcher {
       throw new Error(`The new version couldn't be made: ffmpeg isn't installed. ${typeof b['hint'] === 'string' ? b['hint'] : 'Install ffmpeg.'} Nothing changed.`);
     }
     if (res.status === 400 && b['error'] === 'ffmpeg_failed') {
-      const detail = typeof b['detail'] === 'string' ? b['detail'].trim().split('\n').pop()!.slice(0, 200) : 'the encoder failed';
+      // The tool's last stderr line, without its own end mark: the sentence ends once (R2 C1).
+      const detail = typeof b['detail'] === 'string' ? unended(b['detail'].trim().split('\n').pop()!.slice(0, 200)) || 'the encoder failed' : 'the encoder failed';
       throw new Error(`The new version couldn't be made: ${detail}. Nothing changed.`);
     }
     if ((res.status === 409 && (b['error'] === 'cut_unverified' || b['error'] === 'cut_document')) || (res.status === 404 && b['error'] === 'no_cut')) {
       throw new LaunchRefusal(409, { code: 'cut_refused', error: typeof b['message'] === 'string' ? b['message'] : "This video can't be changed here." });
     }
-    throw new Error(`The new version couldn't be made (the video tool answered ${res.status}${typeof b['error'] === 'string' ? `: ${b['error']}` : ''}). Nothing changed.`);
+    throw new Error(`The new version couldn't be made (the video tool answered ${res.status}${typeof b['error'] === 'string' ? `: ${unended(b['error'])}` : ''}). Nothing changed.`);
   }
 }
 
@@ -237,3 +239,6 @@ export function cutInterruptedWords(msg: string): string {
   const said = /[.!?]$/u.test(s) ? s : `${s}.`;
   return /\b(Go again|try again|Ask again)\b/u.test(said) ? said : `${said} Go again to try once more.`;
 }
+
+/** A quoted fragment without its own trailing end marks, so crew's sentence around it ends once. */
+const unended = (s: string): string => s.trim().replace(/[.!?]+$/u, '');

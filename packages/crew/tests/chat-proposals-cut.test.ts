@@ -426,6 +426,7 @@ describe('cut proposals: round-2 folds (crew#1814 R2 C1, C2)', () => {
     const cases: Array<[Answer | 'lose' | 'drop' | 'old' | 'broken', string]> = [
       ['lose', 'I lost track of the new version while it was being made (fetch failed). Go again checks whether it finished.'],
       [{ method: 'POST', path: '', status: 400, answer: { error: 'ffmpeg_failed', detail: 'frame 1\nError opening output file' } }, "The new version couldn't be made: Error opening output file. Nothing changed. Go again to try once more."],
+      [{ method: 'POST', path: '', status: 400, answer: { error: 'ffmpeg_failed', detail: 'frame 1\nConversion failed!' } }, "The new version couldn't be made: Conversion failed. Nothing changed. Go again to try once more."],
       [{ method: 'POST', path: '', status: 400, answer: { error: 'ffmpeg_missing' } }, "The new version couldn't be made: ffmpeg isn't installed. Install ffmpeg. Nothing changed. Go again to try once more."],
       [{ method: 'POST', path: '', status: 500, answer: { error: 'internal' } }, "The new version couldn't be made (the video tool answered 500: internal). Nothing changed. Go again to try once more."],
       ['old', CUT_OLD_TOOL],
