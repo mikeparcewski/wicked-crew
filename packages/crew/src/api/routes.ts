@@ -4024,7 +4024,9 @@ export function registerRoutes(
         }
         // No helper signed in at all: the engine's own launch refusal (`no_eligible_seat`) names each benched seat, its
         // cause and the remedy; there is nothing a stand-in could stand in from.
-        const refusal = preflight === null || preflight.signedIn.length === 0 ? null : preflightRefusal(preflight);
+        // (crew#1932) No plan and no workflow: the engine runs one neutral unit, which seats no independent role.
+        const oneStep = input.plan === undefined && input.workflow === undefined && input.power !== true;
+        const refusal = preflight === null || preflight.signedIn.length === 0 ? null : preflightRefusal(preflight, oneStep);
         if (refusal !== null && (consent === null || refusal.code === 'no_usable_helper')) return reply.code(409).send(refusal);
       }
       if (consent !== null) {

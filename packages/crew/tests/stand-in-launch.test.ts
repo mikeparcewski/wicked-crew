@@ -81,10 +81,13 @@ describe('stand-in consent and refusal bodies (pure)', () => {
     expect(e).not.toMatch(/signed in/i);
     expect(e).not.toMatch(/standIns/);
     expect(e).toMatch(/Use stand-ins for this job or for every job, or add another helper to the job\.$/);
+    // (crew#1932) Short only on roles a run needs if an event calls for them: no question at launch (the run's gate asks).
     const condOnly = { ...p, roles: p.roles.map((r) => (r.conditional ? r : { ...r, shortBy: 0 })) };
-    const e2 = preflightRefusal(condOnly)!.error;
-    expect(e2).toMatch(/^If the job calls for them, it needs a rules checker, a rules council, a council and a monitor that did not build the work, and this job's helpers can't be those\./);
-    expect(e2).not.toMatch(/signed in|standIns/);
+    expect(preflightRefusal(condOnly)).toBeNull();
+    // A conditional role no helper can stand in for does not refuse the launch either.
+    expect(preflightRefusal({ ...condOnly, roles: condOnly.roles.map((r) => (r.conditional ? { ...r, canStandIn: false, standInFrom: null } : r)) })).toBeNull();
+    // One step (no plan, no workflow): never asked, whatever is short.
+    expect(preflightRefusal(p, true)).toBeNull();
     expect((preflightRefusal(p) as { choices: Array<{ id: string; label: string }> }).choices.find((c) => c.id === 'sign_in')?.label).toBe('Add or sign in another helper');
   });
 
