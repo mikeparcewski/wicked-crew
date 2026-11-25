@@ -419,6 +419,7 @@ import { VoiceService, defaultVoiceDir } from '../voice/service.js';
 import { TtsService } from '../voice/tts.js';
 import { VoiceDashboardStore } from '../voice/dashboard.js';
 import { registerVoiceRoutes } from '../voice/routes.js';
+import { DeskSnoozes, registerDeskSnoozeRoutes } from './desk-snoozes.js';
 import { VoiceInjectInputs } from '../voice/inject-input.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
@@ -1976,6 +1977,7 @@ export function registerRoutes(
     service: new VoiceService({ dir: defaultVoiceDir() }),
     dashboard: (() => { try { return VoiceDashboardStore.under(crewStateHome()); } catch { return null; } })(),
   };
+  registerDeskSnoozeRoutes(app, { snoozes: new DeskSnoozes(audit) });
   registerVoiceRoutes(app, { voice: voice.service, tts: voice.tts ?? new TtsService({ dir: defaultVoiceDir() }), dashboard: voice.dashboard, audit });
   const voiceInputs = runtime.voiceInputs ?? new VoiceInjectInputs();
   const openWithOs = runtime.openWithOs ?? openWithSystemDefault;
