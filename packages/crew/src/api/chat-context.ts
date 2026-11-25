@@ -42,7 +42,7 @@ import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import { anchorTexts, outlineOf } from './artifact-outline.js';
 import { buildRunBrief, fenced } from './run-brief.js';
 import { BeneathError, beneathMode, createBeneath, mkdirBeneath, readBeneath, statBeneath } from './beneath.js';
-import { cutChangeNote, cutDataLines, headProblem, readCut, unended, type CutBridgeCall } from './cut-read.js';
+import { cutChangeNote, cutDataLines, headProblem, readCut, toolNotRunning, type CutBridgeCall } from './cut-read.js';
 
 /** The Unfiled mount in an artifact ref (studio's mount alias `default` is read as it). */
 export const UNFILED_MOUNT = '_unfiled';
@@ -668,7 +668,7 @@ export async function buildTurnContext(input: TurnContextInput, deps: ChatContex
         else {
           // The video tool not starting (or too old to adopt) is an answer for the seat, never a send that fails.
           const call = await deps.cutBridge(ref.projectId).catch((err: unknown) => new Error(err instanceof Error ? err.message : String(err)));
-          const got = call instanceof Error ? { state: 'unavailable' as const, why: `The video tool isn't running here: ${unended(call.message)}.` }
+          const got = call instanceof Error ? { state: 'unavailable' as const, why: toolNotRunning(call) }
             : call === null ? { state: 'unavailable' as const, why: 'This video is no longer on this daemon.' } : await readCut(call, ref.doc);
           if ('state' in got) cutNoteLines = cutChangeNote(ref.ref, { why: got.why });
           else if (got.head !== artifact.head) cutNoteLines = cutChangeNote(ref.ref, { why: `It changed while this message was being sent (now version ${got.head}). Ask them to send it again.` });

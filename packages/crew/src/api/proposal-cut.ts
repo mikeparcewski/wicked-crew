@@ -12,7 +12,7 @@ import { z } from '../zod.js';
 import type { ArtifactProposal, CutOp, ProposalCut, ChatContextBinding } from '../core/types.js';
 import { LaunchRefusal, type ProposalDispatch, type ProposalDispatcher } from './chat-proposals.js';
 import { ARTIFACT_REF, parseArtifactRef } from './chat-context.js';
-import { CUT_OLD_TOOL, CUT_OPS_MAX, CUT_SAY_MAX, CUT_TITLE_MAX, headProblem, readCut, unended, type CutBridgeCall, type CutRead, type CutUnavailable } from './cut-read.js';
+import { CUT_OLD_TOOL, CUT_OPS_MAX, CUT_SAY_MAX, CUT_TITLE_MAX, headProblem, readCut, toolNotRunning, unended, type CutBridgeCall, type CutRead, type CutUnavailable } from './cut-read.js';
 
 /** Words longer than this give no card at all (S7): resolve checks the real limits and says why below it. */
 const PARSE_TEXT_MAX = 4000;
@@ -99,7 +99,7 @@ export async function resolveCut(block: CutBlockBody, turn: CutTurn, deps: CutRe
   else {
     // The video tool not starting (or too old to adopt) blocks the card with why, never drops it.
     const call = await deps.bridgeFor(ref.projectId).catch((err: unknown) => new Error(err instanceof Error ? err.message : String(err)));
-    const got = call instanceof Error ? ({ state: 'unavailable', why: `The video tool isn't running here: ${unended(call.message)}.` } as CutUnavailable)
+    const got = call instanceof Error ? ({ state: 'unavailable', why: toolNotRunning(call) } as CutUnavailable)
       : call === null ? ({ state: 'unavailable', why: 'This video is no longer on this daemon.', gone: true } as CutUnavailable) : await readCut(call, ref.doc);
     if ('state' in got) blocked = got.why;
     else if (got.head !== open.head) blocked = `The video changed while I was answering (now version ${got.head}). Ask again to change the new version.`;
@@ -173,7 +173,7 @@ export class CutLauncher implements ProposalDispatcher {
       call = await this.deps.bridgeFor(r.projectId);
     } catch (err) {
       if (err instanceof LaunchRefusal) throw err;
-      throw new Error(`The video tool isn't running here: ${unended(err instanceof Error ? err.message : String(err))}.`);
+      throw new Error(toolNotRunning(err));
     }
     if (call === null) throw new LaunchRefusal(409, { code: 'cut_gone', error: 'This video is no longer on this daemon.' });
     return { call, doc: r.doc };
@@ -227,7 +227,8 @@ export class CutLauncher implements ProposalDispatcher {
     if ((res.status === 409 && (b['error'] === 'cut_unverified' || b['error'] === 'cut_document')) || (res.status === 404 && b['error'] === 'no_cut')) {
       throw new LaunchRefusal(409, { code: 'cut_refused', error: typeof b['message'] === 'string' ? b['message'] : "This video can't be changed here." });
     }
-    throw new Error(`The new version couldn't be made (the video tool answered ${res.status}${typeof b['error'] === 'string' ? `: ${unended(b['error'])}` : ''}). Nothing changed.`);
+    const said = typeof b['error'] === 'string' ? unended(b['error']) : '';
+    throw new Error(`The new version couldn't be made (the video tool answered ${res.status}${said !== '' ? `: ${said}` : ''}). Nothing changed.`);
   }
 }
 
@@ -240,5 +241,3 @@ export function cutInterruptedWords(msg: string): string {
   const said = /[.!?]$/u.test(s) ? s : `${s}.`;
   return /\b(Go again|try again|Ask again)\b/u.test(said) ? said : `${said} Go again to try once more.`;
 }
-
-/** A quoted fragment without its own trailing end marks, so crew's sentence around it ends once. */

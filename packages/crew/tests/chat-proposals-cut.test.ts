@@ -20,7 +20,7 @@ import {
   type ProposalDispatcher,
 } from '../src/api/chat-proposals.js';
 import { CutLauncher, refusalWords } from '../src/api/proposal-cut.js';
-import { CUT_OLD_TOOL, type CutBridgeCall } from '../src/api/cut-read.js';
+import { CUT_OLD_TOOL, toolNotRunning, type CutBridgeCall } from '../src/api/cut-read.js';
 import { chatMakeDigest, chatMakeLines } from '../src/api/chat-scope.js';
 
 type Answer = { method: string; path: string; body?: Record<string, unknown>; status: number; answer: Record<string, unknown> };
@@ -522,5 +522,12 @@ describe('cut card words (coord R2 F6 on studio#1409)', () => {
     const r = rig({ bridge: async () => { throw new Error('the bridge on port 4100 is 0.16.2.'); } });
     const p = (await propose(r, 'c1', turn(r, 'c1'), block()))!;
     expect(p.blocked).toBe("The video tool isn't running here: the bridge on port 4100 is 0.16.2.");
+  });
+
+  it.each(['', '   ', '...', 'stopped…'])('a video tool that will not start with the error %j still reads as one sentence', async (msg) => {
+    const r = rig({ bridge: async () => { throw new Error(msg); } });
+    const p = (await propose(r, 'c1', turn(r, 'c1'), block()))!;
+    expect(p.blocked).toBe(msg === 'stopped…' ? "The video tool isn't running here: stopped." : "The video tool isn't running here.");
+    expect(toolNotRunning(msg)).toBe(p.blocked);
   });
 });
