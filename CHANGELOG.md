@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+
+- `npm run stamp:api-types -- <X.Y.Z>` stamps `wicked-crew-api-types` once per release train (coord ruling, train 15). A pull request that changes the contract now tags what it adds `(api-types next)` and leaves the package version, crew's caret and `package-lock.json` alone. The train's crew version PR runs the stamp. It sets the version and the caret, edits the two lockfile fields in place, turns each `next` tag in `index.d.ts`, crew's src and this file into the number, and regenerates the endpoint manifest and the API sample test. `--check` is the guard. CI runs it on a PR that moves crew's version, the api-types release runs it before publishing, and crew's release runs it as a job of its own that publish does not wait on. It fails on a `next` tag left behind, on a caret, lockfile entry or endpoint manifest naming another version, and when the contract on disk differs from its `api-types-v<version>` tag. Feature PRs no longer pick numbers that collide, so they stop re-stamping and re-running CI. The rule is in the api-types README.
+
 ## [0.18.22] — 2026-11-25
 
 Patch release on the train-14 cut c56940f8, carrying 31 PRs since 0.18.21: #1867, #1868, #1870, #1871, #1869, #1875, #1819, #1766, #1872, #1873, #1893, #1882, #1887, #1874, #1889, #1897, #1899, #1894, #1898, #1904, #1908, #1878, #1900, #1877, #1913, #1914, #1917, #1910, #1920, #1921, #1888.
