@@ -500,6 +500,9 @@ export const ProductPublishSchema = z
  */
 const NOT_SENT = new Set(['source_off', 'busy', 'rate_limited', 'remote_work_pending', 'secret_missing', 'credential_changed', 'gh_not_installed', 'gh_signed_out', 'gh_token_unavailable']);
 
+/** How long an issue read back as matching is trusted before a GET reads it again (crew#1911). */
+export const READ_BACK_FRESH_MS = 60_000;
+
 export function registerProductPublishRoutes(app: FastifyInstance, deps: ProductPublishDeps): void {
   /** Publications being sent or resolved now, taken before the first await (DES Send step 1). */
   const slots = new Set<string>();

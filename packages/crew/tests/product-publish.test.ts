@@ -16,7 +16,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 
 import { AuditLog, appendLineSynced } from '../src/api/audit.js';
 import { composeFactsOf, type ComposeLevel } from '../src/api/compose-facts.js';
-import { type ProductPublishDeps, registerProductPublishRoutes, strippedCharacter } from '../src/api/product-publish.js';
+import { type ProductPublishDeps, READ_BACK_FRESH_MS, registerProductPublishRoutes, strippedCharacter } from '../src/api/product-publish.js';
 import { RunTimingIndex } from '../src/api/run-timing-index.js';
 import type { Actor, ProductPublicationsResponse, ProductPublishResponse, SessionView } from '../src/core/types.js';
 import { DataGate } from '../src/knowledge/gate/gate.js';
@@ -70,6 +70,8 @@ let index: RunTimingIndex;
 let actor: Actor;
 let app: FastifyInstance;
 let deps: ProductPublishDeps;
+/** The routes' clock (crew#1911): each test starts past every read-back an earlier test left fresh. */
+let nowMs = Date.now();
 let auditPath: string;
 
 function toolsOf(writeOn = true) {
@@ -160,6 +162,7 @@ beforeAll(async () => {
     audit: new AuditLog(auditPath, () => undefined),
     actorOf: () => actor,
     journalDir: join(base, 'j0'),
+    now: () => nowMs,
   };
   app = Fastify({ logger: false });
   registerProductPublishRoutes(app, deps);
@@ -178,6 +181,7 @@ beforeEach(() => {
   output = draftText(PLAN);
   facts();
   world();
+  nowMs += READ_BACK_FRESH_MS + 1;
   deps.journalDir = join(base, `j-${randomUUID().slice(0, 8)}`);
   delete deps.appendLine;
   delete deps.syncJournalDirs;
@@ -630,8 +634,73 @@ describe('who may publish, and the read-back', () => {
     st.issues[0]!.title = 'Accounts (renamed on GitHub)';
     st.issues[2]!.deleted = true;
     writeFileSync(join(ghLog, 'issues.json'), JSON.stringify(st));
+    // (crew#1911) A read-back that matched is trusted for READ_BACK_FRESH_MS; the edit shows once it is due again.
+    expect(((await getPub()).json() as ProductPublicationsResponse).publications[0]!.items.map((i) => i.readBack)).toEqual(['ok', 'ok', 'ok', 'ok']);
+    nowMs += READ_BACK_FRESH_MS;
     const g = (await getPub()).json() as ProductPublicationsResponse;
     expect(g.publications[0]!.items.map((i) => i.readBack)).toEqual(['differs', 'ok', 'unreadable', 'ok']);
     expect(g.publications[0]!.published).toBe(false);
+  });
+});
+
+// crew#1911 — a GET reads GitHub back only where it must, and never beside a send.
+describe('reading issues back (crew#1911)', () => {
+  const reads = () => calls().filter((c) => c.tool === 'issue_read').length;
+
+  it('the send reads each issue back once, right after creating it; a GET while fresh reads nothing', async () => {
+    const order: string[] = [];
+    const real = gate.pm.vendorRead.bind(gate.pm);
+    deps.pm = {
+      vendorRead: async (e, tool, args, cls, before, cred) => {
+        if (tool === 'issue_write' || tool === 'issue_read') order.push(tool === 'issue_write' ? 'create' : 'read');
+        return real(e, tool, args, cls, before, cred);
+      },
+    };
+    expect((await publish()).body).toMatchObject({ publication: { published: true } });
+    expect(order).toEqual(['create', 'read', 'create', 'read', 'create', 'read', 'create', 'read']);
+    const before = reads();
+    const g = (await getPub()).json() as ProductPublicationsResponse;
+    expect(g.publications[0]).toMatchObject({ published: true });
+    expect(reads()).toBe(before);
+  });
+
+  it('a GET past the freshness reads again; one that differs or is unreadable is read on every GET', async () => {
+    await publish();
+    nowMs += READ_BACK_FRESH_MS;
+    let before = reads();
+    await getPub();
+    expect(reads() - before).toBe(4);
+    const st = issues();
+    st.issues[2]!.deleted = true;
+    writeFileSync(join(ghLog, 'issues.json'), JSON.stringify(st));
+    nowMs += READ_BACK_FRESH_MS;
+    await getPub();
+    before = reads();
+    const g = (await getPub()).json() as ProductPublicationsResponse;
+    expect(reads() - before).toBe(1);
+    expect(g.publications[0]!.items.map((i) => i.readBack)).toEqual(['ok', 'ok', 'unreadable', 'ok']);
+  });
+
+  it('a GET while the send holds the publication reads nothing from GitHub, and still shows what was created', async () => {
+    let release!: () => void;
+    let reached!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    const at = new Promise<void>((r) => (reached = r));
+    deps.appendLine = async (p, l, m) => {
+      if (l.includes('"kind":"sending"') && l.includes('"key":"e1.f1.s1"')) {
+        reached();
+        await held;
+      }
+      return appendLineSynced(p, l, m);
+    };
+    const c = await card();
+    const sending = post({ confirm: c.publishHash });
+    await at;
+    const before = reads();
+    const g = (await getPub()).json() as ProductPublicationsResponse;
+    expect(reads()).toBe(before);
+    expect(g.publications[0]!.items.map((i) => [i.state, i.readBack])).toEqual([['created', 'ok'], ['created', 'ok'], ['missing', null], ['missing', null]]);
+    release();
+    expect((await sending).json()).toMatchObject({ publication: { published: true } });
   });
 });
