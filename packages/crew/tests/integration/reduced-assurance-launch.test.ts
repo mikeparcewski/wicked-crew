@@ -1,10 +1,11 @@
 // wicked-core#850 EX-01 at crew's real entry point: `POST /runs` on the real engine (`stub: false`),
 // a ONE-seat roster, a build → review workflow — the one-CLI quickstart.
 //
-//   FULL (the default; nothing sent): the engine refuses to seat the review on its builder's seat.
-//     The run parks at the `dead_seat` gate before any unit runs, the session's contract reads
-//     `full`, and the 201 answer carries `assuranceNotice` naming the one seat and the explicit
-//     opt-in (`retryWith: {retryOf, reducedAssurance: true}`). crew does not apply it.
+//   FULL (the default; nothing sent): the stand-in choice (DES-STANDIN-001 §2.1, §4). A one-seat roster
+//     has no reviewer that did not build the work, so with no consent the launch is refused
+//     `409 stand_in_choice` before anything is created (`retryWith: {standIns: true}`). Before the
+//     choice, the run parked at the `dead_seat` gate; the engine's own suites still pin that gate for
+//     a launch that does not ask (`tests/dead_seat_gate.rs`).
 //   REDUCED (`reducedAssurance: true`, the caller's explicit choice): the contract reads `reduced`,
 //     no `assuranceNotice`, the review runs on the creator's seat with the fallback disclosed
 //     (`distinctnessFallback: creator_seat`), and the receipts say `reduced`.
@@ -43,7 +44,7 @@ let adapter: CoreAdapter;
 let app: Awaited<ReturnType<typeof createServer>>;
 let baseUrl: string;
 let cliPath: string;
-let full: Settled;
+let full: { status: number; body: Record<string, unknown> };
 let reduced: Settled;
 
 async function getJson(path: string): Promise<{ status: number; body: Record<string, unknown> }> {
@@ -136,7 +137,13 @@ beforeAll(async () => {
   });
   expect(wf.status, JSON.stringify(wf.body)).toBeLessThan(300);
 
-  full = await launchAndSettle(RUN_FULL, {});
+  full = await postJson('/api/v1/runs', {
+    problem: 'Build the thing, then review it.',
+    sessionId: RUN_FULL,
+    workflow: WORKFLOW,
+    entityMode: 'shared',
+    clisJson: JSON.stringify([{ key: SEAT, display_name: 'Solo', binary: process.execPath, headless_invocation: `${process.execPath} ${cliPath} {PROMPT}` }]),
+  });
   reduced = await launchAndSettle(RUN_REDUCED, { reducedAssurance: true, humanConfirm: 'none' });
 }, 150_000);
 
@@ -156,24 +163,15 @@ afterAll(async () => {
 });
 
 describe('a one-seat build → review launch under FULL assurance (the default)', () => {
-  it('the contract reads full and the engine refuses the creator-seat review: the run parks at the dead_seat gate before any unit runs', () => {
-    expect(full.session['assurance']).toEqual({ mode: 'full', required: ['distinct_evaluator', 'judge'] });
-    expect(ofType(full.events, 'sessionStarted')[0]?.['assurance']).toEqual({ mode: 'full', required: ['distinct_evaluator', 'judge'] });
-    expect(String(full.session['status'])).toBe('awaiting_human');
-    const gates = ofType(full.events, 'gateEscalated');
-    expect(gates).toHaveLength(1);
-    expect(gates[0]).toMatchObject({ condition: 'dead_seat', denialSource: 'dead_seat' });
-    expect(String(gates[0]!['verdictSummary'])).toContain('requires a distinct evaluator');
-    expect(ofType(full.events, 'unitDispatched')).toHaveLength(0);
-  });
-
-  it('the 201 answer names the one seat and the explicit opt-in, and crew did not apply it', () => {
-    expect(full.launch['assuranceNotice']).toMatchObject({
-      code: 'single_cli_roster',
-      seats: [SEAT],
-      retryWith: { retryOf: RUN_FULL, reducedAssurance: true },
-    });
-    expect(String((full.launch['assuranceNotice'] as { message: string }).message)).toContain('reducedAssurance');
+  it('is refused 409 stand_in_choice before anything is created: the reviewer is short and a stand-in could fill it', async () => {
+    expect(full.status, JSON.stringify(full.body)).toBe(409);
+    expect(full.body).toMatchObject({ code: 'stand_in_choice', retryWith: { standIns: true } });
+    const roles = ((full.body['preflight'] as { roles?: Array<{ role: string; shortBy: number; canStandIn: boolean }> }).roles ?? [])
+      .filter((r) => r.shortBy > 0);
+    expect(roles.map((r) => r.role)).toContain('evaluator');
+    expect(roles.every((r) => r.canStandIn)).toBe(true);
+    expect(full.body['runId']).toBeUndefined();
+    expect((await getJson(`/api/v1/runs/${RUN_FULL}`)).status).toBe(404);
   });
 });
 
@@ -200,8 +198,7 @@ describe('the same launch with reducedAssurance: true (the explicit opt-in)', ()
       reducedAssurance: false,
       clisJson: JSON.stringify([{ key: SEAT, display_name: 'Solo', binary: process.execPath, headless_invocation: `${process.execPath} ${cliPath} {PROMPT}` }]),
     });
-    expect(res.status, JSON.stringify(res.body)).toBe(201);
-    expect(res.body['assuranceNotice']).toMatchObject({ code: 'single_cli_roster' });
-    await postJson('/api/v1/runs/it-assurance-full-explicit-1/cancel', {}).catch(() => undefined);
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    expect(res.body).toMatchObject({ code: 'stand_in_choice', retryWith: { standIns: true } });
   });
 });

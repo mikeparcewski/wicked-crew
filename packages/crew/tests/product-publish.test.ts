@@ -679,6 +679,27 @@ describe('reading issues back (crew#1911)', () => {
     expect(reads()).toBe(before);
   });
 
+  it('freshness runs on a monotonic clock: a wall clock stepped back keeps no read-back fresh (crew#1919)', async () => {
+    const saved = deps.now!;
+    delete deps.now;
+    let mono = nowMs + 10 * READ_BACK_FRESH_MS; // past every read-back earlier tests left on the tests' clock
+    const perf = vi.spyOn(performance, 'now').mockImplementation(() => mono);
+    const wall = vi.spyOn(Date, 'now');
+    try {
+      await publish();
+      wall.mockReturnValue(Date.now() - 3_600_000); // the wall clock steps back an hour
+      mono += READ_BACK_FRESH_MS + 1;
+      const before = reads();
+      await getPub();
+      expect(reads() - before).toBe(4);
+    } finally {
+      perf.mockRestore();
+      wall.mockRestore();
+      deps.now = saved;
+      nowMs = mono; // the read-backs this test left are on its clock: later tests start past them
+    }
+  });
+
   it('a GET past the freshness reads again; one that differs or is unreadable is read on every GET until it matches', async () => {
     await publish();
     nowMs += READ_BACK_FRESH_MS;
@@ -722,7 +743,7 @@ describe('reading issues back (crew#1911)', () => {
     expect(g.publications[0]!.items.map((x) => x.readBack)).toEqual(['differs', 'differs', 'ok', 'ok']);
   });
 
-  it('while any publication is being sent, a GET reads nothing and a card waits; an issue not read yet shows unreadable', async () => {
+  it('while any publication is being sent, a GET reads nothing and a card waits; an issue not read yet is not checked yet (null)', async () => {
     world({ lib: true });
     // owner/lib is published first: a second publication on the same source, which the GET also reads back.
     const lc = (await post({ repo: 'owner/lib' })).json() as { publishHash: string };
@@ -761,7 +782,10 @@ describe('reading issues back (crew#1911)', () => {
       let g = (await getPub()).json() as ProductPublicationsResponse;
       expect(scheduled()).toBe(before);
       const app = (x: ProductPublicationsResponse) => x.publications.find((p) => p.repo === 'owner/app')!;
-      expect(app(g).items.map((i) => [i.state, i.readBack])).toEqual([['created', 'ok'], ['created', 'unreadable'], ['missing', null], ['missing', null]]);
+      // (crew#1919) e1.f1 is created and not read back yet: 'not checked yet', never 'unreadable' (which reads as deleted).
+      expect(app(g).items.map((i) => [i.state, i.readBack])).toEqual([['created', 'ok'], ['created', null], ['missing', null], ['missing', null]]);
+      expect(app(g).items[1]).toMatchObject({ number: appE1f1, url: expect.stringContaining(`/issues/${appE1f1}`) });
+      expect(app(g).published).toBe(false);
       readE1f1.release();
       await sentS1.at;
       nowMs += READ_BACK_FRESH_MS; // nothing is fresh now: an observer would read if it could
@@ -777,6 +801,39 @@ describe('reading issues back (crew#1911)', () => {
       sentS1.release();
     }
     expect((await sending).json()).toMatchObject({ publication: { published: true } });
+  });
+
+  it('every issue created and one not checked yet is not published; once crew has checked it, it is (crew#1919)', async () => {
+    const lastRead = gateOf();
+    const vr = real();
+    let last: number | null = null;
+    deps.pm = {
+      vendorRead: async (e, tool, args, cls, before, cred) => {
+        // The sender's read-back of the last story: every issue's `created` line is on disk, this read-back not done.
+        if (tool === 'issue_read' && args['issue_number'] === last) {
+          lastRead.reached();
+          await lastRead.held;
+        }
+        const r = await vr(e, tool, args, cls, before, cred);
+        if (tool === 'issue_write' && args['title'] === 'Sign out from any page') last = issues().issues.at(-1)!.number;
+        return r;
+      },
+    };
+    const c = await card();
+    const sending = post({ confirm: c.publishHash });
+    try {
+      await lastRead.at;
+      const before = reads();
+      const g = (await getPub()).json() as ProductPublicationsResponse;
+      expect(reads()).toBe(before);
+      expect(g.publications[0]!.items.map((i) => [i.state, i.readBack])).toEqual([['created', 'ok'], ['created', 'ok'], ['created', 'ok'], ['created', null]]);
+      expect(g.publications[0]!.published).toBe(false);
+    } finally {
+      lastRead.release();
+    }
+    const done = (await sending).json() as { publication: { published: boolean; items: Array<{ readBack: string | null }> } };
+    expect(done.publication.items.map((i) => i.readBack)).toEqual(['ok', 'ok', 'ok', 'ok']);
+    expect(done.publication.published).toBe(true);
   });
 
   it('a send waits for an observer read already on the source queue before it does anything', async () => {

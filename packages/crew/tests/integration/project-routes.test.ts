@@ -196,7 +196,7 @@ describe('launch filing (§2.2) + the durable prompt inbox (§5.3)', () => {
     const unknown = await req('POST', '/runs', {
       problem: 'p',
       sessionId: 'never-a',
-      clisJson: STUB_CLIS,
+      clisJson: STUB_CLIS, standIns: true,
       projectId: 'proj_nope',
     });
     expect(unknown.status).toBe(404);
@@ -207,7 +207,7 @@ describe('launch filing (§2.2) + the durable prompt inbox (§5.3)', () => {
     const archived = await req('POST', '/runs', {
       problem: 'p',
       sessionId: 'never-b',
-      clisJson: STUB_CLIS,
+      clisJson: STUB_CLIS, standIns: true,
       projectId: graveyard.id,
     });
     expect(archived.status).toBe(409);
@@ -216,7 +216,7 @@ describe('launch filing (§2.2) + the durable prompt inbox (§5.3)', () => {
     const launched = await req('POST', '/runs', {
       problem: 'Do step one. Do step two',
       sessionId: 'gated-run',
-      clisJson: STUB_CLIS,
+      clisJson: STUB_CLIS, standIns: true,
       humanConfirm: 'before:1',
       projectId: project.id,
     });
@@ -308,7 +308,7 @@ describe('launch filing (§2.2) + the durable prompt inbox (§5.3)', () => {
     const unfiled = await req('POST', '/runs', {
       problem: 'Do one thing',
       sessionId: 'unfiled-run',
-      clisJson: STUB_CLIS,
+      clisJson: STUB_CLIS, standIns: true,
     });
     expect(unfiled.status).toBe(201);
     await waitForStatus('unfiled-run', 'completed');

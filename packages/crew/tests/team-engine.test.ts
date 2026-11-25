@@ -94,7 +94,7 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
   async function launchHeld(sessionId: string, extra: Record<string, unknown> = {}): Promise<void> {
     const res = await fetch(
       `${baseUrl}/api/v1/runs`,
-      json({ problem: 'add SSO login', sessionId, clisJson: SEATS, plan: { steps: [{ catalog: 'build' }], touch: TOUCH }, ...extra }),
+      json({ problem: 'add SSO login', sessionId, clisJson: SEATS, standIns: true, plan: { steps: [{ catalog: 'build' }], touch: TOUCH }, ...extra }),
     );
     expect(res.status, await res.clone().text()).toBe(201);
     await waitFor('the plan_approval pause', async () =>
@@ -191,7 +191,7 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
   });
 
   it('(b) an un-teamed run answers units: []', async () => {
-    const res = await fetch(`${baseUrl}/api/v1/runs`, json({ problem: 'free text', sessionId: 't8-plain', clisJson: SEATS }));
+    const res = await fetch(`${baseUrl}/api/v1/runs`, json({ problem: 'free text', sessionId: 't8-plain', clisJson: SEATS, standIns: true }));
     expect(res.status, await res.clone().text()).toBe(201);
     const team = (await (await fetch(`${baseUrl}/api/v1/runs/t8-plain/team`)).json()) as RunTeamResponse;
     expect(team.units).toEqual([]);
@@ -314,7 +314,7 @@ describe.skipIf(!ENGINE_HAS_TEAM_READ)('the team surface through the real engine
     // waits past the default test timeout.
     const res = await fetch(
       `${baseUrl}/api/v1/runs`,
-      json({ problem: 'add SSO login', sessionId: 't8-x1', clisJson: SEATS, plan: { steps: [{ catalog: 'build' }] } }),
+      json({ problem: 'add SSO login', sessionId: 't8-x1', clisJson: SEATS, standIns: true, plan: { steps: [{ catalog: 'build' }] } }),
     );
     expect(res.status, await res.clone().text()).toBe(201);
     // Before the scope step decides: rev 1 is `pa-scope` alone, and the run is still scoping.

@@ -99,7 +99,7 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
   it('forwards the plan to the engine as planJson (T2 (g)\'s payload, step id omitted)', async () => {
     await withCapability(ctx.adapter, true, async () => {
       const plan = { steps: [{ catalog: 'build' }] };
-      const res = await fetch(`${ctx.baseUrl}/api/v1/runs`, json({ problem: 'p', clisJson: SEATS, plan }));
+      const res = await fetch(`${ctx.baseUrl}/api/v1/runs`, json({ problem: 'p', clisJson: SEATS, standIns: true, plan }));
       expect(res.status, await res.clone().text()).toBe(201);
       expect(launched).toHaveLength(1);
       const opts = launched[0] as LaunchOptions & { planJson?: string };
@@ -119,7 +119,7 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
       };
       const res = await fetch(
         `${ctx.baseUrl}/api/v1/runs`,
-        json({ problem: 'p', clisJson: SEATS, humanConfirm: 'before:1', plan }),
+        json({ problem: 'p', clisJson: SEATS, standIns: true, humanConfirm: 'before:1', plan }),
       );
       expect(res.status).toBe(201);
       expect(JSON.parse((launched[0] as { planJson?: string }).planJson ?? 'null')).toEqual(plan);
@@ -145,7 +145,7 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
     await withCapability(ctx.adapter, false, async () => {
       const res = await fetch(
         `${ctx.baseUrl}/api/v1/runs`,
-        json({ problem: 'p', clisJson: SEATS, plan: { steps: [{ catalog: 'build' }] } }),
+        json({ problem: 'p', clisJson: SEATS, standIns: true, plan: { steps: [{ catalog: 'build' }] } }),
       );
       expect(res.status).toBe(501);
       expect(((await res.json()) as { error: string }).error).toMatch(/supportsPlanLaunch/);
@@ -278,7 +278,7 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
     await withCapability(ctx.adapter, true, async () => {
       const res = await fetch(
         `${ctx.baseUrl}/api/v1/runs`,
-        json({ problem: 'ship SSO', clisJson: SEATS, workflow: 'feature', deliver: 'pr' }),
+        json({ problem: 'ship SSO', clisJson: SEATS, standIns: true, workflow: 'feature', deliver: 'pr' }),
       );
       expect(res.status, await res.clone().text()).toBe(201);
       const opts = launched[0] as LaunchOptions & { deliverStepJson?: string; planJson?: string };
@@ -299,7 +299,7 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
   it('T8: a delivering PLAN launch hands the engine the plan and its deliver step', async () => {
     await withCapability(ctx.adapter, true, async () => {
       const plan = { steps: [{ catalog: 'build' }] };
-      const res = await fetch(`${ctx.baseUrl}/api/v1/runs`, json({ problem: 'ship SSO', clisJson: SEATS, plan, deliver: 'pr' }));
+      const res = await fetch(`${ctx.baseUrl}/api/v1/runs`, json({ problem: 'ship SSO', clisJson: SEATS, standIns: true, plan, deliver: 'pr' }));
       expect(res.status, await res.clone().text()).toBe(201);
       const opts = launched[0] as LaunchOptions & { deliverStepJson?: string; planJson?: string };
       expect(JSON.parse(opts.planJson ?? 'null')).toEqual(plan);
@@ -316,7 +316,7 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
   it('T8: a plan launch without deliver hands no deliver step; requireDeliverables with a plan is refused', async () => {
     await withCapability(ctx.adapter, true, async () => {
       const plan = { steps: [{ catalog: 'build' }] };
-      const res = await fetch(`${ctx.baseUrl}/api/v1/runs`, json({ problem: 'p', clisJson: SEATS, plan }));
+      const res = await fetch(`${ctx.baseUrl}/api/v1/runs`, json({ problem: 'p', clisJson: SEATS, standIns: true, plan }));
       expect(res.status).toBe(201);
       expect((launched[0] as { deliverStepJson?: string }).deliverStepJson).toBeUndefined();
       // (wicked-core#858) The engine judges a plan's declared deliverables; an addon before the
@@ -335,7 +335,7 @@ describe('POST /runs {plan} and the plan_approval gate — HTTP contract (shadow
     await withCapability(ctx.adapter, false, async () => {
       const res = await fetch(
         `${ctx.baseUrl}/api/v1/runs`,
-        json({ problem: 'ship SSO', clisJson: SEATS, workflow: 'feature', deliver: 'pr' }),
+        json({ problem: 'ship SSO', clisJson: SEATS, standIns: true, workflow: 'feature', deliver: 'pr' }),
       );
       expect(res.status).toBe(501);
       expect(launched).toHaveLength(0);
@@ -425,7 +425,7 @@ describe.skipIf(!ENGINE_HAS_PLAN_GATE)('the plan approval gate through the real 
   });
 
   async function launch(sessionId: string, plan: unknown): Promise<SessionView> {
-    const res = await fetch(`${ctx.baseUrl}/api/v1/runs`, json({ problem: 'add SSO login', sessionId, clisJson: SEATS, plan }));
+    const res = await fetch(`${ctx.baseUrl}/api/v1/runs`, json({ problem: 'add SSO login', sessionId, clisJson: SEATS, standIns: true, plan }));
     expect(res.status, await res.clone().text()).toBe(201);
     return waitFor('the plan_approval pause', async () => {
       const v = await viewOf(ctx.adapter, sessionId);
@@ -554,7 +554,7 @@ describe.skipIf(!ENGINE_HAS_PLAN_GATE)('the plan approval gate through the real 
     const res = await fetch(
       `${ctx.baseUrl}/api/v1/runs`,
       // Phased explicitly: power mode is the default launch now (program DES-POWER-MODE), tested below.
-      json({ problem: 'add SSO login', sessionId: 't3-dlv', clisJson: SEATS, workflow: 'feature', repoRef: repoId, deliver: 'pr', power: false }),
+      json({ problem: 'add SSO login', sessionId: 't3-dlv', clisJson: SEATS, standIns: true, workflow: 'feature', repoRef: repoId, deliver: 'pr', power: false }),
     );
     expect(res.status, await res.clone().text()).toBe(201);
     const v = await waitFor('the plan_approval pause', async () => {
@@ -610,7 +610,7 @@ describe.skipIf(!ENGINE_HAS_PLAN_GATE)('the plan approval gate through the real 
     const repoId = (await ctx.adapter.listRepos()).find((r) => r.name === 't3-power-ws')!.id;
     const res = await fetch(
       `${ctx.baseUrl}/api/v1/runs`,
-      json({ problem: 'add SSO login', sessionId: 't3-pw', clisJson: SEATS, workflow: 'feature', repoRef: repoId, deliver: 'pr' }),
+      json({ problem: 'add SSO login', sessionId: 't3-pw', clisJson: SEATS, standIns: true, workflow: 'feature', repoRef: repoId, deliver: 'pr' }),
     );
     expect(res.status, await res.clone().text()).toBe(201);
     expect((await res.json()).power).toBe(true);
@@ -631,7 +631,7 @@ describe.skipIf(!ENGINE_HAS_PLAN_GATE)('the plan approval gate through the real 
   it('an understand-only plan scores 0 and is not held in auto mode', async () => {
     const res = await fetch(
       `${ctx.baseUrl}/api/v1/runs`,
-      json({ problem: 'survey', sessionId: 't3-u', clisJson: SEATS, plan: { steps: [{ catalog: 'understand' }] } }),
+      json({ problem: 'survey', sessionId: 't3-u', clisJson: SEATS, standIns: true, plan: { steps: [{ catalog: 'understand' }] } }),
     );
     expect(res.status).toBe(201);
     await waitFor('the first dispatch', async () => {

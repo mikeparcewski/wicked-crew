@@ -61,7 +61,7 @@ describe.skipIf(!ENGINE_HAS_PLANS)('M3: POST /runs {workflow:"chat"} launches th
     const res = await fetch(`${baseUrl}/api/v1/runs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ problem: 'what does this module do?', workflow: 'chat', clisJson: ONE_SEAT }),
+      body: JSON.stringify({ problem: 'what does this module do?', workflow: 'chat', clisJson: ONE_SEAT, standIns: true }),
     });
     expect(res.status, await res.clone().text()).toBe(201);
     const { runId } = (await res.json()) as { runId: string };
