@@ -803,6 +803,39 @@ describe('reading issues back (crew#1911)', () => {
     expect((await sending).json()).toMatchObject({ publication: { published: true } });
   });
 
+  it('every issue created and one not checked yet is not published; once crew has checked it, it is (crew#1919)', async () => {
+    const lastRead = gateOf();
+    const vr = real();
+    let last: number | null = null;
+    deps.pm = {
+      vendorRead: async (e, tool, args, cls, before, cred) => {
+        // The sender's read-back of the last story: every issue's `created` line is on disk, this read-back not done.
+        if (tool === 'issue_read' && args['issue_number'] === last) {
+          lastRead.reached();
+          await lastRead.held;
+        }
+        const r = await vr(e, tool, args, cls, before, cred);
+        if (tool === 'issue_write' && args['title'] === 'Sign out from any page') last = issues().issues.at(-1)!.number;
+        return r;
+      },
+    };
+    const c = await card();
+    const sending = post({ confirm: c.publishHash });
+    try {
+      await lastRead.at;
+      const before = reads();
+      const g = (await getPub()).json() as ProductPublicationsResponse;
+      expect(reads()).toBe(before);
+      expect(g.publications[0]!.items.map((i) => [i.state, i.readBack])).toEqual([['created', 'ok'], ['created', 'ok'], ['created', 'ok'], ['created', null]]);
+      expect(g.publications[0]!.published).toBe(false);
+    } finally {
+      lastRead.release();
+    }
+    const done = (await sending).json() as { publication: { published: boolean; items: Array<{ readBack: string | null }> } };
+    expect(done.publication.items.map((i) => i.readBack)).toEqual(['ok', 'ok', 'ok', 'ok']);
+    expect(done.publication.published).toBe(true);
+  });
+
   it('a send waits for an observer read already on the source queue before it does anything', async () => {
     let refuse = 2;
     const firstRead = gateOf();
