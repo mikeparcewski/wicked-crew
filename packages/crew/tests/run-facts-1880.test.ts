@@ -75,7 +75,8 @@ async function list(a: CoreAdapter): Promise<Array<Record<string, unknown>>> {
   const res = await app.inject({ method: 'GET', url: '/api/v1/runs?include=archived' });
   expect(res.statusCode, res.body).toBe(200);
   await a.flushRunFacts?.();
-  return (res.json() as { runs: Array<Record<string, unknown>> }).runs;
+  // The run DTO: `{ session, units }`; the fields under test are the session's.
+  return (res.json() as { runs: Array<{ session: Record<string, unknown> }> }).runs.map((r) => r.session);
 }
 
 const byId = (runs: Array<Record<string, unknown>>, id: string): Record<string, unknown> => runs.find((r) => r['id'] === id)!;
@@ -148,6 +149,17 @@ describe('crew#1880: a terminal run log is read once, and never again after a re
     expect(Object.fromEntries(reads)).toEqual({ prelog: 1 });
     expect(byId(again, 'prelog')['ended_at']).toBeUndefined();
     expect(byId(again, 'prelog')['run_identity']).toEqual(byId(runs, 'prelog')['run_identity']);
+  });
+
+  it('a kept terminal frame without a kept launch frame: ended_at is served, the launch name is read again', async () => {
+    store.push(run('nolaunch', 'completed'));
+    logs.set('nolaunch', [{ type: 'sessionCompleted', session: 'nolaunch', ts: T0 + 300_000, seq: 4 }]);
+    const runs = await list(newAdapter());
+    reads.clear();
+    const again = await list(newAdapter());
+    expect(Object.fromEntries(reads)).toEqual({ nolaunch: 1 });
+    expect(byId(again, 'nolaunch')['ended_at']).toBe((T0 + 300_000) / 1000);
+    expect(byId(again, 'nolaunch')['run_identity']).toEqual(byId(runs, 'nolaunch')['run_identity']);
   });
 
   it('a kept fact answers only the run it was derived from: another problem under the same id is read again', async () => {
