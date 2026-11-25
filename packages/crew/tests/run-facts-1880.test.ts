@@ -7,7 +7,7 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -86,6 +86,9 @@ const factsPath = (): string => `${dbPath}.run-facts.jsonl`;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'run-facts-1880-'));
   dbPath = join(dir, 'core.db');
+  // The store file exists before the daemon starts, as on a real install (the facts bind to it). An empty file is an
+  // empty SQLite database; the stub engine may otherwise create it only after the first list.
+  writeFileSync(dbPath, '');
   adapters = [];
   apps = [];
   reads = new Map();
@@ -174,7 +177,10 @@ describe('crew#1880: a terminal run log is read once, and never again after a re
 
   it('a new store at the same path (a new file) discards the kept facts', async () => {
     await list(newAdapter());
-    for (const a of adapters.splice(0)) a.close();
+    for (const a of adapters.splice(0)) {
+      await a.flushRunFacts();
+      a.close();
+    }
     for (const f of ['core.db', 'core.db-wal', 'core.db-shm']) rmSync(join(dir, f), { force: true });
     writeFileSync(dbPath, '');
     reads.clear();
@@ -182,16 +188,73 @@ describe('crew#1880: a terminal run log is read once, and never again after a re
     expect(Object.fromEntries(reads)).toEqual({ done: 1, free: 1, stopped: 1 });
   });
 
-  it('a torn or malformed line is skipped and that run is derived again', async () => {
+  it('a torn tail and malformed rows are skipped; the fact derived again after them is readable on the next start', async () => {
     await list(newAdapter());
     expect(existsSync(factsPath())).toBe(true);
     const lines = readFileSync(factsPath(), 'utf8').split('\n').filter((l) => l !== '');
-    const kept = lines.filter((l) => !l.includes('"done"'));
-    writeFileSync(factsPath(), kept.join('\n') + '\n{"v":1,"run":"done","fp":');
-    appendFileSync(factsPath(), '\nnot json\n');
+    // codex r1: `null` and `42` parse as JSON but are not rows; a torn last line has no newline after it.
+    writeFileSync(factsPath(), lines.filter((l) => !l.includes('"done"')).join('\n') + '\nnull\n42\nnot json\n{"v":1,"run":"done","fp":');
     reads.clear();
     const runs = await list(newAdapter());
     expect(Object.fromEntries(reads)).toEqual({ done: 1 });
     expect(byId(runs, 'done')['ended_at']).toBe((T0 + 60_000) / 1000);
+    reads.clear();
+    await list(newAdapter());
+    expect(totalReads()).toBe(0);
+  });
+
+  it('duplicate lines: the last one wins; a file grown far past its runs is compacted at start', async () => {
+    await list(newAdapter());
+    const done = readFileSync(factsPath(), 'utf8').split('\n').find((l) => l.includes('"done"'))!;
+    const row = JSON.parse(done) as Record<string, unknown>;
+    const stale = JSON.stringify({ ...row, endedAt: T0 + 1_000 });
+    appendFileSync(factsPath(), Array.from({ length: 200 }, () => stale + '\n').join('') + JSON.stringify({ ...row, endedAt: T0 + 7_000 }) + '\n');
+    reads.clear();
+    const runs = await list(newAdapter());
+    expect(totalReads()).toBe(0);
+    expect(byId(runs, 'done')['ended_at']).toBe((T0 + 7_000) / 1000);
+    const after = readFileSync(factsPath(), 'utf8').split('\n').filter((l) => l !== '');
+    expect(after.length).toBe(1 + 3); // the header + one line per kept run
+  });
+
+  it('a run read while live never answers ended_at, even when its log already holds the terminal frame', async () => {
+    store.push(run('lag', 'executing'));
+    logs.set('lag', log('lag', 'feature', T0 + 400_000)); // the log is ahead of the fold
+    const a = newAdapter();
+    const first = await list(a);
+    expect('ended_at' in byId(first, 'lag')).toBe(false);
+    store[3] = run('lag', 'completed');
+    (a as unknown as { viewsEpoch: number }).viewsEpoch++;
+    const runs = await list(a);
+    expect(reads.get('lag')).toBe(2); // the terminal-time read, not the live one, dates it
+    expect(byId(runs, 'lag')['ended_at']).toBe((T0 + 400_000) / 1000);
+  });
+
+  it('the run fence fallback answers a terminal run with no launch frame from the memo, as before (no read)', async () => {
+    store.push(run('nolaunch', 'completed'));
+    logs.set('nolaunch', [{ type: 'sessionCompleted', session: 'nolaunch', ts: T0 + 300_000, seq: 4 }]);
+    const a = newAdapter();
+    await list(a);
+    reads.clear();
+    await expect(a.launchedWorkflowOfRun('nolaunch')).resolves.toBeUndefined();
+    await expect(a.launchedWorkflowOfRun('done')).resolves.toBe('feature');
+    expect(totalReads()).toBe(0);
+  });
+
+  it('a facts file that cannot be written leaves the list right (memory only)', async () => {
+    mkdirSync(factsPath());
+    const runs = await list(newAdapter());
+    expect(byId(runs, 'done')).toMatchObject({ workflow_id: 'feature', ended_at: (T0 + 60_000) / 1000 });
+    reads.clear();
+    await list(newAdapter());
+    expect(Object.fromEntries(reads)).toEqual({ done: 1, free: 1, stopped: 1 });
+  });
+
+  it('with no event-log binding the list dates nothing and keeps nothing', async () => {
+    const a = newAdapter();
+    delete (a as unknown as { core: Record<string, unknown> }).core['runEvents'];
+    const runs = await list(a);
+    expect('ended_at' in byId(runs, 'done')).toBe(false);
+    expect(existsSync(factsPath()) ? readFileSync(factsPath(), 'utf8') : '').not.toContain('"done"');
   });
 });

@@ -61,6 +61,11 @@ function storeIdentity(dbPath: string): Header['store'] | null {
   }
 }
 
+/** How long kept lines wait to be written together. */
+const FLUSH_DELAY_MS = 500;
+/** Lines beyond twice the distinct runs that a file may hold before it is compacted at the next start. */
+const COMPACT_SLACK = 64;
+
 const sameStore = (a: Header['store'], b: unknown): boolean => {
   const o = b as Partial<Header['store']> | null | undefined;
   return o != null && o.dev === a.dev && o.ino === a.ino && o.birth === a.birth;
@@ -75,12 +80,15 @@ export class RunFactsFile {
   private kept: Map<string, KeptFacts> | null = null;
   /** Lines waiting for the next flush (one append per batch, not one write per run). */
   private pending: string[] = [];
-  private flushing: Promise<void> = Promise.resolve();
-  private scheduled = false;
+  /** The write chain: one append at a time, each draining every line pending when it starts. */
+  private writing: Promise<void> | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
   /** Set when the file could not be written: memory only for this process. */
   private off = false;
   /** The file's header names the store now at `dbPath` (read or written by this process). */
   private bound = false;
+  /** The file ends inside a line (a torn write): the next append starts a new line first. */
+  private torn = false;
 
   constructor(readonly path: string, private readonly dbPath: string) {}
 
@@ -90,7 +98,7 @@ export class RunFactsFile {
     return k !== undefined && k.fp === fp ? k : undefined;
   }
 
-  /** Keep a run's positive facts (no-op when there is none). */
+  /** Keep a run's positive facts (no-op when there is none or they are already kept). */
   put(runId: string, fp: string, facts: LogFacts): void {
     const kept: KeptFacts = { fp };
     if (facts.launched !== undefined) kept.launched = facts.launched;
@@ -101,49 +109,67 @@ export class RunFactsFile {
     this.load().set(runId, kept);
     if (this.off) return;
     this.pending.push(JSON.stringify({ v: 1, run: runId, ...kept }) + '\n');
-    if (!this.scheduled) {
-      this.scheduled = true;
-      setImmediate(() => {
-        this.scheduled = false;
+    // Batched by time, not by turn: a first list derives runs as their reads land, spread over seconds.
+    if (this.timer === null) {
+      this.timer = setTimeout(() => {
+        this.timer = null;
         void this.flush();
-      });
+      }, FLUSH_DELAY_MS);
+      this.timer.unref?.();
     }
   }
 
-  /** Write every pending line (one append). Never throws: a failed write costs a re-read on the next start. */
+  /** Write every pending line, after any write in flight. Never throws: a failed write turns the file off for this
+   *  process (memory only) and costs one re-read per run on the next start. */
   flush(): Promise<void> {
-    if (this.pending.length === 0 || this.off) return this.flushing;
-    if (!this.bound && !this.bind()) return this.flushing; // no store file yet: the lines wait for it
-    const lines = this.pending.join('');
-    this.pending = [];
-    this.flushing = this.flushing.then(() =>
-      appendFile(this.path, lines).catch(() => {
-        this.off = true;
-      }),
-    );
-    return this.flushing;
+    if (this.timer !== null) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    const run = (this.writing ?? Promise.resolve()).then(() => this.drain());
+    this.writing = run;
+    void run.finally(() => {
+      if (this.writing === run) this.writing = null;
+    });
+    return run;
   }
 
-  /** Start the file over for the store now at `dbPath` (its header first). False while there is no store file. */
-  private bind(): boolean {
-    const store = storeIdentity(this.dbPath);
-    if (store === null) return false;
+  private async drain(): Promise<void> {
+    while (this.pending.length > 0 && !this.off) {
+      if (!this.bound) return; // load() binds the file before any line is kept; `off` covers a failed bind
+      const lines = (this.torn ? '\n' : '') + this.pending.join('');
+      this.pending = [];
+      this.torn = false;
+      try {
+        await appendFile(this.path, lines);
+      } catch {
+        this.off = true;
+        this.pending = [];
+      }
+    }
+  }
+
+  /** Start the file over for this store (its header first). */
+  private bind(store: Header['store']): void {
     try {
       writeFileSync(this.path, JSON.stringify({ v: 1, store } satisfies Header) + '\n');
       this.bound = true;
+      this.torn = false;
     } catch {
       this.off = true;
     }
-    return this.bound;
   }
 
   private load(): Map<string, KeptFacts> {
     if (this.kept !== null) return this.kept;
     this.kept = new Map();
     const store = storeIdentity(this.dbPath);
-    // No store file yet (the engine has not created it): nothing on disk can be this store's; the file is started
-    // over once the store exists (`flush` binds it then).
-    if (store === null) return this.kept;
+    // No store file to bind to: memory only for this process. (A daemon's first fold has the engine's store open, so
+    // the file exists by the time a fact is asked for; only a fake engine meets this.)
+    if (store === null) {
+      this.off = true;
+      return this.kept;
+    }
     let text = '';
     try {
       text = readFileSync(this.path, 'utf8');
@@ -160,28 +186,47 @@ export class RunFactsFile {
     const h = header as Partial<Header> | undefined;
     if (h?.v !== 1 || !sameStore(store, h.store)) {
       // A missing, unreadable or foreign file (a new store at this path): start it over.
-      this.bind();
+      this.bind(store);
       return this.kept;
     }
     this.bound = true;
+    let rows = 0;
     for (const line of lines.slice(1)) {
       if (line === '') continue;
-      let row: Record<string, unknown>;
+      rows++;
+      let row: unknown;
       try {
-        row = JSON.parse(line) as Record<string, unknown>;
+        row = JSON.parse(line);
       } catch {
         continue; // a torn or malformed line: that run is derived again
       }
-      const run = row['run'];
-      const fp = row['fp'];
-      if (row['v'] !== 1 || typeof run !== 'string' || typeof fp !== 'string') continue;
+      if (row === null || typeof row !== 'object') continue;
+      const r = row as Record<string, unknown>;
+      const run = r['run'];
+      const fp = r['fp'];
+      if (r['v'] !== 1 || typeof run !== 'string' || typeof fp !== 'string') continue;
       const kept: KeptFacts = { fp };
-      const launched = row['launched'];
+      const launched = r['launched'];
       if (typeof launched === 'string' || launched === null) kept.launched = launched;
-      const endedAt = row['endedAt'];
+      const endedAt = r['endedAt'];
       if (typeof endedAt === 'number' && endedAt > 0) kept.endedAt = endedAt;
       this.kept.set(run, kept);
     }
+    this.torn = text.length > 0 && !text.endsWith('\n');
+    // Compaction: a run is re-appended only when its facts change (a reused id), so lines track distinct runs; a file
+    // that has grown past twice them is rewritten once, here, from what was just read.
+    if (rows > 2 * this.kept.size + COMPACT_SLACK) this.compact(store, this.kept);
     return this.kept;
+  }
+
+  private compact(store: Header['store'], all: ReadonlyMap<string, KeptFacts>): void {
+    const out = [JSON.stringify({ v: 1, store } satisfies Header)];
+    for (const [run, kept] of all) out.push(JSON.stringify({ v: 1, run, ...kept }));
+    try {
+      writeFileSync(this.path, out.join('\n') + '\n');
+      this.torn = false;
+    } catch {
+      // Left as it was: the next start reads the longer file.
+    }
   }
 }

@@ -2972,8 +2972,9 @@ export class CoreAdapter {
    * the run fence's fallback for a run crew no longer holds in memory. Memoized once found; `undefined` = not known.
    */
   async launchedWorkflowOfRun(runId: string): Promise<string | null | undefined> {
+    // As before crew#1880: a found launch name, or a terminal run's settled "none", answers without a read.
     const known = this.runFactsMemo.get(runId);
-    if (known !== undefined && known.launched !== undefined) return known.launched;
+    if (known !== undefined && (known.final || known.launched !== undefined)) return known.launched;
     let events: RecordedEvent[] | null;
     try {
       events = await this.runEvents(runId);
