@@ -679,6 +679,26 @@ describe('reading issues back (crew#1911)', () => {
     expect(reads()).toBe(before);
   });
 
+  it('freshness runs on a monotonic clock: a wall clock stepped back keeps no read-back fresh (crew#1919)', async () => {
+    const saved = deps.now;
+    delete deps.now;
+    let mono = 1_000_000;
+    const perf = vi.spyOn(performance, 'now').mockImplementation(() => mono);
+    const wall = vi.spyOn(Date, 'now');
+    try {
+      await publish();
+      wall.mockReturnValue(Date.now() - 3_600_000); // the wall clock steps back an hour
+      mono += READ_BACK_FRESH_MS + 1;
+      const before = reads();
+      await getPub();
+      expect(reads() - before).toBe(4);
+    } finally {
+      perf.mockRestore();
+      wall.mockRestore();
+      deps.now = saved;
+    }
+  });
+
   it('a GET past the freshness reads again; one that differs or is unreadable is read on every GET until it matches', async () => {
     await publish();
     nowMs += READ_BACK_FRESH_MS;
