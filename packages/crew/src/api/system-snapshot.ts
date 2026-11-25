@@ -44,6 +44,7 @@ import type {
   SystemRun,
   SystemRunLiveness,
   SystemSnapshot,
+  SystemSnoozedItem,
   SystemState,
   SystemUnresolvedItem,
 } from '../core/types.js';
@@ -1551,6 +1552,8 @@ export function assembleSnapshot(parts: {
   infra: SystemInfraRow[];
   governance: SystemGovernanceCard[];
   attention: SystemAttentionItem[];
+  /** studio#1416: the items a snooze holds back (out of `attention` and the level). */
+  snoozed?: SystemSnoozedItem[];
   unresolved: SystemUnresolvedItem[];
   unresolvedSpend: NonNullable<SystemSnapshot['unresolvedSpend']>;
   toReview: number | null;
@@ -1562,6 +1565,7 @@ export function assembleSnapshot(parts: {
     tookMs: now - parts.startedAt,
     level: needsLevel(parts.attention, parts.unresolved),
     attention: parts.attention,
+    snoozed: parts.snoozed ?? [],
     unresolved: parts.unresolved,
     unresolvedSpend: parts.unresolvedSpend,
     toReview: parts.toReview,

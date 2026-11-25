@@ -422,7 +422,7 @@ import { VoiceService, defaultVoiceDir } from '../voice/service.js';
 import { TtsService } from '../voice/tts.js';
 import { VoiceDashboardStore } from '../voice/dashboard.js';
 import { registerVoiceRoutes } from '../voice/routes.js';
-import { DeskSnoozes, registerDeskSnoozeRoutes } from './desk-snoozes.js';
+import { DeskSnoozes, holdSnoozed, registerDeskSnoozeRoutes } from './desk-snoozes.js';
 import { VoiceInjectInputs } from '../voice/inject-input.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
@@ -1983,7 +1983,9 @@ export function registerRoutes(
     service: new VoiceService({ dir: defaultVoiceDir() }),
     dashboard: (() => { try { return VoiceDashboardStore.under(crewStateHome()); } catch { return null; } })(),
   };
-  registerDeskSnoozeRoutes(app, { snoozes: new DeskSnoozes(audit) });
+  // One store for the snooze routes and `GET /system`, which holds back the attention items snoozed (studio#1416).
+  const deskSnoozes = new DeskSnoozes(audit);
+  registerDeskSnoozeRoutes(app, { snoozes: deskSnoozes });
   registerVoiceRoutes(app, { voice: voice.service, tts: voice.tts ?? new TtsService({ dir: defaultVoiceDir() }), dashboard: voice.dashboard, audit });
   const voiceInputs = runtime.voiceInputs ?? new VoiceInjectInputs();
   const openWithOs = runtime.openWithOs ?? openWithSystemDefault;
@@ -12191,6 +12193,8 @@ export function registerRoutes(
       })();
 
       // Reads the folds and the run list depend on, each bounded.
+      // The snoozes in force (studio#1416): a read that fails or runs late holds nothing back.
+      const snoozesP = settleWithin(() => deskSnoozes.list(), PROBE_TIMEOUT_MS);
       const viewsP = settleWithin(async () => {
         const detail = await adapter.sessionsDetail();
         await backfillEndedAt(detail);
@@ -12490,6 +12494,8 @@ export function registerRoutes(
         engine: clusterReader.engine(),
       });
       const toReview = await toReviewP;
+      const snoozes = await snoozesP;
+      const held = holdSnoozed(needs.attention, snoozes.kind === 'ok' ? snoozes.value : [], Date.now());
       // A run list that could not be read never reads green: the daemon row (degraded, "did not list
       // its runs") is in attention as a slowdown, and the level stays at least yellow.
       return assembleSnapshot({
@@ -12498,7 +12504,8 @@ export function registerRoutes(
         runs,
         infra,
         governance,
-        attention: needs.attention,
+        attention: held.attention,
+        snoozed: held.snoozed,
         unresolved: needs.unresolved,
         unresolvedSpend: needs.unresolvedSpend,
         toReview: toReview.kind === 'ok' ? toReview.value : null,

@@ -358,8 +358,8 @@ describe('GET /api/v1/system: snoozed items (studio#1416)', () => {
   it('an item a person may snooze carries its key and rank; a component (infra) item carries none', async () => {
     const { body } = await snapshot();
     const item = gateItem(body)!;
-    expect(item.waitedSince).toEqual(expect.any(String));
-    expect(item.snooze).toEqual({ key: `attention:run:run-gate@${item.waitedSince}`, rank: expect.any(Number) });
+    // The open gate's interaction id (the engine's, from GET /interactions): a gate asked again is a new key.
+    expect(item.snooze).toEqual({ key: 'attention:run:run-gate@ir_gate1', rank: 101 });
     for (const a of body.attention as Snoozable[]) if (a.source !== 'run') expect(a.snooze).toBeUndefined();
   });
 
