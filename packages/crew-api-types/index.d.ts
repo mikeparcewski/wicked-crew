@@ -12473,7 +12473,7 @@ export interface SystemSnapshot {
    *  (`/desk/snoozes`, keyed by {@link SystemAttentionItem.snooze}) takes an item out of it into `snoozed`. */
   attention: SystemAttentionItem[];
   /**
-   * (api-types 0.231.0, studio#1416) The items a person snoozed, still held back: the snooze's end is ahead and the
+   * (api-types next, studio#1416) The items a person snoozed, still held back: the snooze's end is ahead and the
    * item is no worse than when it was snoozed (its `snooze.rank` at most the `severity` stored; a snooze stored with no
    * severity holds nothing back). Not in `attention[]` and not
    * in `level`. Its length is the "N snoozed" number. Soonest end first. ABSENT on an older daemon.
@@ -12531,7 +12531,7 @@ export interface SystemAttentionItem {
   waitedSince?: string | null;
   /** (api-types 0.140.0) Units not yet done across the held runs. ABSENT on an older daemon. */
   unitsLeft?: number;
-  /** (api-types 0.231.0, studio#1416) Present when a person may snooze this item: one run's own open gate or question
+  /** (api-types next, studio#1416) Present when a person may snooze this item: one run's own open gate or question
    *  (`id` `run:<runId>`, the target naming its interaction), the one cause whose occurrence crew can name. `key` names
    *  this occurrence, `attention:<id>@<interactionId>@<waitedSince>`: the engine keeps an unkeyed gate's interaction id
    *  when the run pauses at the same gate again, and `waitedSince` is that opening's own time, so a gate asked again is
@@ -12542,14 +12542,14 @@ export interface SystemAttentionItem {
   snooze?: SystemAttentionSnooze;
 }
 
-/** (api-types 0.231.0) How to snooze one attention item: see {@link SystemAttentionItem.snooze}. */
+/** (api-types next) How to snooze one attention item: see {@link SystemAttentionItem.snooze}. */
 export interface SystemAttentionSnooze {
   key: string;
   /** A whole number, 100 to 299: `(red ? 200 : 100) + min(blocks, 99)` (blocks below 0 count as 0). */
   rank: number;
 }
 
-/** (api-types 0.231.0) An attention item held back by a snooze, with the snooze's end (ISO-8601). */
+/** (api-types next) An attention item held back by a snooze, with the snooze's end (ISO-8601). */
 export interface SystemSnoozedItem extends SystemAttentionItem {
   until: string;
 }
