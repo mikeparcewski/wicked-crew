@@ -12469,8 +12469,16 @@ export interface SystemSnapshot {
    *  failed runs older than 7 days, benches with an alternative and pending proposals are not in it
    *  (the first three move to `unresolved[]`; proposals are `toReview`). Sorted by runs held, then
    *  prevents before slows, then a component (infra, or no seat at all) before one run's own cause,
-   *  then the longest wait, then the units left. Its length is the number. */
+   *  then the longest wait, then the units left. Its length is the number. A person's snooze in force
+   *  (`/desk/snoozes`, keyed by {@link SystemAttentionItem.snooze}) takes an item out of it into `snoozed`. */
   attention: SystemAttentionItem[];
+  /**
+   * (api-types next, studio#1416) The items a person snoozed, still held back: the snooze's end is ahead and the
+   * item is no worse than when it was snoozed (its `snooze.rank` at most the `severity` stored; a snooze stored with no
+   * severity holds nothing back). Not in `attention[]` and not
+   * in `level`. Its length is the "N snoozed" number. Soonest end first. ABSENT on an older daemon.
+   */
+  snoozed?: SystemSnoozedItem[];
   /**
    * (api-types 0.140.0) Work nobody has resolved: failed runs not retried and not archived,
    * superseded runs still open, asks parked at their turn gate past a day. Each carries what it cost
@@ -12523,6 +12531,27 @@ export interface SystemAttentionItem {
   waitedSince?: string | null;
   /** (api-types 0.140.0) Units not yet done across the held runs. ABSENT on an older daemon. */
   unitsLeft?: number;
+  /** (api-types next, studio#1416) Present when a person may snooze this item: one run's own open gate or question
+   *  (`id` `run:<runId>`, the target naming its interaction), the one cause whose occurrence crew can name. `key` names
+   *  this occurrence, `attention:<id>@<interactionId>@<waitedSince>`: the engine keeps an unkeyed gate's interaction id
+   *  when the run pauses at the same gate again, and `waitedSince` is that opening's own time, so a gate asked again is
+   *  a new key. `PUT /desk/snoozes/:key {until, severity: rank}` snoozes it. `rank` is how bad it is now, higher is
+   *  worse: an item whose rank goes above the stored one comes back. ABSENT otherwise (a component of the system is
+   *  never hidden; a failed run or an item gathering several runs has no occurrence crew can name) and on an older
+   *  daemon. */
+  snooze?: SystemAttentionSnooze;
+}
+
+/** (api-types next) How to snooze one attention item: see {@link SystemAttentionItem.snooze}. */
+export interface SystemAttentionSnooze {
+  key: string;
+  /** A whole number, 100 to 299: `(red ? 200 : 100) + min(blocks, 99)` (blocks below 0 count as 0). */
+  rank: number;
+}
+
+/** (api-types next) An attention item held back by a snooze, with the snooze's end (ISO-8601). */
+export interface SystemSnoozedItem extends SystemAttentionItem {
+  until: string;
 }
 
 /** (api-types 0.140.0) Why a run is in `unresolved[]`. `failed`: it failed and was neither retried
@@ -18432,11 +18461,14 @@ export interface VoiceTtsStatus {
  * `desk_snooze_invalid` for a time not in the future, more than 7 days ahead, or a key over 200 characters);
  * `DELETE /desk/snoozes/:key` → {@link DeskSnoozeWakeResponse} (audited `desk.need.woken`). Both are on disk before
  * the answer (500 `desk_snooze_unsaved` when the trail could not take them; nothing changed). Setting or ending one
- * is a human operator's (403 `human_operator_only`; an observer token gets the auth boundary's own trust 403). A snooze only defers the item on the Desk: it stays in
- * `/system.attention[]`, and the skin brings it back when `until` passes or its rank rises above `severity`.
+ * is a human operator's (403 `human_operator_only`; an observer token gets the auth boundary's own trust 403). A snooze on
+ * an attention item's own key ({@link SystemAttentionItem.snooze}) moves it out of `/system.attention[]` into
+ * `/system.snoozed[]` while `until` is ahead and its rank is at most `severity`. Any other key only defers the item on
+ * the Desk: the skin brings it back when `until` passes or its rank rises above `severity`.
  */
 export interface DeskSnooze {
-  /** The skin's own id for the item (`run:<id>`, `infra:disk`, a need-row key); opaque to the daemon. */
+  /** An attention item's own key ({@link SystemAttentionSnooze.key}), which `/system` reads; else the skin's own id
+   *  for the item (a need-row key), opaque to the daemon. */
   key: string;
   /** ISO-8601: when the snooze ends by itself. */
   until: string;
