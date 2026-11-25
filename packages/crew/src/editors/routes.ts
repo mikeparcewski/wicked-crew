@@ -4,10 +4,11 @@
  *  - `GET /editors` (operator+): the registry, as Settings → Editors renders it. A run plugin (CS7) lists as an
  *    `EditorView` row too, its `granted_topics` filled from the engine's observe decisions (`[]` when it cannot
  *    decide them: fail closed).
- *  - `POST /editors {packRoot, enabled?}` (HUMAN-only): install or update a pack's editors and/or run plugins —
- *    garden's fail-closed gate, then crew's own conformance run, then the registry (`pack-install.ts`). 200 with
- *    the installed editors; 422 with the verdict or the conformance report; 501 with the approval list
- *    for a pack that also ships skills or blocks; 409 for an id another pack or a first-party editor holds. The
+ *  - `POST /editors {packRoot, enabled?, approve?}` (HUMAN-only): install or update a pack's editors and/or run
+ *    plugins — garden's fail-closed gate, then crew's own conformance run, then the registry (`pack-install.ts`).
+ *    200 with the installed editors; 422 with the verdict or the conformance report; 409 with the approval list for
+ *    a pack that also ships skills or blocks and carries no matching `approve` (crew#1703); 409 for an id another
+ *    pack or a first-party editor holds. The
  *    install consent writes each installed plugin's `observe:<topic>` tokens (CS7 C3), beside the editors'
  *    `mcp.session` tokens, in one ledger edit.
  *  - `DELETE /editors/:id` (HUMAN-only): an installed pack editor or run plugin is removed from the registry (the

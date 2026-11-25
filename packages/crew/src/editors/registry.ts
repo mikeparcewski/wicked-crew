@@ -13,8 +13,8 @@
  *    install-time conformance run (garden `scripts/editor/conformance.py`, run by crew against its
  *    own conformance host page, §12.1 / EP-C8) both pass (`pack-install.ts`). The registry records
  *    the pack directory and each editor's pinned entry hash; it never writes into the pack. A pack
- *    that also ships skills or blocks is refused: their own "Add these" approval (§3.2) is not built
- *    (crew#1703). A pack editor's description and card images are read like a first-party editor's.
+ *    that also ships skills or blocks installs them after the person approves them in the same consent (§3.2
+ *    "Add these", crew#1703, `pack-extras.ts`); the registry keeps which skills and presets each pack added. A pack editor's description and card images are read like a first-party editor's.
  *
  * Persisted state is ONE file, `<state home>/daemon-editors.json`: the enable/disable flags the
  * operator sets in Settings (§6.4, human-only) and the installed packs. It sits under the `daemon-`
@@ -564,7 +564,21 @@ interface PersistedState {
   enabled: Record<string, boolean>;
   /** Installed pack editors, by editor id. Absent in a file written before installs existed. */
   installed?: Record<string, InstalledPack>;
+  /** (crew#1703) The skills and presets each pack added, by pack name. Kept when the pack's last editor is removed:
+   *  the skills root has no removal, so a reinstall of the same pack must still know they are its own. */
+  extras?: Record<string, PackExtrasOwned>;
 }
+
+/** (crew#1703) What one pack added to the skills root and the preset store. */
+export interface PackExtrasOwned {
+  skills: Array<{ name: string; key: string }>;
+  presets: string[];
+}
+
+const PackExtrasOwnedSchema = z.object({
+  skills: z.array(z.object({ name: z.string(), key: z.string() })),
+  presets: z.array(z.string()),
+});
 
 export class EditorRegistry {
   private readonly records = new Map<string, RegisteredRecord>();
@@ -576,6 +590,7 @@ export class EditorRegistry {
     this.log = opts.log ?? (() => undefined);
     const state = this.readState();
     this.persistedFlags = state.enabled;
+    for (const [name, owned] of Object.entries(state.extras ?? {})) this.extras.set(name, owned);
     if (opts.studioRoot !== undefined) {
       for (const r of discoverStudioEditors(opts.studioRoot, this.log)) {
         this.records.set(r.manifest.id, { ...r, enabled: flagOf(state.enabled, r.manifest.id) ?? true });
@@ -596,6 +611,8 @@ export class EditorRegistry {
   private readonly installed = new Map<string, InstalledPack>();
   /** The flags as read at boot: kept for an installed editor skipped at boot, so a write never drops its "off". */
   private persistedFlags: Record<string, boolean> = {};
+  /** (crew#1703) Each pack's skills and presets, by pack name: outlives the pack's editor rows. */
+  private readonly extras = new Map<string, PackExtrasOwned>();
 
   private readState(): PersistedState {
     try {
@@ -617,7 +634,12 @@ export class EditorRegistry {
           };
         } else this.log(`[editors] ${k}: its install record in ${EDITORS_STATE_FILENAME} is malformed; ignored`);
       }
-      return { v: 1, enabled, installed };
+      const extras: Record<string, PackExtrasOwned> = {};
+      for (const [k, v] of Object.entries(raw.extras ?? {})) {
+        const parsed = PackExtrasOwnedSchema.safeParse(v);
+        if (EDITOR_ID.test(k) && parsed.success) extras[k] = parsed.data;
+      }
+      return { v: 1, enabled, installed, extras };
     } catch {
       return { v: 1, enabled: {} };
     }
@@ -629,6 +651,7 @@ export class EditorRegistry {
     for (const id of this.installed.keys()) if (!this.records.has(id) && flagOf(this.persistedFlags, id) === false) enabled[id] = false;
     const state: PersistedState = { v: 1, enabled };
     if (this.installed.size > 0) state.installed = Object.fromEntries([...this.installed].sort(([a], [b]) => a.localeCompare(b)));
+    if (this.extras.size > 0) state.extras = Object.fromEntries([...this.extras].sort(([a], [b]) => a.localeCompare(b)));
     mkdirSync(join(this.stateFile, '..'), { recursive: true });
     const tmp = `${this.stateFile}.${process.pid}.tmp`;
     writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
@@ -664,6 +687,7 @@ export class EditorRegistry {
   private commit(change: () => void): void {
     const records = new Map(this.records);
     const installed = new Map(this.installed);
+    const extras = new Map(this.extras);
     const flags = { ...this.persistedFlags };
     change();
     try {
@@ -673,6 +697,8 @@ export class EditorRegistry {
       for (const [k, v] of records) this.records.set(k, v);
       this.installed.clear();
       for (const [k, v] of installed) this.installed.set(k, v);
+      this.extras.clear();
+      for (const [k, v] of extras) this.extras.set(k, v);
       this.persistedFlags = flags;
       throw err;
     }
@@ -691,6 +717,16 @@ export class EditorRegistry {
   /** (crew#1703) Every pack install this daemon has persisted, a record skipped at boot included. */
   installedPacks(): InstalledPack[] {
     return [...this.installed.values()];
+  }
+
+  /** (crew#1703) The skills and presets the pack `name` added: its records' and the kept map's, so they stay its own
+   *  after its last editor is removed. */
+  packExtrasOwned(name: string): PackExtrasOwned {
+    const rows = [...this.installed.values()].filter((p) => p.name === name);
+    const kept = this.extras.get(name);
+    const skills = [...rows.flatMap((p) => p.skills ?? []), ...(kept?.skills ?? [])].filter((k, i, a) => a.findIndex((x) => x.key === k.key) === i);
+    const presets = [...new Set([...rows.flatMap((p) => p.presets ?? []), ...(kept?.presets ?? [])])];
+    return { skills, presets };
   }
 
   /** (crew#1703) The checks {@link installPack} runs before it commits, committing nothing: a pack install runs them
@@ -737,6 +773,12 @@ export class EditorRegistry {
       for (const r of out) {
         this.records.set(r.manifest.id, r);
         this.installed.set(r.manifest.id, r.pack!);
+      }
+      // crew#1703: the pack's skills and presets, kept by name beyond its editor rows.
+      const first = packs[0]?.pack;
+      if (name !== undefined && first !== undefined) {
+        if ((first.skills?.length ?? 0) > 0 || (first.presets?.length ?? 0) > 0) this.extras.set(name, { skills: first.skills ?? [], presets: first.presets ?? [] });
+        else this.extras.delete(name);
       }
     });
     return { records: out, updated, removed: dropped };

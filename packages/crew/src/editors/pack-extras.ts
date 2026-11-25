@@ -18,7 +18,7 @@
  * Reads stay inside the pack: no link in any path component, leaves opened no-follow, bounded files, entries and bytes.
  */
 
-import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
@@ -38,7 +38,7 @@ export interface PackApproval {
 
 /** The daemon skills root, and how to publish it so workers get what was added. */
 export interface PackSkillsPort {
-  store: Pick<SkillsStore, 'manifest' | 'revision' | 'add' | 'replace' | 'disable' | 'previewWrite' | 'isPublishing'>;
+  store: Pick<SkillsStore, 'manifest' | 'revision' | 'add' | 'replace' | 'enable' | 'disable' | 'previewWrite' | 'isPublishing' | 'listFiles' | 'resolveSkillFile'>;
   publish(): Promise<Pick<SkillPublishResult, 'verdict' | 'findings' | 'snapshot'>>;
   /** Settles once the daemon's skills boot (seed, first publish) has landed; every skills write waits for it. */
   ready?(): Promise<void>;
@@ -68,6 +68,8 @@ export interface PackPresetsPort {
   listPresets(): Promise<Preset[]>;
   putPreset(name: string, steps: PresetStep[], projectId?: string, createdBy?: string): Promise<Preset>;
   deletePreset(name: string): Promise<boolean>;
+  /** The registered workflow definitions (built-in and system): a block may not take one's name. */
+  listWorkflows?(): ReadonlyArray<{ id: string }>;
 }
 
 /** A refusal: the HTTP status, the code, and the plain reason. */
@@ -316,15 +318,20 @@ export async function planExtras(input: {
     if (catalog === null) throw new PackExtrasRefusal(422, 'pack_blocks_unavailable', 'the engine’s phase catalog could not be read, so the pack’s blocks cannot be checked; nothing was installed');
     const phases = [...catalog].sort();
     const existing = new Map((await input.presetsPort.listPresets()).map((p) => [p.name, p]));
+    const workflows = new Set((input.presetsPort.listWorkflows?.() ?? []).map((w) => w.id));
     for (const b of input.blocks) {
       const id = str(b['id']);
       if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) throw new PackExtrasRefusal(422, 'pack_block_unmappable', `the block ${JSON.stringify(id)} has no usable id (lower-case letters, digits and -)`);
-      // Its own preset only while the row still carries this pack's stamp: a preset someone else saved under the
-      // name since is theirs, whatever an older install record says.
+      // Its own preset only while the row carries this pack's stamp (`pack:<name>`, written by nothing else): a preset
+      // someone else saved under the name since is theirs, whatever an older install record says.
       const row = existing.get(id);
-      const own = row !== undefined && input.owned.presets.has(id) && row.created_by === packPresetOwner(input.packName);
+      const own = row !== undefined && row.created_by === packPresetOwner(input.packName);
       if (FENCED_WORKFLOWS.has(id) || (row !== undefined && !own)) {
         throw new PackExtrasRefusal(409, 'pack_name_taken', `the block ${id} would be saved as the preset ${id}, and a preset of that name already exists that this pack did not add; nothing was installed`);
+      }
+      // A preset of a workflow's name would be launched in its place.
+      if (row === undefined && workflows.has(id)) {
+        throw new PackExtrasRefusal(409, 'pack_name_taken', `the block ${id} would be saved as the preset ${id}, which is the name of a registered workflow; nothing was installed`);
       }
       const at = containedPath(input.root, str(b['preset']), 'file');
       const buf = at === null ? null : readNoFollowCapped(at, PACK_PRESET_MAX_BYTES);
@@ -363,14 +370,21 @@ export async function planExtras(input: {
   return { skills, blocks, replaces, digest };
 }
 
-/** Write the block presets (before the registry commits). Returns how to put back what was there. */
-export async function writePresets(plan: ExtrasPlan, presets: PackPresetsPort | null, packName: string): Promise<{ undo(): Promise<void> }> {
+/** Write the block presets (before the registry commits). Returns how to put back what was there: `undo` answers
+ *  what it could not put back (empty when everything was). */
+export async function writePresets(plan: ExtrasPlan, presets: PackPresetsPort | null, packName: string): Promise<{ undo(): Promise<string[]> }> {
   const written: BlockPlan[] = [];
-  const undo = async (): Promise<void> => {
+  const undo = async (): Promise<string[]> => {
+    const failed: string[] = [];
     for (const b of written.reverse()) {
-      if (b.previous !== null) await presets?.putPreset(b.id, b.previous.steps, undefined, b.previous.created_by).catch(() => undefined);
-      else await presets?.deletePreset(b.id).catch(() => false);
+      try {
+        if (b.previous !== null) await presets?.putPreset(b.id, b.previous.steps, undefined, b.previous.created_by);
+        else await presets?.deletePreset(b.id);
+      } catch (err) {
+        failed.push(`${b.id}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
+    return failed;
   };
   if (plan.blocks.length === 0) return { undo };
   // Re-read just before writing: a preset someone saved under the name during the conformance run is theirs.
@@ -393,11 +407,24 @@ export async function writePresets(plan: ExtrasPlan, presets: PackPresetsPort | 
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** A skill's files and switch as they are now, to put back if the pass fails. `null` when it cannot be read. */
+function preImage(store: PackSkillsPort['store'], key: string): { files: Record<string, string>; enabled: boolean } | null {
+  try {
+    const tree = store.listFiles(key);
+    const files: Record<string, string> = Object.create(null) as Record<string, string>;
+    for (const f of tree.files) files[f.path] = readFileSync(store.resolveSkillFile(key, f.path).abs, 'utf8');
+    return { files, enabled: tree.enabled };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Write the pack's skills into the skills root (after the registry committed), then publish so workers get them.
- * The writes run in one synchronous pass once no publish is in flight, so no publish can capture half of them; a
- * write the store still refuses (it changed since the plan) switches the pass's new skills off again. Answers
- * `null`, or the reason workers do not have the skills yet (the install itself stands).
+ * The writes run in one synchronous pass once no publish is in flight, so no publish can capture half of them. The
+ * person approved the pack's skills, so each one is switched on. If a write fails (the store changed since the plan)
+ * or the publish is blocked, the pass is put back: each replaced skill gets its earlier files and switch, and each
+ * added one is switched off. Answers `null`, or the reason workers do not have the skills yet (the install stands).
  */
 export async function writeSkills(plan: ExtrasPlan, port: PackSkillsPort | null, opts: { waitMs?: number } = {}): Promise<string | null> {
   if (plan.skills.length === 0 || port === null) return null;
@@ -408,36 +435,57 @@ export async function writeSkills(plan: ExtrasPlan, port: PackSkillsPort | null,
     await sleep(100);
   }
   const added: string[] = [];
-  const switchOff = (): void => {
+  const replaced: Array<{ key: string; before: { files: Record<string, string>; enabled: boolean } | null }> = [];
+  const putBack = (): string[] => {
+    const left: string[] = [];
     for (const key of added) {
       try {
-        store.disable(key, store.revision());
+        if (store.manifest().skills[key]?.enabled === true) store.disable(key, store.revision());
       } catch {
-        // a skill that cannot be switched off stays unpublished until the next publish judges it
+        left.push(key);
       }
     }
+    for (const { key, before } of replaced.reverse()) {
+      if (before === null) {
+        left.push(key);
+        continue;
+      }
+      try {
+        store.replace(key, before.files, store.revision());
+        const on = store.manifest().skills[key]?.enabled === true;
+        if (on !== before.enabled) (before.enabled ? store.enable : store.disable).call(store, key, store.revision());
+      } catch {
+        left.push(key);
+      }
+    }
+    return left;
   };
+  const leftNote = (left: string[]): string => (left.length > 0 ? ` (could not put back ${left.join(', ')}; install the pack again)` : '');
   for (const s of plan.skills) {
     let why: string | null = null;
     try {
+      if (s.own) replaced.push({ key: s.key, before: preImage(store, s.key) });
       const r = s.own ? store.replace(s.key, s.files, store.revision()) : store.add(s.key, s.files, store.revision());
       if (r.verdict === 'blocked') why = r.findings.filter((f) => f.severity === 'blocking').map((f) => f.evidence).join('; ');
+      else {
+        if (!s.own) added.push(s.key);
+        if (store.manifest().skills[s.key]?.enabled === false) store.enable(s.key, store.revision());
+      }
     } catch (err) {
       why = err instanceof Error ? err.message : String(err);
     }
     if (why !== null) {
-      switchOff();
-      return `installed, but the skills root refused the skill ${s.name} (${s.key}): ${why}; workers do not get the pack’s skills`;
+      const left = putBack();
+      return `installed, but the skills root refused the skill ${s.name} (${s.key}): ${why}; workers do not get the pack’s skills${leftNote(left)}`;
     }
-    if (!s.own) added.push(s.key);
   }
   try {
     const published = await port.publish();
     if (published.verdict === 'blocked') {
-      // Its new skills leave the tree again so the next publish is not blocked by them.
-      switchOff();
+      // The pass leaves the tree again so the next publish is not blocked by it.
+      const left = putBack();
       const why = published.findings.filter((f) => f.severity === 'blocking').map((f) => f.evidence).join('; ');
-      return `installed, but the skills root could not be published (${why}), so workers do not get the pack’s skills; fix that and install the pack again`;
+      return `installed, but the skills root could not be published (${why}), so workers do not get the pack’s skills; fix that and install the pack again${leftNote(left)}`;
     }
   } catch (err) {
     return `installed, but the skills root could not be published (${err instanceof Error ? err.message : String(err)}), so workers do not get the pack’s skills yet; publish from Skills`;

@@ -13,9 +13,11 @@
  *     its private Playwright venv first (`conformance-runtime.ts`, B8). A failed case, a browser that
  *     cannot be provisioned or no jailed runner is a 422 with the report — an unverified editor is
  *     never installed. Only crew's run counts (§12.1, review S13); an author's own run is not consulted;
- *  4. the pack's skills go into the daemon skills root and its blocks become presets, then the registry reads every
- *     editor back from disk at its pinned hash and records it (a failed record takes the skills and presets back),
- *     then the skills root is published so workers get the new skills.
+ *  4. the registry's own checks; then the blocks become presets (each keeps the version it replaced); then the
+ *     registry reads every editor back from disk at its pinned hash and records it with the pack's skills and
+ *     presets (a failed record puts the presets back, and no skill has been written yet); then the skills go into
+ *     the daemon skills root in one pass (a failed write puts back the ones replaced and switches off the ones
+ *     added); then the skills root is published so workers get them (a blocked publish does the same and says so).
  * Nothing is written into the pack. The registry file is `daemon-editors.json`.
  */
 
@@ -388,12 +390,12 @@ export async function installPack(
   for (const id of ids) {
     if (deps.registry.get(id)?.firstParty === true) throw new PackInstallError(409, `${id} is a first-party editor's id`, verdict);
   }
-  // What an earlier install of this same pack added (every persisted record, one skipped at boot included): an update
-  // replaces those in place.
-  const earlier = deps.registry.installedPacks().filter((p) => p.name === name);
+  // What an earlier install of this same pack added (every persisted record, one skipped at boot included, and what
+  // the registry kept after the pack's last editor was removed): an update replaces those in place.
+  const earlier = deps.registry.packExtrasOwned(name);
   const owned = {
-    skills: new Set(earlier.flatMap((p) => (p.skills ?? []).map((k) => k.key))),
-    presets: new Set(earlier.flatMap((p) => p.presets ?? [])),
+    skills: new Set(earlier.skills.map((k) => k.key)),
+    presets: new Set(earlier.presets),
   };
   // Every skill and block is read and checked before the consent is asked for or anything runs: the consent's digest
   // covers what was read, and a pack that would be refused anyway is refused now.
@@ -449,9 +451,19 @@ export async function installPack(
     );
   }
   const now = new Date().toISOString();
-  // The record keeps what this pack added earlier and no longer ships (it stays installed, and stays its own).
-  const heldKeys = deps.skills ? Object.keys(deps.skills.store.manifest().skills) : [];
-  const keptSkills = earlier.flatMap((p) => p.skills ?? []).filter((k) => heldKeys.includes(k.key) && !plan.skills.some((s) => s.key === k.key));
+  // The record keeps what this pack added earlier and no longer ships (it stays installed, and stays its own). The
+  // skills root is read only when there is such a skill to look for, so an editor-only install never depends on it.
+  const leftover = earlier.skills.filter((k) => !plan.skills.some((s) => s.key === k.key));
+  let keptSkills = leftover;
+  if (leftover.length > 0 && deps.skills) {
+    try {
+      await deps.skills.ready?.();
+      const held = deps.skills.store.manifest().skills;
+      keptSkills = leftover.filter((k) => Object.hasOwn(held, k.key));
+    } catch {
+      // unreadable now: keep the claim, so a later install still knows the skills are this pack's
+    }
+  }
   const keptPresets = [...owned.presets].filter((id) => !plan.blocks.some((b) => b.id === id));
   const packSkills = [...plan.skills.map((k) => ({ name: k.name, key: k.key })), ...keptSkills.filter((k, i, a) => a.findIndex((x) => x.key === k.key) === i)];
   const packPresets = [...plan.blocks.map((b) => b.id), ...keptPresets];
@@ -508,8 +520,12 @@ export async function installPack(
   try {
     installed = deps.registry.installPack(packs, enabled);
   } catch (err) {
-    await presetsWritten.undo();
-    if (err instanceof EditorInstallConflict) throw new PackInstallError(409, err.message, verdict);
+    const undone = await presetsWritten.undo();
+    // A preset that could not be put back is said, not swallowed: the next install of this pack sees its own stamp
+    // on it (`pack:<name>`) and replaces it, so a retry finishes the job.
+    const left = undone.length > 0 ? ` (putting the presets back also failed: ${undone.join('; ')}; installing the pack again replaces them)` : '';
+    if (err instanceof EditorInstallConflict) throw new PackInstallError(409, `${err.message}${left}`, verdict);
+    if (left !== '' && err instanceof Error) err.message = `${err.message}${left}`;
     throw err;
   }
   const skillsError = await writeSkills(plan, deps.skills ?? null);
