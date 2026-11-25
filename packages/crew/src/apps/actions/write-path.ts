@@ -246,9 +246,10 @@ export class AppWritePath {
 
   /**
    * K1's Allow writes switch: off withdraws every row-write grant on the source (under the store's lock). A rename
-   * withdraws the old name's too (crew#1906): an app that names the old source needs a new grant.
+   * withdraws the old name's too (crew#1906): an app that names the old source needs a new grant. A name a rename
+   * gives a source first loses any grant an earlier holder of that name left behind (`name_reused`).
    */
-  async withdrawForSource(source: string, why: 'allow_writes_off' | 'source_renamed' = 'allow_writes_off'): Promise<number> {
+  async withdrawForSource(source: string, why: 'allow_writes_off' | 'source_renamed' | 'name_reused' = 'allow_writes_off'): Promise<number> {
     const gone = await this.deps.actions.locked((tx) => tx.dropRowWriteGrants(source));
     for (const g of gone) this.audited('apps.action.revoked', CREW, { app: g.app, action: g.action, reason: why });
     return gone.length;

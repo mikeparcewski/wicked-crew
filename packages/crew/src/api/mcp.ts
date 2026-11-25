@@ -539,7 +539,10 @@ export async function restoreWithdrawals(p: Pick<McpPolicies, 'tokensOf'>, curre
 }
 
 export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): void {
-  /** (crew#1906) Once a rename has landed: the old name's row-write grants go (an app naming it needs a new grant). */
+  /**
+   * (crew#1906) Once a rename has landed: the old name's row-write grants go (an app naming it needs a new grant). A
+   * failure is audited; the grants it leaves name no source, and they go before any source takes that name again.
+   */
   const withdrawRenamedGrants = async (from: string): Promise<{ withdrawnGrants?: number; withdrawFailed?: true }> => {
     if (deps.rowWriteGrants === undefined) return {};
     try {
@@ -788,6 +791,16 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
           const listed = new Set(parsed.data.apps ?? []);
           if (using.length !== listed.size || using.some((a) => !listed.has(a.slug))) {
             throw new McpRegistryError(409, 'apps_bound', `${using.length} app${using.length === 1 ? ' uses' : 's use'} ${from}: confirm the rename with exactly that list`, undefined, { apps: using });
+          }
+          // (crew#1906 r1) Row-write grants an earlier holder of `to` left (a withdrawal that failed after its own rename,
+          // or a removed source) go before any source has that name again, as Allow writes does before it turns on; the
+          // rename waits for that, so a name never hands a source grants nobody gave it.
+          if (deps.rowWriteGrants !== undefined) {
+            try {
+              await deps.rowWriteGrants.withdrawForSource(to, 'name_reused');
+            } catch (e) {
+              throw new McpRegistryError(500, 'withdraw_failed', `nothing was renamed: row-write grants left on the name ${to} from before could not be withdrawn (${e instanceof Error ? e.message : String(e)}); try again`);
+            }
           }
           if (p === undefined) return { server: await renamed(), rules: [] as string[], apps: using };
           // Every rule naming the source is copied to the new name first (one edit: restrictions and exemptions), then

@@ -64,7 +64,7 @@ const V = API_PREFIX;
 /** What turning Allow writes off must reach: the row-write grants on the source (K2b's store). */
 export interface RowWriteGrants {
   /** Withdraw every row-write grant on `source`, audited with `why` (default `allow_writes_off`); answers how many. */
-  withdrawForSource(source: string, why?: 'allow_writes_off' | 'source_renamed'): Promise<number>;
+  withdrawForSource(source: string, why?: 'allow_writes_off' | 'source_renamed' | 'name_reused'): Promise<number>;
 }
 
 export interface SourceRouteDeps {
