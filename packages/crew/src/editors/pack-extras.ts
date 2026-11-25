@@ -25,9 +25,10 @@ import { join } from 'node:path';
 import type { InstalledPackSkill, Preset, PresetStep, SkillConflictFinding, SkillPublishResult } from '../core/types.js';
 import { SKILL_NAME_RE } from '../skills/guards.js';
 import { SKILL_NAME_PREFIX } from '../skills/frontmatter.js';
+import { budgetPacer } from '../skills/tree.js';
 import { FENCED_WORKFLOWS } from '../mcp/run-fence.js';
 import type { SkillsRuntime } from '../skills/runtime.js';
-import type { SkillsStore } from '../skills/store.js';
+import { SkillsUnseededError, type SkillsStore } from '../skills/store.js';
 
 /** What the person approved: the pack's skill directories and block ids, and the digest the refusal showed. */
 export interface PackApproval {
@@ -38,7 +39,7 @@ export interface PackApproval {
 
 /** The daemon skills root, and how to publish it so workers get what was added. */
 export interface PackSkillsPort {
-  store: Pick<SkillsStore, 'manifest' | 'revision' | 'add' | 'replace' | 'enable' | 'disable' | 'previewWrite' | 'isPublishing' | 'listFiles' | 'resolveSkillFile'>;
+  store: Pick<SkillsStore, 'manifest' | 'revision' | 'add' | 'replace' | 'enable' | 'disable' | 'previewWrite' | 'isPublishing' | 'listFiles' | 'resolveSkillFile' | 'currentSnapshotPaced' | 'snapshotSkillsOf'>;
   publish(): Promise<Pick<SkillPublishResult, 'verdict' | 'findings' | 'snapshot'>>;
   /** Settles once the daemon's skills boot (seed, first publish) has landed; every skills write waits for it. */
   ready?(): Promise<void>;
@@ -120,6 +121,24 @@ const unreadable = (msg: string): PackExtrasRefusal => new PackExtrasRefusal(422
 /** The key a pack skill directory is installed under. */
 export function installedKey(dir: string): string {
   return `${SKILL_NAME_PREFIX}${dir}`;
+}
+
+/**
+ * The skills the root holds stamped as the pack's (`origin: pack:<name>`), named by the install record or not: only this
+ * pack's install writes that stamp (`store.add` checks it), so a skill written before a failed record write or a restart
+ * is still the pack's (crew#1915). `[]` when there is no skills root or it is not seeded; `null` when it does not read.
+ */
+export async function packStampedSkills(port: PackSkillsPort | null, packName: string): Promise<InstalledPackSkill[] | null> {
+  if (port === null) return [];
+  try {
+    await port.ready?.();
+    const origin = packSkillOrigin(packName);
+    return Object.entries(port.store.manifest().skills)
+      .filter(([key, e]) => e.origin === origin && key.startsWith(SKILL_NAME_PREFIX))
+      .map(([key]) => ({ name: key.slice(SKILL_NAME_PREFIX.length), key }));
+  } catch (err) {
+    return err instanceof SkillsUnseededError ? [] : null;
+  }
 }
 
 /** The pack's skills with their installed keys, in the pack's order. */
@@ -293,6 +312,7 @@ export async function planExtras(input: {
       if (!SKILL_NAME_RE.test(dir)) throw unreadable(`the skill directory ${JSON.stringify(dir)} is not a valid skill name (letters, digits, - and _ only)`);
       const key = installedKey(dir);
       const exists = Object.hasOwn(held, key);
+      // The pack's own: `owned` holds the record's skills and those stamped as the pack's (`packStampedSkills`, crew#1915).
       const own = exists && input.owned.skills.has(key);
       if (exists && !own) {
         throw new PackExtrasRefusal(409, 'pack_name_taken', `the skill ${dir} would be installed as ${key}, and the skills root already holds a skill of that name that this pack did not add; nothing was installed`);
@@ -533,6 +553,8 @@ export async function withdrawPackExtras(input: {
   skillsPort: PackSkillsPort | null;
   presetsPort: PackPresetsPort | null;
   waitMs?: number;
+  /** The pack's last editor is going: every skill stamped as the pack's leaves too, named by the record or not. */
+  wholePack?: boolean;
 }): Promise<PackWithdrawal> {
   const out: PackWithdrawal = { skills: [], presets: [] };
   const problems: string[] = [];
@@ -551,16 +573,28 @@ export async function withdrawPackExtras(input: {
       problems.push(`the presets could not be read (${err instanceof Error ? err.message : String(err)})`);
     }
   }
-  if (input.skills.length > 0 && input.skillsPort !== null) {
+  if (input.skillsPort !== null) {
     const port = input.skillsPort;
     try {
+      // The whole pack going: the record's skills and any carrying this pack's stamp that the record never came to name
+      // (a failed record write, or a restart between the publish and the record: crew#1917 r1). An unseeded root with no
+      // recorded skill has nothing to withdraw (an editor-only pack still leaves).
+      const origin = packSkillOrigin(input.packName);
+      let stamped: string[] = [];
+      if (input.wholePack === true) {
+        const found = await packStampedSkills(port, input.packName);
+        if (found === null) throw new Error('the skills root could not be read');
+        stamped = found.map((k) => k.key);
+      }
+      const keys = [...new Set([...input.skills, ...stamped])];
+      if (keys.length === 0) return finish();
       await port.ready?.();
       const deadline = Date.now() + (input.waitMs ?? 30_000);
       while (port.store.isPublishing()) {
         if (Date.now() > deadline) throw new Error('the skills root was busy publishing');
         await sleep(100);
       }
-      for (const key of input.skills) {
+      for (const key of keys) {
         // Only one still marked as this pack's: a skill the operator took over (or never the pack's) stays.
         const entry = port.store.manifest().skills[key];
         if (entry?.enabled !== true || entry.origin !== packSkillOrigin(input.packName)) continue;
@@ -568,7 +602,23 @@ export async function withdrawPackExtras(input: {
         if (r.verdict === 'blocked') problems.push(`the skill ${key} could not be switched off (${r.findings.filter((f) => f.severity === 'blocking').map((f) => f.evidence).join('; ')})`);
         else out.skills.push(key);
       }
-      if (out.skills.length > 0) {
+      // Published when a switched-off pack skill is still in the generation workers get: one just switched off, or one an
+      // earlier withdrawal switched off whose publish was blocked (a retry finishes it, crew#1916).
+      // The generation is read (paced: a walk of it, crew#852) only when nothing was just switched off and a switched-off
+      // one of the pack's could still be in it.
+      let stale = false;
+      const now = port.store.manifest().skills;
+      const off = keys.filter((key) => now[key]?.origin === origin && now[key]?.enabled === false);
+      if (out.skills.length === 0 && off.length > 0) {
+        try {
+          const current = await port.store.currentSnapshotPaced(budgetPacer());
+          const live = new Set(current === null ? [] : (port.store.snapshotSkillsOf(current)?.skills ?? off));
+          stale = off.some((key) => live.has(key));
+        } catch {
+          stale = true; // unreadable: publish to be sure
+        }
+      }
+      if (out.skills.length > 0 || stale) {
         const published = await port.publish();
         if (published.verdict === 'blocked') {
           problems.push(`the skills root could not be published (${published.findings.filter((f) => f.severity === 'blocking').map((f) => f.evidence).join('; ')}), so workers keep the switched-off skills until the next publish`);
@@ -578,6 +628,9 @@ export async function withdrawPackExtras(input: {
       problems.push(`the pack’s skills could not be switched off (${err instanceof Error ? err.message : String(err)}); switch them off in Skills`);
     }
   }
-  if (problems.length > 0) out.error = problems.join('; ');
-  return out;
+  return finish();
+  function finish(): PackWithdrawal {
+    if (problems.length > 0) out.error = problems.join('; ');
+    return out;
+  }
 }

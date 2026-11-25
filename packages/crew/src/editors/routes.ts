@@ -370,7 +370,31 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
       return serial(async () => {
         // Installed = served or skipped at boot (codex r2: a skipped one has no live record but is removable).
         if (!registry.isInstalled(id)) return reply.code(404).send({ error: `no editor '${id}' is installed` });
-        // Its grants go first (codex r1): a failed withdrawal keeps the editor installed, so a retry of
+        // (crew#1703 round 2, crew#1916) The pack's last editor going: its skills leave every worker's set and its
+        // presets leave the catalog, BEFORE the record goes, so a withdrawal that fails (a busy or refusing skills root,
+        // a preset that cannot be deleted) is a 503 that keeps the editor installed and a retry of this DELETE finishes
+        // it. The pack keeps them as its own, so a reinstall turns the same skills back on.
+        const packName = registry.packNameOf(id);
+        let withdrawn: Awaited<ReturnType<typeof withdrawPackExtras>> | null = null;
+        if (packName !== null && !registry.hasPack(packName, id)) {
+          const owned = registry.packExtrasOwned(packName);
+          // A skills root is asked even when the record names no skill: one stamped as the pack's goes too (crew#1917 r1).
+          if (owned.skills.length > 0 || owned.presets.length > 0 || (deps.skills ?? null) !== null) {
+            const w = await withdrawPackExtras({
+              packName,
+              skills: owned.skills.map((k) => k.key),
+              presets: owned.presets,
+              skillsPort: deps.skills ?? null,
+              presetsPort: deps.presets ?? null,
+              wholePack: true,
+            });
+            if (w.error !== undefined) {
+              return reply.code(503).send({ error: `${id} was not removed: ${w.error}; try again`, withdrawn: w });
+            }
+            if (owned.skills.length > 0 || owned.presets.length > 0 || w.skills.length > 0 || w.presets.length > 0) withdrawn = w;
+          }
+        }
+        // Its grants go next (codex r1): a failed withdrawal keeps the editor installed, so a retry of
         // this DELETE can still reach it, and never leaves a grant behind a removed editor. Every grant,
         // not only the install's (F37): a reinstall of the same build asks again for what the person allowed.
         try {
@@ -378,24 +402,9 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
         } catch (err) {
           return reply.code(503).send({ error: `${id} was not removed: its grants could not be withdrawn (${err instanceof Error ? err.message : String(err)}); try again` });
         }
-        const packName = registry.packNameOf(id);
         if (!registry.removeInstalled(id)) return reply.code(404).send({ error: `no editor '${id}' is installed` });
         deps.broadcast?.({ type: 'editorGrantsChanged', id, reason: 'removed' } satisfies EditorGrantsChangedFrame);
-        // (crew#1703 round 2) The pack's last editor gone: its skills leave every worker's set and its
-        // presets leave the catalog, and the response says which. The record of them stays, so a reinstall
-        // turns the same skills back on.
-        if (packName === null || registry.hasPack(packName)) return { removed: true, id };
-        const owned = registry.packExtrasOwned(packName);
-        if (owned.skills.length === 0 && owned.presets.length === 0) return { removed: true, id };
-        const withdrawn = await withdrawPackExtras({
-          packName,
-          skills: owned.skills.map((k) => k.key),
-          presets: owned.presets,
-          skillsPort: deps.skills ?? null,
-          presetsPort: deps.presets ?? null,
-        });
-        if (withdrawn.error !== undefined) deps.log?.(`editors: ${packName} removed, but ${withdrawn.error}`);
-        return { removed: true, id, withdrawn };
+        return { removed: true, id, ...(withdrawn !== null ? { withdrawn } : {}) };
       });
     },
   );

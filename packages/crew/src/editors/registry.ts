@@ -812,9 +812,9 @@ export class EditorRegistry {
     return this.installed.get(id)?.name ?? null;
   }
 
-  /** (crew#1703) Whether any installed editor or plugin still comes from the pack `name`. */
-  hasPack(name: string): boolean {
-    return [...this.installed.values()].some((p) => p.name === name);
+  /** (crew#1703) Whether any installed editor or plugin still comes from the pack `name` (`except`: leaving that id out). */
+  hasPack(name: string, except?: string): boolean {
+    return [...this.installed].some(([id, p]) => p.name === name && id !== except);
   }
 
   /** Remove an installed pack editor (the pack's files are the installer's to delete). `false` when it is not one. */
