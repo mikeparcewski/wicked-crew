@@ -33,9 +33,9 @@ export const STAND_IN_NEEDED_GATE = 'stand_in_needed' as const;
 export const STAND_IN_SCOPES = ['job', 'always'] as const;
 export type StandInScope = (typeof STAND_IN_SCOPES)[number];
 
-/** `by` on a launch under the `always` setting when the setting carries no author: it was saved before crew recorded
- *  one (wicked-core#1930 F6), or the record was hand-edited out of shape. */
-export const STAND_IN_SETTING_UNRECORDED = 'the standInReview setting (saved before its author was recorded)';
+/** `by` on a launch under the `always` setting when the setting carries no author (wicked-core#1930 F6): it was saved
+ *  before crew recorded one, turned on by hand, or its record is out of shape. */
+export const STAND_IN_SETTING_UNRECORDED = 'the standInReview setting (author not recorded)';
 
 /** The consent the `always` setting stores (`SystemSettings.standInConsent`): the person who saved it, and when. */
 export function settingConsent(who: string, now: number = Date.now()): StandInConsent {
@@ -46,7 +46,9 @@ export function settingConsent(who: string, now: number = Date.now()): StandInCo
 export function isSettingConsent(v: unknown): v is StandInConsent {
   if (typeof v !== 'object' || v === null) return false;
   const c = v as Record<string, unknown>;
-  return c['scope'] === 'always' && c['via'] === 'setting' && typeof c['by'] === 'string' && c['by'] !== '' && Number.isFinite(c['at']);
+  // The engine refuses a blank author and reads `at` as an i64 (ms), so a record it would refuse is no record.
+  return c['scope'] === 'always' && c['via'] === 'setting' && typeof c['by'] === 'string' && c['by'].trim() !== ''
+    && Number.isSafeInteger(c['at']) && (c['at'] as number) >= 0;
 }
 
 /**

@@ -33,7 +33,7 @@ const HELD = {
 };
 
 /** The words a launch records when the setting carries no author (it was saved before crew recorded one). */
-const STAND_IN_SETTING_UNRECORDED = 'the standInReview setting (saved before its author was recorded)';
+const STAND_IN_SETTING_UNRECORDED = 'the standInReview setting (author not recorded)';
 
 const armedHome = crewStateHome();
 const armedSettings = process.env['WICKED_CREW_SYSTEM_SETTINGS'];
@@ -44,7 +44,12 @@ let app: FastifyInstance;
 const launched: LaunchRunInput[] = [];
 const grants: unknown[][] = [];
 
+// The adapter and a settings save write process.env (the bus, the engine path, the worker and council settings): each
+// case puts it back as it found it.
+let envBefore: NodeJS.ProcessEnv = {};
+
 beforeEach(async () => {
+  envBefore = { ...process.env };
   dir = mkdtempSync(join(tmpdir(), 'stand-in-setting-consent-'));
   file = join(dir, 'settings.json');
   process.env['WICKED_CREW_SYSTEM_SETTINGS'] = file;
@@ -82,12 +87,17 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await app.close();
-  store.close();
-  setCrewStateHome(armedHome);
-  if (armedSettings === undefined) delete process.env['WICKED_CREW_SYSTEM_SETTINGS'];
-  else process.env['WICKED_CREW_SYSTEM_SETTINGS'] = armedSettings;
-  removeScratch(dir);
+  try {
+    await app.close();
+    store.close();
+  } finally {
+    setCrewStateHome(armedHome);
+    if (armedSettings === undefined) delete process.env['WICKED_CREW_SYSTEM_SETTINGS'];
+    else process.env['WICKED_CREW_SYSTEM_SETTINGS'] = armedSettings;
+    for (const k of Object.keys(process.env)) if (!(k in envBefore)) delete process.env[k];
+    for (const [k, v] of Object.entries(envBefore)) if (process.env[k] !== v) process.env[k] = v;
+    removeScratch(dir);
+  }
 });
 
 const put = (body: Record<string, unknown>, actor = 'priya/human/admin') =>
@@ -128,7 +138,8 @@ describe("a launch under standInReview 'always' records the person who saved it 
   it('saving always again keeps the person who turned it on; saving ask clears it', async () => {
     await put({ standInReview: 'always' });
     const first = stored()['standInConsent'];
-    await put({ standInReview: 'always', graphNodeLimit: 120 }, 'omar/human/admin');
+    expect((await put({ standInReview: 'always', graphNodeLimit: 120 }, 'omar/human/admin')).statusCode).toBe(200);
+    expect(stored()['graphNodeLimit']).toBe(120);
     expect(stored()['standInConsent']).toEqual(first);
     await put({ standInReview: 'ask' }, 'omar/human/admin');
     expect(stored()).not.toHaveProperty('standInConsent');
@@ -153,8 +164,16 @@ describe("a launch under standInReview 'always' records the person who saved it 
     writeFileSync(file, JSON.stringify({ standInReview: 'always' }, null, 2));
     await launch();
     expect(launched[0]?.standIn).toMatchObject({ scope: 'always', by: STAND_IN_SETTING_UNRECORDED, via: 'setting' });
-    writeFileSync(file, JSON.stringify({ standInReview: 'always', standInConsent: { scope: 'job', by: 7 } }, null, 2));
-    await launch();
-    expect(launched[1]?.standIn).toMatchObject({ scope: 'always', by: STAND_IN_SETTING_UNRECORDED, via: 'setting' });
+    // Out of shape, or a record the engine would refuse (a blank author, a timestamp that is not an i64 of ms).
+    const bad = [{ scope: 'job', by: 7 }, { scope: 'always', by: '   ', at: 5, via: 'setting' }, { scope: 'always', by: 'x (human)', at: 1.5, via: 'setting' },
+      { scope: 'always', by: 'x (human)', at: 1e100, via: 'setting' }];
+    for (const [i, standInConsent] of bad.entries()) {
+      writeFileSync(file, JSON.stringify({ standInReview: 'always', standInConsent }, null, 2));
+      await launch();
+      expect(launched[i + 1]?.standIn).toMatchObject({ scope: 'always', by: STAND_IN_SETTING_UNRECORDED, via: 'setting' });
+    }
+    // A person's next save of always repairs it: there was no valid author to keep.
+    expect((await put({ standInReview: 'always' })).statusCode).toBe(200);
+    expect(stored()['standInConsent']).toMatchObject({ by: 'priya (human)' });
   });
 });
