@@ -1218,18 +1218,28 @@ describe('the run\'s assurance labels (crew#1186)', () => {
       + "the work but none of the builder's reasoning; it is not an independent review. Stood in: reviewer (Claude Code).",
     );
     expect(body).not.toMatch(/independently/i);
-    // Mixed (a real helper filled another role) and a stand-in that did not answer.
+    // Mixed (a real helper filled another role) and a stand-in that did not answer, as the engine records them (codex
+    // r1 on b7-standin): the session's `roles` stays the empty list the engine starts it with; the answered roles are on
+    // the units' gate receipts (core `gate_receipt` → `WorkUnit.assurance.roles`), and the binding stays `seated`.
     const mixed = {
       ...engine.assurance,
-      roles: [{ role: 'judge', filled: 'real', state: 'answered', seat: 'codex', standIn: null, ord: 2, attempt: 0, subject: null }],
       standIns: [
         ...(engine.assurance['standIns'] as unknown[]),
-        { ...(engine.assurance['standIns'] as Array<Record<string, unknown>>)[0], key: 'claude~2', slot: 2, role: 'council', state: 'failed' },
+        { ...(engine.assurance['standIns'] as Array<Record<string, unknown>>)[0], key: 'claude~2', slot: 2, role: 'qe_reviewer' },
       ],
     };
-    const mixedBody = composeDeliverText(factsFromRun(withAssurance(mixed), null)).body;
+    const mixedView = withAssurance(mixed);
+    expect(engine.assurance['roles']).toEqual([]);
+    const receipt = (mixedView.units ?? []).find((u) => u.ord === 4)!;
+    (receipt as { assurance?: unknown }).assurance = {
+      roles: [
+        { role: 'judge', filled: 'real', state: 'answered', seat: 'codex', standIn: null, ord: 4, attempt: 0, subject: null },
+        { role: 'qe_reviewer', filled: 'stand_in', state: 'failed', seat: 'claude~2', standIn: null, ord: 4, attempt: 0, subject: null },
+      ],
+    };
+    const mixedBody = composeDeliverText(factsFromRun(mixedView, null)).body;
     expect(mixedBody).toContain('- **Checked partly by stand-ins**: only Claude Code was signed in.');
-    expect(mixedBody).toContain('Stood in: reviewer (Claude Code), council member (Claude Code, did not answer).');
+    expect(mixedBody).toContain('Stood in: reviewer (Claude Code), QE reviewer (Claude Code, did not answer).');
     // A run no stand-in took part in says nothing about stand-ins.
     const none = composeDeliverText(factsFromRun(withAssurance({ ...engine.assurance, standIns: [] }), null)).body;
     expect(none).not.toContain('stand-in');

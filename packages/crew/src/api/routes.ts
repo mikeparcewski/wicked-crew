@@ -3983,11 +3983,10 @@ export function registerRoutes(
     if (standInEligible && standInsSupported) {
       const setting = await Promise.resolve().then(() => adapter.getSettings()).then((s) => s.standInReview).catch(() => undefined);
       const consent = consentFor(b.standIns === true, setting, `${req.actor.id} (${req.actor.kind})`);
-      if (consent !== null) {
-        input.standInAware = true;
-        input.standIn = consent;
-      } else if (ctx.standInChoice === true) {
-        let preflight: ReturnType<typeof readPreflight>;
+      // The launcher that can show the choice asks the preflight with or without consent (codex r1 on b7-standin):
+      // consent answers only the choice; a role no signed-in helper can stand in for is no_usable_helper either way.
+      let preflight: ReturnType<typeof readPreflight> = null;
+      if (ctx.standInChoice === true) {
         try {
           preflight = readPreflight(await adapter.independencePreflight(input));
         } catch (err) {
@@ -3995,9 +3994,14 @@ export function registerRoutes(
           return reply.code(400).send({ error: `the launch was refused: ${message(err)}` });
         }
         const refusal = preflight === null ? null : preflightRefusal(preflight);
-        if (refusal !== null) return reply.code(409).send(refusal);
+        if (refusal !== null && (consent === null || refusal.code === 'no_usable_helper')) return reply.code(409).send(refusal);
+      }
+      if (consent !== null) {
+        input.standInAware = true;
+        input.standIn = consent;
+      } else if (preflight !== null) {
         // Not short: launched aware, so a seat lost mid-run holds at the stand-in gate instead of failing.
-        if (preflight !== null) input.standInAware = true;
+        input.standInAware = true;
       }
     }
     // DES-L9 / crew#550 — REVISION: `revisesPr` names an OPEN same-repository pull request whose
@@ -7509,9 +7513,10 @@ export function registerRoutes(
         ...(refusal !== undefined ? { refusal } : {}),
         ...(gateKind !== undefined ? { gateKind } : {}),
         ...(frame !== undefined ? offeredChoices(frame) : {}),
-        // (crew#1698) The opening the record shows: the row's `gate_seq`, else the frame's.
+        // (crew#1698) The opening the record shows: the row's `gate_seq` only, the one an answer is checked
+        // against (a frame's beside an unnumbered row would be an opening no answer could name).
         ...((): { gateSeq?: number } => {
-          const seq = gateSeqOf(durableGate['gate_seq']) ?? gateSeqOf(frame?.['gateSeq']);
+          const seq = gateSeqOf(durableGate['gate_seq']);
           return seq !== undefined ? { gateSeq: seq } : {};
         })(),
       };
@@ -8086,12 +8091,18 @@ export function registerRoutes(
   }
 
   /** (DES-CATALOG-002 §4.6) The plan a gate holds now, for a `gate_changed` answer: its ord and revision, best-effort. */
-  async function currentPlanOf(runId: string, readGate = true): Promise<{ openOrd?: number; planRev?: number }> {
+  async function currentPlanOf(runId: string, readGate = true): Promise<{ openOrd?: number; openGateSeq?: number; planRev?: number }> {
     try {
       // The caller that already read the open gate (and names its ord) asks for the plan revision only.
       const recorded = readGate ? await recordedOpenGate(runId) : null;
       const rev = openPlanGateRev(await busRows(adapter.busDbPath, runId));
-      return { ...(recorded?.state === 'open' ? { openOrd: recorded.ord } : {}), ...(rev !== undefined ? { planRev: rev } : {}) };
+      // (crew#1698) …and the opening open now, as the daemon's own gate_changed says it.
+      const openSeq = recorded?.state === 'open' ? gateSeqOf(recorded.row['gate_seq']) : undefined;
+      return {
+        ...(recorded?.state === 'open' ? { openOrd: recorded.ord } : {}),
+        ...(openSeq !== undefined ? { openGateSeq: openSeq } : {}),
+        ...(rev !== undefined ? { planRev: rev } : {}),
+      };
     } catch {
       return {};
     }
@@ -8310,6 +8321,14 @@ export function registerRoutes(
     }
     try {
       const gated = run.session.status === 'awaiting_human';
+      // (crew#1698, codex r1 on b7-standin) A resume naming a gate OPENING answers that gate: once it has closed,
+      // nothing is resumed on its word.
+      if (!gated && parsed.data.gateSeq !== undefined) {
+        return reply.code(409).send({
+          code: 'gate_changed',
+          error: `Gate changed: this decision was made on opening ${parsed.data.gateSeq} of a gate, but run ${id} is ${run.session.status}, not parked at a gate — it was answered. Nothing was resumed.`,
+        });
+      }
       // A gated resume IS a gate approval, so it lands a steering-author proposal exactly like
       // POST /runs/:id/gate would — the "no side door" rule (task #88) holds for the landing
       // write too (crew#388). Prompt captured pre-confirm; see the gate route.
@@ -8663,7 +8682,8 @@ export function registerRoutes(
     return actions
       .filter((a) => declines(a) || !(a.action === SKIP_QE_ACTION ? skipRefused : approveRefused))
       .filter((a) => !(steering && a.action === 'reassign'))
-      .map((a) => (a.action === SKIP_QE_ACTION || a.action === SKIP_RULES_ACTION || (a.action === 'approve' && a.noteIntent === 'skip_rules')
+      .map((a) => (a.action === SKIP_QE_ACTION || a.action === SKIP_RULES_ACTION || a.action === USE_STAND_INS_ACTION
+        || (a.action === 'approve' && a.noteIntent === 'skip_rules')
         ? { ...a, humanOnly: true as const } : a));
   }
 
@@ -8755,6 +8775,14 @@ export function registerRoutes(
     if (!gated && note !== undefined) {
       return reply.code(400).send({
         error: `run ${id} is executing, not parked at a gate — a note rides only a gated reassign (it is the approve's amendment). Nothing was reassigned.`,
+      });
+    }
+    // (crew#1698, codex r1 on b7-standin) An answer naming a gate OPENING was made on a gate: once that gate has
+    // closed (another decision released it before this one got the lock), it changes no running work.
+    if (!gated && parsed.data.gateSeq !== undefined) {
+      return reply.code(409).send({
+        code: 'gate_changed',
+        error: `Gate changed: this decision was made on opening ${parsed.data.gateSeq} of a gate, but run ${id} is ${run.session.status}, not parked at a gate — it was answered. Nothing was reassigned.`,
       });
     }
     const requestedCli = parsed.data.cli;
@@ -8997,7 +9025,10 @@ export function registerRoutes(
       const run = await runOf();
       const servable =
         recorded === null
-        || (recorded.state === 'open' && cached.ord === recorded.ord)
+        // (crew#1698) …and of the record's opening, when the row numbers it: a gate that re-opened at the
+        // same ord while the pump was behind is not the cached one.
+        || (recorded.state === 'open' && cached.ord === recorded.ord
+          && (gateSeqOf(recorded.row['gate_seq']) === undefined || cached.gateSeq === gateSeqOf(recorded.row['gate_seq'])))
         || (recorded.state === 'none' && run?.session.status === 'awaiting_human');
       if (servable) {
         const offers = await offersAt(cached.ord, run);

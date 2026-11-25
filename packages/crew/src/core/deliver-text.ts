@@ -995,14 +995,22 @@ function standInReasonWords(r: unknown): string | null {
   }
 }
 
-/** (DES-STANDIN-001 §6, K6) The stand-ins from `session.assurance` (`standIns`, `roles`, `standInLabel`); absent when none took part. */
-function standInsOf(a: Record<string, unknown>): DeliverStandInFact | undefined {
+/** (DES-STANDIN-001 §6, K6) The stand-ins from `session.assurance` (`standIns`, `standInLabel`) and the role records
+ *  (`roles`): the session's, and every unit's gate receipt (`unit.assurance.roles`), where the engine writes the
+ *  answered roles (the session's list starts empty). Absent when none took part. A stand-in is `failed` when its
+ *  binding, or a receipt's record of its seat, says so (codex r1 on b7-standin). */
+function standInsOf(a: Record<string, unknown>, units: WorkUnit[] = []): DeliverStandInFact | undefined {
   const bindings = (Array.isArray(a['standIns']) ? a['standIns'] : []) as Array<Record<string, unknown>>;
   const took = bindings.filter((b) => typeof b['role'] === 'string' && typeof b['key'] === 'string');
   if (took.length === 0) return undefined;
   const label = typeof a['standInLabel'] === 'string' ? a['standInLabel'].trim() : '';
   const reason = standInReasonWords(took[0]!['reason']) ?? (label !== '' ? label : 'too few helpers were signed in');
-  const records = (Array.isArray(a['roles']) ? a['roles'] : []) as Array<Record<string, unknown>>;
+  const rolesOf = (v: unknown): Array<Record<string, unknown>> =>
+    (Array.isArray(v) ? v : []).filter((r): r is Record<string, unknown> => typeof r === 'object' && r !== null);
+  const records = [
+    ...rolesOf(a['roles']),
+    ...units.flatMap((u) => rolesOf(((u as { assurance?: { roles?: unknown } | null }).assurance ?? undefined)?.roles)),
+  ];
   const mixed = records.some((r) => r['filled'] === 'real');
   return {
     reason,
@@ -1010,7 +1018,8 @@ function standInsOf(a: Record<string, unknown>): DeliverStandInFact | undefined 
     roles: took.map((b) => ({
       role: b['role'] as string,
       by: typeof b['display'] === 'string' && b['display'].trim() !== '' ? b['display'].trim() : typeof b['base'] === 'string' ? b['base'] : (b['key'] as string),
-      failed: b['state'] === 'failed',
+      failed: b['state'] === 'failed'
+        || records.some((r) => r['seat'] === b['key'] && r['filled'] === 'stand_in' && r['state'] === 'failed'),
     })),
   };
 }
@@ -1049,7 +1058,7 @@ function assuranceOf(s: SessionView['session'], units: WorkUnit[]): DeliverAssur
         : 'floor overridden by operator',
   }));
   const power = powerOf(s);
-  const standIns = standInsOf(a as Record<string, unknown>);
+  const standIns = standInsOf(a as Record<string, unknown>, units);
   return {
     mode: typeof a.mode === 'string' ? a.mode : 'full',
     qe,

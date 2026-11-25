@@ -225,7 +225,8 @@ export class GateCache {
       if (event.type === 'awaitingHuman' && this.hydrated.has(event.session)) {
         const entry = this.entries.get(event.session);
         // Live frames cannot be ordered against the durable read.
-        if (entry?.ord !== event.ord || entry?.prompt !== event.prompt) this.forget(event.session);
+        // (crew#1698) Another opening at the same ord and prompt (a re-ask) is another gate too.
+        if (entry?.ord !== event.ord || entry?.prompt !== event.prompt || entry?.gateSeq !== gateSeqOf(event['gateSeq'])) this.forget(event.session);
         return;
       }
       this.hydrated.delete(event.session);

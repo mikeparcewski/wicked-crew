@@ -11,7 +11,8 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import type { AuditLog } from '../src/api/audit.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
-import type { LaunchRunInput } from '../src/core/types.js';
+import type { Actor, LaunchRunInput } from '../src/core/types.js';
+import { registerAuthHooks } from '../src/api/auth.js';
 import { consentFor, preflightRefusal, readPreflight } from '../src/core/stand-in.js';
 import { withRunViews } from './support/run-views.js';
 
@@ -105,7 +106,7 @@ describe('POST /runs asks the stand-in question (T-K1, T-K2)', () => {
     const res = await post({ standIns: true });
     expect(res.statusCode, res.body).toBe(201);
     expect(res.json().assuranceNotice).toBeUndefined();
-    expect(preflights).toEqual([]);
+    expect(preflights).toHaveLength(1);
     expect(launched).toHaveLength(1);
     expect(launched[0]!.standInAware).toBe(true);
     expect(launched[0]!.standIn).toMatchObject({ scope: 'job', by: 'test-human (human)', via: 'launch' });
@@ -125,7 +126,7 @@ describe('POST /runs asks the stand-in question (T-K1, T-K2)', () => {
       const res = await post({}, actor);
       expect(res.statusCode, res.body).toBe(201);
     }
-    expect(preflights).toEqual([]);
+    expect(preflights).toHaveLength(2);
     expect(launched.map((l) => [l.standInAware, l.standIn?.scope, l.standIn?.via])).toEqual([[true, 'always', 'setting'], [true, 'always', 'setting']]);
   });
 
@@ -137,13 +138,16 @@ describe('POST /runs asks the stand-in question (T-K1, T-K2)', () => {
     expect(launched[0]!.standIn).toBeUndefined();
   });
 
-  it('no usable base is 409 no_usable_helper', async () => {
+  it('no usable base is 409 no_usable_helper, consent or not (consent answers only the choice)', async () => {
     const p = JSON.parse(ONE_HELPER);
     p.roles[0].canStandIn = false; p.roles[0].standInFrom = null;
     preflight = JSON.stringify(p);
-    const res = await post({});
-    expect(res.statusCode, res.body).toBe(409);
-    expect(res.json().code).toBe('no_usable_helper');
+    for (const [body, saved] of [[{}, {}], [{ standIns: true }, {}], [{}, { standInReview: 'always' }]] as const) {
+      settings = { ...saved };
+      const res = await post({ ...body });
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().code).toBe('no_usable_helper');
+    }
     expect(launched).toEqual([]);
   });
 
@@ -191,6 +195,54 @@ describe('PUT /settings standInReview is a person\'s', () => {
     expect((await put({ standInReview: 'always' }, 'agent/admin')).statusCode).toBe(403);
     expect((await put({ standInReview: 'sometimes' })).statusCode).toBe(400);
     expect(saved).toHaveLength(2);
+  });
+});
+
+// codex r1 on b7-standin: the consent guards behind crew's REAL auth hooks (required mode), each actor by its bearer: an
+// agent's or a system's token never consents, at launch, in the setting or (below) at the gate. (In `off` mode the daemon
+// has no identities at all: every request is the local person, as for every human-only rule.)
+describe('stand-in consent behind the real auth hooks', () => {
+  let app: FastifyInstance;
+  const launched: LaunchRunInput[] = [];
+  const saved: unknown[] = [];
+  const TOKENS: Record<string, Actor> = {
+    human: { id: 'priya', kind: 'human', trust: 'admin' },
+    agent: { id: 'seat-codex', kind: 'agent', trust: 'admin' },
+    system: { id: 'ci', kind: 'system', trust: 'admin' },
+  };
+  beforeAll(async () => {
+    const adapter = {
+      getSettings: async () => ({}),
+      updateSettings: vi.fn(async (patch: Record<string, unknown>) => { saved.push(patch); return patch; }),
+      sessions: async () => [], sessionsDetail: async () => [], listRepos: async () => [],
+      listWorkflows: () => [], getWorkflow: () => null,
+      launchRun: vi.fn(async (input: LaunchRunInput) => { launched.push(input); return input.sessionId; }),
+      supportsStandIns: () => true,
+      independencePreflight: vi.fn(async () => ONE_HELPER),
+    };
+    app = Fastify({ logger: false });
+    registerAuthHooks(app, { mode: 'required', verifiers: [{ name: 'test', verify: async (t) => TOKENS[t] ?? null }], allowedOrigins: null });
+    registerRoutes(app, adapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, {
+      audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog, authMode: 'required',
+    }, { rosterWithStanding: () => [], judgeCoverage: () => null });
+    await app.ready();
+  });
+  afterAll(async () => { await app.close(); });
+  const as = (token: string) => ({ authorization: `Bearer ${token}` });
+
+  it('only a person\'s bearer consents at launch or saves always', async () => {
+    for (const token of ['agent', 'system']) {
+      const launch = await app.inject({ method: 'POST', url: '/api/v1/runs', headers: as(token), payload: { problem: 'fix it', clisJson: '[]', standIns: true } });
+      expect(launch.statusCode, launch.body).toBe(403);
+      const put = await app.inject({ method: 'PUT', url: '/api/v1/settings', headers: as(token), payload: { standInReview: 'always' } });
+      expect(put.statusCode, put.body).toBe(403);
+    }
+    expect(launched).toEqual([]);
+    expect(saved).toEqual([]);
+    const launch = await app.inject({ method: 'POST', url: '/api/v1/runs', headers: as('human'), payload: { problem: 'fix it', clisJson: '[]', standIns: true } });
+    expect(launch.statusCode, launch.body).toBe(201);
+    expect(launched[0]!.standIn).toMatchObject({ scope: 'job', by: 'priya (human)' });
+    expect((await app.inject({ method: 'PUT', url: '/api/v1/settings', headers: as('human'), payload: { standInReview: 'always' } })).statusCode).toBe(200);
   });
 });
 

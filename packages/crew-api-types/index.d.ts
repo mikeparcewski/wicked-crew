@@ -2566,7 +2566,9 @@ export interface GateInfo {
  * (`needsPlanRev`) also send `planRev`, the held revision ({@link GateInfo.planRev}, the one the person was shown);
  * `edit_plan` sends `plan`.
  * The note, reason or rationale rides `amend` (a reassign's rides `note`); `skip_rules` sends `skipRules`, one
- * reason per rule id named in {@link GateAction.rules}.
+ * reason per rule id named in {@link GateAction.rules}. `use_stand_ins` (api-types 0.224.0, a `stand_in_needed`
+ * gate; a person's answer, `humanOnly`) also sends `scope` (`'job'` | `'always'`, one listed action draws both).
+ * Any answer may send `gateSeq` ({@link GateInfo.gateSeq}), the opening the person was shown.
  */
 export interface GateAction {
   /**
@@ -7604,7 +7606,9 @@ export interface SystemSettings {
   /**
    * (api-types 0.224.0, DES-STANDIN-001 §4) Settings → Checks → "Stand-in review": `ask` (the default; a job that
    * can't be checked independently asks first, `409 stand_in_choice`) or `always` (use stand-ins whenever a helper
-   * is missing; every stand-in is labelled). ABSENT = `ask`. Human actors only.
+   * is missing; every stand-in is labelled). ABSENT = `ask`. Human actors only. Read by every launch through
+   * crew's launcher (studio's Start, the API, a chat proposal's Start, a recording, a product plan); a scheduled job
+   * does not read it yet.
    */
   standInReview?: 'ask' | 'always' | undefined;
   /**

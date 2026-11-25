@@ -19,8 +19,8 @@ afterEach(async () => { await Promise.all(apps.splice(0).map((app) => app.close(
 const row = (gateSeq: number | null) => ({ kind: 'gate', ord: 4, gate_kind: 'escalation', prompt: 'Retry the review?', created_at: 1, ...(gateSeq !== null ? { gate_seq: gateSeq } : {}) });
 
 /** `null`: a row with no `gate_seq` at all (an engine before core#1808). */
-function harness(gateSeq: number | null = 2) {
-  const run = { session: { id: 'r', status: 'awaiting_human', unit_ix: 0, clis: ['claude', 'codex'], workflow_id: 'bug' },
+function harness(gateSeq: number | null = 2, status = 'awaiting_human') {
+  const run = { session: { id: 'r', status, unit_ix: 0, clis: ['claude', 'codex'], workflow_id: 'bug' },
     units: [{ id: 'u', ord: 4, phase_ref: 'review', status: 'rejected', assigned_cli: 'claude' }] };
   const adapter = {
     runView: vi.fn(async () => run), sessionsDetail: vi.fn(async () => [run]),
@@ -30,12 +30,14 @@ function harness(gateSeq: number | null = 2) {
     supportsPlanSendBack: () => true,
     confirmGate: vi.fn<(...args: unknown[]) => Promise<string>>(async () => 'executing'),
     reassignUnit: vi.fn(async () => undefined),
+    resumeRun: vi.fn(async () => 'executing'),
   };
   const app = Fastify({ logger: false });
   apps.push(app);
-  registerRoutes(app, adapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined,
+  const cache = new GateCache();
+  registerRoutes(app, adapter as unknown as CoreAdapter, cache, new ElicitationCache(), undefined,
     { audit: { record: vi.fn() } as unknown as AuditLog, authMode: 'off' });
-  return { app, adapter };
+  return { app, adapter, cache };
 }
 
 const answers = [
@@ -108,6 +110,46 @@ describe('the per-opening gate id (crew#1698)', () => {
     adapter.confirmGate.mockRejectedValueOnce(new Error('gate_changed: the gate opened again (opening 3, not 2)'));
     const res = await app.inject({ method: 'POST', url: '/api/v1/runs/r/gate', payload: { approve: true, gateSeq: 2 } });
     expect(res.statusCode).toBe(409);
-    expect(res.json().code).toBe('gate_changed');
+    expect(res.json()).toMatchObject({ code: 'gate_changed', openOrd: 4, openGateSeq: 2 });
+  });
+
+  // codex r1 on b7-standin: an answer naming an opening, queued behind another decision that released the gate, changes
+  // no running work.
+  for (const path of ['reassign', 'resume']) {
+    it(`/${path}: naming an opening once the gate has closed is 409 gate_changed, nothing changed`, async () => {
+      const { app, adapter } = harness(2, path === 'reassign' ? 'executing' : 'paused');
+      const res = await app.inject({ method: 'POST', url: `/api/v1/runs/r/${path}`, payload: { gateSeq: 2 } });
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().code).toBe('gate_changed');
+      expect(adapter.reassignUnit).not.toHaveBeenCalled();
+      expect(adapter.resumeRun).not.toHaveBeenCalled();
+      expect(adapter.confirmGate).not.toHaveBeenCalled();
+    });
+  }
+
+  it('a cached gate of an earlier opening at the same ord is not served; the record\'s opening is', async () => {
+    const { app, cache } = harness(3);
+    cache.ingest({ type: 'awaitingHuman', session: 'r', ord: 4, prompt: 'Retry the review?', gateKind: 'escalation', gateSeq: 2 } as CoreEvent);
+    const res = await app.inject({ method: 'GET', url: '/api/v1/runs/r/gate' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ ord: 4, gateSeq: 3 });
+  });
+
+  it('a durable row with no opening serves none, even beside a numbered frame', async () => {
+    const { app, adapter } = harness(0);
+    adapter.runEvents.mockResolvedValue([{ type: 'awaitingHuman', session: 'r', ord: 4, prompt: 'Retry the review?', gateSeq: 7 } as CoreEvent]);
+    const res = await app.inject({ method: 'GET', url: '/api/v1/runs/r/gate' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).not.toHaveProperty('gateSeq');
+  });
+
+  it('a gate read from the record is dropped by a live frame of another opening at the same ord and prompt', async () => {
+    const cache = new GateCache();
+    const read = { ord: 4, prompt: 'p', lifecycle: 'open' as const, receivedAt: new Date(1).toISOString(), gateSeq: 2 };
+    await cache.resolve('r', async () => read);
+    cache.ingest({ type: 'awaitingHuman', session: 'r', ord: 4, prompt: 'p', gateSeq: 2 } as CoreEvent);
+    expect(cache.get('r')).toMatchObject({ gateSeq: 2 });
+    cache.ingest({ type: 'awaitingHuman', session: 'r', ord: 4, prompt: 'p', gateSeq: 3 } as CoreEvent);
+    expect(cache.get('r')).toBeUndefined();
   });
 });
