@@ -1,7 +1,7 @@
 // DES-CHAT-ARTIFACTS-001 §4.2-§4.3 (slice A2): the resolver and the accept flow over in-memory deps — the cases the
 // server harness cannot stage (a live job filed under the chat, a document being revised, a launcher that fails or
 // stays live, a chat id reused mid-accept, a slow resolution). Every refusal is checked to record and start nothing.
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
@@ -22,6 +22,10 @@ import {
   type ProposalDispatcher,
 } from '../src/api/chat-proposals.js';
 import { splitMakeBlocks } from '../src/decisions/chat-recorder.js';
+
+/** A demo cut's `demo-cut.json` marker exactly as wicked-interactive's import and recut write it (the video tool's own
+ *  `isCut` rule, which crew reads too): tests/fixtures/demo-cut/routes-0.17.0.json `_source`. */
+const CUT_MARKER = readFileSync(new URL('./fixtures/demo-cut/demo-cut.json', import.meta.url), 'utf8');
 
 const ME: Actor = { id: 'maria', kind: 'human', trust: 'operator' };
 const ROOT = mkdtempSync(join(tmpdir(), 'chat-proposals-accept-'));
@@ -182,15 +186,16 @@ describe('the resolver', () => {
     expect(r.docsRootCalls).not.toContain('other');
   });
 
-  it('studio#1140: a refine of a demo cut is blocked (chat cannot change a video) and carries no target, so Go starts nothing', async () => {
+  it('studio#1140: a refine of a demo cut is blocked (a video changes through a cut card) and carries no target, so Go starts nothing', async () => {
     const dir = join(ROOT, 'mikes', 'demo-8e0ffbece431');
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, '_v2.html'), '<h1>Sign-in demo</h1>');
     writeFileSync(join(dir, 'versions.json'), JSON.stringify({ head: 2, kind: 'demo', versions: [{ version: 2, kind: 'demo' }] }));
+    writeFileSync(join(dir, 'demo-cut.json'), CUT_MARKER);
     const r = rig();
     const t = chatWith(r, 'c1', { projectId: 'mikes', open: 'mikes/demo-8e0ffbece431' });
     const p = (await propose(r, 'c1', t, { refine: 'mikes/demo-8e0ffbece431', ask: 'change the chapter caption' }))!;
-    expect(p.blocked).toBe("Coverage deck · a demo video: this chat can't change it. Change it by hand in the video editor (chapters, trims, captions, theme)");
+    expect(p.blocked).toBe("Coverage deck · a demo video: ask for its change in this chat as a video change, not a page change (or change it by hand in the video editor)");
     expect(p.target).toBeUndefined();
     const res = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
     expect(res.code).toBe(409);
@@ -208,10 +213,10 @@ describe('the resolver', () => {
     expect(p.blocked).toBeNull();
     expect(p.target).toMatchObject({ ref: 'mikes/cut-later', base: 1 });
     // The same document is a cut when Go is pressed (a card an older crew recorded on a cut).
-    writeFileSync(join(dir, 'versions.json'), JSON.stringify({ head: 1, kind: 'demo', versions: [{ version: 1, kind: 'demo' }] }));
+    writeFileSync(join(dir, 'demo-cut.json'), CUT_MARKER);
     const res = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
     expect(res.code).toBe(409);
-    expect(res.body).toMatchObject({ code: 'proposal_blocked', error: "Coverage deck · a demo video: this chat can't change it. Change it by hand in the video editor (chapters, trims, captions, theme)" });
+    expect(res.body).toMatchObject({ code: 'proposal_blocked', error: "Coverage deck · a demo video: ask for its change in this chat as a video change, not a page change (or change it by hand in the video editor)" });
     expect(r.launcher.launched).toEqual([]);
     expect(kinds(r, 'c1')).toEqual(['proposal']);
   });
@@ -223,18 +228,21 @@ describe('the resolver', () => {
     writeFileSync(join(dir, '_v1.html'), '<h1>Sign-in demo</h1>');
     const real = { head: 1, versions: [{ version: 0, parent: null, feedback_file: null, html_file: '_v0.html' }, { version: 1, parent: 0, kind: 'demo' }] };
     writeFileSync(join(dir, 'versions.json'), JSON.stringify(real));
-    const blockedText = "Coverage deck · a demo video: this chat can't change it. Change it by hand in the video editor (chapters, trims, captions, theme)";
+    writeFileSync(join(dir, 'demo-cut.json'), CUT_MARKER);
+    const blockedText = "Coverage deck · a demo video: ask for its change in this chat as a video change, not a page change (or change it by hand in the video editor)";
     const r = rig();
     const t = chatWith(r, 'c1', { projectId: 'mikes', open: 'mikes/demo-1a2b3c4d5e6f' });
     const p = (await propose(r, 'c1', t, { refine: 'mikes/demo-1a2b3c4d5e6f', ask: 'change the chapter caption' }))!;
     expect(p.blocked).toBe(blockedText);
     expect(p.target).toBeUndefined();
-    // A card recorded while it was still the placeholder (version 0 only, no kind) is stopped at Go once it is a cut.
+    // A card recorded while it was still the placeholder (version 0 only, no marker yet) is stopped at Go once it is a
+    // cut (the import writes its marker before anything else).
+    rmSync(join(dir, 'demo-cut.json'));
     writeFileSync(join(dir, 'versions.json'), JSON.stringify({ head: 0, versions: [real.versions[0]] }));
     const t2 = chatWith(r, 'c2', { projectId: 'mikes', open: 'mikes/demo-1a2b3c4d5e6f' });
     const q = (await propose(r, 'c2', t2, { refine: 'mikes/demo-1a2b3c4d5e6f', ask: 'change the chapter caption' }))!;
     expect(q.blocked).toBeNull();
-    writeFileSync(join(dir, 'versions.json'), JSON.stringify({ ...real, head: 0 }));
+    writeFileSync(join(dir, 'demo-cut.json'), CUT_MARKER);
     const res = await r.svc.decide('c2', q.pid, { decision: 'go' }, ME, 'i1');
     expect(res.code).toBe(409);
     expect(res.body).toMatchObject({ code: 'proposal_blocked', error: blockedText });
