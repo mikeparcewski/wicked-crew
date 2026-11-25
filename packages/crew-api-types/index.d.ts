@@ -17203,7 +17203,8 @@ export interface ProductComposeResponse {
  * sources link it). Three modes:
  * - no `confirm`, no `resolve`: the card and its `publishHash`; nothing is sent;
  * - `confirm` = the card's `publishHash`: the items not yet created are created in order, each journaled before and
- *   after it is sent, then every created issue is read back;
+ *   after it is sent and read back right after it is created; the answer's publication reads back each created issue
+ *   whose last `ok` read-back is older than 60 s (wicked-crew#1911);
  * - `resolve`: a person settles one `unsure` item: `issue: N` = it was created as #N (crew reads #N and records it only
  *   when its title and body are the approved ones), `issue: null` = it was not created (a later confirm creates it).
  *
@@ -17257,9 +17258,11 @@ export interface ProductPublishCard {
  * before it was sent); `unsure` (crew cannot tell whether GitHub created it: resolve it); `absent` (a person said it was
  * not created); `missing` (planned, never sent). `readBack` (created items only): `ok` = the issue's title and body as
  * GitHub's MCP server shows them are the approved ones; `differs`; `unreadable` (the read failed, a deleted issue
- * included). An edit made only of characters that server strips is invisible to it. (wicked-crew#1911) The send reads each
- * issue back right after creating it; a later read-back that was `ok` stands for up to 60 s, and while a send or resolve of
- * the publication is in flight the GET answers from the send's own read-backs, so an edit on GitHub can take that long to show.
+ * included). An edit made only of characters that server strips is invisible to it. (wicked-crew#1911) When crew reads:
+ * a send reads each issue back right after creating it; an `ok` read-back is not read again for 60 s, and one that differs
+ * or was unreadable is read again on each answer. While any publication is being sent or resolved in the daemon, a GET or a
+ * card reads nothing from GitHub and answers the last read-back whatever its age, or `unreadable` for an issue not read yet;
+ * so an edit made on GitHub shows within 60 s of the last read, or after the send ends.
  */
 export interface PublicationItemState {
   key: string;
