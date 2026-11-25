@@ -5489,6 +5489,10 @@ export interface SkillEntry {
    *  so the two sides of the collision are comparable — the answer's `path` names the file actually
    *  read (api-types 0.28.0). Re-derived by every refresh. */
   upstreamDir: string | null;
+  /** (api-types 0.230.0, crew#1703) Who added it, when it was not the operator: `pack:<pack name>` for a skill an editor
+   *  pack installed. Such a skill is the pack's, not an operator change: it never stops the daemon's garden
+   *  auto-refresh, and a refresh leaves it as it is. Absent for every other skill. */
+  origin?: string;
 }
 
 /** One managed file (plugin-relative path → hashes). `baselineHash` `null` = user-added file;
@@ -16906,6 +16910,12 @@ export interface EditorView {
   description?: string;
   /** Its icon, colour and preview (api-types 0.157.0). Absent when it declares none that read. */
   visuals?: EditorVisuals;
+  /** (api-types 0.230.0, crew#1703) The skills its pack added to the daemon skills root: the pack's own name and the
+   *  key it was installed under (`wicked-garden-<dir>`, what a worker invokes as `wicked-garden:<dir>`). Absent when
+   *  the pack shipped none. */
+  packSkills?: InstalledPackSkill[];
+  /** (api-types 0.230.0, crew#1703) The presets its pack's blocks were installed as (each named by its block id). */
+  packBlocks?: string[];
   /** A run plugin (CS7): `run-thread`. Absent for an artifact editor. */
   inline?: 'run-thread';
   /** A run plugin's asked topics, each with its reason (the install consent lists these). */
@@ -16930,6 +16940,20 @@ export interface InstallEditorBody {
   packRoot: string;
   /** Install it on (the default; an update keeps the editor's current switch) or off. */
   enabled?: boolean;
+  /**
+   * (api-types 0.230.0, crew#1703) The one consent for a pack that also ships skills or blocks: the person approves
+   * the pack's skill directories and block ids exactly as the refusal listed them (`InstallEditorRefusal.pack`),
+   * together with the editors' permissions. Send the refusal's `digest` to bind the approval to the bytes shown (a
+   * consent screen should); a caller that binds the content itself may leave it out (garden's installer does). Absent,
+   * not exactly that list, or a digest that is not this pack's is a 409 that installs nothing.
+   */
+  approve?: { skills: string[]; blocks: string[]; digest?: string };
+}
+
+/** (api-types 0.230.0, crew#1703) A pack skill: its name in the pack, and the key it is installed under. */
+export interface InstalledPackSkill {
+  name: string;
+  key: string;
 }
 
 /** `POST /editors` → 200: the pack's editors are installed (or updated in place) and listed. */
@@ -16954,6 +16978,37 @@ export interface InstallEditorResponse {
    */
   granted?: string[];
   grantError?: string;
+  /** (api-types 0.230.0, crew#1703) The pack's skills the daemon skills root now holds (only those written; a
+   *  `skillsError` names any that were not). Absent when there is none. */
+  skills?: InstalledPackSkill[];
+  /** (api-types 0.230.0, crew#1703) The presets written for the pack's blocks. Absent when it ships none. */
+  presets?: string[];
+  /** (api-types 0.230.0, crew#1703) Installed, but the skills root could not be published, so workers do not get the
+   *  new skills yet: the reason, and what to do (publish from Skills once it is fixed). */
+  skillsError?: string;
+  /** (api-types 0.230.0, crew#1703) An update that no longer ships some of the pack's skills or blocks: what it
+   *  switched off and deleted. Absent when the update dropped none. */
+  withdrawn?: PackWithdrawn;
+}
+
+/** (api-types 0.230.0, crew#1703) What a pack's removal or update withdrew. */
+export interface PackWithdrawn {
+  /** Pack skills switched off: workers stop getting them (they stay in the skills root, and an install of the
+   *  pack switches them back on). */
+  skills: string[];
+  /** Presets deleted (only those still carrying the pack's stamp). */
+  presets: string[];
+  /** Some could not be withdrawn: which, and why. */
+  error?: string;
+}
+
+/** `DELETE /editors/:id` → 200. */
+export interface RemoveEditorResponse {
+  removed: true;
+  id: string;
+  /** (api-types 0.230.0, crew#1703) The pack's last editor was removed: the pack's skills and presets this
+   *  withdrew. Absent when the pack added none, or another of its editors is still installed. */
+  withdrawn?: PackWithdrawn;
 }
 
 /**
@@ -17009,14 +17064,23 @@ export interface PackCheckResult {
 }
 
 /**
- * `POST /editors` → 501: the pack passed garden's gate but also ships skills or blocks, whose own
- * approval (§3.2 "Add these") is not built yet; this is what it would ask the operator to approve.
- * Nothing was written. (`third_party_editors_not_available` before the install surface: every pack was refused.)
+ * `POST /editors` → 409 (api-types 0.230.0, crew#1703): the pack passed garden's gate and also ships skills or
+ * blocks, so the install asks for one consent first. This is what the person approves: the editors' permissions,
+ * the run plugins' topics, the blocks, and the skills with the key each is installed under. Install again with
+ * `approve: { skills, blocks, digest }`, where `digest` is this one (optional; it binds the approval to these bytes). Nothing was written. A daemon before crew#1703
+ * answered 501 `pack_ships_skills_or_blocks`, which could not be approved. (`third_party_editors_not_available` came
+ * before the install surface, when every pack was refused.)
  */
 export interface InstallEditorRefusal {
-  code: 'pack_ships_skills_or_blocks' | 'third_party_editors_not_available';
+  /** `pack_needs_approval` (409, api-types 0.230.0): the pack also ships skills or blocks, and the install carried no
+   *  `approve`; `pack_approval_mismatch` (409): its `approve` is not exactly this list. Nothing was installed.
+   *  `pack_ships_skills_or_blocks`: the 501 of a daemon before crew#1703. */
+  code: 'pack_needs_approval' | 'pack_approval_mismatch' | 'pack_ships_skills_or_blocks' | 'third_party_editors_not_available';
   error: string;
   check: PackCheckResult;
+  /** (api-types 0.230.0) sha256 over the manifest, every skill file and every block's steps as read: the approval
+   *  carries it back, so a pack that changed after the person looked is refused (`pack_approval_mismatch`). */
+  digest?: string;
   pack: {
     name: string;
     vendor: string;
@@ -17025,6 +17089,12 @@ export interface InstallEditorRefusal {
     blocks: Array<{ id: string; label: string; produces_kind: string; skills: string[] }>;
     /** The pack's skill directories, approved together with its editors and blocks. */
     skills: string[];
+    /** (api-types 0.230.0) Each skill's pack name and the key it would be installed under, so the person recognises it. */
+    installedSkills?: InstalledPackSkill[];
+    /** (api-types 0.230.0) Its run plugins and the topics each asks to hear (the install grants them). */
+    plugins?: Array<{ id: string; title: string; version: string; observe: Array<{ topic: string; why: string }> }>;
+    /** (api-types 0.230.0) Skill keys and preset names an earlier install of this pack added, which this one replaces. */
+    replaces?: string[];
   };
 }
 

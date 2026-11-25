@@ -470,6 +470,7 @@ import { ConsiderationService } from '../decisions/consider.js';
 import { engineConformance, gardenPackCheck, type ConformanceRunner, type PackCheckRunner } from '../editors/pack-install.js';
 import { conformanceProvisioner, conformanceRuntimeReady, conformanceRuntimeRoot, conformanceVenvDir, editorPluginLaunchListener, venvPython } from '../editors/conformance-runtime.js';
 import { EditorRegistry } from '../editors/registry.js';
+import { packSkillsPort } from '../editors/pack-extras.js';
 import { registerEditorRoutes, unitTokenProbe, type UnitTokenVerdict } from '../editors/routes.js';
 import { broadcast } from '../events/bus.js';
 import type { AppActionStore } from '../apps/actions/store.js';
@@ -2208,6 +2209,10 @@ export function registerRoutes(
     registry: editorRegistry,
     adapter,
     broadcast,
+    // crew#1703: a pack's skills join the daemon skills root and are published as POST /skills/publish does; its
+    // blocks become presets in the engine's store, checked against its phase catalog.
+    skills: runtime.skills === undefined ? null : packSkillsPort(runtime.skills),
+    presets: adapter,
     packCheck: runtime.packCheck ?? gardenPackCheck(discoverLivePlugin()?.path ?? null),
     conformance: runtime.editorConformance ?? engineConformance({ provision: editorConformanceRuntime }),
     // F37: the grant write's §6.4 tripwire asks the engine whether a bearer is a governed unit's token.

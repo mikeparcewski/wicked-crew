@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.229.0",
+  "apiTypesVersion": "0.230.0",
   "endpoints": [
     {
       "method": "GET",
@@ -722,7 +722,7 @@
     {
       "method": "POST",
       "path": "/api/v1/editors",
-      "requestType": null,
+      "requestType": "InstallEditorBody",
       "responseType": "InstallEditorResponse",
       "statusCodes": [
         200,
@@ -730,15 +730,14 @@
         403,
         404,
         409,
-        422,
-        501
+        422
       ]
     },
     {
       "method": "DELETE",
       "path": "/api/v1/editors/:id",
       "requestType": null,
-      "responseType": null,
+      "responseType": "RemoveEditorResponse",
       "statusCodes": [
         200,
         403,

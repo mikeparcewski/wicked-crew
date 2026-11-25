@@ -5,15 +5,19 @@
  * Install is human-only (§6.4) and fail closed at every step, in this order:
  *  1. garden's `pack check --json` on the pack root (schema, every editor's and run plugin's entry inside the
  *     pack, its hash, its size, nothing loaded from outside);
- *  2. the pack ships editors and/or run plugins only (CS7 C4): one that also ships skills or blocks is refused
- *     with the approval list (501 `pack_ships_skills_or_blocks`), since their own "Add these" step (§3.2) is
- *     not built;
+ *  2. a pack that also ships skills or blocks (crew#1703, §3.2 "Add these") needs the person's approval of exactly
+ *     its list (409 `pack_needs_approval` / `pack_approval_mismatch` with the list otherwise), and every skill and
+ *     block is read and checked (`pack-extras.ts`) before anything runs;
  *  3. the **conformance run**, through the engine's jailed garden harness: its browser can reach
  *     only the engine's own loopback port and writes stay in a private temp directory. Crew provisions
  *     its private Playwright venv first (`conformance-runtime.ts`, B8). A failed case, a browser that
  *     cannot be provisioned or no jailed runner is a 422 with the report — an unverified editor is
  *     never installed. Only crew's run counts (§12.1, review S13); an author's own run is not consulted;
- *  4. the registry reads every editor back from disk at its pinned hash and records it.
+ *  4. the registry's own checks; then the blocks become presets (each keeps the version it replaced); then the
+ *     registry reads every editor back from disk at its pinned hash and records it with the pack's skills and
+ *     presets (a failed record puts the presets back, and no skill has been written yet); then the skills go into
+ *     the daemon skills root in one pass (a failed write puts back the ones replaced and switches off the ones
+ *     added); then the skills root is published so workers get them (a blocked publish does the same and says so).
  * Nothing is written into the pack. The registry file is `daemon-editors.json`.
  */
 
@@ -26,6 +30,9 @@ import type { EditorConformanceSummary, InstallEditorRefusal, InstallEditorRespo
 import { execCapped } from '../core/exec.js';
 import { EditorInstallConflict, EditorRegistry, PackEditorSchema, PluginManifestSchema, RUN_PLUGIN_CASES, editorEntryDigest, packEditorDigest, type InstalledPack } from './registry.js';
 import type { ConformanceProvisioner } from './conformance-runtime.js';
+import { approvalDiff, installedSkillsOf, PackExtrasRefusal, packSkillOrigin, planExtras, withdrawPackExtras, writePresets, writeSkills, type ExtrasPlan, type PackApproval, type PackPresetsPort, type PackSkillsPort } from './pack-extras.js';
+
+export type { PackApproval, PackPresetsPort, PackSkillsPort } from './pack-extras.js';
 
 export type PackCheckRunner = (packRoot: string) => Promise<PackCheckResult>;
 
@@ -86,7 +93,7 @@ export function gardenPackCheck(gardenRoot: string | null): PackCheckRunner {
 
 export class PackInstallError extends Error {
   constructor(
-    readonly status: 400 | 404 | 409 | 422 | 501,
+    readonly status: 400 | 404 | 409 | 422,
     message: string,
     readonly check?: PackCheckResult,
     readonly body?: Record<string, unknown>,
@@ -259,6 +266,8 @@ function parseConformanceReport(stdout: string): EditorConformanceSummary | null
 
 interface ParsedPack {
   root: string;
+  /** The manifest's own text, as read (the consent digest covers it). */
+  manifestText: string;
   manifest: Record<string, unknown>;
   editors: Array<Record<string, unknown>>;
   plugins: Array<Record<string, unknown>>;
@@ -286,8 +295,10 @@ async function readCheckedPack(packRootRaw: string, check: PackCheckRunner): Pro
     throw new PackInstallError(422, `wicked-garden pack check refused the pack (${verdict.errors.length} error${verdict.errors.length === 1 ? '' : 's'})`, verdict);
   }
   let manifest: Record<string, unknown>;
+  let manifestText = '';
   try {
-    manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
+    manifestText = readFileSync(manifestPath, 'utf8');
+    manifest = JSON.parse(manifestText) as Record<string, unknown>;
   } catch (err) {
     throw new PackInstallError(400, `wicked-pack.json is not JSON: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -305,23 +316,21 @@ async function readCheckedPack(packRootRaw: string, check: PackCheckRunner): Pro
   } catch {
     skills = [];
   }
-  return { pack: { root: packRoot, manifest, editors, plugins, blocks, skills }, verdict };
+  return { pack: { root: packRoot, manifestText, manifest, editors, plugins, blocks, skills }, verdict };
 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
 
-/** The approval list a pack with skills or blocks would need (§3.2; crew#1703): the 501 body. Its `error` is what the
+/** The approval list a pack with skills or blocks needs (§3.2; crew#1703): the 409 body. Its `error` is what the
  *  person installing reads (garden's installer prints it), so it says what to do, in plain words. */
-function approvalList(pack: ParsedPack, verdict: PackCheckResult): InstallEditorRefusal {
+function approvalList(pack: ParsedPack, verdict: PackCheckResult, code: 'pack_needs_approval' | 'pack_approval_mismatch', why: string, plan: ExtrasPlan): InstallEditorRefusal {
   const m = pack.manifest;
   return {
-    code: 'pack_ships_skills_or_blocks',
-    error:
-      'This pack also brings its own skills or blocks, and this daemon cannot add those yet, so nothing was installed. ' +
-      "To use the pack's editor now, install an editor-only copy of it: its editors folder and a wicked-pack.json " +
-      'without skills_dir, domains or blocks.',
+    code,
+    error: why,
     check: verdict,
+    digest: plan.digest,
     pack: {
       name: str(m['name']),
       vendor: str(m['vendor']),
@@ -337,6 +346,17 @@ function approvalList(pack: ParsedPack, verdict: PackCheckResult): InstallEditor
       })),
       blocks: pack.blocks.map((b) => ({ id: str(b['id']), label: str(b['label']), produces_kind: str(b['produces_kind']), skills: strs(b['skills']) })),
       skills: pack.skills,
+      installedSkills: installedSkillsOf(pack.skills),
+      // Its run plugins and the topics each asks to hear: the install grants them, so the consent lists them.
+      plugins: pack.plugins.map((p) => ({
+        id: str(p['id']),
+        title: str(p['title']),
+        version: str(p['version']),
+        observe: Array.isArray(p['observe'])
+          ? (p['observe'] as Array<Record<string, unknown>>).map((o) => ({ topic: str(o['topic']), why: str(o['why']) }))
+          : [],
+      })),
+      replaces: plan.replaces,
     },
   };
 }
@@ -359,16 +379,51 @@ function digestOfPlugin(entry: Record<string, unknown>): string {
 export async function installPack(
   packRootRaw: string,
   enabled: boolean | undefined,
-  deps: { check: PackCheckRunner; conformance: ConformanceRunner; registry: EditorRegistry },
+  deps: { check: PackCheckRunner; conformance: ConformanceRunner; registry: EditorRegistry; skills?: PackSkillsPort | null; presets?: PackPresetsPort | null },
+  approve?: PackApproval,
 ): Promise<InstallEditorResponse> {
   const { pack, verdict } = await readCheckedPack(packRootRaw, deps.check);
-  if (pack.blocks.length > 0 || pack.skills.length > 0) {
-    throw new PackInstallError(501, 'the pack ships skills or blocks', verdict, approvalList(pack, verdict) as unknown as Record<string, unknown>);
-  }
   const name = str(pack.manifest['name']);
+  const blockIds = pack.blocks.map((b) => str(b['id']));
+  const extras = pack.blocks.length > 0 || pack.skills.length > 0;
   const ids = [...pack.editors, ...pack.plugins].map((e) => str(e['id']));
   for (const id of ids) {
     if (deps.registry.get(id)?.firstParty === true) throw new PackInstallError(409, `${id} is a first-party editor's id`, verdict);
+  }
+  // What an earlier install of this same pack added (every persisted record, one skipped at boot included, and what
+  // the registry kept after the pack's last editor was removed): an update replaces those in place.
+  const earlier = deps.registry.packExtrasOwned(name);
+  const owned = {
+    skills: new Set(earlier.skills.map((k) => k.key)),
+    presets: new Set(earlier.presets),
+  };
+  // Every skill and block is read and checked before the consent is asked for or anything runs: the consent's digest
+  // covers what was read, and a pack that would be refused anyway is refused now.
+  let plan: ExtrasPlan = { skills: [], blocks: [], replaces: [], digest: '' };
+  if (extras) {
+    try {
+      plan = await planExtras({ root: pack.root, manifestText: pack.manifestText, manifest: pack.manifest, packName: name, skills: pack.skills, blocks: pack.blocks, skillsPort: deps.skills ?? null, presetsPort: deps.presets ?? null, owned });
+    } catch (err) {
+      if (err instanceof PackExtrasRefusal) throw new PackInstallError(err.status, err.message, verdict, { code: err.code });
+      throw err;
+    }
+    if (approve === undefined) {
+      const why =
+        'This pack also brings its own skills or blocks. Nothing was installed: approve them together with the editors’ permissions ' +
+        '(install again with `approve` listing exactly these skills and blocks, and this digest to bind them to what was shown).';
+      throw new PackInstallError(409, why, verdict, approvalList(pack, verdict, 'pack_needs_approval', why, plan) as unknown as Record<string, unknown>);
+    }
+  }
+  if (approve !== undefined) {
+    const diff = approvalDiff(approve, pack.skills, blockIds);
+    // The digest binds the approval to the bytes the person was shown (studio's consent sends it). A caller that binds
+    // the content itself sends none: garden's installer stages the pack from one read and refuses a change after its
+    // own plan (wicked-garden scripts/editor/install.py, `pack_inventory` and `plan_digest`).
+    if (extras && approve.digest !== undefined && approve.digest !== plan.digest) diff.push('the pack changed since it was shown (its digest differs)');
+    if (diff.length > 0) {
+      const why = `The approval is not this pack’s list (${diff.join('; ')}), so nothing was installed.`;
+      throw new PackInstallError(409, why, verdict, approvalList(pack, verdict, 'pack_approval_mismatch', why, plan) as unknown as Record<string, unknown>);
+    }
   }
   const conformance = await deps.conformance(pack.root, pack.editors, pack.plugins);
   // The report counts only for the bytes being installed (codex r1): the run's own version and entry
@@ -396,6 +451,16 @@ export async function installPack(
     );
   }
   const now = new Date().toISOString();
+  // The record names only skills the skills root holds (a new one is named once it is written, below) and the presets
+  // this install writes. What an earlier version added and this one no longer ships is withdrawn after the write.
+  const packSkills = plan.skills.filter((k) => k.own).map((k) => ({ name: k.name, key: k.key }));
+  const packPresets = plan.blocks.map((b) => b.id);
+  const droppedSkills = earlier.skills.filter((k) => !plan.skills.some((s) => s.key === k.key));
+  const droppedPresets = earlier.presets.filter((id) => !plan.blocks.some((b) => b.id === id));
+  const extrasRecord = {
+    ...(packSkills.length > 0 ? { skills: packSkills } : {}),
+    ...(packPresets.length > 0 ? { presets: packPresets } : {}),
+  };
   const editorPacks = pack.editors.map((e) => {
     const record: InstalledPack = {
       kind: 'editor',
@@ -406,6 +471,7 @@ export async function installPack(
       manifestSha256: digestOf(e),
       installedAt: now,
       conformance: { ok: true, at: conformance.at, cases: requiredCases(e) },
+      ...extrasRecord,
     };
     return { id: str(e['id']), pack: record };
   });
@@ -419,21 +485,66 @@ export async function installPack(
       manifestSha256: digestOfPlugin(p),
       installedAt: now,
       conformance: { ok: true, at: conformance.at, cases: [...RUN_PLUGIN_CASES] },
+      ...extrasRecord,
     };
     return { id: str(p['id']), pack: record };
   });
   const packs = [...editorPacks, ...pluginPacks];
-  let installed: ReturnType<EditorRegistry['installPack']>;
+  // The registry's own checks first (an id another pack holds, an editor that does not read back), so a conflict
+  // writes nothing; then the presets, then the record (a failed record puts the presets back), then the skills, which
+  // are published for workers last.
   try {
-    installed = deps.registry.installPack(packs, enabled);
+    deps.registry.preflight(packs);
   } catch (err) {
     if (err instanceof EditorInstallConflict) throw new PackInstallError(409, err.message, verdict);
     throw err;
   }
+  let presetsWritten: Awaited<ReturnType<typeof writePresets>>;
+  try {
+    presetsWritten = await writePresets(plan, deps.presets ?? null, name);
+  } catch (err) {
+    if (err instanceof PackExtrasRefusal) throw new PackInstallError(err.status, err.message, verdict, { code: err.code });
+    throw err;
+  }
+  let installed: ReturnType<EditorRegistry['installPack']>;
+  try {
+    installed = deps.registry.installPack(packs, enabled, { skills: earlier.skills, presets: [...new Set([...earlier.presets, ...packPresets])] });
+  } catch (err) {
+    const undone = await presetsWritten.undo();
+    // A preset that could not be put back is said, not swallowed: the next install of this pack sees its own stamp
+    // on it (`pack:<name>`) and replaces it, so a retry finishes the job.
+    const left = undone.length > 0 ? ` (putting the presets back also failed: ${undone.join('; ')}; installing the pack again replaces them)` : '';
+    if (err instanceof EditorInstallConflict) throw new PackInstallError(409, `${err.message}${left}`, verdict);
+    if (left !== '' && err instanceof Error) err.message = `${err.message}${left}`;
+    throw err;
+  }
+  let skillsError = await writeSkills(plan, deps.skills ?? null, { origin: packSkillOrigin(name) });
+  // What an earlier version of the pack added and this one dropped is switched off (skills) or deleted (presets
+  // still carrying the pack's stamp), and said.
+  const withdrawn = droppedSkills.length > 0 || droppedPresets.length > 0
+    ? await withdrawPackExtras({ packName: name, skills: droppedSkills.map((k) => k.key), presets: droppedPresets, skillsPort: deps.skills ?? null, presetsPort: deps.presets ?? null })
+    : null;
+  // The record now names the skills the root holds; the pack keeps every skill it ever added as its own, so a later
+  // version can bring a withdrawn one back.
+  const held = deps.skills && plan.skills.length > 0 ? deps.skills.store.manifest().skills : {};
+  const current = plan.skills.filter((k) => Object.hasOwn(held, k.key)).map((k) => ({ name: k.name, key: k.key }));
+  const ownedSkills = [...earlier.skills, ...current].filter((k, i, a) => a.findIndex((x) => x.key === k.key) === i);
+  const ownedPresets = [...new Set([...earlier.presets, ...packPresets])].filter((id) => !(withdrawn?.presets.includes(id) ?? false));
+  try {
+    deps.registry.setPackExtras(name, { skills: current, presets: packPresets }, { skills: ownedSkills, presets: ownedPresets });
+  } catch (err) {
+    const why = `the install record could not name the pack’s skills (${err instanceof Error ? err.message : String(err)}); install the pack again`;
+    skillsError = skillsError === null ? why : `${skillsError}; ${why}`;
+  }
+  const records = installed.records.map((r) => deps.registry.get(r.manifest.id) ?? r);
   return {
+    ...(current.length > 0 ? { skills: current } : {}),
+    ...(packPresets.length > 0 ? { presets: packPresets } : {}),
+    ...(skillsError !== null ? { skillsError } : {}),
+    ...(withdrawn !== null ? { withdrawn } : {}),
     installed: true,
     updated: installed.updated,
-    editors: installed.records.map((r) => EditorRegistry.view(r)),
+    editors: records.map((r) => EditorRegistry.view(r)),
     ...(installed.removed.length > 0 ? { removed: installed.removed } : {}),
     check: verdict,
     conformance,
