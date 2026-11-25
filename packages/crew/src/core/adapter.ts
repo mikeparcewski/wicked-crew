@@ -86,7 +86,6 @@ const ACTIVE_RUN_STATUSES: ReadonlySet<string> = new Set(['planning', 'distribut
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { applyGovernanceStoreEnv, isStoreSpec, type GovernanceStoreLocation } from './governance-store.js';
 import { isCouncilSize, isCouncilStaggerMs } from './council-settings.js';
-import { isRequirementsGraphSettings } from './requirements-graph-setting.js';
 import { QE_OFF_REASON, launchRequiresQe, qeAcceptanceMode, qeSettingSkipReason } from './qe-acceptance-setting.js';
 import { applyVaultBinEnv, BOOT_VAULT_BIN, resolveShippedVaultBin, type VaultBinInputs, type VaultBinPosture } from './vault-bin.js';
 import { withFolderFindings } from './repoPaths.js';
@@ -4560,11 +4559,9 @@ export class CoreAdapter {
       if ('councilSpawnStaggerMs' in parsed && !isCouncilStaggerMs(parsed.councilSpawnStaggerMs)) {
         delete parsed.councilSpawnStaggerMs;
       }
-      // requirementsGraph.minCoveragePct (operator ruling 2026-10-31): integer 1..100 like the PUT
-      // route; a hand-edited invalid object falls back to the engine default (80).
-      if ('requirementsGraph' in parsed && !isRequirementsGraphSettings(parsed.requirementsGraph)) {
-        delete parsed.requirementsGraph;
-      }
+      // J6 M1: `requirementsGraph` (the minimum and the page knobs) is no longer a setting. One left in
+      // settings.json is dropped on read, never honored.
+      delete (parsed as Record<string, unknown>)['requirementsGraph'];
       if ('worker_config_root' in parsed) {
         const r = parsed.worker_config_root;
         if (typeof r !== 'string' || (r !== '' && !isAbsolute(r))) delete parsed.worker_config_root;

@@ -576,3 +576,23 @@ describe('the schedule routes', () => {
     await app.close();
   });
 });
+
+describe('a domain model schedule saved before K1 refused them (J6 M1, coord W2)', () => {
+  it('is listed as skipped with the words a save is refused with, and never fires, on a sweep or Run it now', async () => {
+    const r = rig();
+    // The row as the store writes it (the route's own writer before K1): on disk, then read by a restarted daemon.
+    r.store.put('map-it', { workflow: 'domain-extraction', everyHours: 24 }, T0);
+    r.store.put('nightly', { workflow: 'review-recent-work', everyHours: 24 }, T0);
+    const restarted = rig({ path: r.path });
+    expect(JSON.parse(readFileSync(r.path, 'utf8')).schedules['map-it'].workflow).toBe('domain-extraction');
+    restarted.at(24);
+    await restarted.scheduler.sweep();
+    await restarted.scheduler.sweep();
+    // The other due schedule still runs; the domain model one never does.
+    expect(restarted.launches.map((l) => l.id)).toEqual(['nightly']);
+    const words = "a domain model run covers what a person says it should and is started by them (a repository's Requirements: Map the domain); it cannot run on a schedule";
+    expect(restarted.store.get('map-it')?.lastNote).toBe(`skipped: ${words}`);
+    await expect(restarted.scheduler.runNow('map-it')).rejects.toThrow(`not started: ${words}`);
+    expect(restarted.launches.map((l) => l.id)).toEqual(['nightly']);
+  });
+});

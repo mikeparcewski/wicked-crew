@@ -113,6 +113,41 @@ function lastLine(stderr: string): string {
 /** The largest scope file the preview reads (it holds every target; the card needs a summary). */
 export const SCOPE_FILE_MAX_BYTES = 16 * 1024 * 1024;
 
+/** (J6 M1, coord F6) How many scope cards are read at once; another waits its turn. Each read is a garden process over
+ *  the whole code graph, and a person typing asks again on every pause, so the daemon never runs one per keystroke. */
+export const SCOPE_CONCURRENCY = 2;
+let scopesRunning = 0;
+const scopesWaiting: Array<() => void> = [];
+
+/** A turn among the scope reads, or `false` when `signal` ended the wait first (the asker went away: it leaves the
+ *  queue and never runs). */
+function scopeTurn(signal: AbortSignal | undefined): Promise<boolean> {
+  if (signal?.aborted === true) return Promise.resolve(false);
+  if (scopesRunning < SCOPE_CONCURRENCY) {
+    scopesRunning += 1;
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve) => {
+    const go = (): void => {
+      signal?.removeEventListener('abort', leave);
+      scopesRunning += 1;
+      resolve(true);
+    };
+    const leave = (): void => {
+      const i = scopesWaiting.indexOf(go);
+      if (i >= 0) scopesWaiting.splice(i, 1);
+      resolve(false);
+    };
+    scopesWaiting.push(go);
+    signal?.addEventListener('abort', leave, { once: true });
+  });
+}
+
+function scopeTurnDone(): void {
+  scopesRunning -= 1;
+  scopesWaiting.shift()?.();
+}
+
 /**
  * The card for `scope` over the checkout at `root` and the estate store `db`, or why there is none: never throws.
  * Runs garden through its launcher under `gardenRoot` (`$WICKED_GARDEN_ROOT`, else the live plugin), in a scratch
@@ -127,20 +162,27 @@ export async function scopeCardFor(opts: {
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
   maxCardBytes?: number;
+  /** The asker went away (its request closed): a read still waiting for its turn never starts. */
+  signal?: AbortSignal;
 }): Promise<{ card: DomainScopeCard } | { error: string }> {
-  let dir: string;
+  if (!(await scopeTurn(opts.signal))) return { error: 'the scope was not read: the request ended first' };
   try {
-    dir = await mkdtemp(join(tmpdir(), 'wicked-domain-scope-'));
-  } catch (err) {
-    return { error: `the scope could not start: ${(err as Error).message}` };
-  }
-  try {
-    return await runScope(dir, opts);
-  } catch (err) {
-    return { error: `the scope could not be read: ${(err as Error).message}` };
+    let dir: string;
+    try {
+      dir = await mkdtemp(join(tmpdir(), 'wicked-domain-scope-'));
+    } catch (err) {
+      return { error: `the scope could not start: ${(err as Error).message}` };
+    }
+    try {
+      return await runScope(dir, opts);
+    } catch (err) {
+      return { error: `the scope could not be read: ${(err as Error).message}` };
+    } finally {
+      // A scratch directory left behind does not unmake the card the person asked for; the OS temp dir clears it.
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
   } finally {
-    // A scratch directory left behind does not unmake the card the person asked for; the OS temp dir clears it.
-    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    scopeTurnDone();
   }
 }
 

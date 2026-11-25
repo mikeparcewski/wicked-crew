@@ -9,7 +9,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import { DOMAIN_MODEL_V3, domainModelOf, domainScopeJsonOf, rulingAnswerOf, rulingRequestOf } from '../src/api/domain-model.js';
-import { execScope, scopeCardFor, scopeCardOf, type ScopeExec } from '../src/api/domain-scope.js';
+import { execScope, SCOPE_CONCURRENCY, scopeCardFor, scopeCardOf, type ScopeExec } from '../src/api/domain-scope.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { forgetRequirementsReads } from '../src/api/requirements.js';
@@ -197,19 +197,75 @@ describe('scope card: garden scope.py output', () => {
     vi.unstubAllEnvs();
   });
 
+  it('reads at most two scope cards at once; a waiting ask whose request ended leaves the queue and never runs (J6 M1, F6)', async () => {
+    expect(SCOPE_CONCURRENCY).toBe(2);
+    const started: string[] = [];
+    const finish = new Map<string, () => void>();
+    const ask = (intent: string, signal?: AbortSignal) => scopeCardFor({
+      root: '/r', db: '/d', gardenRoot: null, scope: { intent }, ...(signal !== undefined ? { signal } : {}),
+      exec: (_c, args) => new Promise((resolve) => {
+        started.push(intent);
+        let done = false;
+        finish.set(intent, () => {
+          if (done) return;
+          done = true;
+          writeFileSync(args[args.indexOf('--out') + 1]!, readFileSync(join(FIX, 'scope-mini-cobol.json')));
+          resolve({ outcome: 'exit', code: 0, stderr: '' });
+        });
+      }),
+    });
+    const a = ask('a');
+    const b = ask('b');
+    const gone = new AbortController();
+    const c = ask('c', gone.signal);
+    const d = ask('d');
+    try {
+      await vi.waitFor(() => expect([...started].sort()).toEqual(['a', 'b']), { timeout: 20_000 });
+      // The person typed on: the older ask's request closed while it waited.
+      gone.abort();
+      expect(await c).toEqual({ error: 'the scope was not read: the request ended first' });
+      expect(started).toHaveLength(2);
+      finish.get('a')!();
+      expect('card' in (await a)).toBe(true);
+      // Its turn went to the next one still waiting, never to the ask that left.
+      await vi.waitFor(() => expect([...started].sort()).toEqual(['a', 'b', 'd']), { timeout: 20_000 });
+      finish.get('b')!();
+      finish.get('d')!();
+      expect('card' in (await b) && 'card' in (await d)).toBe(true);
+      // An ask whose request had already ended never starts.
+      const ended = new AbortController();
+      ended.abort();
+      expect(await ask('e', ended.signal)).toEqual({ error: 'the scope was not read: the request ended first' });
+      expect(started).toHaveLength(3);
+    } finally {
+      // Whatever failed above, no read is left holding a turn for the tests after this one.
+      gone.abort();
+      for (const f of finish.values()) f();
+      await Promise.allSettled([a, b, c, d]);
+    }
+  }, 60_000);
+
   it('the time limit ends the whole process tree, so nothing writes after the scratch directory is gone', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'k1-tree-'));
     dirs.push(dir);
     const late = join(dir, 'late.txt');
+    const pidFile = join(dir, 'grandchild.pid');
     const launcher = join(dir, 'launcher.sh');
-    // The launcher starts a grandchild (as garden's launcher starts python) that would write after a second.
-    writeFileSync(launcher, `#!/bin/sh\n(sleep 1; echo late > "${late}") &\nwait\n`);
+    // The launcher starts a grandchild (as garden's launcher starts python) that says its pid, then would write after
+    // half a minute. (J6 M1: counted, not timed, per coord's no-wall-clock ruling: an execScope that waited for the
+    // grandchild would outlive the test's own limit; one that left it running leaves its pid alive.)
+    writeFileSync(launcher, `#!/bin/sh\nsh -c 'echo $$ > "${pidFile}"; sleep 30; echo late > "${late}"' &\nwait\n`);
     chmodSync(launcher, 0o755);
-    const t0 = Date.now();
-    const r = await execScope(launcher, [], { env: process.env, timeoutMs: 200 });
+    // A limit long enough for the grandchild to have started on a loaded host, far short of its 30 s.
+    const r = await execScope(launcher, [], { env: process.env, timeoutMs: 3000 });
     expect(r.outcome).toBe('timeout');
-    expect(Date.now() - t0).toBeLessThan(900);
-    await new Promise((res) => setTimeout(res, 1300));
+    expect(existsSync(pidFile), 'the grandchild never started inside the limit').toBe(true);
+    const pid = Number(readFileSync(pidFile, 'utf8').trim());
+    expect(Number.isSafeInteger(pid) && pid > 1).toBe(true);
+    const alive = (): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    // The kill is sent before execScope answers; the OS reaps the grandchild a moment later.
+    for (let i = 0; i < 100 && alive(); i += 1) await new Promise((res) => setTimeout(res, 20));
+    expect(alive()).toBe(false);
     expect(existsSync(late)).toBe(false);
     expect(await execScope(join(dir, 'missing'), [], { env: process.env, timeoutMs: 1000 })).toMatchObject({ outcome: 'spawn' });
     // Past the stderr cap, the last line is the one kept.

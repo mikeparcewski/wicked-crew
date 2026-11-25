@@ -3,8 +3,8 @@
  *  - P2: a true requirement whose code is wrong counts; the mismatch is a finding on the row (`codeMismatch`),
  *    counted on the page (`mismatches`) and filterable (`?mismatch=yes|no`).
  *  - P1: the page says how old the code behind the listed build is (`codeDrift`), as the engine counted it.
- *  - P3: the page says which minimum is in force and why (`minimum`), and the repository's own minimum can be set or
- *    cleared through the engine's own command (`setRepoMinimum`).
+ *  - P3 is withdrawn by J6 M1: the minimum is gone (a domain model has no share to reach). An engine before J6 C3
+ *    still sends its `target` and `min_pct`; the page carries no minimum, and the label keeps its counts.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
@@ -16,8 +16,7 @@ import {
   forgetRequirementsReads,
   listRequirements,
   listRequirementsRead,
-  minimumOf,
-  setRepoMinimum,
+  coverageOf,
   retireRequirement,
   type EstateRequirementsRead,
   type RequirementsGraphReader,
@@ -48,7 +47,7 @@ const rows = {
 const HEAD = '1111111111111111111111111111111111111111';
 const BUILT = '8cc32aabde358bf81042ed116623a51c0ef03a96';
 
-describe('requirements: mismatches, code age and the minimum in force (operator rulings 2026-11-06)', () => {
+describe('requirements: mismatches and code age (operator rulings 2026-11-06); no minimum (J6 M1)', () => {
   const roots: string[] = [];
   beforeEach(() => forgetRequirementsReads());
   afterEach(async () => {
@@ -94,7 +93,7 @@ describe('requirements: mismatches, code age and the minimum in force (operator 
     expect(no!.items.map((i) => i.reqId)).toEqual(['REQ-001']);
   });
 
-  it('the page says how old the code behind the build is, and which minimum is in force', async () => {
+  it('the page says how old the code behind the build is, and carries no minimum though the engine sent its target', async () => {
     const page = await listRequirements(await repo(), { offset: 0, limit: 1 }, engine(read));
     expect(page!.codeDrift).toEqual({
       builtFromCommit: BUILT,
@@ -103,32 +102,34 @@ describe('requirements: mismatches, code age and the minimum in force (operator 
       commitsBehind: 69,
       headCommit: HEAD,
     });
-    expect(page!.minimum).toEqual({ pct: 66, source: 'repo', repoPct: 66, settingsPct: 80 });
+    expect(page).not.toHaveProperty('minimum');
   });
 
-  it('an older engine says nothing: no drift, no minimum, no mismatch (never a guess)', async () => {
+  it('an older engine says nothing: no drift, no mismatch (never a guess)', async () => {
     const old = { src: { 'REQ-001': { real: true, uncounted: null }, 'REQ-002': { real: true, uncounted: null }, 'REQ-003': { real: true, uncounted: null } } };
     const page = await listRequirements(await repo(), { offset: 0, limit: 10 }, engine({ rows: old }));
     expect(page!.codeDrift).toBeNull();
-    expect(page!.minimum).toBeNull();
     expect(page!.mismatches).toBe(0);
     expect(page!.items.every((i) => i.codeMismatch === null)).toBe(true);
   });
 
-  it('drift and minimum parse defensively', () => {
+  it('drift parses defensively; the coverage label no longer needs a minimum', () => {
     expect(codeDriftOf({ built_from: { commit: 'not a sha', basis: 'build' } })).toBeNull();
     expect(codeDriftOf({ built_from: { commit: BUILT, basis: 'guess' } })).toBeNull();
     expect(codeDriftOf({ built_from: { commit: BUILT, basis: 'index', at: null }, commits_behind: null })).toEqual({
       builtFromCommit: BUILT, builtAt: null, basis: 'index', commitsBehind: null, headCommit: null,
     });
-    expect(minimumOf({ repo: null, daemon: 80 }, null)).toEqual({ pct: 80, source: 'settings', repoPct: null, settingsPct: 80 });
-    expect(minimumOf({ repo: 0, daemon: 101 }, null)).toBeNull();
+    // J6 M1: an engine after C3 sends no min_pct; the label stands on its counts. One out of range is left off.
+    const { min_pct: _gone, ...noMin } = live;
+    expect(coverageOf(noMin)).toEqual({ realPct: 66, behaviorBearing: 3, real: 2, placeholders: 1, unmapped: 0, notProduct: 5 });
+    expect(coverageOf({ ...live, min_pct: 0 })).toEqual(coverageOf(noMin));
+    expect(coverageOf(live)).toEqual({ ...coverageOf(noMin), minPct: 66 });
     expect(engineRowOf({ s: { R: { real: true, uncounted: null, code_mismatch: '   ' } } }, 's', 'R')).toEqual({
       real: true, uncounted: null, codeMismatch: null,
     });
   });
 
-  it('a repository with no graph yet still says which minimum it is held to', async () => {
+  it('a repository with no graph yet says how far it is, with no minimum', async () => {
     const r = await repo();
     const none: RequirementsGraphReader = {
       async getRequirementsGraphForRepo() {
@@ -137,22 +138,8 @@ describe('requirements: mismatches, code age and the minimum in force (operator 
     };
     const out = await listRequirementsRead(r, { offset: 0, limit: 1 }, none);
     expect(out.page).toBeNull();
-    expect(out.minimum).toEqual({ pct: 80, source: 'settings', repoPct: null, settingsPct: 80 });
-  });
-
-  it('setRepoMinimum runs the engine command against the repository store: set, clear, and nothing without a store', async () => {
-    const r = await repo();
-    const calls: string[][] = [];
-    const run = async (args: string[]) => { calls.push(args); };
-    expect(await setRepoMinimum(r, 90, run)).toBe(true);
-    expect(await setRepoMinimum(r, null, run)).toBe(true);
-    expect(calls).toEqual([
-      ['requirements-target', '--db', r.code_graph_db, '--set', '90'],
-      ['requirements-target', '--db', r.code_graph_db, '--clear'],
-    ]);
-    const bare: RepoEntry = { ...r, code_graph_db: join(r.root_path, 'none', 'estate.db') };
-    expect(await setRepoMinimum(bare, 90, run)).toBe(false);
-    expect(calls).toHaveLength(2);
+    expect(out).not.toHaveProperty('minimum');
+    expect(out.coverage).toMatchObject({ realPct: 0, unmapped: 3 });
   });
 
   it('retireRequirement sends only a row whose code was deleted to the engine (wicked-core#1698)', async () => {

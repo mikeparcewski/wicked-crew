@@ -186,7 +186,7 @@ describe('chat requirements maps (crew#1412)', () => {
   const row = (i: number, mismatch: string | null = null): RequirementSummary =>
     ({ key: `d::REQ-${i}`, domain: 'd', reqId: `REQ-${i}`, title: `t${i}`, category: 'functional', statement: `rule ${i}`, status: 'active', risk: false, riskSource: null, edited: false, corroboration: null, placeholder: false, uncounted: null, codeMismatch: mismatch }) as RequirementSummary;
   const pageOf = (items: RequirementSummary[], extra: Partial<RequirementsPage> = {}): RequirementsPage =>
-    ({ total: items.length, corpus: items.length, offset: 0, limit: items.length, items, source: 'store', orphanedOverrides: 0, coverage: null, graphBuild: null, corroboration: { validated: 0, unconfirmed: 0 }, uncounted: null, categories: { functional: items.length, configData: 0 }, codeDrift: null, minimum: null, mismatches: items.filter((r) => r.codeMismatch !== null).length, ...extra }) as RequirementsPage;
+    ({ total: items.length, corpus: items.length, offset: 0, limit: items.length, items, source: 'store', orphanedOverrides: 0, coverage: null, graphBuild: null, corroboration: { validated: 0, unconfirmed: 0 }, uncounted: null, categories: { functional: items.length, configData: 0 }, codeDrift: null, mismatches: items.filter((r) => r.codeMismatch !== null).length, ...extra }) as RequirementsPage;
 
   it('one row budget across both sections, and the count of rows left out is exact (codex r1)', () => {
     const items = [...Array.from({ length: REQUIREMENTS_MAP_ROWS }, (_, i) => row(i)), row(900, 'x'), row(901, 'y')];

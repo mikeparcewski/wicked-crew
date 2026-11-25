@@ -10,6 +10,18 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { crewStateHome } from '../projects/state-home.js';
+import { DOMAIN_EXTRACTION_WORKFLOW } from '../api/domain-model.js';
+
+/**
+ * (J6 K1 F4, M1) Why a workflow can never run on a schedule, or `null`. A domain model maps what a person says it
+ * should cover, after they see its scope; a schedule has no one to say it. Saving one is refused (routes.ts); one saved
+ * before that refusal existed is listed as skipped with these words and never fires (coord W2, 2026-11-25).
+ */
+export function notSchedulable(workflow: string): string | null {
+  return workflow === DOMAIN_EXTRACTION_WORKFLOW
+    ? "a domain model run covers what a person says it should and is started by them (a repository's Requirements: Map the domain); it cannot run on a schedule"
+    : null;
+}
 
 export const SCHEDULES_FILENAME = 'daemon-schedules.json';
 export const MIN_EVERY_HOURS = 24;
