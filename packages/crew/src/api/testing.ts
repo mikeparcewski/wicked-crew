@@ -22,7 +22,6 @@
 
 import { defaultLaunchRoster } from '../core/opt-in-seats.js';
 import { randomUUID } from 'node:crypto';
-import { resolve as resolvePath } from 'node:path';
 
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from '../zod.js';
@@ -251,7 +250,7 @@ export function registerTestingRoutes(
         // Record the run in the eval history (best-effort, LOUD-NON-FATAL): the report is the
         // contract and must answer even if persistence fails, so a store miss is warned and
         // swallowed, never a 500. `rule_store` is the daemon's own steering store the run judged,
-        // recorded absolute (never masked: the read routes compare it canonically, crew#1934).
+        // recorded as the daemon names it, never masked (the read routes compare it canonically, crew#1934).
         // `degraded` and `rule_coverage` are the ENGINE's readings persisted verbatim — the
         // daemon recomputes neither; `rule_coverage` is spread conditionally because an engine
         // predating core #394 emits none, and an absent key (never a fabricated one) is how a
@@ -262,7 +261,7 @@ export function registerTestingRoutes(
               actor: actorOf(req).id,
               corpus: parsed.data.corpus ?? null,
               type_filter: parsed.data.type ?? null,
-              rule_store: typeof adapter.dbPath === 'string' && adapter.dbPath !== '' && adapter.dbPath !== ':memory:' ? resolvePath(adapter.dbPath) : adapter.dbPath,
+              rule_store: adapter.dbPath,
               summary: report.summary,
               per_type: perTypeRollup(report.results),
               degraded: report.degraded,

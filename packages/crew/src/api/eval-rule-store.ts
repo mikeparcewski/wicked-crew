@@ -13,8 +13,9 @@
  * through the same home scrub. Studio's string equality relays this answer, and history rows recorded
  * before the fix (absolute, or under another spelling of the same file) read correctly too.
  *
- * Theoretical, no actor: a DIFFERENT store whose masked spelling equals this daemon's (another user's
- * home at the same relative path) would still read equal to studio's string compare.
+ * A DIFFERENT store whose masked spelling equals this daemon's (another user's home at the same
+ * relative path, say a copied history) gets {@link OTHER_STORE_SUFFIX}, so the strings never match
+ * when the stores don't.
  */
 
 import { realpathSync } from 'node:fs';
@@ -38,6 +39,9 @@ export function canonicalStorePath(path: string, home: string = homedir()): stri
   }
 }
 
+/** Appended to another store's masked spelling when it would otherwise read as this daemon's. */
+export const OTHER_STORE_SUFFIX = ' (a different store)';
+
 /** The usable `--db` of this daemon, or null (a stub route set, an in-memory store). */
 function daemonDb(dbPath: unknown): string | null {
   return typeof dbPath === 'string' && dbPath !== '' && dbPath !== ':memory:' ? dbPath : null;
@@ -59,7 +63,11 @@ export function ruleStoreReader(dbPath: unknown, home: string = homedir()): (sto
     if (typeof stored !== 'string' || stored === '') return stored;
     let shown = seen.get(stored);
     if (shown === undefined) {
-      shown = own !== null && ownDisplay !== null && canonicalStorePath(stored, home) === own ? ownDisplay : scrubHomePaths(stored, home);
+      if (own !== null && ownDisplay !== null && canonicalStorePath(stored, home) === own) shown = ownDisplay;
+      else {
+        const masked = scrubHomePaths(stored, home);
+        shown = masked === ownDisplay ? `${masked}${OTHER_STORE_SUFFIX}` : masked;
+      }
       seen.set(stored, shown);
     }
     return shown;

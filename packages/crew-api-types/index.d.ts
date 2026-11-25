@@ -6481,8 +6481,9 @@ export interface EvalRunSummary {
   /** The single steering type the run was narrowed to, or null when it ran all seven. */
   type_filter: SteeringType | null;
   /** The steering rule store the run was judged against (the daemon's `--db` steering store), shown
-   *  for display: home-masked (`~/…`), and, when the daemon finds it is canonically its own store, the
-   *  exact string `GET /diagnostics` lists for `core.db`, so equality with that path means "judged
+   *  for display: home-masked (`~/…`). When the daemon finds it is canonically its own store, it is the
+   *  exact string `GET /diagnostics` lists for `core.db`; any other store never equals that string
+   *  (one that would is suffixed ` (a different store)`). So equality with that path means "judged
    *  against this daemon's rules" (crew#1934). */
   rule_store: string;
   /** The report's rollup, verbatim ({@link GovernanceEvalSummary}). */

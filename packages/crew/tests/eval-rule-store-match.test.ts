@@ -12,13 +12,14 @@
  */
 import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { GovernanceEvalReport } from '../src/core/types.js';
 import { createServer } from '../src/api/server.js';
+import { OTHER_STORE_SUFFIX } from '../src/api/eval-rule-store.js';
 import { removeScratch } from './setup/scratch.js';
 
 const REPORT: GovernanceEvalReport = {
@@ -88,6 +89,15 @@ async function detail(app: FastifyInstance, id: string): Promise<Record<string, 
 async function runOnce(app: FastifyInstance, corpus: string): Promise<void> {
   const res = await app.inject({ method: 'POST', url: '/api/v1/testing/evals/run', payload: { corpus } });
   expect(res.statusCode).toBe(200);
+}
+
+/** A history row exactly as the run route writes it (testing.ts `evalStore.record({... rule_store:
+ *  adapter.dbPath ...})` → EvalRunStore.writeRun: the detail file, then the rollup line). */
+function seedRow(id: string, corpus: string, ruleStore: string): void {
+  const row = { id, created_at: 1_700_000_000, actor: 'local', corpus, type_filter: null, rule_store: ruleStore, summary: REPORT.summary, per_type: {}, degraded: null };
+  mkdirSync(join(evalsRoot, 'results'), { recursive: true });
+  writeFileSync(join(evalsRoot, 'results', `${id}.json`), JSON.stringify({ ...row, results: REPORT.results }), 'utf8');
+  appendFileSync(join(evalsRoot, 'runs.jsonl'), `${JSON.stringify(row)}\n`, 'utf8');
 }
 
 beforeAll(() => {
@@ -163,7 +173,7 @@ describe('crew#1934: a run made on this daemon names the same store diagnostics 
     mkdirSync(real, { recursive: true });
     writeFileSync(join(real, 'core.db'), 'x', 'utf8');
     const link = join(home, 'linked-state');
-    symlinkSync(real, link, 'dir');
+    symlinkSync(real, link, process.platform === 'win32' ? 'junction' : 'dir');
     // The run was recorded under the real spelling; this daemon was started on the link.
     const row = { id: 'sym-1', created_at: 1_700_000_001, actor: 'local', corpus: 'evals:sym', type_filter: null, rule_store: join(real, 'core.db'), summary: REPORT.summary, per_type: {}, degraded: null };
     mkdirSync(join(evalsRoot, 'results'), { recursive: true });
@@ -174,6 +184,7 @@ describe('crew#1934: a run made on this daemon names the same store diagnostics 
       const store = await daemonStore(app);
       const [listed] = await runs(app, 'evals:sym');
       expect(listed!['rule_store']).toBe(store);
+      expect((await detail(app, 'sym-1'))['rule_store']).toBe(store);
     } finally {
       await app.close();
     }
@@ -192,9 +203,62 @@ describe('crew#1934: a run made on this daemon names the same store diagnostics 
     try {
       const store = await daemonStore(app);
       const [listed] = await runs(app, 'evals:other');
+      const masked = join('~', 'harness-copy', 'core.db');
       expect(listed!['rule_store']).not.toBe(store);
-      expect(listed!['rule_store']).toBe('~/harness-copy/core.db');
-      expect((await detail(app, 'other-1'))['rule_store']).toBe('~/harness-copy/core.db');
+      expect(listed!['rule_store']).toBe(masked);
+      expect((await detail(app, 'other-1'))['rule_store']).toBe(masked);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('a pre-fix row spelled with ~ or relative to the daemon\'s directory reads as this daemon store', async () => {
+    const stateHome = join(home, 'spelled');
+    mkdirSync(stateHome, { recursive: true });
+    const db = join(stateHome, 'core.db');
+    writeFileSync(db, 'x', 'utf8');
+    seedRow('tilde-1', 'evals:tilde', join('~', 'spelled', 'core.db'));
+    seedRow('rel-1', 'evals:rel', relative(process.cwd(), db));
+    const app = await daemon(db);
+    try {
+      const store = await daemonStore(app);
+      expect((await runs(app, 'evals:tilde'))[0]!['rule_store']).toBe(store);
+      expect((await detail(app, 'rel-1'))['rule_store']).toBe(store);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('another home\'s store at the same relative path never reads equal to this daemon store', async () => {
+    const stateHome = join(home, '.wicked-crew-collide');
+    mkdirSync(stateHome, { recursive: true });
+    const db = join(stateHome, 'core.db');
+    writeFileSync(db, 'x', 'utf8');
+    // A copied history from another person's daemon: /home/<other> masks to `~` too.
+    const otherHome = process.platform === 'win32' ? 'C:\\Users\\someone-else' : '/home/someone-else';
+    seedRow('collide-1', 'evals:collide', join(otherHome, '.wicked-crew-collide', 'core.db'));
+    const app = await daemon(db);
+    try {
+      const store = await daemonStore(app);
+      const shown = (await runs(app, 'evals:collide'))[0]!['rule_store'];
+      expect(shown).not.toBe(store);
+      expect(shown).toBe(`${store}${OTHER_STORE_SUFFIX}`);
+      expect((await detail(app, 'collide-1'))['rule_store']).toBe(`${store}${OTHER_STORE_SUFFIX}`);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('a store file not on disk compares by its real directory (the parent realpath fallback)', async () => {
+    const real = join(home, 'gone-real');
+    mkdirSync(real, { recursive: true });
+    const link = join(home, 'gone-link');
+    symlinkSync(real, link, process.platform === 'win32' ? 'junction' : 'dir');
+    // The daemon's db file does not exist (yet); the row names it through the link.
+    seedRow('gone-1', 'evals:gone', join(link, 'fresh.db'));
+    const app = await daemon(join(real, 'fresh.db'));
+    try {
+      expect((await runs(app, 'evals:gone'))[0]!['rule_store']).toBe(join('~', 'gone-real', 'fresh.db'));
     } finally {
       await app.close();
     }
