@@ -279,7 +279,7 @@ export interface HealthCapabilities {
    */
   reducedAssurance?: boolean;
   /**
-   * (api-types 0.225.0, DES-STANDIN-001 §4) The stand-in choice: a launch whose roster cannot check the job
+   * (api-types 0.226.0, DES-STANDIN-001 §4) The stand-in choice: a launch whose roster cannot check the job
    * independently is refused `409 stand_in_choice` ({@link StandInChoiceRefusal}) or `409 no_usable_helper`
    * ({@link NoUsableHelperRefusal}) before anything is created, `LaunchRunBody.standIns` and
    * `SystemSettings.standInReview` are accepted, and a `stand_in_needed` gate takes `use_stand_ins`. ABSENT on an
@@ -2508,7 +2508,7 @@ export interface GateInfo {
    */
   recommended?: number;
   /**
-   * (api-types 0.225.0, crew#1698, core#1808) Which OPENING of the gate this is: a gate that closed and re-opened at
+   * (api-types 0.226.0, crew#1698, core#1808) Which OPENING of the gate this is: a gate that closed and re-opened at
    * the same ord (a re-ask after a send-back, a retry that lands on a new gate) is another opening. Send it back with
    * the answer (`GateDecision.gateSeq`, `ResumeRequest.gateSeq`, `ReassignRequest.gateSeq`). ABSENT on an older daemon
    * or engine, and on a gate the engine did not number.
@@ -2566,7 +2566,7 @@ export interface GateInfo {
  * (`needsPlanRev`) also send `planRev`, the held revision ({@link GateInfo.planRev}, the one the person was shown);
  * `edit_plan` sends `plan`.
  * The note, reason or rationale rides `amend` (a reassign's rides `note`); `skip_rules` sends `skipRules`, one
- * reason per rule id named in {@link GateAction.rules}. `use_stand_ins` (api-types 0.225.0, a `stand_in_needed`
+ * reason per rule id named in {@link GateAction.rules}. `use_stand_ins` (api-types 0.226.0, a `stand_in_needed`
  * gate; a person's answer, `humanOnly`) also sends `scope` (`'job'` | `'always'`, one listed action draws both).
  * Any answer may send `gateSeq` ({@link GateInfo.gateSeq}), the opening the person was shown.
  */
@@ -2654,7 +2654,7 @@ export interface GateDecisionResult {
   landing?: SteeringLandingResult;
   assurance?: AssuranceReceipt | null;
   delivery?: { qeAcceptance: QeAcceptanceCheck | null };
-  /** (api-types 0.225.0, DES-STANDIN-001 §3.10) A `use_stand_ins` answer with `scope: 'always'`: whether the
+  /** (api-types 0.226.0, DES-STANDIN-001 §3.10) A `use_stand_ins` answer with `scope: 'always'`: whether the
    *  `standInReview: 'always'` setting was saved beside the grant. The grant took either way. */
   standInReview?: 'saved' | 'failed';
 }
@@ -2776,7 +2776,7 @@ export interface GateDecision {
      *  INCONCLUSIVE or no-reviewer gate it is the operator's own judgment (labelled), at a gate whose verdict could not be
      *  bound it re-runs the QE step (resuming its evidence), and an Apps publish's QE layer keeps its retry. Engine: wicked-core core#1312 (the core-ts release after 0.15.31). */
     | 'retry_qe'
-    /** (api-types 0.225.0, DES-STANDIN-001 §3.8, §3.10) USE STAND-INS at a `stand_in_needed` gate (`gateEscalated
+    /** (api-types 0.226.0, DES-STANDIN-001 §3.8, §3.10) USE STAND-INS at a `stand_in_needed` gate (`gateEscalated
      *  .condition: 'stand_in_needed'`: an independent check found no helper that did not build the work, and nobody
      *  had consented to stand-ins), with `approve: true`, {@link GateDecision.scope} and nothing else. Human only (a
      *  worker's bearer or a standing order is refused 403). The daemon records the person's consent on the run
@@ -2796,7 +2796,7 @@ export interface GateDecision {
    * it does not apply (api-types 0.188.0): the note lands as {@link GateDecision.plan} says.
    */
   amendScope?: 'cursor' | 'creator';
-  /** (api-types 0.225.0) With `action: 'use_stand_ins'` only (required there): stand-ins for this job, or for every
+  /** (api-types 0.226.0) With `action: 'use_stand_ins'` only (required there): stand-ins for this job, or for every
    *  job from now on. */
   scope?: 'job' | 'always';
   /**
@@ -2849,7 +2849,7 @@ export interface GateDecision {
    */
   planRev?: number;
   /**
-   * (api-types 0.225.0, crew#1698, core#1808) The OPENING of the gate this answer was made on ({@link GateInfo.gateSeq},
+   * (api-types 0.226.0, crew#1698, core#1808) The OPENING of the gate this answer was made on ({@link GateInfo.gateSeq},
    * `awaitingHuman.gateSeq`). A gate that closed and re-opened since, at the same ord too, is **409** `gate_changed`
    * with `openOrd` and `openGateSeq`. Optional: without it the ord check stands as before, and the daemon still binds
    * the engine's decision to the opening its record shows.
@@ -2896,7 +2896,7 @@ export interface LaunchPlan {
 export interface ResumeRequest {
   /** The gate the decision was made on; mismatch 409 `gate_changed`. */
   ord?: number;
-  /** (api-types 0.225.0, crew#1698) The opening of the gate the decision was made on ({@link GateInfo.gateSeq});
+  /** (api-types 0.226.0, crew#1698) The opening of the gate the decision was made on ({@link GateInfo.gateSeq});
    *  mismatch 409 `gate_changed` (with `openGateSeq`). */
   gateSeq?: number;
 }
@@ -2912,7 +2912,7 @@ export interface ResumeRequest {
 export interface ReassignRequest {
   /** The gate (or, for an executing reassign, the cursor unit) the decision was made on; mismatch 409 `gate_changed`. */
   ord?: number;
-  /** (api-types 0.225.0, crew#1698) On a gated reassign: the opening of the gate it answers ({@link GateInfo.gateSeq});
+  /** (api-types 0.226.0, crew#1698) On a gated reassign: the opening of the gate it answers ({@link GateInfo.gateSeq});
    *  mismatch 409 `gate_changed` (with `openGateSeq`). */
   gateSeq?: number;
   cli?: string;
@@ -2941,7 +2941,7 @@ export interface CoreEvent {
   type: string;
   session?: string;
   ord?: number;
-  /** `awaitingHuman` (core#1808, api-types 0.225.0): which opening of the gate this is ({@link GateInfo.gateSeq}). */
+  /** `awaitingHuman` (core#1808, api-types 0.226.0): which opening of the gate this is ({@link GateInfo.gateSeq}). */
   gateSeq?: number;
   prompt?: string;
   chunk?: string;
@@ -3478,7 +3478,7 @@ export type UnitDenialSource =
   | 'same_seat_evaluator'
   | 'evaluator_error'
   | 'judge_unavailable'
-  /** (api-types 0.225.0, DES-STANDIN-001 §3.8) An independent check has no helper that did not build the work and
+  /** (api-types 0.226.0, DES-STANDIN-001 §3.8) An independent check has no helper that did not build the work and
    *  nobody consented to stand-ins: answer `use_stand_ins`, approve to retry, or reject. */
   | 'stand_in_needed'
   | (string & {});
@@ -3577,7 +3577,7 @@ export interface JudgeFallback {
 /** Why an instrument is absent from a receipt. */
 export type AssuranceSkipReason =
   | 'reduced_assurance'
-  /** (api-types 0.225.0, DES-STANDIN-001 §5.1) A stand-in did it: never an independent check. `detail` is the
+  /** (api-types 0.226.0, DES-STANDIN-001 §5.1) A stand-in did it: never an independent check. `detail` is the
    *  run's `standInLabel`. */
   | 'stand_in'
   | 'no_distinct_seat'
@@ -3602,22 +3602,22 @@ export interface RunAssurance {
   /** (api-types 0.135.0) Every failed floor the operator overrode on this run ("floor overridden
    *  by operator"), each with who, when and the rationale; ABSENT when none or on an older engine. */
   floorOverrides?: OperatorJudgment[];
-  /** (api-types 0.225.0, DES-STANDIN-001 §3.8) The launch was stand-in-aware (crew sent the choice). ABSENT = false:
+  /** (api-types 0.226.0, DES-STANDIN-001 §3.8) The launch was stand-in-aware (crew sent the choice). ABSENT = false:
    *  today's path, reduced assurance included. */
   standInAware?: boolean;
-  /** (api-types 0.225.0, §3.8) Seats that authored the work under review: never a real reviewer of it. */
+  /** (api-types 0.226.0, §3.8) Seats that authored the work under review: never a real reviewer of it. */
   parties?: string[];
-  /** (api-types 0.225.0, §3.8) A person's consent to stand-ins, from the launch or a mid-run grant. */
+  /** (api-types 0.226.0, §3.8) A person's consent to stand-ins, from the launch or a mid-run grant. */
   standIn?: StandInConsent;
-  /** (api-types 0.225.0, §3.3) Every stand-in the run seated, in order. */
+  /** (api-types 0.226.0, §3.3) Every stand-in the run seated, in order. */
   standIns?: StandInBinding[];
-  /** (api-types 0.225.0, §5.1) PRESENT (empty) on a stand-in-aware run: its receipts are canonical (`roles`). */
+  /** (api-types 0.226.0, §5.1) PRESENT (empty) on a stand-in-aware run: its receipts are canonical (`roles`). */
   roles?: RoleRecord[];
-  /** (api-types 0.225.0, §3.7) The run's stand-in label in words, once a stand-in was seated. */
+  /** (api-types 0.226.0, §3.7) The run's stand-in label in words, once a stand-in was seated. */
   standInLabel?: string;
 }
 
-/** (api-types 0.225.0, DES-STANDIN-001 §3.1) An independent role: one a helper that built the work must not fill. */
+/** (api-types 0.226.0, DES-STANDIN-001 §3.1) An independent role: one a helper that built the work must not fill. */
 export type IndependentRole =
   | 'evaluator'
   | 'judge'
@@ -3629,11 +3629,11 @@ export type IndependentRole =
   | 'party_excluded'
   | (string & {});
 
-/** (api-types 0.225.0, §5.1) A decision's independence: `stand_in` when every role was stood in, `mixed` when a
+/** (api-types 0.226.0, §5.1) A decision's independence: `stand_in` when every role was stood in, `mixed` when a
  *  stand-in took part beside a real helper. A stand-in is never independent. */
 export type Independence = 'independent' | 'stand_in' | 'mixed' | (string & {});
 
-/** (api-types 0.225.0, §3.8) A person's consent to stand-ins. `by` and `at` are the daemon's, never a body's. */
+/** (api-types 0.226.0, §3.8) A person's consent to stand-ins. `by` and `at` are the daemon's, never a body's. */
 export interface StandInConsent {
   scope: 'job' | 'always' | (string & {});
   by: string;
@@ -3641,7 +3641,7 @@ export interface StandInConsent {
   via: 'proposal' | 'launch' | 'setting' | 'schedule' | 'grant' | (string & {});
 }
 
-/** (api-types 0.225.0, §3.7) Why a role was stood in, as data (`kind`); the words are `StandIn.reason`. */
+/** (api-types 0.226.0, §3.7) Why a role was stood in, as data (`kind`); the words are `StandIn.reason`. */
 export type StandInReason =
   | { kind: 'only_one_helper'; cli: string }
   | { kind: 'all_parties'; seats: string[] }
@@ -3650,7 +3650,7 @@ export type StandInReason =
   | { kind: 'shares_provider'; seat: string; provider: string }
   | { kind: string & {}; [k: string]: unknown };
 
-/** (api-types 0.225.0, §3.3) One stand-in the engine seated: a fresh session of `base` (`claude~1` runs on
+/** (api-types 0.226.0, §3.3) One stand-in the engine seated: a fresh session of `base` (`claude~1` runs on
  *  `claude`'s sign-in) for one role. */
 export interface StandInBinding {
   key: string;
@@ -3671,7 +3671,7 @@ export interface StandInBinding {
   display: string | null;
 }
 
-/** (api-types 0.225.0, §5.1) A stand-in's stamp on a role record. */
+/** (api-types 0.226.0, §5.1) A stand-in's stamp on a role record. */
 export interface StandIn {
   cli: string;
   base: string;
@@ -3684,7 +3684,7 @@ export interface StandIn {
   label: string;
 }
 
-/** (api-types 0.225.0, §5.1) Who filled one independent role at one decision. Only `answered` records satisfy a
+/** (api-types 0.226.0, §5.1) Who filled one independent role at one decision. Only `answered` records satisfy a
  *  check; every stand-in that took part counts for `independence`. */
 export interface RoleRecord {
   role: IndependentRole;
@@ -3697,7 +3697,7 @@ export interface RoleRecord {
   subject: string | null;
 }
 
-/** (api-types 0.225.0, §3.9) One independent role the job may need, as the engine's preflight counted it on the
+/** (api-types 0.226.0, §3.9) One independent role the job may need, as the engine's preflight counted it on the
  *  shape the launch would take. */
 export interface IndependencePreflightRole {
   role: IndependentRole;
@@ -3713,7 +3713,7 @@ export interface IndependencePreflightRole {
   why: string | null;
 }
 
-/** (api-types 0.225.0, §3.9; wicked-core-ts `Core.independencePreflight`) Which independent roles a launch needs
+/** (api-types 0.226.0, §3.9; wicked-core-ts `Core.independencePreflight`) Which independent roles a launch needs
  *  and how many real helpers can fill each, read before anything is created. */
 export interface IndependencePreflight {
   short: boolean;
@@ -3736,7 +3736,7 @@ export interface IndependencePreflight {
   };
 }
 
-/** (api-types 0.225.0, §4, §5.2) `409 stand_in_choice`: the roster is short and nobody consented. Nothing was
+/** (api-types 0.226.0, §4, §5.2) `409 stand_in_choice`: the roster is short and nobody consented. Nothing was
  *  created. Re-send the SAME request merged with `retryWith` for this job; `always` is the `standInReview` setting
  *  (`PUT /settings`, human only) and then the same request again. */
 export interface StandInChoiceRefusal {
@@ -3747,7 +3747,7 @@ export interface StandInChoiceRefusal {
   retryWith: { standIns: true };
 }
 
-/** (api-types 0.225.0, §2.5, §4) `409 no_usable_helper`: no signed-in helper can fill a role, even as a stand-in.
+/** (api-types 0.226.0, §2.5, §4) `409 no_usable_helper`: no signed-in helper can fill a role, even as a stand-in.
  *  Nothing was created. */
 export interface NoUsableHelperRefusal {
   code: 'no_usable_helper';
@@ -3830,14 +3830,14 @@ export interface AssuranceReceipt {
    *  (api-types 0.193.0) `disputed` row held it. A row with `blocking: false` (a process rule) did
    *  neither. */
   rules?: RuleVerdict[];
-  /** (api-types 0.225.0, DES-STANDIN-001 §5.1) Who filled each independent role, real or stand-in. PRESENT on a
+  /** (api-types 0.226.0, DES-STANDIN-001 §5.1) Who filled each independent role, real or stand-in. PRESENT on a
    *  stand-in-aware run's receipts (empty when no role was due); ABSENT on every other run, which reads the legacy
    *  fields. Once any stand-in took part, the legacy fields never claim an independent check (`ran` holds neither
    *  `distinct_evaluator` nor `judge`, `evaluator` and `judge` are null, the skips say `stand_in`). */
   roles?: RoleRecord[];
-  /** (api-types 0.225.0) `independent` | `stand_in` | `mixed`; ABSENT when no seat-bound role was recorded. */
+  /** (api-types 0.226.0) `independent` | `stand_in` | `mixed`; ABSENT when no seat-bound role was recorded. */
   independence?: Independence;
-  /** (api-types 0.225.0) The run's stand-in label, when a stand-in took part in this decision. */
+  /** (api-types 0.226.0) The run's stand-in label, when a stand-in took part in this decision. */
   standInLabel?: string;
 }
 
@@ -6915,12 +6915,12 @@ export interface LaunchRunBody {
    * holds (`judge_unavailable`), and a one-CLI launch is answered with
    * `LaunchRunResponse.assuranceNotice`. It never waives `qe_acceptance`. A client must ask its
    * operator before sending `true`; send it only when `GET /health.capabilities.reducedAssurance === true`.
-   * @deprecated (api-types 0.225.0) Replaced by stand-ins ({@link LaunchRunBody.standIns}); removed after studio
+   * @deprecated (api-types 0.226.0) Replaced by stand-ins ({@link LaunchRunBody.standIns}); removed after studio
    * stops sending it (DES-STANDIN-001 K3).
    */
   reducedAssurance?: boolean;
   /**
-   * (api-types 0.225.0, DES-STANDIN-001 §3.8, §4) The person consents to STAND-INS for this job: when too few
+   * (api-types 0.226.0, DES-STANDIN-001 §3.8, §4) The person consents to STAND-INS for this job: when too few
    * helpers are signed in to check it independently, a fresh session of a signed-in helper (one that sees the work
    * but none of the builder's reasoning) fills the missing reviewer, judge or QE reviewer, labelled everywhere and
    * never counted as independent. Send it only after the person chose "this job" on a `409 stand_in_choice`
@@ -7604,7 +7604,7 @@ export interface SystemSettings {
    */
   powerModeDefault?: boolean | undefined;
   /**
-   * (api-types 0.225.0, DES-STANDIN-001 §4) Settings → Checks → "Stand-in review": `ask` (the default; a job that
+   * (api-types 0.226.0, DES-STANDIN-001 §4) Settings → Checks → "Stand-in review": `ask` (the default; a job that
    * can't be checked independently asks first, `409 stand_in_choice`) or `always` (use stand-ins whenever a helper
    * is missing; every stand-in is labelled). ABSENT = `ask`. Human actors only. Read by every launch through
    * crew's launcher (studio's Start, the API, a chat proposal's Start, a recording, a product plan); a scheduled job
@@ -13593,7 +13593,7 @@ export type TeamEventType =
   | 'wicked.team.step.reviewed'
   | 'wicked.team.finding.settled'
   | 'wicked.team.council.called'
-  /** (api-types 0.225.0, core#1822) The council's ballots started (type 27). */
+  /** (api-types 0.226.0, core#1822) The council's ballots started (type 27). */
   | 'wicked.team.council.convened'
   | 'wicked.team.council.ruled'
   | 'wicked.team.ledger.folded'
@@ -13935,7 +13935,7 @@ export type TeamCouncilCalledPayload = TeamEnvelope & {
   transcript: number[];
 };
 
-/** (api-types 0.225.0, core#1822, DES-STANDIN-001 §3.11) A council's ballots STARTED: published before any ballot
+/** (api-types 0.226.0, core#1822, DES-STANDIN-001 §3.11) A council's ballots STARTED: published before any ballot
  *  returns. A `council.called` with no `council.convened` never voted (its ruling reads `not_convened`, never
  *  `timeout`). */
 export type TeamCouncilConvenedPayload = TeamEnvelope & {
@@ -13949,12 +13949,12 @@ export type TeamCouncilConvenedPayload = TeamEnvelope & {
 export type TeamCouncilRuledPayload = TeamEnvelope & {
   subject: string;
   verdict: 'yes' | 'no' | 'no_verdict' | (string & {});
-  /** (api-types 0.225.0) `not_convened`: no ballot started (the council never met); `detail` says why. */
+  /** (api-types 0.226.0) `not_convened`: no ballot started (the council never met); `detail` says why. */
   reason: 'no_quorum' | 'seats_benched' | 'error' | 'timeout' | 'cap' | 'not_convened' | (string & {}) | null;
-  /** (api-types 0.225.0, core#1822) Why, in words, on a `not_convened` no-verdict ("another council held the host
+  /** (api-types 0.226.0, core#1822) Why, in words, on a `not_convened` no-verdict ("another council held the host
    *  slot"). ABSENT otherwise and on rows recorded before it. */
   detail?: string;
-  /** (api-types 0.225.0, DES-STANDIN-001 §5.1) Who sat, real or stand-in, on a stand-in-aware run. */
+  /** (api-types 0.226.0, DES-STANDIN-001 §5.1) Who sat, real or stand-in, on a stand-in-aware run. */
   roles?: RoleRecord[];
   independence?: Independence;
   task_id: string | null;
@@ -13982,11 +13982,11 @@ export interface TeamDispute {
   dissent: number | null;
   seats: string[];
   seed?: number;
-  /** (api-types 0.225.0) `not_convened` joins the reasons: the council never met (`detail` says why). */
+  /** (api-types 0.226.0) `not_convened` joins the reasons: the council never met (`detail` says why). */
   reason: string | null;
-  /** (api-types 0.225.0, core#1822) Why, in words, on `not_convened`. ABSENT otherwise. */
+  /** (api-types 0.226.0, core#1822) Why, in words, on `not_convened`. ABSENT otherwise. */
   detail?: string;
-  /** (api-types 0.225.0, DES-STANDIN-001 §5.1) Who sat, real or stand-in, on a stand-in-aware run. */
+  /** (api-types 0.226.0, DES-STANDIN-001 §5.1) Who sat, real or stand-in, on a stand-in-aware run. */
   roles?: RoleRecord[];
   independence?: Independence;
 }
