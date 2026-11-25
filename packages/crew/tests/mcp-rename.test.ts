@@ -17,7 +17,7 @@ import { LOCAL_ACTOR } from '../src/api/auth.js';
 import { registerMcpRoutes } from '../src/api/mcp.js';
 import { CoreAdapter } from '../src/core/adapter.js';
 import type { Actor, ConformanceRule, McpPolicyPreviewResponse, McpPreviewResponse, McpServer } from '../src/core/types.js';
-import { FIRST_USE_LEDGER, McpPolicies, WRITE_LEDGER } from '../src/mcp/policies.js';
+import { FIRST_USE_LEDGER, isShippedRule, McpPolicies, WRITE_LEDGER } from '../src/mcp/policies.js';
 import { probeMcpServer } from '../src/mcp/probe.js';
 import { McpRegistry } from '../src/mcp/registry.js';
 import { McpRegistryStore } from '../src/mcp/registry-store.js';
@@ -48,6 +48,10 @@ let policies: McpPolicies;
 let previews: string[];
 /** (crew#1906) Every row-write withdrawal the routes asked for, as `source:why`. */
 let withdrawn: string[];
+/** (crew#1906 r1) The registry's names at each withdrawal, in order: whether the rename had landed by then. */
+let namesAtWithdrawal: string[][];
+/** (crew#1906 r1) Sources whose withdrawal fails. */
+let failWithdraw: Set<string>;
 
 function secrets(): SecretStore {
   return {
@@ -114,7 +118,19 @@ beforeEach(async () => {
   audit = new AuditLog(join(base, 'audit.log'), () => undefined);
   app = Fastify();
   withdrawn = [];
-  registerMcpRoutes(app, { registry, policies, audit, actorOf: () => actor, appsUsing: async () => usingApps, rowWriteGrants: { withdrawForSource: async (source, why) => { withdrawn.push(`${source}:${why}`); return 2; } } });
+  namesAtWithdrawal = [];
+  failWithdraw = new Set();
+  registerMcpRoutes(app, {
+    registry, policies, audit, actorOf: () => actor, appsUsing: async () => usingApps,
+    rowWriteGrants: {
+      withdrawForSource: async (source, why) => {
+        withdrawn.push(`${source}:${why}`);
+        namesAtWithdrawal.push((await registry.list()).servers.map((x) => x.name).sort());
+        if (failWithdraw.has(source)) throw new Error('fixture: the grants store is unreachable');
+        return 2;
+      },
+    },
+  });
   await app.ready();
 });
 
@@ -319,6 +335,9 @@ describe('renaming a source (crew#1514)', () => {
     expect((await rule(FIRST_USE_LEDGER))!.excludes).toEqual(expect.arrayContaining(['mcp:fx2']));
     expect((await call('GET', '/mcp/servers')).json().servers.map((s: McpServer) => s.name)).toEqual(['fx2']);
     expect((await auditEvents()).some((e) => e.action === 'mcp.server.renamed' && e.detail?.['to'] === 'fx2')).toBe(true);
+    // (crew#1906 r1) Landed, so the old name's grants go: once, after the rename, as on the read path.
+    expect(withdrawn.filter((w) => w.startsWith('fx:'))).toEqual(['fx:source_renamed']);
+    expect(namesAtWithdrawal[withdrawn.indexOf('fx:source_renamed')]).toEqual(['fx2']);
   });
 
   it('removing a renamed entry re-saved on an env secret still deletes the keychain account it owns', async () => {
@@ -565,19 +584,19 @@ describe('rename: rules whose trigger can match a name (crew#1905)', () => {
     // The whole function was read (its last answer is in it), with its comments taken out.
     expect(body).toMatch(/claim_id:\s*Some\(\s*verdict\.claim_id\s*\)/);
     const code = (body as string).replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
-    // ctx is built once from context() and never rebound or shadowed.
-    expect(code.match(/\bctx\s*=(?!=)/g)?.length).toBe(1);
-    // Whitespace-blind (a rewrap of core's source is not a change of the context): coord's W2 on #1910.
-    expect(code).toMatch(/let\s+mut\s+ctx\s*=\s*context\(\s*unit\s*,\s*call\s*,\s*class\s*\)\s*;/);
-    expect(code).toMatch(/if\s+let\s+Some\(\s*obj\s*\)\s*=\s*ctx\s*\.\s*as_object_mut\(\s*\)\s*\{\s*obj\s*\.\s*remove\(\s*"args"\s*\)\s*;\s*\}/);
-    // Every write to ctx: the one removal of args and the one raw string.
-    expect([...code.matchAll(/\bobj\s*\.\s*(\w+)\(\s*([^)]*?)\s*\)/g)].map((m) => `${m[1]}(${m[2]})`)).toEqual(['remove("args")']);
-    expect([...code.matchAll(/\bctx\s*\[\s*([^\]]*?)\s*\]\s*=(?!=)/g)].map((m) => m[1])).toEqual(['"raw"']);
-    expect(code).toMatch(/ctx\s*\[\s*"raw"\s*\]\s*=\s*serde_json::Value::String\(\s*raw\s*\.\s*to_string\(\s*\)\s*\)\s*;/);
-    // The one mutable view of ctx is the one that removes args; no other is taken.
-    expect(code.match(/as_object_mut\(|pointer_mut\(|get_mut\(|&\s*mut\s+ctx\b/g)).toEqual(['as_object_mut(']);
+    // Whitespace-blind (a rewrap of core's source is not a change of the context): coord's W2 on #1910. The context is
+    // built and changed in exactly these three statements, in this order; crew#1906 r1 pins the region whole rather
+    // than listing the writes it knows (a `ctx["server"].take()` would have passed a list).
+    const flat = code.replace(/\s+/g, '');
+    const region = 'letmutctx=context(unit,call,class);ifletSome(obj)=ctx.as_object_mut(){obj.remove("args");}ctx["raw"]=serde_json::Value::String(raw.to_string());';
+    expect(flat.split(region), 'the context is built differently').toHaveLength(2);
+    const [before, after] = flat.split(region) as [string, string];
+    // Nothing names ctx before it is built, and afterwards it is only ever lent, read-only, to a call: no method,
+    // index, field, assignment, move or mutable borrow, so the rules see exactly the region's value.
+    expect(before).not.toContain('ctx');
+    expect([...after.matchAll(/(.)ctx\b(.)/g)].map((m) => `${m[1]}ctx${m[2]}`).filter((x) => x !== '&ctx)' && x !== '&ctx,')).toEqual([]);
     // The rules are judged on that ctx.
-    expect(code).toMatch(/select_any\(\s*store\s*,\s*&unit\.scope\s*,\s*&phases\s*,\s*&ctx\s*\)/);
+    expect(flat).toContain('select_any(store,&unit.scope,&phases,&ctx)');
     // serde_json keeps an object's keys sorted unless its preserve_order feature (indexmap) is on anywhere in core.
     const lock = readFileSync(join(requireCoreDir(), 'Cargo.lock'), 'utf8');
     const serdeJson = /\[\[package\]\]\nname = "serde_json"\n[\s\S]*?(?=\n\[\[package\]\]|\n*$)/.exec(lock)?.[0];
@@ -640,10 +659,59 @@ describe('rename follow-ups (crew#1906)', () => {
     expect(withdrawn).toEqual([]);
     const res = await call('POST', '/mcp/servers/fx/rename', { to: 'gx' });
     expect(res.statusCode, res.body).toBe(200);
-    expect(withdrawn).toEqual(['fx:source_renamed']);
+    expect(withdrawn.filter((w) => w.startsWith('fx:'))).toEqual(['fx:source_renamed']);
+    // (crew#1906 r1) Only once the rename has landed: fx is gone from the list by then.
+    expect(namesAtWithdrawal[withdrawn.indexOf('fx:source_renamed')]).toEqual(['gx', 'taken']);
     await audit.flush();
     const line = (await audit.read({ action: 'mcp.server.renamed' }))[0]!;
     expect(line.detail).toMatchObject({ from: 'fx', to: 'gx', withdrawnGrants: 2 });
+  });
+
+  it("a rename its rules refuse withdraws none of the current name's grants", async () => {
+    await register('fx');
+    await upsert({ id: 'OWN-FX', applies_to: ['release'], effect: 'deny', severity: 'critical', trigger: { contains: '"tool":"mcp:fx/' } });
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'gx' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().code).toBe('rules_differ');
+    expect(withdrawn.filter((w) => w.startsWith('fx:'))).toEqual([]);
+  });
+
+  it('a name a source takes loses the row-write grants an earlier holder left on it, before the rename lands', async () => {
+    await register('fx');
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'gx' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(withdrawn).toEqual(['gx:name_reused', 'fx:source_renamed']);
+    // gx's leftovers went while the source was still fx: no source of that name could use them meanwhile.
+    expect(namesAtWithdrawal[0]).toEqual(['fx']);
+  });
+
+  it("if a name's leftover grants cannot be withdrawn, nothing is renamed and crew says so", async () => {
+    await register('fx');
+    failWithdraw.add('gx');
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'gx' });
+    expect(res.statusCode, res.body).toBe(500);
+    expect(res.json()).toMatchObject({ code: 'withdraw_failed' });
+    expect(res.json().error).toMatch(/nothing was renamed/);
+    expect((await call('GET', '/mcp/servers')).json().servers.map((x: McpServer) => x.name)).toEqual(['fx']);
+    expect(withdrawn).toEqual(['gx:name_reused']);
+    expect((await rule(FIRST_USE_LEDGER))!.excludes ?? []).not.toContain('mcp:gx');
+  });
+
+  it("a withdrawal that fails after the rename is recorded, and the rename back withdraws those grants first", async () => {
+    await register('fx');
+    failWithdraw.add('fx');
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'gx' });
+    expect(res.statusCode, res.body).toBe(200);
+    await audit.flush();
+    expect((await audit.read({ action: 'mcp.server.renamed' }))[0]!.detail).toMatchObject({ from: 'fx', to: 'gx', withdrawFailed: true });
+    failWithdraw.clear();
+    withdrawn = [];
+    namesAtWithdrawal = [];
+    const back = await call('POST', '/mcp/servers/gx/rename', { to: 'fx' });
+    expect(back.statusCode, back.body).toBe(200);
+    // fx's grants that outlived the first rename go before fx is a name again.
+    expect(withdrawn[0]).toBe('fx:name_reused');
+    expect(namesAtWithdrawal[0]).toEqual(['gx']);
   });
 
   it('removing a renamed source withdraws the approvals its former names hold too', async () => {
@@ -671,5 +739,29 @@ describe('rename follow-ups (crew#1906)', () => {
     expect(error).toMatch(/To rename it, first change or retire OWN-FX\b/);
     expect(error).not.toMatch(/change or retire[^.]*SHIPPED-FX/);
     expect(error).toContain('SHIPPED-FX ships with crew');
+  });
+
+  // (crew#1906 r1) "Ships with crew" is the record core's seeding writes: its pack file and that rule's own id.
+  it('every rule core seeds from its packs counts as shipped, read from the engine as it seeded them', async () => {
+    const seeded = ['MCP-FIRST-USE', 'MCP-POSTURE-READ', 'MCP-POSTURE-WRITE', 'MCP-MODE-ASK-WRITE', 'EDITOR-GRANTS', 'EDITOR-BUILTIN', 'EDITOR-OPEN-DEFAULTS'];
+    const rules = await adapter.listConformanceRules();
+    for (const id of seeded) {
+      const r = rules.find((x) => x.id === id);
+      expect(r, `${id} is not seeded`).toBeDefined();
+      expect(isShippedRule(r!), id).toBe(true);
+    }
+    expect(rules.filter((r) => r.provenance?.ref === 'test').some((r) => isShippedRule(r))).toBe(false);
+  });
+
+  it("a person's copy of a shipped rule is theirs to change, even with the pack's provenance kept", async () => {
+    await register('fx');
+    const shipped = (await adapter.listConformanceRules()).find((x) => x.id === 'MCP-FIRST-USE')!;
+    expect(isShippedRule({ ...shipped, id: 'MY-COPY' })).toBe(false);
+    expect(isShippedRule({ ...shipped, provenance: { ...shipped.provenance, source: 'ui' } })).toBe(false);
+    await upsert({ id: 'MY-COPY', applies_to: ['release'], effect: 'deny', severity: 'critical', trigger: { contains: '"server":"fx"' }, provenance: shipped.provenance });
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'gx' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toMatch(/To rename it, first change or retire MY-COPY\b/);
+    expect(res.json().error).not.toContain('ships with crew');
   });
 });
