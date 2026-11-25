@@ -17,13 +17,15 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writ
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import Fastify from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { EditorConformanceSummary, InstallEditorRefusal, Preset, PresetStep } from '../src/core/types.js';
+import type { EditorConformanceSummary, InstallEditorRefusal, InstallEditorResponse, Preset, PresetStep, RemoveEditorResponse } from '../src/core/types.js';
 import { installPack, PackInstallError, type ConformanceRunner, type PackApproval, type PackCheckRunner, type PackPresetsPort, type PackSkillsPort, requiredCases } from '../src/editors/pack-install.js';
 import { packSkillsPort } from '../src/editors/pack-extras.js';
 import { SkillsRuntime } from '../src/skills/runtime.js';
 import { EditorRegistry, sha256Of } from '../src/editors/registry.js';
+import { registerEditorRoutes } from '../src/editors/routes.js';
 import { removeScratch } from './setup/scratch.js';
 import { scaffold, type Scaffold } from './support/skills-fixture.js';
 
@@ -88,9 +90,10 @@ function rig(opts: { seedPresets?: Preset[] } = {}) {
   sc.store.seed();
   const presets = presetStore(opts.seedPresets);
   // The production port over a real runtime: it waits for the boot ladder and publishes as POST /skills/publish does.
-  const skills = packSkillsPort(new SkillsRuntime({ store: sc.store, log: () => undefined }));
+  const runtime = new SkillsRuntime({ store: sc.store, log: () => undefined });
+  const skills = packSkillsPort(runtime);
   const conformance = conformant();
-  return { registry, home, studio, sc, presets, conformance, deps: { check: passCheck, conformance, registry, skills, presets } };
+  return { registry, home, studio, sc, presets, conformance, runtime, deps: { check: passCheck, conformance, registry, skills, presets } };
 }
 
 /** The approval a person gives after reading the 409: exactly its list, and its digest. */
@@ -213,7 +216,7 @@ describe('crew#1703: an editor pack with skills and a block', () => {
       const source = readFileSync(join(root, 'skills', dir, 'SKILL.md'), 'utf8');
       const added = (await r.sc.store.readFile(`wicked-garden-${dir}`, 'SKILL.md')).content;
       expect(added).toBe(source.replace(`\nname: ${dir}\n`, `\nname: wicked-garden-${dir}\n`));
-      expect(r.sc.store.manifest().skills[`wicked-garden-${dir}`]).toMatchObject({ enabled: true, provenance: 'user-added' });
+      expect(r.sc.store.manifest().skills[`wicked-garden-${dir}`]).toMatchObject({ enabled: true, provenance: 'user-added', origin: 'pack:acme-terms' });
     }
     // Published: the generation seats are handed holds both.
     expect(r.sc.store.currentSnapshotSkills()?.skills).toEqual(expect.arrayContaining(['wicked-garden-acme-terms', 'wicked-garden-acme-terms-checker']));
@@ -504,19 +507,25 @@ describe('crew#1703: an editor pack with skills and a block', () => {
     expect((err as PackInstallError).message).toMatch(/registered workflow/);
   });
 
-  it('review r3: an editor-only update of a pack that shipped skills never waits on or reads the skills root', async () => {
+  it('review r3 (round 2 F1): an editor-only update withdraws the earlier skills and block; a skills root that cannot answer leaves the install standing, said', async () => {
     const r = rig();
     const root = pack(['critique']);
     await installPack(root, undefined, r.deps, await approvalFor(root, r.deps));
     const editorOnly = pack(['critique']);
     editManifest(editorOnly, (m) => ({ ...m, skills_dir: 'none', blocks: [] }));
-    let touched = 0;
-    const port = { ...wrappedPort(r.deps.skills, { manifest: (() => { touched++; throw new Error('skills root still seeding'); }) as never }), ready: async () => { touched++; } };
+    const port = wrappedPort(r.deps.skills, { manifest: (() => { throw new Error('skills root still seeding'); }) as never });
     const res = await installPack(editorOnly, undefined, { ...r.deps, skills: port });
     expect(res.installed).toBe(true);
-    expect(touched).toBe(0);
-    // The earlier skills stay the pack's own.
-    expect(res.skills?.map((k) => k.key)).toEqual(['wicked-garden-acme-terms', 'wicked-garden-acme-terms-checker']);
+    expect(res.skills).toBeUndefined();
+    // The preset went; the skills could not be switched off, and the response says so.
+    expect(res.withdrawn).toMatchObject({ skills: [], presets: ['acme-terms-review'] });
+    expect(res.withdrawn?.error).toMatch(/skills could not be switched off \(skills root still seeding\); switch them off in Skills/);
+    expect(r.presets.presets.has('acme-terms-review')).toBe(false);
+    // Still the pack's own: the next install (the skills root answering) switches them off.
+    const again = await installPack(editorOnly, undefined, r.deps);
+    expect(again.withdrawn?.skills).toEqual(['wicked-garden-acme-terms', 'wicked-garden-acme-terms-checker']);
+    expect(again.withdrawn?.error).toBeUndefined();
+    expect(r.sc.store.manifest().skills['wicked-garden-acme-terms']?.enabled).toBe(false);
   });
 
   it('review r3: a second preset write that fails puts the first back, and says so when that fails too', async () => {
@@ -570,5 +579,133 @@ describe('crew#1703: an editor pack with skills and a block', () => {
     });
     const res = await installPack(again, undefined, { ...r.deps, skills: port }, ok);
     expect(res.skillsError).toMatch(/could not put back wicked-garden-acme-terms-checker, wicked-garden-acme-terms; install the pack again/);
+  });
+});
+
+/** The editor routes over the rig, as the daemon mounts them (an operator at the keyboard). */
+async function routes(r: ReturnType<typeof rig>) {
+  const app = Fastify({ logger: false });
+  app.decorateRequest('actor', null as unknown as never);
+  app.addHook('onRequest', async (req) => {
+    (req as unknown as { actor: unknown }).actor = { id: 'human-1', kind: 'human', trust: 'operator' };
+  });
+  registerEditorRoutes(app, { registry: r.registry, adapter: {}, packCheck: passCheck, conformance: r.conformance, skills: r.deps.skills, presets: r.presets, log: () => undefined });
+  await app.ready();
+  return app;
+}
+
+const published = (r: ReturnType<typeof rig>): string[] => r.sc.store.currentSnapshotSkills()?.skills ?? [];
+
+// Each case publishes the skills root several times (a real store and runtime): give them room on a loaded host.
+describe('crew#1703 coord round 2: what a pack added leaves with it, and garden skills still refresh', { timeout: 120_000 }, () => {
+  it('F2: a pack skill is marked as the pack’s, so the garden refresh after an upgrade still runs and keeps the pack skills on', async () => {
+    const sc = scaffold();
+    scaffolds.push(sc);
+    const runtime = new SkillsRuntime({ store: sc.store, log: () => undefined, bootSnapshot: undefined, installedTtlMs: 0 });
+    const probe = vi.spyOn(sc.store, 'installedStateAsync');
+    expect((await runtime.apply()).state).toBe('published');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await Promise.all(probe.mock.results.filter((x) => x.type === 'return').map((x) => x.value));
+    const r = { ...rig(), sc };
+    const deps = { ...r.deps, skills: packSkillsPort(runtime) };
+    const root = pack(['critique']);
+    const res = await installPack(root, undefined, deps, await approvalFor(root, deps));
+    expect(res.skillsError).toBeUndefined();
+    expect(sc.store.manifest().skills['wicked-garden-acme-terms']?.origin).toBe('pack:acme-terms');
+    // garden moves to 1.1.0 (the installed plugin manifest and one shipped file).
+    const manifest = join(sc.upstream, '.claude-plugin', 'plugin.json');
+    writeFileSync(manifest, JSON.stringify({ ...(JSON.parse(readFileSync(manifest, 'utf8')) as object), version: '1.1.0' }, null, 2));
+    const notes = join(sc.upstream, 'skills', 'alpha', 'refs', 'notes.md');
+    writeFileSync(notes, `${readFileSync(notes, 'utf8')}\nupstream 1.1.0\n`);
+    const outcome = await runtime.autoRefreshOnBoot({});
+    expect(outcome).toMatchObject({ action: 'published', from: '1.0.0', to: '1.1.0' });
+    expect(sc.store.currentSnapshotSkills()?.skills).toEqual(expect.arrayContaining(['wicked-garden-acme-terms', 'wicked-garden-acme-terms-checker']));
+    expect((await sc.store.readFile('wicked-garden-alpha', 'refs/notes.md')).content).toMatch(/upstream 1\.1\.0/);
+  });
+
+  it('F2: an origin is only ever pack:<name>, in the manifest as in add()', () => {
+    const r = rig();
+    expect(() => r.sc.store.add('x-skill', { 'SKILL.md': '---\nname: x-skill\ndescription: x\n---\nx\n' }, r.sc.store.revision(), { origin: 'operator' })).toThrow(/pack:<pack name>/);
+  });
+
+  it('F1: removing the pack’s last editor switches its skills off for every worker, deletes its preset, and says so; installing it again brings them back', async () => {
+    const r = rig();
+    const app = await routes(r);
+    const root = pack(['critique']);
+    const ok = await approvalFor(root, r.deps);
+    const installed = await app.inject({ method: 'POST', url: '/api/v1/editors', payload: { packRoot: root, approve: ok } });
+    expect(installed.statusCode, installed.body).toBe(200);
+    expect(published(r)).toEqual(expect.arrayContaining(['wicked-garden-acme-terms', 'wicked-garden-acme-terms-checker']));
+    const removed = await app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-terms' });
+    expect(removed.statusCode, removed.body).toBe(200);
+    expect(removed.json<RemoveEditorResponse>()).toEqual({
+      removed: true,
+      id: 'acme-terms',
+      withdrawn: { skills: ['wicked-garden-acme-terms', 'wicked-garden-acme-terms-checker'], presets: ['acme-terms-review'] },
+    });
+    expect(r.sc.store.manifest().skills['wicked-garden-acme-terms']?.enabled).toBe(false);
+    expect(published(r)).not.toContain('wicked-garden-acme-terms');
+    expect(published(r)).not.toContain('wicked-garden-acme-terms-checker');
+    expect(r.presets.presets.has('acme-terms-review')).toBe(false);
+    // Installing it again (the same consent) turns the same skills back on and writes the preset again.
+    const back = await app.inject({ method: 'POST', url: '/api/v1/editors', payload: { packRoot: root, approve: ok } });
+    expect(back.statusCode, back.body).toBe(200);
+    expect(back.json<InstallEditorResponse>().skills?.map((k) => k.key)).toEqual(['wicked-garden-acme-terms', 'wicked-garden-acme-terms-checker']);
+    expect(published(r)).toEqual(expect.arrayContaining(['wicked-garden-acme-terms', 'wicked-garden-acme-terms-checker']));
+    expect(r.presets.presets.has('acme-terms-review')).toBe(true);
+    await app.close();
+  });
+
+  it('F1: a removal leaves a preset someone saved over since, and a skill no longer marked as the pack’s', async () => {
+    const r = rig();
+    const app = await routes(r);
+    const root = pack(['critique']);
+    await installPack(root, undefined, r.deps, await approvalFor(root, r.deps));
+    await r.presets.putPreset('acme-terms-review', [{ catalog: 'review', id: 'review' }], undefined, 'api');
+    const removed = await app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-terms' });
+    expect(removed.json<RemoveEditorResponse>().withdrawn).toEqual({ skills: ['wicked-garden-acme-terms', 'wicked-garden-acme-terms-checker'], presets: [] });
+    expect(r.presets.presets.get('acme-terms-review')?.created_by).toBe('api');
+    await app.close();
+  });
+
+  it('F1: an update that no longer ships a skill or block switches that skill off and deletes that preset, and says so', async () => {
+    const r = rig();
+    const root = pack(['critique']);
+    await installPack(root, undefined, r.deps, await approvalFor(root, r.deps));
+    const slimmer = pack(['critique']);
+    rmSync(join(slimmer, 'skills', 'acme-terms-checker'), { recursive: true });
+    editManifest(slimmer, (m) => ({ ...m, blocks: [] }));
+    const res = await installPack(slimmer, undefined, r.deps, await approvalFor(slimmer, r.deps));
+    expect(res.skills?.map((k) => k.key)).toEqual(['wicked-garden-acme-terms']);
+    expect(res.presets).toBeUndefined();
+    expect(res.withdrawn).toEqual({ skills: ['wicked-garden-acme-terms-checker'], presets: ['acme-terms-review'] });
+    expect(r.sc.store.manifest().skills['wicked-garden-acme-terms-checker']?.enabled).toBe(false);
+    expect(published(r)).toContain('wicked-garden-acme-terms');
+    expect(published(r)).not.toContain('wicked-garden-acme-terms-checker');
+    expect(r.presets.presets.has('acme-terms-review')).toBe(false);
+    expect(EditorRegistry.view(r.registry.get('acme-terms')!)).toMatchObject({ packSkills: [{ name: 'acme-terms', key: 'wicked-garden-acme-terms' }] });
+    // The dropped skill is still the pack's: the full pack installs again without a name clash and turns it back on.
+    const full = await installPack(root, undefined, r.deps, await approvalFor(root, r.deps));
+    expect(full.skills?.map((k) => k.key)).toEqual(['wicked-garden-acme-terms', 'wicked-garden-acme-terms-checker']);
+    expect(published(r)).toContain('wicked-garden-acme-terms-checker');
+  });
+
+  it('W2: the install record names a skill only once it is written (a skills root busy past the wait names none)', async () => {
+    const r = rig();
+    const root = pack(['critique']);
+    const ok = await approvalFor(root, r.deps);
+    let t = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => (t += 20_000));
+    try {
+      const res = await installPack(root, undefined, { ...r.deps, skills: wrappedPort(r.deps.skills, { isPublishing: (() => true) as never }) }, ok);
+      expect(res.skillsError).toMatch(/busy publishing/);
+      expect(res.skills).toBeUndefined();
+    } finally {
+      clock.mockRestore();
+    }
+    expect(keys(r.sc)).toEqual([]);
+    expect(EditorRegistry.view(r.registry.get('acme-terms')!).packSkills).toBeUndefined();
+    const reread = new EditorRegistry({ stateHome: r.home, studioRoot: r.studio });
+    expect(EditorRegistry.view(reread.get('acme-terms')!).packSkills).toBeUndefined();
   });
 });
