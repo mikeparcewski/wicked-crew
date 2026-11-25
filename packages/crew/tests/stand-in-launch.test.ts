@@ -55,6 +55,30 @@ describe('stand-in consent and refusal bodies (pure)', () => {
     expect(preflightRefusal({ ...p, short: false })).toBeNull();
   });
 
+  // coord round 2 F4: the words state only the needs this launch has, never "signed in" (the person may have picked
+  // the job's helpers), and never end on an API field.
+  it('the choice names the roles the job needs, then the ones it needs only if the job calls for them', () => {
+    const p = readPreflight(ONE_HELPER)!;
+    const e = preflightRefusal(p)!.error;
+    expect(e).toMatch(/^This job's helpers can't check it independently: it needs a reviewer, a judge and a QE reviewer that did not build the work, and, if the job calls for them, a rules checker, a rules council, a council and a monitor\./);
+    expect(e).toMatch(/They are not independent reviews\./);
+    expect(e).not.toMatch(/signed in/i);
+    expect(e).not.toMatch(/standIns/);
+    expect(e).toMatch(/Use stand-ins for this job or for every job, or add another helper to the job\.$/);
+    const condOnly = { ...p, roles: p.roles.map((r) => (r.conditional ? r : { ...r, shortBy: 0 })) };
+    const e2 = preflightRefusal(condOnly)!.error;
+    expect(e2).toMatch(/^If the job calls for them, it needs a rules checker, a rules council, a council and a monitor that did not build the work, and this job's helpers can't be those\./);
+    expect(e2).not.toMatch(/signed in|standIns/);
+    expect((preflightRefusal(p) as { choices: Array<{ id: string; label: string }> }).choices.find((c) => c.id === 'sign_in')?.label).toBe('Add or sign in another helper');
+  });
+
+  it('no_usable_helper says what to do on a picked roster too', () => {
+    const p = readPreflight(ONE_HELPER)!;
+    const none = { ...p, roles: p.roles.map((r, i) => (i === 0 ? { ...r, canStandIn: false, standInFrom: null } : r)) };
+    const e = preflightRefusal(none)!.error;
+    expect(e).toBe('No helper on this job can be a reviewer for it, even as a stand-in, so it can\'t start. Add another helper to the job, or sign one in, and start it again.');
+  });
+
   it('a malformed preflight reads as none', () => {
     for (const raw of ['{', '[]', '{"short":true}', '{"short":true,"roles":[{"role":"judge"}]}']) expect(readPreflight(raw)).toBeNull();
   });
@@ -67,6 +91,7 @@ describe('POST /runs asks the stand-in question (T-K1, T-K2)', () => {
   let settings: Record<string, unknown> = {};
   let preflight = ONE_HELPER;
   let supports = true;
+  let draining = false;
 
   beforeAll(async () => {
     const adapter = {
@@ -75,6 +100,7 @@ describe('POST /runs asks the stand-in question (T-K1, T-K2)', () => {
       listWorkflows: () => [], getWorkflow: () => null,
       launchRun: vi.fn(async (input: LaunchRunInput) => { launched.push(input); return input.sessionId; }),
       supportsStandIns: () => supports,
+      isDraining: () => draining,
       independencePreflight: vi.fn(async (input: LaunchRunInput) => { preflights.push(input); return preflight; }),
     };
     app = Fastify({ logger: false });
@@ -86,7 +112,7 @@ describe('POST /runs asks the stand-in question (T-K1, T-K2)', () => {
   });
   afterAll(async () => { await app.close(); });
   beforeEach(() => {
-    launched.length = 0; preflights.length = 0; settings = {}; preflight = ONE_HELPER; supports = true;
+    launched.length = 0; preflights.length = 0; settings = {}; preflight = ONE_HELPER; supports = true; draining = false;
   });
 
   const post = (body: Record<string, unknown>, actor = 'human/operator') =>
@@ -98,6 +124,16 @@ describe('POST /runs asks the stand-in question (T-K1, T-K2)', () => {
     expect(res.json()).toMatchObject({ code: 'stand_in_choice', retryWith: { standIns: true }, preflight: { short: true } });
     expect(res.json().choices.map((c: { id: string }) => c.id)).toEqual(['job', 'always', 'sign_in', 'cancel']);
     expect(preflights).toHaveLength(1);
+    expect(launched).toEqual([]);
+  });
+
+  // coord round 2 F5: a draining daemon refuses before it asks; the choice would only lead to the 503.
+  it('a draining daemon with a short roster and no consent answers 503 maintenance_drain, not the choice', async () => {
+    draining = true;
+    const res = await post({});
+    expect(res.statusCode, res.body).toBe(503);
+    expect(res.json().code).toBe('maintenance_drain');
+    expect(preflights).toEqual([]);
     expect(launched).toEqual([]);
   });
 
