@@ -20,7 +20,7 @@ import { FIRST_USE_LEDGER, McpPolicies, WRITE_LEDGER } from '../src/mcp/policies
 import { probeMcpServer } from '../src/mcp/probe.js';
 import { McpRegistry } from '../src/mcp/registry.js';
 import { McpRegistryStore } from '../src/mcp/registry-store.js';
-import { CONTEXTS, triggerNames } from '../src/mcp/trigger-names.js';
+import { CONTEXTS, judgeTrigger, triggerNames } from '../src/mcp/trigger-names.js';
 import { keychainRef, type SecretStore } from '../src/mcp/secrets.js';
 import { removeScratch } from './setup/scratch.js';
 import { requireCoreDir, SKIP_CORE_CHECKS } from './support/core-checkout.js';
@@ -558,8 +558,13 @@ describe('rename: rules whose trigger can match a name (crew#1905)', () => {
     const src = readFileSync(join(requireCoreDir(), 'src', 'mcp_gate', 'output.rs'), 'utf8');
     const body = /pub\(crate\) fn evaluate_output\([\s\S]*?\n\}\n/.exec(src)?.[0];
     expect(body, "core's src/mcp_gate/output.rs no longer declares evaluate_output").toBeDefined();
-    const code = (body as string).split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+    // The whole function was read (its last answer is in it), with its comments taken out.
+    expect(body).toContain('claim_id: Some(verdict.claim_id)');
+    const code = (body as string).replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+    // ctx is built once from context() and never rebound or shadowed.
+    expect(code.match(/\bctx\s*=(?!=)/g)?.length).toBe(1);
     expect(code).toMatch(/let mut ctx = context\(unit, call, class\);/);
+    expect(code).toMatch(/if let Some\(obj\) = ctx\.as_object_mut\(\) \{\s*obj\.remove\("args"\);\s*\}/);
     // Every write to ctx: the one removal of args and the one raw string.
     expect([...code.matchAll(/obj\.(\w+)\(([^)]*)\)/g)].map((m) => `${m[1]}(${m[2]})`)).toEqual(['remove("args")']);
     expect([...code.matchAll(/ctx\[([^\]]*)\]\s*=/g)].map((m) => m[1])).toEqual(['"raw"']);
@@ -568,6 +573,11 @@ describe('rename: rules whose trigger can match a name (crew#1905)', () => {
     expect(code.match(/as_object_mut\(\)|pointer_mut\(|get_mut\(|&mut ctx\b/g)).toEqual(['as_object_mut()']);
     // The rules are judged on that ctx.
     expect(code).toMatch(/select_any\(store, &unit\.scope, &phases, &ctx\)/);
+    // serde_json keeps an object's keys sorted unless its preserve_order feature (indexmap) is on anywhere in core.
+    const lock = readFileSync(join(requireCoreDir(), 'Cargo.lock'), 'utf8');
+    const serdeJson = /\[\[package\]\]\nname = "serde_json"\n[\s\S]*?(?=\n\[\[package\]\]|\n*$)/.exec(lock)?.[0];
+    expect(serdeJson, "core's Cargo.lock has no serde_json").toBeDefined();
+    expect(serdeJson).not.toContain('"indexmap');
   });
 
   it('refuses a rename past a rule that withholds the source\'s results by the result context alone', async () => {
@@ -577,6 +587,26 @@ describe('rename: rules whose trigger can match a name (crew#1905)', () => {
     expect(res.statusCode, res.body).toBe(409);
     expect(res.json()).toMatchObject({ code: 'rules_differ', rules: ['SEC-FX-RESULTS'] });
     expect(res.json().error).toContain('SEC-FX-RESULTS (fx, the current name)');
+  });
+
+  it('judges a trigger in full or says it did not: unread syntax, a trigger too long, and a search over budget', () => {
+    expect(judgeTrigger('"server":"fx"', ['fx', 'gx'])).toEqual({ names: ['fx'], judged: true });
+    expect(judgeTrigger('"class":"read"', ['fx', 'gx'])).toEqual({ names: [], judged: true });
+    expect(judgeTrigger('(?x) f x', ['fx', 'gx'])).toEqual({ names: ['fx', 'gx'], judged: false });
+    expect(judgeTrigger('x'.repeat(5000), ['fx', 'gx'])).toEqual({ names: ['fx', 'gx'], judged: false });
+    expect(judgeTrigger('a?'.repeat(2000) + 'zz', ['fx', 'gx'])).toEqual({ names: ['fx', 'gx'], judged: false });
+  });
+
+  it('a rename refused only by a trigger crew cannot judge says so and names it as the next step', async () => {
+    await register('fx');
+    await upsert({ id: 'SEC-VERBOSE', applies_to: ['release'], effect: 'deny', severity: 'critical', trigger: { contains: '(?x) "server" : "nobody"' } });
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'gx' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'rules_differ', rules: ['SEC-VERBOSE'] });
+    const error = res.json().error as string;
+    expect(error).toContain('the trigger of rule SEC-VERBOSE (crew cannot judge its trigger, so it counts for both names)');
+    expect(error).toMatch(/To rename it, first change or retire SEC-VERBOSE$/);
+    expect(error).not.toContain('A new name');
   });
 
   // R2 F2: the refusal says when crew could not judge a trigger, and gives the next step when the current name is matched.
