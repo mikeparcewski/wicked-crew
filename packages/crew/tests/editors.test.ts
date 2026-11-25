@@ -308,7 +308,7 @@ describe('pack install: the gate, crew\'s conformance run, then the registry', (
     expect((err as PackInstallError).status).toBe(422);
     const body = (err as PackInstallError).body as unknown as InstallEditorRefusal;
     expect(body.code).toBe('pack_skills_unavailable');
-    expect(body.error).toMatch(/nothing was installed/);
+    expect((err as PackInstallError).message).toMatch(/nothing was installed/);
     expect(conformance).not.toHaveBeenCalled();
     expect(reg.get('acme-terms')).toBeNull();
   });
