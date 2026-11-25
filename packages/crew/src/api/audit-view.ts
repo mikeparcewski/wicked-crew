@@ -30,6 +30,7 @@ export const ALLOWED: Readonly<Record<string, readonly string[]>> = {
   'mcp.server.enabled': ['name'],
   'mcp.server.disabled': ['name'],
   'mcp.server.removed': ['name'],
+  'mcp.server.renamed': ['from', 'to'],
   'mcp.secret.set': ['name'],
   'mcp.tool.updated': ['subject', 'enabled', 'classOverride', 'disclosure'],
   'mcp.tool.write_granted': ['subject', 'class', 'via'],

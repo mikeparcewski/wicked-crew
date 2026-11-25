@@ -193,6 +193,8 @@ export class McpRegistry {
    * belongs to a later descriptor still needs a describe). A listener's failure never fails the restore.
    */
   onSourceChanged: ((name: string) => void) | null = null;
+  /** (crew#1906) A PM entry was renamed: its trackers' projection names the old source until it is reconciled. */
+  onTrackersChanged: (() => void) | null = null;
   /** (DES-PM-001 §3.4) Whether estate holds each tracker's links yet; the daemon points it at the tracker projector. */
   trackerProjection: TrackerProjectionLookup = PROJECTION_UNKNOWN;
   /** (DES-PM-001 §3.4) Called once a restore has landed (the daemon points it at the tracker projector). */
@@ -521,6 +523,14 @@ export class McpRegistry {
     }
   }
 
+  private trackersChanged(): void {
+    try {
+      this.onTrackersChanged?.();
+    } catch {
+      // the projector's failure is its own; the rename has landed
+    }
+  }
+
   private sourceChanged(name: string): void {
     try {
       this.onSourceChanged?.(name);
@@ -732,6 +742,8 @@ export class McpRegistry {
     if (copied) await this.catalogs.remove(from).catch(() => undefined);
     for (const [hash, held] of this.previews) if (held.config.name === from || held.config.name === to) this.previews.delete(hash);
     if (isSourceRecord(renamed)) this.sourceChanged(to);
+    // (crew#1906) A PM entry's trackers are projected under its name: reconcile now, not at the next ten-minute pass.
+    if (renamed.pm !== undefined) this.trackersChanged();
     try {
       return await this.view(renamed);
     } catch (err) {

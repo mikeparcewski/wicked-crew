@@ -12,23 +12,61 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
-- feat(system): a person snoozes an item on the ranked Needs-you page (studio#1416, crew#1124). An attention item a person may snooze (one run's own open gate or question; the key names the interaction and that opening, so a gate asked again is a new key) carries `snooze: {key, rank}`. While a snooze on that key is in force (`/desk/snoozes`, stored with its rank) and the item is no worse, `GET /system` moves it out of `attention[]` and the level into `snoozed[]`, with its end. A component of the system, a failed run and an item gathering several runs are not offered; a snooze read that fails or runs late holds nothing back.
-- api-types next: `SystemAttentionItem.snooze`, `SystemAttentionSnooze`, `SystemSnoozedItem`, `SystemSnapshot.snoozed`.
 - feat(repos): a person turns a repository's seat toolchain layers off, or back on (wicked-core#1043). `PUT /api/v1/repos/:id/seat-layers` `{off: [...]}` hands the repo's full list to the engine's `setRepoSeatLayersOff` (a layer the daemon turned off stays off) and answers the repo's row as `GET /repos` shows it, whose `seat_layers` rows say which layers are on and what turned each off. It is a person's choice: a seat's or agent's token gets 403 `human_operator_only` (an observer token, the daemon's trust refusal) and nothing is read or written. An unknown layer is 400 `unknown_seat_layer` with the engine's words, an unknown repo 404, and an engine before the switch 501 `repo_seat_layers_unsupported`. Audited as `repo.seat_layers.set`.
 - api-types next: `RepoEntry.seat_layers`, `RepoEntry.seat_layers_off`, `RepoSeatLayer`, `PutRepoSeatLayersBody`.
+
+## [0.18.22] — 2026-11-25
+
+Patch release on the train-14 cut c56940f8, carrying 31 PRs since 0.18.21: #1867, #1868, #1870, #1871, #1869, #1875, #1819, #1766, #1872, #1873, #1893, #1882, #1887, #1874, #1889, #1897, #1899, #1894, #1898, #1904, #1908, #1878, #1900, #1877, #1913, #1914, #1917, #1910, #1920, #1921, #1888.
+
+Ships with wicked-crew-api-types 0.231.0 (tag api-types-v0.231.0), pins wicked-core-ts ^0.15.50 and bundles wicked-studio 0.16.18. Known limitation (domain mapping accuracy): unchanged from 0.18.21; `/analyze domain` keeps its current mapping loop.
+
+### Added
+
+- feat(system): a person snoozes an item on the ranked Needs-you page (studio#1416, crew#1124). An attention item a person may snooze (one run's own open gate or question; the key names the interaction and that opening, so a gate asked again is a new key) carries `snooze: {key, rank}`. While a snooze on that key is in force (`/desk/snoozes`, stored with its rank) and the item is no worse, `GET /system` moves it out of `attention[]` and the level into `snoozed[]`, with its end. A component of the system, a failed run and an item gathering several runs are not offered; a snooze read that fails or runs late holds nothing back.
+- api-types next: `SystemAttentionItem.snooze`, `SystemAttentionSnooze`, `SystemSnoozedItem`, `SystemSnapshot.snoozed`.
 - feat(chat): a chat changes the demo video open in it (crew#1814, studio#1140 option (a)). A client that sends `accepts: ['cut']` gets crew's note on the video and its chapter list (ids, titles, timings; no caption words) in the turn's context. The seat's `wicked-make` `{"cut":{"ref","ops"}}` block becomes a `cut` card: the ops frozen, crew's words for each change, and the head the seat read. Go posts the ops to wicked-interactive's recut once, with `expect_head` and the Go's id as `request_id`. Go again reads that request first, so it never posts twice, and answers 409 `cut_pending` while the video is still rendering. A moved, deleted or refused video blocks the card with words saying which change failed and why. `chatArtifacts.cut` advertises it.
 - api-types 0.225.0: `ArtifactProposalKind` `cut`, `CutOp`, `ProposalCut`, `ArtifactProposal.cut`, `ProposalResult.version`, `ChatArtifactsCapabilities.cut`, and `accepts` takes `'cut'`.
+- Snooze a Needs-you item for up to a week, durable in the audit trail, a person's only (crew#1124) (#1873)
+- An All-repos chat marks its repositories optional read roots (crew#1883, core#1463) (#1893)
+- GET /voice/tts says the engine's download size, from each lock's own wheels (crew#1563) (#1874)
+- Rename a data source, keeping its id, secret, grants and rules (#1514) (#1894)
+- A filed memory takes the person's tier and repository scope (studio#1095) (#1878)
+- Publish a finished compose's plan as GitHub issues, card first (#372) (#1900)
+- A pack's skills and blocks install with its editors, in one consent (crew#1703) (#1877)
+- The launch asks the stand-in question; use_stand_ins grants; gates carry their opening (crew#1856, #1698; part of core#1843) (#1888)
 
 ### Changed
 
 - The interactive default range is `^0.17.0` (the chapter ops, the request read and `head` on `GET cut`, wicked-interactive#351). A 0.16.x override is flagged as below the floor.
 - A document is a demo cut when it has interactive's `demo-cut.json` marker (the video tool's own rule). A recorder storyboard from before cuts (manifest kind `demo`, no marker) is a page again.
+- Re-pin the smoke and PR self-test harness to wicked-ci 7940367d (#85, F-E2E-012-WT) (#1882)
+- The run list after a restart reads no terminal run log again (crew#1880) (#1898)
+- Typecheck crew against the lockfile's published wicked-core-ts (crew#1903) (#1904)
+- Re-pin the selftest and the release smoke to wicked-ci main after #86 (#1920)
 
 ### Fixed
 
+- A run launched under the `standInReview: 'always'` setting records the person who turned the setting on as its consent's `by`, not the launcher (wicked-core#1930 F6). A workload token's launch used to record itself. Saving `always` (in `PUT /settings`, or by answering a stand-in gate with every job) now stores `standInConsent` (`{ scope: 'always', by, at, via: 'setting' }`), the daemon's own record: a body that sends it has it dropped. A `PUT` of `always` when it is already `always` keeps the author, an every-job gate answer records its person afresh, and saving `ask` clears it. A setting with no author recorded (saved before this change, or turned on by hand) records `by: 'the standInReview setting (author not recorded)'`. `SystemSettings.standInConsent` is new in `wicked-crew-api-types` (api-types next).
 - A video card's words read like a person wrote them (crew#1814, coord round 2 on studio#1409). A refused change is named once, without its own "(Undo brings it back)" inside the sentence's parenthesis; an earlier version reads "You're looking at version N"; "The video tool isn't running here: …" ends on one full stop.
 
 - A cut card's interrupted Go says crew's own sentence, ended, and what Go again does, never "could not start it: … Go again resumes the same job." (doubled period, a run's words). Not now on a cut the video tool already made says the version stays and Undo brings back the one before (crew#1814 round 2).
+- The gateway not-ready fix is runnable as offered: filled-in install command, exact kubectl events and log commands (crew#1851) (#1867)
+- The stay line names a redirect or any write target, a script interpreter and a changing git command (crew#1854) (#1868)
+- Daemon shutdown stops the install-time editor conformance harness (crew#1835) (#1870)
+- A refused rewording of a carried citation says the cited repository changed since the draft (crew#1857) (#1871)
+- Every crew child runs without the raw Azure DevOps credential; only the two header minters ask for it back (crew#1843) (#1869)
+- Protection is decided on the matched route (#1875)
+- Cancelling a pod sign-in ends it through the engine's seat-login abandon (#1523) (#1819)
+- Requirements not generated yet answers 200, not 404 (studio#986) (#1766)
+- A disk running low is a Nerve Center need that names wicked's largest stores on the volume (crew#1126) (#1872)
+- A repo not indexed yet answers its graph summary 200 with no kinds (studio#1402) (#1887)
+- Widen optionalReadRoots locally; pin the adapter's forwarding and the project scope (crew#1883 round 1) (#1897)
+- A memory's repository must be a registered one; the half-TTL seat-image test runs on a fake clock (#1913)
+- Read issues back once, beside no create; GETs answer from that (#1911) (#1914)
+- A reinstall claims the pack's stamped skills; a failed removal can be retried (#1917)
+- A rename's rule check refuses only triggers that can match the name (#1905) (#1910)
+- A created issue not read back yet is not checked yet, never 'may have been deleted' (#1919) (#1921)
 
 ## [0.18.21] — 2026-11-24
 
