@@ -287,6 +287,11 @@ export const SaveMcpServerSchema = z.strictObject({
   disclosures: record(z.string().min(1).max(256), disclosureClass).refine((d) => Object.keys(d).length <= 512, { error: 'at most 512 tools' }).optional(),
 });
 export const PatchMcpServerSchema = z.strictObject({ enabled: z.boolean() });
+/**
+ * (crew#1514) `POST /mcp/servers/:name/rename`. `apps`: the slugs of the apps that use the source, exactly as the 409
+ * `apps_bound` answer listed them: the person saw that list and renames anyway.
+ */
+export const RenameMcpServerSchema = z.strictObject({ to: serverName, apps: z.array(z.string().min(1).max(64)).max(1000).optional() });
 // crew#1788: `expectedSchemaHash` is the saved schema the person saw (the row's `schemaHash`); a patch against any other
 // one is refused 409 `schema_changed` in the same mutation, so a tick never accepts a schema nobody reviewed.
 export const PatchMcpToolSchema = z.strictObject({ enabled: z.boolean().optional(), classOverride: toolClass.nullable().optional(), disclosure: disclosureClass.nullable().optional(), readAccepted: z.boolean().optional(), expectedSchemaHash: z.string().regex(/^[0-9a-f]{64}$/u, 'a schema hash is 64 lowercase hex characters').optional() })
@@ -341,6 +346,11 @@ export interface McpRouteDeps {
   now?: () => number;
   audit: Pick<AuditLog, 'record'>;
   actorOf: (req: FastifyRequest) => Actor;
+  /**
+   * (crew#1514) The apps any of whose versions use source `name` (a query, an action or a recall text naming it). Absent =
+   * no apps store: a rename lists none.
+   */
+  appsUsing?: (name: string) => Promise<Array<{ slug: string; name: string }>>;
 }
 
 function invalidBody(reply: FastifyReply, err: z.ZodError): FastifyReply {
@@ -719,6 +729,72 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
         return serverFor(deps.actorOf(req), server);
       } catch (err) {
         return fail(reply, err);
+      }
+    },
+  );
+
+  // (crew#1514) Rename an entry. A human operator's only. Everything bound to the entry stays (its id, secret reference,
+  // tools, switches, grants, agents, links); its old name is retired while it lives. Rules naming it are copied to the
+  // new name (restrictions before the write, exemptions after), and the rename is refused when the engine would judge
+  // any of its tools more loosely under the new name. Apps are not rewritten: the ones that use it are listed (409
+  // `apps_bound`) until the request names exactly those.
+  app.post<{ Params: { name: string } }>(
+    `${V}/mcp/servers/:name/rename`,
+    { config: { manifest: { requestType: 'RenameMcpServerBody', responseType: 'McpServer', statusCodes: [200, 400, 403, 404, 409, 502, 503] } } },
+    async (req, reply) => {
+      const r = registry(reply);
+      if (r === null) return reply;
+      const parsed = RenameMcpServerSchema.safeParse(req.body);
+      if (!parsed.success) return invalidBody(reply, parsed.error);
+      const actor = deps.actorOf(req);
+      if (!mayGrantWrite(actor)) return humanOperatorOnly(reply, actor, 'rename a source', 'rename_human_only');
+      const from = req.params.name;
+      const to = parsed.data.to;
+      // Before the locks: the same name twice would wait on its own lock.
+      if (from === to) return fail(reply, new McpRegistryError(409, 'name_unchanged', `${from} already has that name`), actor);
+      const p = deps.policies;
+      // Both names' locks, in one order (two renames never wait on each other in a cycle).
+      const [first, second] = [from, to].sort();
+      const locked = <T>(fn: () => Promise<T>): Promise<T> => (p === undefined ? fn() : p.exclusive(first!, () => p.exclusive(second!, fn)));
+      try {
+        const outcome = await locked(async () => {
+          await r.get(from);
+          const using = deps.appsUsing === undefined ? [] : await deps.appsUsing(from);
+          const listed = new Set(parsed.data.apps ?? []);
+          if (using.length !== listed.size || using.some((a) => !listed.has(a.slug))) {
+            throw new McpRegistryError(409, 'apps_bound', `${using.length} app${using.length === 1 ? ' uses' : 's use'} ${from}: confirm the rename with exactly that list`, undefined, { apps: using });
+          }
+          if (p === undefined) return { server: await r.rename(from, to), rules: [] as string[], apps: using, approvalsCopied: true };
+          // Restrictions first (fail-closed if a later step fails), then the engine's own judgement of the new name.
+          const originals = await p.copyRestrictions(from, to).catch((e: unknown) => { auditPartial(deps, req, e, [`mcp:${to}`]); throw e; });
+          let server: McpServer;
+          try {
+            const loosened = await p.loosenedByRename(from, to);
+            if (loosened.length > 0) {
+              throw new McpRegistryError(409, 'rules_differ', `a rule would judge ${loosened.join(', ')} more loosely under ${to}: it matches ${from} by its content, not by a name crew can copy. Change the rule to cover ${to}, then rename`, undefined, { subjects: loosened });
+            }
+            server = await r.rename(from, to);
+          } catch (e) {
+            await p.restoreRules(originals).catch((x: unknown) => auditPartial(deps, req, x, [`mcp:${to}`]));
+            throw e;
+          }
+          // Exemptions (approvals, a deny's exemption) only once the rename has landed: a failure leaves the new name
+          // asking or denied more, never less.
+          let exempted: string[] = [];
+          let approvalsCopied = true;
+          try {
+            exempted = await p.copyExemptions(from, to);
+          } catch (e) {
+            auditPartial(deps, req, e, [`mcp:${to}`]);
+            approvalsCopied = false;
+          }
+          return { server, rules: [...new Set([...originals.map((o) => o.id), ...exempted])], apps: using, approvalsCopied };
+        });
+        deps.audit.record('mcp.server.renamed', actor, { detail: { id: outcome.server.id, from, to, apps: outcome.apps.map((a) => a.slug), rules: outcome.rules, ...(outcome.approvalsCopied ? {} : { approvalsCopied: false }) } });
+        for (const id of outcome.rules) deps.audit.record('governance.rule.upserted', actor, { detail: { id, source: 'mcp-rename' } });
+        return serverFor(actor, outcome.server);
+      } catch (err) {
+        return fail(reply, err, actor);
       }
     },
   );

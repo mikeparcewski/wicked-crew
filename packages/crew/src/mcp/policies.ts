@@ -145,6 +145,16 @@ function approvalState(tokens: ReadonlySet<string>, server: string, subject: str
   return null;
 }
 
+/** (crew#1514) Whether a rule token names `server` (`mcp:<server>` or one of its tools). */
+function namesServer(token: string, server: string): boolean {
+  return token === `mcp:${server}` || token.startsWith(`mcp:${server}/`);
+}
+
+/** (crew#1514) The tokens of `list` that name `from`, spelled for `to`. */
+function renamedTokens(list: readonly string[], from: string, to: string): string[] {
+  return list.filter((t) => namesServer(t, from)).map((t) => `mcp:${to}${t.slice(4 + from.length)}`);
+}
+
 export class McpPolicies {
   private chain: Promise<unknown> = Promise.resolve();
   /** Per server: the tail of the work queued by {@link exclusive}. Never rejects. */
@@ -344,7 +354,9 @@ export class McpPolicies {
     try {
       prior = await this.registry.get(next.name);
     } catch (err) {
-      if (err instanceof McpRegistryError && err.status === 404) return [];
+      // (crew#1514) A NEW registration never inherits: approvals left under its name (a removal whose withdrawal
+      // failed, a rename whose registry write failed) belonged to another source.
+      if (err instanceof McpRegistryError && err.status === 404) return this.tokensOf(next.name);
       throw err;
     }
     // A `gone` tool keeps its last saved schema hash (the registry never deletes one), so a tool
@@ -360,6 +372,82 @@ export class McpPolicies {
     if (changed.length === 0) return [];
     const held = new Set(await this.tokensOf(next.name));
     return [`mcp:${next.name}`, ...changed.map((t) => t.subject)].filter((t) => held.has(t));
+  }
+
+  // ── rename (crew#1514) ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Before a rename commits: every rule that RESTRICTS `from` (a token naming it in `applies_to`) gets the same token
+   * for `to` beside it; the old tokens stay (`from` is retired while the renamed entry lives). Fail-closed if left
+   * behind by a rename that then fails: it only narrows a name nothing has. Answers the original rules changed, for
+   * {@link restoreRules}. Callers hold {@link exclusive} for both names.
+   */
+  async copyRestrictions(from: string, to: string): Promise<ConformanceRule[]> {
+    return this.editRules((rule) => {
+      const list = rule.applies_to ?? [];
+      const added = renamedTokens(list, from, to).filter((t) => !list.includes(t));
+      return added.length === 0 ? null : { ...rule, applies_to: [...list, ...added] };
+    });
+  }
+
+  /**
+   * After a rename has committed: every rule's exemptions (`excludes`: the approval ledgers and any deny's exemption)
+   * for `to` become exactly those it holds for `from`. Stale `to` tokens (another source once had that name) are
+   * dropped. Exemptions are copied only after the commit: left behind by a failed rename they would loosen a later
+   * source of that name. A failure here leaves `to` with fewer exemptions than `from` had (it asks or is denied
+   * more): fail-closed. Answers the ids changed.
+   */
+  async copyExemptions(from: string, to: string): Promise<string[]> {
+    const originals = await this.editRules((rule) => {
+      const list = rule.excludes ?? [];
+      const kept = list.filter((t) => !namesServer(t, to));
+      const next = [...kept, ...renamedTokens(list, from, to).filter((t) => !kept.includes(t))];
+      return canonicalJson(next) === canonicalJson(list) ? null : { ...rule, excludes: next };
+    });
+    return originals.map((r) => r.id);
+  }
+
+  /** Put rules back as {@link copyRestrictions} found them (a rename refused after the copy). */
+  async restoreRules(originals: readonly ConformanceRule[]): Promise<void> {
+    if (originals.length === 0) return;
+    const ids = new Set(originals.map((r) => r.id));
+    await this.editRules((rule) => (ids.has(rule.id) ? originals.find((o) => o.id === rule.id)! : null));
+  }
+
+  /**
+   * Whether every one of `from`'s tools would be judged at least as strictly under `to` as it is now, by the engine's own
+   * evaluation over the preview's cells (allow < ask < deny; an allow keeps every obligation). Rules that match the
+   * server by content (a trigger on the context JSON) are covered: nothing here reads a rule. Answers the subjects of
+   * `from` whose verdict would loosen.
+   */
+  async loosenedByRename(from: string, to: string): Promise<string[]> {
+    const server = await this.registry.get(from);
+    const tools = server.tools.filter((t) => t.status !== 'gone');
+    if (tools.length === 0) return [];
+    const cells = this.cells({});
+    const callsOf = (name: string): EngineCall[] => tools.map((t) => ({
+      server: name,
+      tool: t.name,
+      annotations: hints(t.annotations),
+      classOverride: t.classOverride,
+      registered: server.enabled && t.enabled && t.status === 'registered',
+      kind: server.kind,
+    }));
+    const [before, after] = await Promise.all([this.judge(callsOf(from), cells), this.judge(callsOf(to), cells)]);
+    const rank = (d: McpDecision): number => (d === 'deny' ? 2 : d === 'ask' ? 1 : 0);
+    const loosened: string[] = [];
+    tools.forEach((t, i) => {
+      const was = before[i] ?? [];
+      const now = after[i] ?? [];
+      const looser = was.some((c, j) => {
+        const n = now[j];
+        if (n === undefined) return true;
+        if (rank(n.decision) !== rank(c.decision)) return rank(n.decision) < rank(c.decision);
+        return c.obligations.some((o) => !n.obligations.includes(o));
+      });
+      if (looser) loosened.push(t.subject);
+    });
+    return loosened;
   }
 
   /** Every approval token that names `server` (the server's own and each of its tools'). */
@@ -445,6 +533,43 @@ export class McpPolicies {
       firstUse: approvalState(ledgers.firstUse.tokens, server, subject),
       write: approvalState(ledgers.write.tokens, server, subject),
     };
+  }
+
+  /**
+   * (crew#1514) Apply `next` to every rule in the store, serialized with the ledger edits, with the same rollback: a
+   * failed write puts back the rules already written, and what a failed rollback leaves changed is named on the error.
+   * Answers the ORIGINAL form of every rule it changed.
+   */
+  private editRules(next: (rule: ConformanceRule) => ConformanceRule | null): Promise<ConformanceRule[]> {
+    const run = async (): Promise<ConformanceRule[]> => {
+      const rules = await this.engine.listRules();
+      const edits = rules.flatMap((rule) => {
+        const changed = next(rule);
+        return changed === null ? [] : [{ original: rule, changed }];
+      });
+      const applied: ConformanceRule[] = [];
+      try {
+        for (const e of edits) {
+          await this.engine.upsertRule(e.changed);
+          applied.push(e.original);
+        }
+      } catch (err) {
+        const stuck: string[] = [];
+        for (const original of [...applied].reverse()) {
+          try {
+            await this.engine.upsertRule(original);
+          } catch {
+            stuck.push(original.id);
+          }
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new McpLedgerEditError(stuck, `the rule edit failed and was rolled back${stuck.length > 0 ? ` except ${stuck.join(', ')}` : ''}: ${msg}`);
+      }
+      return edits.map((e) => e.original);
+    };
+    const result = this.chain.then(run, run);
+    this.chain = result.catch(() => undefined);
+    return result;
   }
 
   /**

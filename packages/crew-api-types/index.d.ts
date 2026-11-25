@@ -14910,6 +14910,17 @@ export interface McpServer {
    * refused until it is saved again with a range.
    */
   address?: McpAddressPolicy;
+  /**
+   * (api-types 0.225.0, wicked-crew#1514) The names this entry was renamed away from, oldest first. Each is retired
+   * while the entry exists: no other source may be saved or renamed under it. Absent = never renamed.
+   */
+  formerNames?: string[];
+  /**
+   * (api-types 0.225.0, wicked-crew#1514) The keychain account this entry's own secret lives under when that is not its
+   * name (the name it had when it was renamed: the secret is never moved). Its own entry is
+   * `keychain:wicked-mcp/<keychainAccount ?? name>`. Absent = its name.
+   */
+  keychainAccount?: string;
   authState: McpAuthState;
   enabled: boolean;
   health: McpHealth;
@@ -15227,6 +15238,21 @@ export interface McpRestEgress {
 /** `PATCH /mcp/servers/:name`. */
 export interface PatchMcpServerBody {
   enabled: boolean;
+}
+
+/**
+ * (api-types 0.225.0, wicked-crew#1514) `POST /mcp/servers/:name/rename`: a human operator's only. Answers the renamed
+ * {@link McpServer}. The entry keeps its id, secret reference, tools, switches, grants, agents and links; its old name
+ * is retired (in `formerNames`) while it exists. Refusals (409, `{error, code, ...}`): `apps_bound` with
+ * `apps: Array<{slug, name}>` (the apps that use the source; send the same slugs in `apps` to rename anyway),
+ * `name_taken`, `name_retired`, `name_unchanged`, `reserved_name`, `not_renamable`, and `rules_differ` with
+ * `subjects: string[]` (a rule matches the source by its content and would judge those tools more loosely under
+ * the new name). 403 `rename_human_only` for any other actor.
+ */
+export interface RenameMcpServerBody {
+  to: string;
+  /** The slugs of the apps the `apps_bound` answer listed: the person saw them and renames anyway. */
+  apps?: string[];
 }
 
 /**
