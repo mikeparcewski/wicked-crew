@@ -23,11 +23,12 @@ vi.mock('node:fs/promises', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:fs/promises')>()),
   statfs: async () => ({ bavail: 500_000, bsize: 1_000_000, blocks: 1_000_000 }),
 }));
-// RED (this commit only): the macOS CI runner's condition, a saturated host (the 1-minute load at 6 per core), which
-// the load row reads from the real host and calls `down` (red) at 5 per core.
+// The load row reads the real host too (`loadRow`: the 1-minute load per core, `down` and so red from 5 per core). A CI
+// runner under the full suite passes that (crew main 5ea981c7, macOS), and a red load row decided the page level the
+// snooze tests assert on. Pin an idle host; the rest of the module stays real.
 vi.mock('node:os', async (importOriginal) => {
   const os = await importOriginal<typeof import('node:os')>();
-  return { ...os, loadavg: () => [os.cpus().length * 6, 0, 0] };
+  return { ...os, loadavg: () => [0.1, 0.1, 0.1] };
 });
 
 const ENV_KEYS = ['WICKED_SEAT_FLOOR', 'WICKED_CONTAINER_RUNTIME', 'WICKED_CORE_EXE', 'WICKED_MEMORY_DB', 'WICKED_ESTATE_EXE', 'WICKED_ESTATE_MCP_EXE', 'LOG_LEVEL'] as const;
@@ -409,7 +410,7 @@ describe('GET /api/v1/system: snoozed items (studio#1416)', () => {
     await app.inject({ method: 'DELETE', url: `/api/v1/desk/snoozes/${encodeURIComponent(item.snooze!.key)}` });
   });
 
-  it('the level is the kept items\' worst: a snoozed item leaves it, and Wake puts it back', async () => {
+  it('the level is the kept items\' worst (the host\'s disk and load rows pinned): a snoozed item leaves it, and Wake puts it back', async () => {
     gateKind = 'escalation'; // the run is held: red, the worst on the page
     try {
       const before = (await snapshot()).body;
