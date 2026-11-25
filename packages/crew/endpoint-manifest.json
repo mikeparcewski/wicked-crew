@@ -1382,6 +1382,23 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/api/v1/mcp/servers/:name/rename",
+      "requestType": "RenameMcpServerBody",
+      "responseType": "McpServer",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        500,
+        501,
+        502,
+        503
+      ]
+    },
+    {
       "method": "PUT",
       "path": "/api/v1/mcp/servers/:name/secret",
       "requestType": "PutMcpSecretBody",

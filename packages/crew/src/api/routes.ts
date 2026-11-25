@@ -2113,8 +2113,13 @@ export function registerRoutes(
     await deliveryResolver.settle(views, runtime.deliverySettleMs);
   };
   // crew#985: terminal runs with no `run.ended` entry are dated from the engine's event log before
-  // the DTO is assembled (read-only, once per run per process; see `backfillEndedFromEvents`).
+  // the DTO is assembled (read-only; once per run, kept across starts: crew#1880, `backfillEnded`).
   const backfillEndedAt = async (views: readonly SessionView[]): Promise<void> => {
+    // crew#1880: the adapter answers from facts kept across starts and one log read shared with the identity.
+    if (typeof (adapter as Partial<CoreAdapter>).runEndedFact === 'function') {
+      await runTimingIndex.backfillEnded(views, (view) => adapter.runEndedFact(view));
+      return;
+    }
     if (typeof adapter.runEvents !== 'function') return;
     await runTimingIndex.backfillEndedFromEvents(views, (id) => adapter.runEvents(id));
   };
@@ -11937,6 +11942,8 @@ export function registerRoutes(
     ...(runtime.dataGate !== undefined ? { gate: runtime.dataGate } : {}),
     ...(mcpPolicies !== undefined ? { policies: mcpPolicies } : {}),
     ...(runtime.mcpCalls !== undefined ? { usage: runtime.mcpCalls } : {}),
+    // (crew#1514) A rename lists the apps that use the source.
+    ...(runtime.apps !== undefined ? { appsUsing: (name: string) => runtime.apps!.appsUsing(name) } : {}),
     audit,
     actorOf,
   });

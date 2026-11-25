@@ -20,11 +20,10 @@ import type { Actor, AuditEntry, LaunchEnvelope, LaunchShape, RecordedEvent, Ses
 import type { RunAddress } from '../knowledge/trackers/addresses.js';
 import { MCP_SERVER_NAME_RE } from '../mcp/classify.js';
 import { type ComposeFacts, readComposeFacts } from './compose-facts.js';
+import { factsFromEvents } from '../core/run-log-facts.js';
 
 /** The run statuses that are terminal (`SessionStatus`): the only runs `ended_at` may date. */
 const TERMINAL_STATUSES: ReadonlySet<string> = new Set(['completed', 'cancelled', 'failed']);
-/** The engine frames that end a run: the same three the daemon records `run.ended` on. */
-const TERMINAL_EVENTS: ReadonlySet<string> = new Set(['sessionCompleted', 'sessionFailed', 'runCancelled']);
 /** How many run event logs one backfill reads at once. */
 const BACKFILL_CONCURRENCY = 4;
 
@@ -511,9 +510,26 @@ export class RunTimingIndex {
     views: readonly SessionView[],
     runEvents: (runId: string) => Promise<RecordedEvent[] | null>,
   ): Promise<void> {
+    await this.backfillEnded(views, async (view) => {
+      const events = await runEvents(view.session.id);
+      return events === null ? undefined : factsFromEvents(events).endedAt;
+    });
+  }
+
+  /**
+   * crew#1880: {@link backfillEndedFromEvents} over a reader that answers the run's first terminal frame `ts`
+   * (millis) directly — the adapter's {@link CoreAdapter.runEndedFact}, which answers from facts kept across starts
+   * and shares one log read with the run's identity. `null` = no terminal frame (stays ABSENT), `undefined` = no
+   * binding (dates nothing), a throw = a failed read (retried later). Same rules, same in-flight sharing.
+   */
+  async backfillEnded(
+    views: readonly SessionView[],
+    endedAtOf: (view: SessionView) => Promise<number | null | undefined>,
+  ): Promise<void> {
     const inFlight: Promise<void>[] = [];
-    const pending: Array<{ id: string; settle: () => void }> = [];
-    for (const { session: s } of views) {
+    const pending: Array<{ view: SessionView; settle: () => void }> = [];
+    for (const view of views) {
+      const s = view.session;
       if (!TERMINAL_STATUSES.has(s.status) || this.runToEndedAt.has(s.id)) continue;
       const read = this.endedBackfill.get(s.id);
       if (read !== undefined) {
@@ -522,16 +538,16 @@ export class RunTimingIndex {
       }
       let settle!: () => void;
       this.endedBackfill.set(s.id, new Promise<void>((resolve) => (settle = resolve)));
-      pending.push({ id: s.id, settle });
+      pending.push({ view, settle });
     }
     let next = 0;
     const worker = async (): Promise<void> => {
       while (next < pending.length) {
-        const { id, settle } = pending[next++]!;
+        const { view, settle } = pending[next++]!;
+        const id = view.session.id;
         try {
-          const events = await runEvents(id);
-          const terminal = events?.find((e) => TERMINAL_EVENTS.has(e.type) && typeof e.ts === 'number' && e.ts > 0);
-          if (terminal !== undefined) this.runToDerivedEndedAt.set(id, toSeconds(terminal.ts));
+          const ts = await endedAtOf(view);
+          if (typeof ts === 'number' && ts > 0) this.runToDerivedEndedAt.set(id, toSeconds(ts));
         } catch {
           this.endedBackfill.delete(id);
         } finally {

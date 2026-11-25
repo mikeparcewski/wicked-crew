@@ -1380,3 +1380,22 @@ describe('apps: GET /apps pages', () => {
     expect(slugsOf(await get(`?limit=3&cursor=${p1['nextCursor'] as string}`))).toEqual(['delta']);
   });
 });
+
+describe('apps: which apps use a source (crew#1514, the rename confirm)', () => {
+  it('lists an app whose accepted version queries the source; an unreadable accepted tree counts as using it', async () => {
+    const s = setup({ stage: fakeStage() });
+    await newApp(s, 'escalations');
+    await newApp(s, 'notes');
+    const v2 = await s.call('POST', '/apps/escalations/edits', { base: 1, ops: [{ op: 'spec', spec: dataSpec('x') }, { op: 'query-text', query: 'open_count', text: 'select 1 as open' }] });
+    expect(v2.status, JSON.stringify(v2.body)).toBe(200);
+    expect((await s.store.appsUsing('support-pg')).map((a) => a.slug)).toEqual(['escalations']);
+    expect(await s.store.appsUsing('billing-pg')).toEqual([]);
+    // A tree crew can't read now may run once it can: the person confirms that app too (fail closed).
+    const root = join(s.dir, 'apps', 'notes');
+    const notes = (await s.store.detail('notes'));
+    const specBlob = git(root, 'rev-parse', `${notes.versions[0]!.commit}:apps.json`);
+    overwriteLooseObject(root, specBlob, 'blob', Buffer.from(JSON.stringify(textSpec('Notes', 'swapped'))));
+    const fresh = new AppStore({ stateFile: s.store.stateFile, appsRoot: s.store.appsRoot, registry: fakeRegistry().registry });
+    expect((await fresh.appsUsing('billing-pg')).map((a) => a.slug)).toEqual(['notes']);
+  });
+});

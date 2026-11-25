@@ -134,6 +134,16 @@ export interface McpServerRecord {
   trackers?: StoredTracker[];
   /** (DES-PM-001 §3.4) PM entries only: trackers whose last link went, kept until estate takes their empty generation. */
   retired?: RetiredTracker[];
+  /**
+   * (crew#1514) The names this entry was renamed away from. Each is RETIRED while the entry lives: no other entry may be
+   * saved or renamed under it, so a run pick, a rule token or a keychain account naming it never reaches another source.
+   */
+  formerNames?: string[];
+  /**
+   * (crew#1514) The keychain account this entry's own secret lives under, when that is not its name: the name it had when
+   * it was renamed (`auth.ref` is part of the descriptor, so the secret is never moved). Absent = its name.
+   */
+  keychainAccount?: string;
   enabled: boolean;
   health: McpHealth;
   registeredAt: string;

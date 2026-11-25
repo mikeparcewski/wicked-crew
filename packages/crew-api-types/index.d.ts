@@ -14952,6 +14952,17 @@ export interface McpServer {
    * refused until it is saved again with a range.
    */
   address?: McpAddressPolicy;
+  /**
+   * (api-types 0.227.0, wicked-crew#1514) The names this entry was renamed away from, oldest first. Each is retired
+   * while the entry exists: no other source may be saved or renamed under it. Absent = never renamed.
+   */
+  formerNames?: string[];
+  /**
+   * (api-types 0.227.0, wicked-crew#1514) The keychain account this entry's own secret lives under when that is not its
+   * name (the name it had when it was renamed: the secret is never moved). Its own entry is
+   * `keychain:wicked-mcp/<keychainAccount ?? name>`. Absent = its name.
+   */
+  keychainAccount?: string;
   authState: McpAuthState;
   enabled: boolean;
   health: McpHealth;
@@ -15269,6 +15280,26 @@ export interface McpRestEgress {
 /** `PATCH /mcp/servers/:name`. */
 export interface PatchMcpServerBody {
   enabled: boolean;
+}
+
+/**
+ * (api-types 0.227.0, wicked-crew#1514) `POST /mcp/servers/:name/rename`: a human operator's only. Answers the renamed
+ * {@link McpServer}. The entry keeps its id, secret reference, tools, switches, grants, agents and links; its old name
+ * is retired (in `formerNames`) while it exists. Refusals (409, `{error, code, ...}`): `apps_bound` with
+ * `apps: Array<{slug, name}>` (the apps that use the source; send the same slugs in `apps` to rename anyway),
+ * `name_taken`, `name_retired`, `name_unchanged`, `reserved_name`, `not_renamable`, and `rules_differ` with
+ * `subjects: string[]` (tools the engine would judge more loosely under the new name) and/or `rules: string[]`
+ * (rules whose `trigger.contains` contains either name or is contained in one: a substring test, so a short name can
+ * coincide with unrelated text; change them to name `mcp:<name>` first). 403 `rename_human_only` for any other actor;
+ * 500 `rules_unrestored` with `rules` when a refused rename's copied rules could not be put back (they still name the new
+ * name); 501 `mcp_preview_unsupported` when the engine cannot judge the rules; 502 `preview_failed` when it answered no
+ * judgement, or `renamed_unread` when the rename landed but its record could not be read back (read the list again). A
+ * restore of a generation that would undo a rename is refused 409 `restore_crosses_rename`.
+ */
+export interface RenameMcpServerBody {
+  to: string;
+  /** The slugs of the apps the `apps_bound` answer listed: the person saw them and renames anyway. */
+  apps?: string[];
 }
 
 /**
