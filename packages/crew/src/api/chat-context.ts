@@ -457,11 +457,12 @@ async function readArtifact(
   const outline = outlineOf(shownHtml);
   const style = deps.docStyle?.(root, ref.doc);
   // studio#1140: a demo cut is a video whatever its storyboard page or a sidecar says, and no chat writer changes one.
+  // A recorder storyboard from before cuts (manifest kind `demo`, no marker) is a page, as the video tool treats it.
   const cut = seen.cut;
   const kind = cut
     ? KIND_WORDS.demo!
     : (style !== undefined && Object.hasOwn(STYLE_WORDS, style) ? STYLE_WORDS[style] : undefined)
-      ?? (outline.items[0]?.unit === 'slide' ? 'slides' : KIND_WORDS[manifest.kind]!);
+      ?? (outline.items[0]?.unit === 'slide' ? 'slides' : KIND_WORDS[manifest.kind === 'demo' ? 'doc' : manifest.kind]!);
   const title = outline.title ?? ref.doc;
   const lines: string[] = [
     '### The artifact the person has open',
@@ -665,8 +666,10 @@ export async function buildTurnContext(input: TurnContextInput, deps: ChatContex
       if (seen.cut && artifact !== undefined && input.acceptsCut === true && deps.cutBridge !== undefined) {
         if (artifact.viewed !== artifact.head) cutNoteLines = cutChangeNote(ref.ref, { viewed: artifact.viewed, head: artifact.head });
         else {
-          const call = await deps.cutBridge(ref.projectId);
-          const got = call === null ? { state: 'unavailable' as const, why: 'This video is no longer on this daemon.' } : await readCut(call, ref.doc);
+          // The video tool not starting (or too old to adopt) is an answer for the seat, never a send that fails.
+          const call = await deps.cutBridge(ref.projectId).catch((err: unknown) => new Error(err instanceof Error ? err.message : String(err)));
+          const got = call instanceof Error ? { state: 'unavailable' as const, why: `The video tool isn't running here: ${call.message}` }
+            : call === null ? { state: 'unavailable' as const, why: 'This video is no longer on this daemon.' } : await readCut(call, ref.doc);
           if ('state' in got) cutNoteLines = cutChangeNote(ref.ref, { why: got.why });
           else if (got.head !== artifact.head) cutNoteLines = cutChangeNote(ref.ref, { why: `It changed while this message was being sent (now version ${got.head}). Ask them to send it again.` });
           else if (headProblem(got) !== null) cutNoteLines = cutChangeNote(ref.ref, { why: headProblem(got)! });

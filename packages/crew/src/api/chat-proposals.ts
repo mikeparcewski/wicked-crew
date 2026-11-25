@@ -1028,7 +1028,7 @@ export class ChatProposals {
    *  new work too (DES-CATALOG-002 §2.3: job cards for a client that renders them, a command line for an older one).
    *  `o.appearance` (A7): whether the message carried the tab's appearance. A client that sends none cannot preview or
    *  apply a theme, so its seat is not told it can propose one (absent = not known here: the flag alone decides). */
-  digest(chatId?: string, accepts?: boolean, o: { appearance?: boolean; onboard?: boolean } = {}): MakeDigest {
+  digest(chatId?: string, accepts?: boolean, o: { appearance?: boolean; onboard?: boolean; cut?: boolean } = {}): MakeDigest {
     const f = this.deps.flags();
     const on = f.proposals;
     const entries = on
@@ -1049,6 +1049,8 @@ export class ChatProposals {
       // crew-0182: the onboard block, for a client that draws the card (its seat is told only then).
       // `o.onboard`: this message's own declaration (the chat's stored one changes only once the message is accepted).
       ...(on && f.onboard === true && chatId !== undefined && this.deps.onboard !== undefined && (o.onboard ?? this.deps.acceptsOnboard?.(chatId)) === true ? { onboard: true } : {}),
+      // crew#1814: the cut block, for a client that draws the card (crew's note on an open video says when it fits).
+      ...(on && f.cut === true && chatId !== undefined && this.deps.cut !== undefined && (o.cut ?? this.deps.acceptsCut?.(chatId)) === true ? { cut: true } : {}),
       entries,
       ...(jobs !== undefined ? { jobs } : {}),
     };

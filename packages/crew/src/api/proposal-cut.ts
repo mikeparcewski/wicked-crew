@@ -97,8 +97,10 @@ export async function resolveCut(block: CutBlockBody, turn: CutTurn, deps: CutRe
   if (open === undefined || open.ref !== ref.ref) blocked = `${quote(ref.doc)} isn't the video open here.`;
   else if (open.viewed !== open.head) blocked = `They're looking at version ${open.viewed}. Only the latest (version ${open.head}) can be changed: open it and ask again.`;
   else {
-    const call = await deps.bridgeFor(ref.projectId);
-    const got = call === null ? ({ state: 'unavailable', why: 'This video is no longer on this daemon.', gone: true } as CutUnavailable) : await readCut(call, ref.doc);
+    // The video tool not starting (or too old to adopt) blocks the card with why, never drops it.
+    const call = await deps.bridgeFor(ref.projectId).catch((err: unknown) => new Error(err instanceof Error ? err.message : String(err)));
+    const got = call instanceof Error ? ({ state: 'unavailable', why: `The video tool isn't running here: ${call.message}` } as CutUnavailable)
+      : call === null ? ({ state: 'unavailable', why: 'This video is no longer on this daemon.', gone: true } as CutUnavailable) : await readCut(call, ref.doc);
     if ('state' in got) blocked = got.why;
     else if (got.head !== open.head) blocked = `The video changed while I was answering (now version ${got.head}). Ask again to change the new version.`;
     else blocked = headProblem(got) ?? opsProblem(block.cut.ops, got);
@@ -176,7 +178,7 @@ export class CutLauncher implements ProposalDispatcher {
     const res = await call('GET', `/d/${encodeURIComponent(doc)}/api/demo/cut?request_id=${encodeURIComponent(identity.runId)}`);
     if (res.status === 404) return false;
     if (res.status === 410) throw new LaunchRefusal(409, { code: 'cut_gone', error: 'This video was deleted.' });
-    if (res.status === 202 && res.body['request_id'] === identity.runId) {
+    if (res.status === 202) {
       throw new LaunchRefusal(409, { code: 'cut_pending', error: 'Still making the new version. It shows here when it is done.' });
     }
     // An older video tool ignores the query and answers the whole cut: never read as found (R7, F14).

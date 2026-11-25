@@ -463,7 +463,10 @@ describe('buildTurnContext', () => {
     expect((await built({ context: { artifact: { ref: 'mikes/themed-page', version: 1 } } })).block).not.toContain("Crew's note");
     // One rule, the video tool's (its marker): a recorder storyboard from before cuts (kind demo, no marker) is a page.
     writeDoc('mikes', 'old-storyboard', { 1: '<h1>Tour</h1>' }, { head: 1, kind: 'demo', versions: [{ version: 1, kind: 'demo' }] });
-    expect((await built({ context: { artifact: { ref: 'mikes/old-storyboard', version: 1 } } })).block).not.toContain("Crew's note");
+    const storyboard = await built({ context: { artifact: { ref: 'mikes/old-storyboard', version: 1 } } });
+    expect(storyboard.block).not.toContain("Crew's note");
+    expect(storyboard.binding?.artifact?.kind).toBe('document');
+    expect(storyboard.block).not.toContain('demo video');
     // A malformed entry (no, a string or a negative version) marked demo never makes a page a cut.
     writeDoc('mikes', 'odd-page', { 1: '<h1>P</h1>' }, { head: 1, kind: 'doc', versions: [{ version: 1, kind: 'theme' }, { kind: 'demo' }, { version: '2', kind: 'demo' }, { version: -1, kind: 'demo' }] });
     const odd = await built({ context: { artifact: { ref: 'mikes/odd-page', version: 1 } } });
@@ -518,6 +521,10 @@ describe('buildTurnContext', () => {
     // The latest version is not a cut (a page version landed on it by an older tool).
     answer = { status: 200, body: { ...v1.answer, head: 2, version: 1 } };
     expect((await built({ context: { artifact: { ref: 'mikes/demo-8e0ffbece431', version: 2 } }, acceptsCut: true })).block).toContain("The latest version of this video isn't a cut");
+    // A video tool that won't start (or is too old to adopt): the seat is told why; the message still goes.
+    deps = { ...deps, cutBridge: async () => { throw new Error('the bridge on port 4100 is 0.16.2'); } };
+    expect((await built({ context: { artifact: { ref: 'mikes/demo-8e0ffbece431', version: 2 } }, acceptsCut: true })).block).toContain("this chat can't change it now: The video tool isn't running here: the bridge on port 4100 is 0.16.2");
+    deps = { ...deps, cutBridge: async () => async () => answer };
     // Deleted, or history from before kept cuts.
     answer = { status: 409, body: { error: 'cut_unverified' } };
     expect((await built({ context: { artifact: { ref: 'mikes/demo-8e0ffbece431', version: 2 } }, acceptsCut: true })).block).toContain("history predates kept cuts");
