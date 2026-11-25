@@ -666,6 +666,25 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     expect(instructions).toContain('/srv/repos/alpha');
   });
 
+  it("an 'All repos' chat marks its repositories optional read roots; a repo scope keeps them required (wicked-core#1463)", async () => {
+    const spy = vi.spyOn(CoreAdapter, 'roster').mockReturnValue([
+      { key: 'claude', governance_class: 'acp_input_governance', acp: { acp_input_governance: true, os_sandbox: false } },
+    ]);
+    try {
+      expect((await open({ chatId: 'all-opt', clis: ['claude'], scopeKind: 'everything' })).statusCode).toBe(201);
+      expect((await send('all-opt')).statusCode).toBe(202);
+      const all = launched.at(-1)!;
+      // Only the scope's repositories, each one of the run's read roots: never the chat's own dirs.
+      expect(all.optionalReadRoots).toEqual(['/srv/repos/alpha']);
+      expect(all.extraReadRoots).toEqual(expect.arrayContaining(['/srv/repos/alpha']));
+      expect((await open({ chatId: 'one-opt', clis: ['claude'], scopeKind: 'repo', repoRefs: ['alpha'] })).statusCode).toBe(201);
+      expect((await send('one-opt')).statusCode).toBe(202);
+      expect(launched.at(-1)).not.toHaveProperty('optionalReadRoots');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   function park(id: string) {
     chatTurns.observe({ type: 'chatReply', chat: id, cliKey: askPaths.get(id)?.pa ?? 'claude', text: 'Attach the repository and start a new chat to read it.', ok: true });
     adapter.sessionsDetail = async () => [{ session: { id: askPaths.get(id)?.runId, status: 'awaiting_human' } }] as Awaited<ReturnType<CoreAdapter['sessionsDetail']>>;
