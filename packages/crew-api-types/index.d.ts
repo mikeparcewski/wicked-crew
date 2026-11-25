@@ -15297,8 +15297,8 @@ export interface PatchMcpServerBody {
  * `apps: Array<{slug, name}>` (the apps that use the source; send the same slugs in `apps` to rename anyway),
  * `name_taken`, `name_retired`, `name_unchanged`, `reserved_name`, `not_renamable`, and `rules_differ` with
  * `subjects: string[]` (tools the engine would judge more loosely under the new name) and/or `rules: string[]`
- * (rules whose `trigger.contains` contains either name or is contained in one: a substring test, so a short name can
- * coincide with unrelated text; change them to name `mcp:<name>` first). 403 `rename_human_only` for any other actor;
+ * (rules whose `trigger.contains` may tell the two names apart: some match of it can take in a character of either name
+ * where an MCP call's context carries it; the error says which name each can match; wicked-crew#1905). 403 `rename_human_only` for any other actor;
  * 500 `rules_unrestored` with `rules` when a refused rename's copied rules could not be put back (they still name the new
  * name); 501 `mcp_preview_unsupported` when the engine cannot judge the rules; 502 `preview_failed` when it answered no
  * judgement, or `renamed_unread` when the rename landed but its record could not be read back (read the list again). A
