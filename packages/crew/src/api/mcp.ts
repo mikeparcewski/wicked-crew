@@ -765,9 +765,13 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
           return r.get(to).catch(() => { throw e; });
         }
       };
+      /** The rules the rename moved, once moved (audited whether or not its answer could be read). */
+      let moved: string[] = [];
       try {
         const outcome = await locked(async () => {
-          await r.get(from);
+          // Everything the registry would refuse, before any rule moves: a refused rename never lends this entry's rules
+          // to a live destination.
+          await r.checkRename(from, to);
           const using = deps.appsUsing === undefined ? [] : await deps.appsUsing(from);
           const listed = new Set(parsed.data.apps ?? []);
           if (using.length !== listed.size || using.some((a) => !listed.has(a.slug))) {
@@ -777,7 +781,17 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
           // Every rule naming the source is copied to the new name first (one edit: restrictions and exemptions), then
           // the rules are judged as they will stand; a refusal or a failed write puts them back.
           const originals = await p.copyRules(from, to).catch((e: unknown) => { auditPartial(deps, req, e, [`mcp:${to}`]); throw e; });
-          const back = async (): Promise<void> => { await p.restoreRules(originals).catch((x: unknown) => auditPartial(deps, req, x, [`mcp:${to}`])); };
+          moved = originals.map((o) => o.id);
+          // Rules that cannot be put back still name `to` (an exemption a later source of that name would inherit): the
+          // refusal is replaced by saying so, with the rules to fix by hand.
+          const back = async (): Promise<void> => {
+            try {
+              await p.restoreRules(originals);
+            } catch (x) {
+              auditPartial(deps, req, x, [`mcp:${to}`]);
+              throw new McpRegistryError(500, 'rules_unrestored', `the rename was not made, but rule${moved.length === 1 ? '' : 's'} ${moved.join(', ')} could not be put back and still name ${to} (${x instanceof Error ? x.message : String(x)}): remove the mcp:${to} tokens from ${moved.length === 1 ? 'it' : 'them'} before anything is saved as ${to}`, undefined, { rules: moved });
+            }
+          };
           let server: McpServer;
           try {
             const judged = await p.loosenedByRename(from, to);
@@ -806,7 +820,8 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
       } catch (err) {
         if (err instanceof McpRenameCommitted) {
           // It landed (rules and all); only its answer is missing. Audited as what it is, and said so.
-          deps.audit.record('mcp.server.renamed', actor, { detail: { from, to, unread: true } });
+          deps.audit.record('mcp.server.renamed', actor, { detail: { from, to, unread: true, rules: moved } });
+          for (const id of moved) deps.audit.record('governance.rule.upserted', actor, { detail: { id, source: 'mcp-rename' } });
           return reply.code(502).send({ error: `${err.message}; read the source list again`, code: 'renamed_unread' });
         }
         return fail(reply, err, actor);

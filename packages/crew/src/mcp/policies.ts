@@ -381,8 +381,9 @@ export class McpPolicies {
    * restriction never stays behind), and every rule's `excludes` (the approval ledgers, a deny's exemption) for `to`
    * become exactly those it holds for `from` (stale `to` tokens, from a source that once had that name, are dropped).
    * One edit, so the rename is judged on the final rules. Answers the rules as they were, for {@link restoreRules}.
-   * Exemptions left under `to` by a rename that then failed are inert (nothing is called `to`) and a later registration
-   * of `to` withdraws them ({@link withdrawnBySave}).
+   * The caller has checked that `to` is free first (no live entry is lent these rules), and puts them back when the
+   * rename is refused; one that cannot be put back is reported with its rules (`rules_unrestored`), since only the
+   * approval ledgers' tokens are withdrawn by a later registration of `to`, not a deny's exemption.
    */
   async copyRules(from: string, to: string): Promise<ConformanceRule[]> {
     return this.editRules((rule) => {
@@ -406,8 +407,10 @@ export class McpPolicies {
 
   /**
    * Whether `from`'s rules hold for `to` once {@link copyRules} has run. Two checks, both fail-closed:
-   * - a rule that names the server by its content (`trigger.contains` overlapping either name) is never judged
-   *   equivalent (it may match in a phase, or on a data source's gated tools, that no preview covers);
+   * - a rule whose `trigger.contains` contains either name, or is contained in one, is never judged equivalent (it may
+   *   match in a phase, or on a data source's gated tools, that no preview covers). It is a substring test, so a short
+   *   name can coincide with unrelated trigger text: that refuses (fail-closed), naming the rule. A trigger that only
+   *   straddles a name's edge (`"server":"prod-` for `prod-db`) is not caught here; the preview judges it where it can;
    * - every tool of `from` must be judged at least as strictly under `to` by the engine's own evaluation over the
    *   preview's cells (allow < ask < deny; an allow keeps every obligation), with each tool judged as callable whatever
    *   its switches (a disabled tool switched on later is held to the same rules).

@@ -40,6 +40,9 @@ let actor: Actor;
 let usingApps: Array<{ slug: string; name: string }>;
 /** An in-memory keychain: account -> value. */
 let keychain: Map<string, string>;
+let policies: McpPolicies;
+/** Every preview the policies asked the engine for (its JSON), in order. */
+let previews: string[];
 
 function secrets(): SecretStore {
   return {
@@ -95,12 +98,13 @@ beforeEach(async () => {
   keychain = new Map();
   actor = LOCAL_ACTOR;
   usingApps = [];
+  previews = [];
   adapter = new CoreAdapter({ dbPath: join(base, 'core.db'), stub: true });
   registry = new McpRegistry({ store: new McpRegistryStore(join(base, 'state', 'mcp')), secrets: secrets(), probe: probeMcpServer, discover: () => [], env: { FX_ENV: 'fixture-env-value' } });
-  const policies = new McpPolicies(registry, {
+  policies = new McpPolicies(registry, {
     listRules: () => adapter.listConformanceRules(),
     upsertRule: (r) => adapter.upsertConformanceRule(r),
-    previewCalls: (j) => adapter.previewMcpCalls(j),
+    previewCalls: (j) => { previews.push(j); return adapter.previewMcpCalls(j); },
   });
   audit = new AuditLog(join(base, 'audit.log'), () => undefined);
   app = Fastify();
@@ -309,5 +313,75 @@ describe('renaming a source (crew#1514)', () => {
     expect((await rule(FIRST_USE_LEDGER))!.excludes).toEqual(expect.arrayContaining(['mcp:fx2']));
     expect((await call('GET', '/mcp/servers')).json().servers.map((s: McpServer) => s.name)).toEqual(['fx2']);
     expect((await auditEvents()).some((e) => e.action === 'mcp.server.renamed' && e.detail?.['to'] === 'fx2')).toBe(true);
+  });
+
+  it('removing a renamed entry re-saved on an env secret still deletes the keychain account it owns', async () => {
+    await register('fx', 'fixture-tok-1');
+    expect((await call('POST', '/mcp/servers/fx/rename', { to: 'fx2' })).statusCode).toBe(200);
+    const viaEnv = await call('POST', '/mcp/servers/preview', { name: 'fx2', kind: 'mcp-stdio', command: process.execPath, args: [FIXTURE_SERVER, specPath], auth: { ref: 'env:FX_ENV', env: 'FX_TOKEN' } });
+    expect(viaEnv.statusCode, viaEnv.body).toBe(200);
+    expect((await call('POST', '/mcp/servers', { previewHash: (viaEnv.json() as McpPreviewResponse).previewHash })).statusCode).toBe(201);
+    expect([...keychain.entries()]).toEqual([['fx', 'fixture-tok-1']]);
+    expect((await call('DELETE', '/mcp/servers/fx2')).statusCode).toBe(200);
+    expect(keychain.size).toBe(0);
+  });
+
+  it('a rename to a taken name moves no rule, not even for a moment', async () => {
+    await register('fx');
+    await register('fy');
+    expect((await call('POST', '/mcp/approvals', { subject: 'mcp:fx' })).statusCode).toBe(200);
+    await upsert({ id: 'SEC-ALL-DENY', applies_to: ['mcp'], effect: 'deny', severity: 'critical', excludes: ['mcp:fx'] });
+    const rulesBefore = JSON.stringify(await adapter.listConformanceRules());
+    const copy = policies.copyRules.bind(policies);
+    let copies = 0;
+    policies.copyRules = async (a, b) => { copies++; return copy(a, b); };
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'fy' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().code).toBe('name_taken');
+    expect(copies).toBe(0);
+    expect(JSON.stringify(await adapter.listConformanceRules())).toBe(rulesBefore);
+  });
+
+  it('a refused rename puts back every rule it moved: restrictions, approvals, exemptions and stale tokens', async () => {
+    await register('fx');
+    expect((await call('POST', '/mcp/approvals', { subject: 'mcp:fx' })).statusCode).toBe(200);
+    expect((await call('POST', '/mcp/approvals', { subject: 'mcp:fx/wt_note' })).statusCode).toBe(200);
+    await upsert({ id: 'SEC-FX-NO-NOTE', applies_to: ['mcp:fx/wt_note'], effect: 'deny', severity: 'critical' });
+    await upsert({ id: 'SEC-ALL-DENY', applies_to: ['mcp'], effect: 'deny', severity: 'critical', excludes: ['mcp:fx', 'mcp:fx2/wt_echo'] });
+    const ledger = (await rule(FIRST_USE_LEDGER))!;
+    await adapter.upsertConformanceRule({ ...ledger, excludes: [...(ledger.excludes ?? []), 'mcp:fx2/wt_echo'] });
+    await upsert({ id: 'SEC-FX-BY-TEXT', applies_to: ['mcp'], effect: 'deny', severity: 'critical', trigger: { contains: '"server":"fx"' } });
+    const rulesBefore = JSON.stringify(await adapter.listConformanceRules());
+    const copy = policies.copyRules.bind(policies);
+    let moved: string[] = [];
+    policies.copyRules = async (a, b) => { const o = await copy(a, b); moved = o.map((r) => r.id); return o; };
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'fx2' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().code).toBe('rules_differ');
+    // The copy really moved these (so putting them back is what is tested).
+    expect(moved).toEqual(expect.arrayContaining([FIRST_USE_LEDGER, WRITE_LEDGER, 'SEC-FX-NO-NOTE', 'SEC-ALL-DENY']));
+    expect(JSON.stringify(await adapter.listConformanceRules())).toBe(rulesBefore);
+  });
+
+  it('a refused rename whose rules cannot be put back says so, naming them', async () => {
+    await register('fx');
+    expect((await call('POST', '/mcp/approvals', { subject: 'mcp:fx' })).statusCode).toBe(200);
+    await upsert({ id: 'SEC-FX-BY-TEXT', applies_to: ['mcp'], effect: 'deny', severity: 'critical', trigger: { contains: '"server":"fx"' } });
+    policies.restoreRules = async () => { throw new Error('fixture: the rule store is read-only'); };
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'fx2' });
+    expect(res.statusCode, res.body).toBe(500);
+    expect(res.json().code).toBe('rules_unrestored');
+    expect(res.json().rules).toEqual(expect.arrayContaining([FIRST_USE_LEDGER]));
+    expect((await call('GET', '/mcp/servers')).json().servers.map((s: McpServer) => s.name)).toEqual(['fx']);
+  });
+
+  it('judges a switched-off source as if its tools were on', async () => {
+    await register('fx');
+    expect((await call('PATCH', '/mcp/servers/fx', { enabled: false })).statusCode).toBe(200);
+    previews = [];
+    expect((await call('POST', '/mcp/servers/fx/rename', { to: 'fx2' })).statusCode).toBe(200);
+    const calls = previews.flatMap((j) => (JSON.parse(j) as { calls: Array<{ server: string; registered: boolean }> }).calls);
+    expect(calls.map((c) => c.server).sort()).toEqual(['fx', 'fx', 'fx2', 'fx2']);
+    expect(calls.every((c) => c.registered)).toBe(true);
   });
 });
