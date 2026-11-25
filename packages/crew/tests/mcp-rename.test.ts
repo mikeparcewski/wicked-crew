@@ -5,7 +5,7 @@
 // through the product's own preview + save routes, never a hand-written record.
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,9 +20,10 @@ import { FIRST_USE_LEDGER, McpPolicies, WRITE_LEDGER } from '../src/mcp/policies
 import { probeMcpServer } from '../src/mcp/probe.js';
 import { McpRegistry } from '../src/mcp/registry.js';
 import { McpRegistryStore } from '../src/mcp/registry-store.js';
-import { triggerNames } from '../src/mcp/trigger-names.js';
+import { CONTEXTS, triggerNames } from '../src/mcp/trigger-names.js';
 import { keychainRef, type SecretStore } from '../src/mcp/secrets.js';
 import { removeScratch } from './setup/scratch.js';
+import { requireCoreDir, SKIP_CORE_CHECKS } from './support/core-checkout.js';
 
 const FIXTURE_SERVER = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'mcp', 'fixture-server.mjs');
 
@@ -537,6 +538,36 @@ describe('rename: rules whose trigger can match a name (crew#1905)', () => {
     expect(triggerNames(`"raw":"${inString}secret${inString}","scope":"${S}","seat":"${S}","tool":"mcp:fx/`, ['fx', 'gx'])).toEqual(['fx']);
     // The result context has no args: a trigger that needs both an args key and raw matches neither name.
     expect(triggerNames(`\\{"args":${S}"raw":"${S}","scope":"${S}","seat":"${S}","tool":"mcp:fx`, ['fx', 'gx'])).toEqual([]);
+  });
+
+  it('the result context is the call context with args removed and raw added, its keys sorted', () => {
+    // Spell each shape as JSON: a name, a string, a boolean, flat hints, and an args value.
+    const fill: Record<string, string> = { N: 'fx', STR: '', BOOL: 'true', NOBRACE: '', ANY: '{}' };
+    const parse = (shape: readonly string[]): Record<string, unknown> => JSON.parse(shape.map((g) => fill[g] ?? g).join('')) as Record<string, unknown>;
+    const call = parse(CONTEXTS.call);
+    const result = parse(CONTEXTS.result);
+    const rest: Record<string, unknown> = { ...call };
+    delete rest['args'];
+    expect(result).toEqual({ ...rest, raw: '' });
+    for (const o of [call, result, call['mcp'] as Record<string, unknown>]) expect(Object.keys(o)).toEqual(Object.keys(o).sort());
+  });
+
+  // Core builds the result context in one place; this holds that place to the derivation above (as the route test holds
+  // the call context to the engine's own preview). The engine judges a result only for a token bound to a running unit.
+  it.skipIf(SKIP_CORE_CHECKS)("core's result gate judges context() with args removed and raw added, nothing else (src/mcp_gate/output.rs)", { tags: ['cross-repo'] }, () => {
+    const src = readFileSync(join(requireCoreDir(), 'src', 'mcp_gate', 'output.rs'), 'utf8');
+    const body = /pub\(crate\) fn evaluate_output\([\s\S]*?\n\}\n/.exec(src)?.[0];
+    expect(body, "core's src/mcp_gate/output.rs no longer declares evaluate_output").toBeDefined();
+    const code = (body as string).split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+    expect(code).toMatch(/let mut ctx = context\(unit, call, class\);/);
+    // Every write to ctx: the one removal of args and the one raw string.
+    expect([...code.matchAll(/obj\.(\w+)\(([^)]*)\)/g)].map((m) => `${m[1]}(${m[2]})`)).toEqual(['remove("args")']);
+    expect([...code.matchAll(/ctx\[([^\]]*)\]\s*=/g)].map((m) => m[1])).toEqual(['"raw"']);
+    expect(code).toMatch(/ctx\["raw"\] = serde_json::Value::String\(raw\.to_string\(\)\);/);
+    // The one mutable view of ctx is the one that removes args; no other is taken.
+    expect(code.match(/as_object_mut\(\)|pointer_mut\(|get_mut\(|&mut ctx\b/g)).toEqual(['as_object_mut()']);
+    // The rules are judged on that ctx.
+    expect(code).toMatch(/select_any\(store, &unit\.scope, &phases, &ctx\)/);
   });
 
   it('refuses a rename past a rule that withholds the source\'s results by the result context alone', async () => {

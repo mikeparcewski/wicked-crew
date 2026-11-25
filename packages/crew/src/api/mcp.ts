@@ -796,11 +796,14 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpRouteDeps): voi
           try {
             const judged = await p.loosenedByRename(from, to);
             if (judged.rules.length > 0) {
-              // (crew#1905) Say which name each trigger can match; a shipped rule is never the thing to edit, and another
-              // new name is offered only when nothing blocks the current one.
-              const said = judged.rules.map((id) => `${id} (${(judged.names.get(id) ?? []).map((n) => `${n}, the ${n === from ? 'current' : 'new'} name`).join('; ')})`);
-              const onlyTo = judged.subjects.length === 0 && judged.rules.every((id) => !(judged.names.get(id) ?? [from]).includes(from));
-              throw new McpRegistryError(409, 'rules_differ', `the trigger of rule${judged.rules.length === 1 ? '' : 's'} ${said.join(', ')} can match the source's name in a call, and crew cannot carry a trigger to a new name, so nothing was renamed${onlyTo ? `. A new name no rule's trigger can match avoids this` : ''}`, undefined, { rules: judged.rules, subjects: judged.subjects });
+              // (crew#1905) Say which name each trigger can match, or that crew could not judge it. Another new name is
+              // offered only when nothing blocks the current one; when something does, the next step is that rule.
+              const said = judged.rules.map((id) => `${id} (${judged.unjudged.has(id) ? 'crew cannot judge its trigger, so it counts for both names' : (judged.names.get(id) ?? []).map((n) => `${n}, the ${n === from ? 'current' : 'new'} name`).join('; ')})`);
+              const blocking = judged.rules.filter((id) => (judged.names.get(id) ?? [from]).includes(from));
+              const next = blocking.length > 0
+                ? `. To rename it, first change or retire ${blocking.join(', ')}`
+                : judged.subjects.length === 0 ? `. A new name no rule's trigger can match avoids this` : '';
+              throw new McpRegistryError(409, 'rules_differ', `the trigger of rule${judged.rules.length === 1 ? '' : 's'} ${said.join(', ')} can match the source's name in a call or its result, and crew cannot carry a trigger to a new name, so nothing was renamed${next}`, undefined, { rules: judged.rules, subjects: judged.subjects });
             }
             if (judged.subjects.length > 0) {
               throw new McpRegistryError(409, 'rules_differ', `a rule would judge ${judged.subjects.join(', ')} more loosely under ${to}: it matches ${from} by its content, not by a name crew can copy. Change the rule to cover ${to}, then rename`, undefined, { subjects: judged.subjects });

@@ -319,31 +319,46 @@ class Reader {
 }
 
 /**
- * The canonical context core builds for an MCP call (mcp_gate.rs `context()`), as segments; `N` is the source name.
- * Two facts it rests on: a name is 1-63 of `a-z 0-9 _ -` starting with a letter or digit (`MCP_SERVER_NAME_RE`), so it
+ * The two canonical contexts core judges a trigger against, as segments; `N` is the source name.
+ * - The call (mcp_gate.rs `context()`), judged before the call runs.
+ * - The result (mcp_gate/output.rs `evaluate_output`): the same context with `args` removed and `raw` (the result text,
+ *   a JSON string) added. serde_json keeps keys sorted, so `raw` sits between `phase_role` and `scope`.
+ * Two facts both rest on: a name is 1-63 of `a-z 0-9 _ -` starting with a letter or digit (`MCP_SERVER_NAME_RE`), so it
  * is never JSON-escaped and both its edges are word characters (a `\b` there reads the same under either name; the
  * characters beside it are marked too, for one that does not); and `annotations` is core's flat `McpAnnotations`
- * (four optional booleans), so it holds no brace. The route test that spells this whole context fires in the engine.
+ * (four optional booleans), so it holds no brace. A route test that spells the whole call context fires in the engine,
+ * and a cross-repo test holds core's result context to this derivation.
  */
 type Seg = string | 'ANY' | 'STR' | 'NOBRACE' | 'BOOL' | 'N';
-const CONTEXT: readonly Seg[] = [
-  '{"args":', 'ANY', // any JSON value
+const MIDDLE: readonly Seg[] = [
   ',"carrier":"', 'STR',
   '","mcp":{"annotations":{', 'NOBRACE', // flat boolean hints
   '},"class":"', 'STR', '","kind":"', 'STR', '","registered":', 'BOOL',
   ',"server":"', 'N', '","subject":"mcp:', 'N', '/', 'STR', '","tool":"', 'STR',
-  '"},"mode":"', 'STR', '","phase":"', 'STR', '","phase_role":"', 'STR', '","scope":"', 'STR', '","seat":"', 'STR',
+  '"},"mode":"', 'STR', '","phase":"', 'STR', '","phase_role":"', 'STR',
+];
+const END: readonly Seg[] = [
+  '","scope":"', 'STR', '","seat":"', 'STR',
   '","tool":"mcp:', 'N', '/', 'STR', '","work":"mcp:', 'N', '/', 'STR', '","write_posture":"', 'STR', '"}',
 ];
+/** The contexts, exported for the tests that hold them to core's. */
+export const CONTEXTS: { readonly call: readonly Seg[]; readonly result: readonly Seg[] } = {
+  call: ['{"args":', 'ANY', ...MIDDLE, ...END], // args: any JSON value
+  result: ['{"carrier":"', 'STR', ...MIDDLE.slice(2), '","raw":"', 'STR', ...END], // no args; raw: a JSON string
+};
 
 /**
- * Every context for `name`, as an automaton whose moves on a name character are marked. With `wide`, the character on
- * either side of each name is marked too (a word boundary there reads the name's edge).
+ * Every context for `name` (both shapes), as one automaton whose moves on a name character are marked. With `wide`, the
+ * character on either side of each name is marked too (a word boundary there reads the name's edge).
  */
-function contextNfa(name: string, wide: boolean): { nfa: Nfa; start: number } {
+function contextNfa(name: string, wide: boolean): Nfa {
   const nfa = new Nfa();
-  const start = nfa.add();
-  let at = start;
+  for (const shape of [CONTEXTS.call, CONTEXTS.result]) spell(nfa, shape, name, wide);
+  return nfa;
+}
+
+function spell(nfa: Nfa, shape: readonly Seg[], name: string, wide: boolean): void {
+  let at = nfa.add();
   const step = (cs: CharSet, mark: boolean): void => {
     const next = nfa.add();
     nfa.moves[at]!.push([cs, next, mark]);
@@ -352,7 +367,7 @@ function contextNfa(name: string, wide: boolean): { nfa: Nfa; start: number } {
   const loop = (cs: CharSet): void => {
     nfa.moves[at]!.push([cs, at, false]);
   };
-  CONTEXT.forEach((seg, k) => {
+  shape.forEach((seg, k) => {
     if (seg === 'N') {
       for (const ch of name) step(charOf(ch, false), true);
       return;
@@ -378,11 +393,10 @@ function contextNfa(name: string, wide: boolean): { nfa: Nfa; start: number } {
       at = join;
       return;
     }
-    const before = CONTEXT[k - 1] === 'N';
-    const after = CONTEXT[k + 1] === 'N';
+    const before = shape[k - 1] === 'N';
+    const after = shape[k + 1] === 'N';
     [...seg].forEach((ch, j) => step(charOf(ch, false), wide && ((before && j === 0) || (after && j === seg.length - 1))));
   });
-  return { nfa, start };
 }
 
 /** Longest trigger read; a longer one names both names. */
@@ -416,8 +430,8 @@ function closures(nfa: Nfa, spend: () => void): (from: number) => number[] {
   };
 }
 
-function touches(re: Nfa, reStart: number, reAccept: number, name: string, wide: boolean): boolean {
-  const { nfa: ctx } = contextNfa(name, wide);
+function touches(re: Nfa, reStart: number, reAccept: number, name: string, wide: boolean): boolean | 'unjudged' {
+  const ctx = contextNfa(name, wide);
   let work = 0;
   const spend = (): void => {
     if (++work > BUDGET) throw new OverBudget();
@@ -454,27 +468,41 @@ function touches(re: Nfa, reStart: number, reAccept: number, name: string, wide:
     }
     return false;
   } catch (e) {
-    if (e instanceof OverBudget) return true;
+    if (e instanceof OverBudget) return 'unjudged';
     throw e;
   }
 }
 
+/** What crew can say about one trigger: the names it can tell apart, and whether it was read and searched in full. */
+export interface TriggerJudgement {
+  names: string[];
+  /** False when the trigger was not read (unsupported syntax, too long) or its search ran out of budget: it names all. */
+  judged: boolean;
+}
+
 /**
- * (crew#1905) Which of `names` the trigger `contains` can tell apart in an MCP call's context: each name some match of
- * it can consume a character of. Fail-closed: a trigger it cannot read, or too large to search, names both.
+ * (crew#1905) Which of `names` the trigger `contains` can tell apart in an MCP call's or result's context: each name some
+ * match of it can consume a character of. Fail-closed: a trigger it cannot read, or too large to search, names all.
  */
-export function triggerNames(contains: string, names: readonly string[]): string[] {
-  if (contains === '') return [];
+export function judgeTrigger(contains: string, names: readonly string[]): TriggerJudgement {
+  if (contains === '') return { names: [], judged: true };
   // A trigger longer than any a person writes is not read (fail-closed): reading is linear, but searching is not free.
-  if (contains.length > MAX_TRIGGER) return [...names];
+  if (contains.length > MAX_TRIGGER) return { names: [...names], judged: false };
   const re = new Nfa();
   const reader = new Reader(contains, re);
   let frag: Frag;
   try {
     frag = reader.read();
   } catch (e) {
-    if (e instanceof Unreadable) return [...names];
+    if (e instanceof Unreadable) return { names: [...names], judged: false };
     throw e;
   }
-  return names.filter((n) => touches(re, frag.s, frag.e, n, reader.boundary));
+  const seen = names.map((n) => touches(re, frag.s, frag.e, n, reader.boundary));
+  if (seen.includes('unjudged')) return { names: [...names], judged: false };
+  return { names: names.filter((_, k) => seen[k] === true), judged: true };
+}
+
+/** The names of {@link judgeTrigger}. */
+export function triggerNames(contains: string, names: readonly string[]): string[] {
+  return judgeTrigger(contains, names).names;
 }
