@@ -69,13 +69,27 @@ export function readPreflight(raw: string): IndependencePreflight | null {
   return v as IndependencePreflight;
 }
 
-/** The roles a stand-in could fill, and those no signed-in helper can (DES §2.5). */
-function shortRoles(p: IndependencePreflight): { canFill: string[]; cannot: string[] } {
+/** The roles a stand-in could fill (split into the ones every run needs and the ones a run needs only if it calls
+ *  for them, DES §2.2), and those no helper on the job can fill (DES §2.5). */
+function shortRoles(p: IndependencePreflight): { canFill: string[]; needed: string[]; conditional: string[]; cannot: string[] } {
   const short = p.roles.filter((r) => r.shortBy > 0);
+  const fill = short.filter((r) => r.canStandIn);
   return {
-    canFill: short.filter((r) => r.canStandIn).map((r) => r.role),
+    canFill: fill.map((r) => r.role),
+    needed: fill.filter((r) => !r.conditional).map((r) => r.role),
+    conditional: fill.filter((r) => r.conditional).map((r) => r.role),
     cannot: short.filter((r) => !r.canStandIn).map((r) => r.role),
   };
+}
+
+/** What the job needs, as this launch has it: the roles every run needs, then the ones only a run that calls for
+ *  them needs. The helpers are "this job's": the person may have picked them, so nothing here says "signed in". */
+function needsSentence(needed: readonly string[], conditional: readonly string[]): string {
+  if (needed.length === 0) {
+    return `If the job calls for them, it needs ${words(conditional)} that did not build the work, and this job's helpers can't be those.`;
+  }
+  const tail = conditional.length > 0 ? `, and, if the job calls for them, ${words(conditional)}` : '';
+  return `This job's helpers can't check it independently: it needs ${words(needed)} that did not build the work${tail}.`;
 }
 
 const ROLE_WORDS: Readonly<Record<string, string>> = {
@@ -102,26 +116,28 @@ function words(roles: readonly string[]): string {
  */
 export function preflightRefusal(p: IndependencePreflight): StandInChoiceRefusal | NoUsableHelperRefusal | null {
   if (!p.short) return null;
-  const { canFill, cannot } = shortRoles(p);
+  const { canFill, needed, conditional, cannot } = shortRoles(p);
   if (cannot.length > 0 || canFill.length === 0) {
     return {
       code: 'no_usable_helper',
-      error: `No signed-in helper can be ${words(cannot.length > 0 ? cannot : p.roles.map((r) => r.role))} for this job, so it can't start. Sign in a helper and start it again.`,
+      error: `No helper on this job can be ${words(cannot.length > 0 ? cannot : p.roles.map((r) => r.role))} for it, even as a stand-in, so it can't start. Add another helper to the job, or sign one in, and start it again.`,
       preflight: p,
     };
   }
+  // (coord round 2 F4) The words a CLI or MCP reader sees: the needs this launch has, and the ways through in words
+  // (the request field is `retryWith`, never the sentence's end).
   return {
     code: 'stand_in_choice',
     error:
-      `Too few helpers are signed in to check this job: it needs ${words(canFill)} that did not build the work. `
+      `${needsSentence(needed, conditional)} `
       + 'wicked can fill those roles with stand-ins (a fresh session that sees the work but none of the builder\'s reasoning), '
       + 'labelled on the job, every gate, the delivery and the pull request. They are not independent reviews. '
-      + 'Start it again with standIns: true to use them, or sign in another helper.',
+      + 'Use stand-ins for this job or for every job, or add another helper to the job.',
     preflight: p,
     choices: [
       { id: 'job', label: 'Use stand-ins for this job' },
       { id: 'always', label: 'Use stand-ins for every job' },
-      { id: 'sign_in', label: 'Sign in another helper' },
+      { id: 'sign_in', label: 'Add or sign in another helper' },
       { id: 'cancel', label: 'Cancel' },
     ],
     retryWith: { standIns: true },
