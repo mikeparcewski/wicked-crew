@@ -525,4 +525,42 @@ describe('rename: rules whose trigger can match a name (crew#1905)', () => {
     expect(triggerNames('(a+)+"', ['a'.repeat(63), 'b'])).toEqual(['a'.repeat(63)]);
     expect(Date.now() - started).toBeLessThan(5000);
   });
+
+  // R2 F1: core judges a source's RESULT in a second context (wicked-core src/mcp_gate/output.rs: context() with `args`
+  // removed and `raw` added), so a trigger may reach the name only through that shape.
+  it("reads the result gate's context too: a trigger that reaches the name only through it is matched", () => {
+    const S = '[^"]*';
+    const whole = `^\\{"carrier":"${S}","mcp":\\{"annotations":\\{[^{}]*\\},"class":"${S}","kind":"${S}","registered":(true|false),"server":"fx","subject":"mcp:fx/wt_echo","tool":"wt_echo"\\},"mode":"${S}","phase":"${S}","phase_role":"${S}","raw":"${S}","scope":"${S}","seat":"${S}","tool":"mcp:fx/wt_echo","work":"mcp:fx/wt_echo","write_posture":"${S}"\\}$`;
+    expect(triggerNames(whole, ['fx', 'gx'])).toEqual(['fx']);
+    expect(triggerNames(`"raw":"${S}","scope":"${S}","seat":"${S}","tool":"mcp:fx`, ['fx', 'gx'])).toEqual(['fx']);
+    const inString = '(?:[^"\\\\]|\\\\.)*';
+    expect(triggerNames(`"raw":"${inString}secret${inString}","scope":"${S}","seat":"${S}","tool":"mcp:fx/`, ['fx', 'gx'])).toEqual(['fx']);
+    // The result context has no args: a trigger that needs both an args key and raw matches neither name.
+    expect(triggerNames(`\\{"args":${S}"raw":"${S}","scope":"${S}","seat":"${S}","tool":"mcp:fx`, ['fx', 'gx'])).toEqual([]);
+  });
+
+  it('refuses a rename past a rule that withholds the source\'s results by the result context alone', async () => {
+    await register('fx');
+    await upsert({ id: 'SEC-FX-RESULTS', applies_to: ['release'], effect: 'deny', severity: 'critical', trigger: { contains: '"raw":"[^"]*","scope":"[^"]*","seat":"[^"]*","tool":"mcp:fx' } });
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'gx' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'rules_differ', rules: ['SEC-FX-RESULTS'] });
+    expect(res.json().error).toContain('SEC-FX-RESULTS (fx, the current name)');
+  });
+
+  // R2 F2: the refusal says when crew could not judge a trigger, and gives the next step when the current name is matched.
+  it('says which triggers crew could not judge, and what to do when a rule matches the current name', async () => {
+    await register('fx');
+    await upsert({ id: 'SEC-VERBOSE', applies_to: ['release'], effect: 'deny', severity: 'critical', trigger: { contains: '(?x) "server" : "nobody"' } });
+    await upsert({ id: 'SEC-FX', applies_to: ['release'], effect: 'deny', severity: 'critical', trigger: { contains: '"server":"fx"' } });
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'gx' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect([...res.json().rules].sort()).toEqual(['SEC-FX', 'SEC-VERBOSE']);
+    const error = res.json().error as string;
+    expect(error).toContain('SEC-VERBOSE (crew cannot judge its trigger, so it counts for both names)');
+    expect(error).not.toContain('SEC-VERBOSE (fx');
+    expect(error).toContain('SEC-FX (fx, the current name)');
+    expect(error).toMatch(/To rename it, first change or retire (SEC-FX, SEC-VERBOSE|SEC-VERBOSE, SEC-FX)$/);
+    expect(error).not.toContain('A new name');
+  });
 });
