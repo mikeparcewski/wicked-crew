@@ -6966,7 +6966,7 @@ export interface LaunchRunBody {
   /** (api-types 0.192.0, DES-CATALOG-002 §4.4) What this launch is the shape of ({@link LaunchShape}). Send only where
    *  `GET /health.capabilities.launchShape` is true. */
   shape?: LaunchShape;
-  /** (api-types 0.230.0, J6 K1) What a `domain-extraction` launch maps ({@link DomainScope}): REQUIRED on that
+  /** (api-types next, J6 K1) What a `domain-extraction` launch maps ({@link DomainScope}): REQUIRED on that
    *  workflow (400 without it), refused on any other. Start sends the scope card's `scopeHash`, so a run whose code
    *  changed since the preview refuses before any model call. */
   domainScope?: DomainScope;
@@ -7074,12 +7074,12 @@ export interface LaunchPreviewBody {
   humanConfirm?: string;
   deliver?: 'pr' | 'none';
   deliverGate?: 'human' | 'auto';
-  /** (api-types 0.230.0, J6 K1) On a `domain-extraction` body with a `repoRef`: the scope to preview; the answer
+  /** (api-types next, J6 K1) On a `domain-extraction` body with a `repoRef`: the scope to preview; the answer
    *  then carries its {@link DomainScopeCard}. */
   domainScope?: DomainScope;
 }
 
-/** (api-types 0.230.0, J6 K1) What a domain model run covers: the person's words, and the phrases they kept. */
+/** (api-types next, J6 K1) What a domain model run covers: the person's words, and the phrases they kept. */
 export interface DomainScope {
   /** "What should the model cover?" (1–2000 chars). */
   intent: string;
@@ -7092,7 +7092,7 @@ export interface DomainScope {
 }
 
 /**
- * (api-types 0.230.0, J6 K1) The scope card of a `domain-extraction` preview: what the intent matched in the code,
+ * (api-types next, J6 K1) The scope card of a `domain-extraction` preview: what the intent matched in the code,
  * computed by garden's `scripts/domain/scope.py` over the repository's checkout and estate store (no model call).
  */
 export interface DomainScopeCard {
@@ -7136,10 +7136,10 @@ export interface LaunchPreviewPosture {
 /** (api-types 0.212.0) `POST /runs/preview`'s answer. */
 export interface LaunchPreviewResponse {
   posture: LaunchPreviewPosture;
-  /** (api-types 0.230.0, J6 K1) On a `domain-extraction` body with a repository and a scope: its card. Absent
+  /** (api-types next, J6 K1) On a `domain-extraction` body with a repository and a scope: its card. Absent
    *  otherwise. */
   scopeCard?: DomainScopeCard;
-  /** (api-types 0.230.0) Why no card could be computed (no checkout, no code graph, the scope failed), when one was
+  /** (api-types next) Why no card could be computed (no checkout, no code graph, the scope failed), when one was
    *  asked for. */
   scopeError?: string;
 }
@@ -8180,19 +8180,19 @@ export interface RequirementsPage {
   /** (0.197.0) Rows of the whole corpus whose code does not meet them (`?mismatch=yes` lists them). ABSENT from an
    *  older daemon. */
   mismatches?: number;
-  /** (api-types 0.230.0, J6 K1) The domain model (schema 1.2.0) the rows come from: its statements, rule groups,
+  /** (api-types next, J6 K1) The domain model (schema 1.2.0) the rows come from: its statements, rule groups,
    *  follow-ups and targets. Present only when the repository's model is a 1.2.0 one. */
   model?: DomainModel;
 }
 
-/** (api-types 0.230.0, J6 K1) Lines a claim cites: inclusive, 1-based. */
+/** (api-types next, J6 K1) Lines a claim cites: inclusive, 1-based. */
 export interface DomainRange {
   file: string;
   from: number;
   to: number;
 }
 
-/** (api-types 0.230.0) A person's ruling, as the model shows it while it applies. */
+/** (api-types next) A person's ruling, as the model shows it while it applies. */
 export interface DomainRuling {
   action: 'confirm' | 'reject';
   by: string;
@@ -8201,7 +8201,7 @@ export interface DomainRuling {
   note?: string;
 }
 
-/** (api-types 0.230.0) One claim of a statement. `when` / `unless` name the condition claims (by `i`) it depends on. */
+/** (api-types next) One claim of a statement. `when` / `unless` name the condition claims (by `i`) it depends on. */
 export interface DomainClaim {
   i: number;
   type: string;
@@ -8214,7 +8214,7 @@ export interface DomainClaim {
 }
 
 /**
- * (api-types 0.230.0) One stated decision. `status`: `Checked` (a second seat confirmed it against the code), `open`
+ * (api-types next) One stated decision. `status`: `Checked` (a second seat confirmed it against the code), `open`
  * (not confirmed: see its follow-up), `confirmed` (a person confirmed it) or `stale` (the code changed since; the next
  * run checks it again). A rejected statement is not here: it is under its target's `rejected`.
  */
@@ -8238,19 +8238,19 @@ export interface DomainStatement {
   ruling: DomainRuling | null;
 }
 
-/** (api-types 0.230.0) A sentence of a rule group, citing the statements it rests on (by id). */
+/** (api-types next) A sentence of a rule group, citing the statements it rests on (by id). */
 export interface DomainGroupSentence {
   id: string;
   text: string;
   cites: string[];
 }
 
-/** (api-types 0.230.0) A sentence the check could not support: kept out of the group, with why. */
+/** (api-types next) A sentence the check could not support: kept out of the group, with why. */
 export interface DomainWithheldSentence extends DomainGroupSentence {
   reason: string;
 }
 
-/** (api-types 0.230.0) Plain-words sentences over Checked statements. Business groups first, housekeeping last. */
+/** (api-types next) Plain-words sentences over Checked statements. Business groups first, housekeeping last. */
 export interface DomainRuleGroup {
   id: string;
   title: string;
@@ -8264,7 +8264,7 @@ export interface DomainRuleGroup {
   stale: boolean;
 }
 
-/** (api-types 0.230.0) What a person should look at, with the action that settles it. */
+/** (api-types next) What a person should look at, with the action that settles it. */
 export interface DomainFollowup {
   id: string;
   n: number;
@@ -8281,7 +8281,7 @@ export interface DomainFollowup {
   ruling: DomainRuling | null;
 }
 
-/** (api-types 0.230.0) A statement a person rejected: out of the model, kept here so the reject can be undone. */
+/** (api-types next) A statement a person rejected: out of the model, kept here so the reject can be undone. */
 export interface DomainRejectedStatement {
   id: string;
   key: string;
@@ -8289,7 +8289,7 @@ export interface DomainRejectedStatement {
   ruling: DomainRuling;
 }
 
-/** (api-types 0.230.0) A unit or line range in scope, and whether its lines are accounted for. */
+/** (api-types next) A unit or line range in scope, and whether its lines are accounted for. */
 export interface DomainTarget {
   id: string;
   file: string;
@@ -8305,7 +8305,7 @@ export interface DomainTarget {
   ruling: DomainRuling | null;
 }
 
-/** (api-types 0.230.0, J6 K1) The domain model of a repository (schema 1.2.0), read from its estate store. */
+/** (api-types next, J6 K1) The domain model of a repository (schema 1.2.0), read from its estate store. */
 export interface DomainModel {
   schemaVersion: string;
   /** `open` counts open and rejected statements (a reject waits for the next run). */
@@ -8319,7 +8319,7 @@ export interface DomainModel {
 }
 
 /**
- * (api-types 0.230.0, J6 K1) Body for `POST /repos/:id/requirements/rulings`: a person's Confirm or Reject on an open
+ * (api-types next, J6 K1) Body for `POST /repos/:id/requirements/rulings`: a person's Confirm or Reject on an open
  * statement (`statement` + `expect`), or Confirm on an unaccounted target (`target`). `expectTarget` is the target's
  * `targetHash` as read; a reject needs a `note` (what is wrong, 1–2000 chars).
  */
@@ -8333,7 +8333,7 @@ export interface DomainRulingBody {
   note?: string;
 }
 
-/** (api-types 0.230.0) `POST /repos/:id/requirements/rulings`'s 200: saved, and the model rebuilt. */
+/** (api-types next) `POST /repos/:id/requirements/rulings`'s 200: saved, and the model rebuilt. */
 export interface DomainRulingResponse {
   ruling: DomainRuling & { subject: 'statement' | 'target'; id: string };
   /** The rebuilt model's counts; `rebuilt: false` with `error` when the ruling was saved but the rebuild failed. */
