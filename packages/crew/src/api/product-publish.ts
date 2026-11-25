@@ -8,7 +8,7 @@
  *                                                                  `resolve`: a person settles one `unsure` item
  *   GET  /projects/:id/product/publish/:runId   HUMAN (operator)  whether the run can be published (and why not), the
  *                                                                  project's GitHub repositories, and every publication
- *                                                                  of the run, each read back now
+ *                                                                  of the run, read back as `readBackOf` allows (crew#1911)
  *
  * The plan is read only from a run whose launch recorded compose facts ({@link ComposeFacts}) and whose draft and
  * review units still match them: a plan edited at its gate is refused, in plain words. The repository is the project's
@@ -500,9 +500,31 @@ export const ProductPublishSchema = z
  */
 const NOT_SENT = new Set(['source_off', 'busy', 'rate_limited', 'remote_work_pending', 'secret_missing', 'credential_changed', 'gh_not_installed', 'gh_signed_out', 'gh_token_unavailable']);
 
+/** How long an issue read back as matching is trusted before it is read again (crew#1911). */
+export const READ_BACK_FRESH_MS = 60_000;
+
+/** Who asks for a read-back: the holder of a publication's slot, or anyone else (crew#1911). */
+type Reads = 'owner' | 'observer';
+
 export function registerProductPublishRoutes(app: FastifyInstance, deps: ProductPublishDeps): void {
   /** Publications being sent or resolved now, taken before the first await (DES Send step 1). */
   const slots = new Set<string>();
+  /**
+   * (crew#1911) The last read-back of each created issue, by publication and item key, for the number and content it
+   * was read against. Who reads GitHub:
+   * - the slot owner (a send or resolve) reads each issue without a fresh `ok` read-back, the send right after each
+   *   create, in turn with its creates;
+   * - an observer (a GET, a card, a refusal outside the slot) reads one only while no publication is being sent or
+   *   resolved in this daemon, and a new slot waits for observer reads already running to finish. While a slot is held an
+   *   observer answers the last read-back, or `unreadable` for an issue not read yet.
+   * So a panel's polling never queues reads beside a create on the source's scheduler (knowledge/gate/scheduler.ts
+   * refuses a full queue `busy`), for this publication or another on the same source.
+   */
+  const readBacks = new Map<string, { number: number; expect: string; readBack: 'ok' | 'differs' | 'unreadable'; url: string | null; at: number }>();
+  const clock = (): number => (deps.now ?? Date.now)();
+  /** Observer reads running now, and the slots waiting for them to finish. */
+  let observing = 0;
+  const drained: Array<() => void> = [];
   const dir = (): string => deps.journalDir ?? mcpStateDir();
   const nowIso = (): string => new Date((deps.now ?? Date.now)()).toISOString();
   const humanOnly = (actor: Actor) => ({
@@ -521,8 +543,35 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
     }
   }
 
-  /** A publication's state now: its journal, each created issue read back. */
-  async function stateOf(f: Folded, projectId: string, sel: RepoSelector, es: PmEntry[] | null): Promise<PublicationState> {
+  /** One created issue read back against what was sent, or the last read-back of it when that is trusted for `reads`. */
+  async function readBackOf(publication: string, reader: { e: PmEntry; t: TrackerSetEntry } | null, it: PublishItem, number: number, parent: number | null, reads: Reads): Promise<{ readBack: 'ok' | 'differs' | 'unreadable'; url: string | null }> {
+    const expectBody = normal(bodyWith(it.body, parent));
+    const expect = sha256Hex(`${it.title}\u0000${expectBody}`);
+    const key = `${publication}\u0000${it.key}`;
+    const memo = readBacks.get(key);
+    const known = memo !== undefined && memo.number === number && memo.expect === expect ? memo : undefined;
+    if (known !== undefined && known.readBack === 'ok' && clock() - known.at < READ_BACK_FRESH_MS) return { readBack: 'ok', url: known.url };
+    // Checked before every read, not once per answer: a slot taken meanwhile stops this observer's next read.
+    if (reads === 'observer' && slots.size > 0) return known !== undefined ? { readBack: known.readBack, url: known.url } : { readBack: 'unreadable', url: null };
+    let read: Read;
+    if (reader === null) read = { ok: false };
+    else if (reads === 'owner') read = await readIssue(deps.pm!, reader.e, reader.t, number);
+    else {
+      observing++;
+      try {
+        read = await readIssue(deps.pm!, reader.e, reader.t, number);
+      } finally {
+        if (--observing === 0) for (const w of drained.splice(0)) w();
+      }
+    }
+    const readBack = !read.ok ? 'unreadable' : read.title === it.title && read.body === expectBody ? 'ok' : 'differs';
+    const url = read.ok ? read.url : null;
+    readBacks.set(key, { number, expect, readBack, url, at: clock() });
+    return { readBack, url };
+  }
+
+  /** A publication's state now: its journal, each created issue read back as {@link readBackOf} allows `reads`. */
+  async function stateOf(f: Folded, projectId: string, sel: RepoSelector, es: PmEntry[] | null, reads: Reads): Promise<PublicationState> {
     const approved = f.last!;
     const card = f.first!.card;
     let reader: { e: PmEntry; t: TrackerSetEntry } | null = null;
@@ -539,13 +588,10 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
       let readBack: PublicationItemState['readBack'] = null;
       let url = s?.url ?? null;
       if (state === 'created' && s!.number !== null) {
-        const read = reader === null ? ({ ok: false } as Read) : await readIssue(deps.pm!, reader.e, reader.t, s!.number);
-        if (!read.ok) readBack = 'unreadable';
-        else {
-          const parent = it.parentKey === null ? null : (numbers.get(it.parentKey) ?? null);
-          readBack = read.title === it.title && read.body === normal(bodyWith(it.body, parent)) ? 'ok' : 'differs';
-          url = read.url;
-        }
+        const parent = it.parentKey === null ? null : (numbers.get(it.parentKey) ?? null);
+        const got = await readBackOf(f.first!.publication, reader, it, s!.number, parent, reads);
+        readBack = got.readBack;
+        if (got.url !== null) url = got.url;
       }
       items.push({ key: it.key, kind: it.kind, title: it.title, state, number: s?.number ?? null, url, readBack, ...(s?.why != null ? { why: s.why } : {}) });
     }
@@ -578,7 +624,7 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
     }
     const contentSha = contentShaOf(plan.items);
     if (f.first !== null && f.first.contentSha !== contentSha) {
-      return refuse(409, 'publication_differs', `this run was already published to ${t.key} with other content; nothing more is sent to it`, { publication: await stateOf(f, projectId, sel, es) });
+      return refuse(409, 'publication_differs', `this run was already published to ${t.key} with other content; nothing more is sent to it`, { publication: await stateOf(f, projectId, sel, es, holding ? 'owner' : 'observer') });
     }
     const who = await deps.pm!.vendorRead(e, 'get_me', {}, 'person');
     const me = who.ok ? readPayload(who.result, e.name, 'github') : null;
@@ -604,7 +650,7 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
     if (!built.ok) return built;
     const b = built.b;
     if ([...b.f.items.values()].some((s) => s.state === 'unsure')) {
-      return refuse(409, 'unresolved', 'an earlier publish could not tell whether some issues were created; say for each whether it exists (resolve) before publishing again', { publication: await stateOf(b.f, projectId, sel, b.es) });
+      return refuse(409, 'unresolved', 'an earlier publish could not tell whether some issues were created; say for each whether it exists (resolve) before publishing again', { publication: await stateOf(b.f, projectId, sel, b.es, 'owner') });
     }
     if (hash !== b.publishHash) {
       return refuse(409, 'card_changed', 'the card changed since it was shown (the plan, the account, the source or the link); nothing was sent: look at it again', { card: b.card, publishHash: b.publishHash });
@@ -684,6 +730,8 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
         break;
       }
       if (outcome['kind'] !== 'created') break;
+      // (crew#1911) Read it back now, inside the slot and in turn with the creates, so no GET has to.
+      await readBackOf(b.publication, { e: b.e, t: b.t }, it, outcome['number'] as number, parent, 'owner');
     }
     let f: Folded;
     try {
@@ -692,7 +740,7 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
       if (err instanceof JournalUnreadable) return refuse(409, 'journal_unreadable', `${err.message}; nothing more is sent until it is repaired`);
       throw err;
     }
-    const publication = await stateOf(f, projectId, sel, b.es);
+    const publication = await stateOf(f, projectId, sel, b.es, 'owner');
     deps.audit.record('product.publish', actor, { runId, detail: { projectId, repo: b.card.repo, source: b.e.name, identity: b.card.identity, ...tally, published: publication.published } });
     return { ok: true, body: { done: true, card: b.card, publication } };
   }
@@ -738,7 +786,7 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
     }
     deps.audit.record('product.publish.resolve', actor, { runId, detail: { projectId, repo: f.first.card.repo, key: it.key, issue: want.issue } });
     const after = await fold(path, publication, () => false);
-    return { ok: true, body: { done: true, card: after.last!.card, publication: await stateOf(after, projectId, sel, es) } };
+    return { ok: true, body: { done: true, card: after.last!.card, publication: await stateOf(after, projectId, sel, es, 'owner') } };
   }
 
   app.post<{ Params: { id: string } }>(
@@ -754,11 +802,19 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
       const { runId, confirm: hash, resolve: want } = parsed.data;
       const projectId = req.params.id;
       if (hash === undefined && want === undefined) {
-        const built = await build(projectId, runId, sel, false);
-        if (!built.ok) return send(reply, built);
-        const b = built.b;
-        const answer: ProductPublishResponse = { done: false, card: b.card, publishHash: b.publishHash, publication: b.f.first === null ? null : await stateOf(b.f, projectId, sel, b.es) };
-        return answer;
+        // (crew#1911) A card asks GitHub which account posts (`get_me`): an observer read, so none while anything is
+        // being sent or resolved here, and a slot taken meanwhile waits for it.
+        if (slots.size > 0) return reply.code(409).send({ error: 'a publish is being sent or resolved right now; ask for the card again in a moment', code: 'in_progress' });
+        observing++;
+        try {
+          const built = await build(projectId, runId, sel, false);
+          if (!built.ok) return send(reply, built);
+          const b = built.b;
+          const answer: ProductPublishResponse = { done: false, card: b.card, publishHash: b.publishHash, publication: b.f.first === null ? null : await stateOf(b.f, projectId, sel, b.es, 'observer') };
+          return answer;
+        } finally {
+          if (--observing === 0) for (const w of drained.splice(0)) w();
+        }
       }
       // Taken synchronously, before any await: a second send or resolve of this publication is refused here.
       const slot = publicationOf(runId, sel.repo);
@@ -767,6 +823,8 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
       let out: { ok: true; body: ProductPublishResponse } | Refusal;
       // Released BEFORE the answer is sent: a client that acts on the answer at once finds the publication free.
       try {
+        // (crew#1911) No observer read starts once a slot is held; wait for any already on the source's queue.
+        while (observing > 0) await new Promise<void>((r) => drained.push(r));
         out = want !== undefined ? await resolve(projectId, runId, sel, want, actor) : await confirm(projectId, runId, sel, hash!, actor, req.log);
       } finally {
         slots.delete(slot);
@@ -808,7 +866,7 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
           throw err;
         }
         if (f.first === null || f.first.projectId !== projectId || f.first.runId !== runId) continue;
-        publications.push(await stateOf(f, projectId, { source: null, repo: f.first.card.repo }, list));
+        publications.push(await stateOf(f, projectId, { source: null, repo: f.first.card.repo }, list, 'observer'));
       }
       const answer: ProductPublicationsResponse = {
         runId,

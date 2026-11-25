@@ -473,6 +473,7 @@ import { ConsiderationService } from '../decisions/consider.js';
 import { engineConformance, gardenPackCheck, type ConformanceRunner, type PackCheckRunner } from '../editors/pack-install.js';
 import { conformanceProvisioner, conformanceRuntimeReady, conformanceRuntimeRoot, conformanceVenvDir, editorPluginLaunchListener, venvPython } from '../editors/conformance-runtime.js';
 import { EditorRegistry } from '../editors/registry.js';
+import { packSkillsPort } from '../editors/pack-extras.js';
 import { registerEditorRoutes, unitTokenProbe, type UnitTokenVerdict } from '../editors/routes.js';
 import { broadcast } from '../events/bus.js';
 import type { AppActionStore } from '../apps/actions/store.js';
@@ -2227,6 +2228,10 @@ export function registerRoutes(
     registry: editorRegistry,
     adapter,
     broadcast,
+    // crew#1703: a pack's skills join the daemon skills root and are published as POST /skills/publish does; its
+    // blocks become presets in the engine's store, checked against its phase catalog.
+    skills: runtime.skills === undefined ? null : packSkillsPort(runtime.skills),
+    presets: adapter,
     packCheck: runtime.packCheck ?? gardenPackCheck(discoverLivePlugin()?.path ?? null),
     conformance: runtime.editorConformance ?? engineConformance({ provision: editorConformanceRuntime }),
     // F37: the grant write's §6.4 tripwire asks the engine whether a bearer is a governed unit's token.
@@ -10903,16 +10908,18 @@ export function registerRoutes(
   });
 
   // POST /proposals {content, project?, repo?, tier?, source?} → proposal.submit → 201 { id } (api-types 0.54.0;
-  // tier and repo 0.227.0, studio#1095). A skin files ONE memory into the same review queue — studio's "takes" (the
+  // tier and repo 0.228.0, studio#1095). A skin files ONE memory into the same review queue — studio's "takes" (the
   // person picks one of two candidate outputs, and the pick becomes "prefers takes like X") and the Memory page's
   // add — learned only once they accept it here. The kind (`memory`) and `capture: "preference"` marker are the
   // daemon's; a caller cannot file a policy through this door (the schema is strict). The tier is the person's
   // choice of three (a fact by default); `project` and `repo` become those facets, so it is recalled there only.
+  // `repo` is a registered repository's id (a run's `repo_ref`, which recall matches): one no registry row carries is
+  // a 400 `repo_unknown`, since a memory on it would never be recalled; a registry that cannot be read is a 503.
   app.post(
     `${V}/proposals`,
     {
       config: {
-        manifest: { requestType: 'FileProposalBody', responseType: 'FileProposalResponse', statusCodes: [201, 400, 502] },
+        manifest: { requestType: 'FileProposalBody', responseType: 'FileProposalResponse', statusCodes: [201, 400, 502, 503] },
       },
     },
     async (req, reply) => {
@@ -10921,6 +10928,17 @@ export function registerRoutes(
         return reply.code(400).send(invalidBody(parsed.error, 'Invalid proposal body'));
       }
       const { content, project, repo, tier, source } = parsed.data;
+      if (repo !== undefined) {
+        let known: boolean;
+        try {
+          known = (await adapter.listRepos()).some((r) => r.id === repo);
+        } catch (err) {
+          return reply.code(503).send({ error: `the repository list could not be read (${err instanceof Error ? err.message : String(err)}); nothing was filed, try again` });
+        }
+        if (!known) {
+          return reply.code(400).send({ error: `no registered repository has the id '${repo}', so a memory on it would never be recalled; pick one from GET /repos`, code: 'repo_unknown' });
+        }
+      }
       const payload: Record<string, unknown> = { content, tier: tier ?? 'semantic', capture: 'preference' };
       if (source !== undefined) payload.source = source;
       let submitted: { id?: unknown };
