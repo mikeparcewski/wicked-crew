@@ -80,11 +80,15 @@ describe('registeredSkillRefs', () => {
     const a = new CoreAdapter({ dbPath: join(mkdtempSync(join(tmpdir(), 'crew-m11-refs-')), 'core.db'), stub: true });
     try {
       const engineRefs = await builtinPresetSkillRefs(a, () => {});
+      // wicked-core#1922 (J6 C1b): the domain model run is two host tool steps that name no skill, so an engine that
+      // carries the run's scope (`Core.supportsDomainScope`) names none of the three domain skills; an older one does.
+      const { addonSupportsDomainScope } = await import('../src/core/adapter.js');
+      const domainRefs = ['wicked-garden-domain', 'wicked-garden-domain-coverage', 'wicked-garden-domain-extractor'];
+      for (const ref of domainRefs) {
+        expect(engineRefs.has(ref), `the installed engine's built-in presets and ${ref}`).toBe(!addonSupportsDomainScope());
+      }
       // Pinned against the installed core-ts: a release that drops one of these is a loud diff.
       for (const ref of [
-        'wicked-garden-domain',
-        'wicked-garden-domain-coverage',
-        'wicked-garden-domain-extractor',
         'wicked-garden-draft',
         'wicked-garden-mcp-scaffold',
         'wicked-garden-platform-security-engineer',

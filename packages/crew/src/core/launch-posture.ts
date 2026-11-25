@@ -49,6 +49,9 @@ export interface PostureFacts {
   /** The daemon's preparation of this workflow's launch removes its delivery (a change review; a run review
    *  prepared by `reviewLaunch`). */
   preparationDropsDelivery: (workflow: string) => boolean;
+  /** (J6 K1) The preset's steps all run as host tools (`executor.type: "tool"`): there is no agent session to lead
+   *  in power mode (`domain-extraction`). Absent: no preset is. */
+  toolOnly?: (workflow: string, projectId: string | undefined) => Promise<boolean>;
 }
 
 export interface LaunchPosture {
@@ -106,6 +109,9 @@ export async function launchPosture(
     const isPreset = b.plan !== undefined || (b.workflow !== undefined && await facts.namesPreset(b.workflow, b.projectId));
     if (b.repoRef === undefined || !isPreset) {
       powerNotice = 'power mode runs a repo-scoped plan or preset launch; this launch runs phased';
+    } else if (b.workflow !== undefined && facts.toolOnly !== undefined && await facts.toolOnly(b.workflow, b.projectId)) {
+      // (J6 K1) A preset of host tool steps only (domain-extraction) has no session to run in power mode.
+      powerNotice = 'its steps run as host tools, with no agent session to lead; the launch runs phased';
     } else if (!facts.powerSupported()) {
       powerNotice = 'this engine has no power mode; the launch runs phased';
     } else if (opts.powerRequired === true && (await facts.powerModeDefault()) === false) {

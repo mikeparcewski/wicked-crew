@@ -1,0 +1,120 @@
+{
+ "intent": "How PAYCALC1 computes pay from the payroll file",
+ "model_calls": 0,
+ "phrases": {
+  "PAYCALC1": [
+   "app/cbl/PAYCALC1.cbl"
+  ]
+ },
+ "unmatched_phrases": [],
+ "questions": [],
+ "reached_from": [
+  "STEP1 -> PAYCALC1 (app/jcl/PAYJOB.jcl:2)"
+ ],
+ "reached_files": [
+  "app/jcl/PAYJOB.jcl"
+ ],
+ "config_read": {
+  "PAYCALC1": [
+   "INFILE=PAY.HOURS.IN"
+  ]
+ },
+ "target_files": [
+  "app/cbl/PAYCALC1.cbl",
+  "app/jcl/PAYJOB.jcl"
+ ],
+ "matched_defs": {},
+ "context_files": [
+  "app/cpy/PAYREC.cpy"
+ ],
+ "big_files": [],
+ "matched_def_ids": {},
+ "ambiguous_phrases": [],
+ "reached_from_count": 1,
+ "reached_shown": [
+  "STEP1 -> PAYCALC1 (app/jcl/PAYJOB.jcl:2)"
+ ],
+ "reached_more": 0,
+ "targets": [
+  {
+   "id": "ts-cobol . . . app/cbl/PAYCALC1/PAYCALC1#MAIN-PARA().",
+   "kind": "node",
+   "node_kind": "function",
+   "name": "MAIN-PARA",
+   "file": "app/cbl/PAYCALC1.cbl",
+   "lines": [
+    15,
+    19
+   ],
+   "anchor_symbol": "ts-cobol . . . app/cbl/PAYCALC1/PAYCALC1#MAIN-PARA().",
+   "anchor_name": "MAIN-PARA",
+   "node_complete": true,
+   "code_lines": 5
+  },
+  {
+   "id": "ts-cobol . . . app/cbl/PAYCALC1/PAYCALC1#READ-PARA().",
+   "kind": "node",
+   "node_kind": "function",
+   "name": "READ-PARA",
+   "file": "app/cbl/PAYCALC1.cbl",
+   "lines": [
+    20,
+    29
+   ],
+   "anchor_symbol": "ts-cobol . . . app/cbl/PAYCALC1/PAYCALC1#READ-PARA().",
+   "anchor_name": "READ-PARA",
+   "node_complete": true,
+   "code_lines": 10
+  },
+  {
+   "id": "app/jcl/PAYJOB.jcl:L1-L1",
+   "kind": "range",
+   "file": "app/jcl/PAYJOB.jcl",
+   "lines": [
+    1,
+    1
+   ],
+   "anchor_symbol": "jcl synthetic app/jcl/PAYJOB.jcl::PAYJOB:",
+   "anchor_name": "PAYJOB",
+   "node_complete": null,
+   "code_lines": 1
+  },
+  {
+   "id": "jcl synthetic app/jcl/PAYJOB.jcl::PAYJOB::STEP1:",
+   "kind": "node",
+   "node_kind": "step",
+   "name": "STEP1",
+   "file": "app/jcl/PAYJOB.jcl",
+   "lines": [
+    2,
+    4
+   ],
+   "anchor_symbol": "jcl synthetic app/jcl/PAYJOB.jcl::PAYJOB::STEP1:",
+   "anchor_name": "STEP1",
+   "node_complete": true,
+   "code_lines": 3
+  }
+ ],
+ "n_targets": 4,
+ "n_node": 3,
+ "n_range": 1,
+ "n_files": 2,
+ "stats": {
+  "app/cbl/PAYCALC1.cbl": {
+   "lines": 29,
+   "code": 29,
+   "covered": 17,
+   "ranges": 0,
+   "behaviour_nodes": 2
+  },
+  "app/jcl/PAYJOB.jcl": {
+   "lines": 4,
+   "code": 4,
+   "covered": 3,
+   "ranges": 1,
+   "behaviour_nodes": 1
+  }
+ },
+ "scope_hash": "a4e596a6916041c94971c5b17f131c1a527b4453eb0e64c869943a97d6f22479",
+ "wall_s": 0.02
+}

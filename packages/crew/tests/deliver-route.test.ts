@@ -23,6 +23,11 @@ import type { LaunchRunInput, WorkflowDef } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import { removeScratch } from './setup/scratch.js';
+// (J6 K1) A domain-extraction launch carries its scope only on an addon that can (Core.supportsDomainScope).
+vi.mock('../src/core/adapter.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/core/adapter.js')>()),
+  addonSupportsDomainScope: () => true,
+}));
 
 /** A minimal code-work def: one `executes_code` build phase — what makes the default engage. */
 const CODE_WORK_DEF = {
@@ -327,6 +332,7 @@ describe('POST /runs deliver DEFAULT for repo-scoped launches (crew#393)', () =>
       clisJson: '[]',
       workflow: 'domain-extraction',
       repoRef: 'repo-1',
+      domainScope: { intent: 'the payroll rules' },
     });
     expect(res.statusCode).toBe(201);
     const input = mockAdapter.launchRun.mock.calls[0]![0] as LaunchRunInput;

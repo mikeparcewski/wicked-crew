@@ -395,6 +395,9 @@ type GovernanceMethods = {
   // store, with the coverage label from the store's counts. JSON `{graph, coverage}`; an unknown repo
   // REJECTS. Absent on engines before core#1223.
   getRequirementsGraphForRepo?(repoRef: string): Promise<string>;
+  // (J6 K1, wicked-core#1922) A person's Confirm / Reject on ONE repo's domain model: core writes the ruling and
+  // rebuilds the model. Resolves with core's one-line JSON answer (refusals included); absent on older engines.
+  domainRuling?(repoRef: string, request: string): Promise<string>;
   // #122: node-count-by-kind summary of ONE repo's code graph, over that repo's OWN store. Returns a
   // JSON string (array of {kind,count}); an unknown repo REJECTS.
   getGraphKindsForRepo(repoRef: string): Promise<string>;
@@ -687,6 +690,7 @@ const STORE_READS_OFF_ACTOR: ReadonlySet<string> = new Set([
   'getCoverageReport',
   'getCoverageReportForRepo',
   'getRequirementsGraphForRepo',
+  'domainRuling',
   'getGraphKindsForRepo',
   'indexRepoGraph',
 ]);
@@ -992,6 +996,13 @@ export function addonSupportsPowerModeStatic(): boolean {
   return typeof Core.supportsPowerMode === 'function' && Core.supportsPowerMode() === true;
 }
 
+/** (J6 K1) Does the installed addon carry a `domain-extraction` run's scope (`LaunchOptions.scopeJson`,
+ *  wicked-core#1922)? Asked of the addon, never inferred from its version. */
+export function addonSupportsDomainScope(): boolean {
+  const probe = (Core as unknown as { supportsDomainScope?: () => boolean }).supportsDomainScope;
+  return typeof probe === 'function' && probe() === true;
+}
+
 /** Does the installed addon carry the QE acceptance decision (`LaunchOptions.skipQeAcceptanceReason`
  *  / `forceQeAcceptance`, `assurance.qe`; QE-IN-APP-WORKFLOWS, >= 0.7.49)? Same doctrine. */
 export function addonSupportsQeOverride(): boolean {
@@ -1194,6 +1205,14 @@ export class CampaignsUnsupportedError extends Error {
  * the engine") on this, never 400 ("fix your request") — and never the WORSE failure of passing
  * a steering-field write through to an engine that would silently drop the fields.
  */
+/** (J6 K1) The linked engine has no `domainRuling` binding: a ruling on the domain model cannot be recorded. */
+export class DomainRulingUnsupportedError extends Error {
+  constructor() {
+    super('this wicked-core engine cannot record a ruling on the domain model (it needs the core-ts binding domainRuling); upgrade wicked-core-ts');
+    this.name = 'DomainRulingUnsupportedError';
+  }
+}
+
 export class SteeringUnsupportedError extends Error {
   constructor(what: string) {
     super(
@@ -2272,6 +2291,17 @@ export class CoreAdapter {
         ? qeSettingSkipReason(mode, input, await launchRequiresQe(this, input.workflow, input.projectId))
         : undefined;
       if (settingSkip !== undefined) input = { ...input, skipQeAcceptanceReason: settingSkip };
+    }
+    if (input.domainScopeJson !== undefined) {
+      // Fail CLOSED on an older addon (napi ignores an undeclared field): the run would start with no scope, and
+      // the engine refuses a domain-extraction launch without one only on an addon that knows the field.
+      if (!addonSupportsDomainScope()) {
+        throw new Error(
+          'a domain model run needs a wicked-core-ts that carries its scope (Core.supportsDomainScope); the ' +
+            'installed addon would launch it without one',
+        );
+      }
+      (opts as LaunchOptions & { scopeJson?: string }).scopeJson = input.domainScopeJson;
     }
     if (input.skipQeAcceptanceReason !== undefined || input.forceQeAcceptance === true) {
       // Fail CLOSED on an old addon (napi ignores undeclared fields): a dropped skip would leave a
@@ -3887,6 +3917,17 @@ export class CoreAdapter {
       await this.core.getRequirementsGraphForRepo(repoRef),
       'getRequirementsGraphForRepo',
     );
+  }
+
+  /**
+   * (J6 K1) A person's ruling on ONE registered repo's domain model, handed to the engine as core's
+   * `RulingRequest` JSON. Resolves with core's one-line answer: `{ok: true, ruling, build}` (saved; `build.ok`
+   * false when the rebuild failed) or `{ok: false, code, message}` (refused, nothing written). An engine without the
+   * binding throws, naming what is needed.
+   */
+  async domainRuling(repoRef: string, request: string): Promise<string> {
+    if (typeof this.core.domainRuling !== 'function') throw new DomainRulingUnsupportedError();
+    return this.core.domainRuling(repoRef, request);
   }
 
   /**
