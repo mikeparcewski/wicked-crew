@@ -14916,12 +14916,12 @@ export interface McpServer {
    */
   address?: McpAddressPolicy;
   /**
-   * (api-types 0.225.0, wicked-crew#1514) The names this entry was renamed away from, oldest first. Each is retired
+   * (api-types 0.227.0, wicked-crew#1514) The names this entry was renamed away from, oldest first. Each is retired
    * while the entry exists: no other source may be saved or renamed under it. Absent = never renamed.
    */
   formerNames?: string[];
   /**
-   * (api-types 0.225.0, wicked-crew#1514) The keychain account this entry's own secret lives under when that is not its
+   * (api-types 0.227.0, wicked-crew#1514) The keychain account this entry's own secret lives under when that is not its
    * name (the name it had when it was renamed: the secret is never moved). Its own entry is
    * `keychain:wicked-mcp/<keychainAccount ?? name>`. Absent = its name.
    */
@@ -15246,7 +15246,7 @@ export interface PatchMcpServerBody {
 }
 
 /**
- * (api-types 0.225.0, wicked-crew#1514) `POST /mcp/servers/:name/rename`: a human operator's only. Answers the renamed
+ * (api-types 0.227.0, wicked-crew#1514) `POST /mcp/servers/:name/rename`: a human operator's only. Answers the renamed
  * {@link McpServer}. The entry keeps its id, secret reference, tools, switches, grants, agents and links; its old name
  * is retired (in `formerNames`) while it exists. Refusals (409, `{error, code, ...}`): `apps_bound` with
  * `apps: Array<{slug, name}>` (the apps that use the source; send the same slugs in `apps` to rename anyway),
