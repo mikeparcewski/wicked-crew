@@ -4548,7 +4548,9 @@ export function registerRoutes(
   const domainScopeCard = async (repoRef: string, scope: { intent: string; phrases?: string[] | undefined }): Promise<{ card: DomainScopeCard } | { error: string }> => {
     const repo = (await adapter.listRepos()).find((r) => r.id === repoRef);
     if (repo === undefined) return { error: `repository ${repoRef} is not registered` };
-    if (typeof repo.root_path !== 'string' || repo.root_path === '') return { error: `repository ${repoRef} has no checkout on this machine` };
+    // garden walks a missing folder as an empty tree, so a gone checkout would read as "nothing matched"
+    const isDir = typeof repo.root_path === 'string' && repo.root_path !== '' && (await fsp.stat(repo.root_path).then((st) => st.isDirectory(), () => false));
+    if (!isDir) return { error: `repository ${repoRef} has no checkout on this machine (its registered folder is missing)` };
     let db: string;
     try {
       db = codeGraphDb(repo);

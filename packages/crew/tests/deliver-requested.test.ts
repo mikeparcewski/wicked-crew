@@ -18,6 +18,11 @@ import { removeScratch } from './setup/scratch.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView } from '../src/core/types.js';
 import { withRunViews } from './support/run-views.js';
+// (J6 K1) A domain-extraction launch carries its scope only on an addon that can (Core.supportsDomainScope).
+vi.mock('../src/core/adapter.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/core/adapter.js')>()),
+  addonSupportsDomainScope: () => true,
+}));
 
 const KEPT = 'run-kept';
 const TRIED = 'run-tried';
@@ -105,7 +110,7 @@ describe('crew#762 — AgentSession.deliver_requested', () => {
     const app = Fastify({ logger: false });
     apps.push(app);
     registerRoutes(app, adapter, new GateCache(), new ElicitationCache(), undefined, { audit, authMode: 'off' });
-    const res = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'Map domain', workflow: 'domain-extraction', repoRef: 'repo-1', deliver: 'pr' } });
+    const res = await app.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'Map domain', workflow: 'domain-extraction', repoRef: 'repo-1', deliver: 'pr', domainScope: { intent: 'the payroll rules' } } });
     expect(res.statusCode, res.body).toBe(201);
     expect(launched.mock.calls[0]![0]).not.toHaveProperty('deliver');
     await audit.flush();

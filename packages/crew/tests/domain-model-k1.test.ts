@@ -1,15 +1,15 @@
 // J6 K1: the 1.2.0 domain model over crew's API. Every fixture is a product route's own output
 // (`tests/fixtures/domain-v3/README.md`): the model wicked-core's `domain-graph` built, the lines its `domain-ruling`
 // answered, and garden's `scope.py` card. The tests read keys and hashes from those documents only.
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import { DOMAIN_MODEL_V3, domainModelOf, domainScopeJsonOf, rulingAnswerOf, rulingRequestOf } from '../src/api/domain-model.js';
-import { scopeCardFor, scopeCardOf } from '../src/api/domain-scope.js';
+import { execScope, scopeCardFor, scopeCardOf, type ScopeExec } from '../src/api/domain-scope.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { forgetRequirementsReads } from '../src/api/requirements.js';
@@ -81,6 +81,13 @@ describe('domainModelOf: the model core built', () => {
     expect(main).toMatchObject({ accounted: true, ruling: { action: 'confirm', by: 'ana' } });
   });
 
+  it('keeps a statement with no target as null, never an invented id', () => {
+    const doc = fixture('model-built.json') as { domains: Record<string, { requirements: Record<string, { business_rules: Array<Record<string, unknown>> }> }> };
+    const r = Object.values(Object.values(doc.domains)[0]!.requirements)[0]!.business_rules[1]!;
+    r['target'] = null;
+    expect(domainModelOf(doc)!.statements[1]!.target).toBeNull();
+  });
+
   it('is null for any other schema, and leaves out an item it cannot type', () => {
     expect(domainModelOf({ metadata: { schema_version: '1.1.0' }, domains: {} })).toBeNull();
     expect(domainModelOf(null)).toBeNull();
@@ -150,7 +157,7 @@ describe('scope card: garden scope.py output', () => {
     expect(scopeCardOf({ ...raw, scope_hash: 'short' })).toBeNull();
   });
 
-  it('runs garden through its launcher and removes its scratch directory; a failure is said, not thrown', async () => {
+  it('runs garden through its launcher and removes its scratch directory; each failure is said, not thrown', async () => {
     const calls: string[][] = [];
     const good = await scopeCardFor({
       root: '/repo', db: '/repo.db', gardenRoot: '/garden', scope: { intent: 'pay', phrases: ['PAYCALC1'] },
@@ -159,15 +166,50 @@ describe('scope card: garden scope.py output', () => {
         const input = JSON.parse(readFileSync(args[args.indexOf('--scope') + 1]!, 'utf8'));
         expect(input).toEqual({ intent: 'pay', phrases: ['PAYCALC1'] });
         writeFileSync(args[args.indexOf('--out') + 1]!, readFileSync(join(FIX, 'scope-mini-cobol.json')));
-        return { code: 0, stderr: '' };
+        return { outcome: 'exit', code: 0, stderr: '' };
       },
     });
     expect('card' in good && good.card.targets).toBe(4);
     expect(calls[0]!.slice(0, 7)).toEqual(['/garden/scripts/wicked-garden', 'run', 'scripts/domain/scope.py', '--root', '/repo', '--db', '/repo.db']);
-    const bad = await scopeCardFor({ root: '/r', db: '/d', gardenRoot: null, scope: { intent: 'x' }, exec: async () => ({ code: 1, stderr: 'Traceback\nKeyError: nodes\n' }) });
-    expect(bad).toEqual({ error: 'the scope failed: KeyError: nodes' });
-    const slow = await scopeCardFor({ root: '/r', db: '/d', gardenRoot: null, scope: { intent: 'x' }, timeoutMs: 1000, exec: async () => ({ code: null, stderr: '' }) });
-    expect(slow).toEqual({ error: 'the scope did not finish in 1 s' });
+    const scratch = dirname(calls[0]![calls[0]!.indexOf('--out') + 1]!);
+    expect(existsSync(scratch)).toBe(false);
+    const said = async (exec: ScopeExec) => scopeCardFor({ root: '/r', db: '/d', gardenRoot: null, scope: { intent: 'x' }, timeoutMs: 1000, exec });
+    expect(await said(async () => ({ outcome: 'exit', code: 1, stderr: 'Traceback\nKeyError: nodes\n' }))).toEqual({ error: 'the scope failed: KeyError: nodes' });
+    expect(await said(async () => ({ outcome: 'timeout', stderr: '' }))).toEqual({ error: 'the scope did not finish in 1 s' });
+    expect(await said(async () => ({ outcome: 'spawn', error: 'spawn wicked-garden ENOENT' }))).toEqual({ error: 'the scope could not start garden: spawn wicked-garden ENOENT' });
+    expect(await said(async () => ({ outcome: 'exit', code: 0, stderr: '' }))).toEqual({ error: 'the scope wrote no card' });
+    expect(await said(async (_c, args) => {
+      writeFileSync(args[args.indexOf('--out') + 1]!, '{');
+      return { outcome: 'exit', code: 0, stderr: '' };
+    })).toEqual({ error: 'the scope wrote a card that is not JSON' });
+    // A scratch directory that cannot be made is said too (the daemon's TMPDIR points nowhere).
+    vi.stubEnv('TMPDIR', join(tmpdir(), 'k1-no-such-dir', 'x'));
+    expect(await said(async () => ({ outcome: 'exit', code: 0, stderr: '' }))).toEqual({ error: expect.stringMatching(/^the scope could not start: /u) });
+    vi.unstubAllEnvs();
+  });
+
+  it('the time limit ends the whole process tree, so nothing writes after the scratch directory is gone', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'k1-tree-'));
+    dirs.push(dir);
+    const late = join(dir, 'late.txt');
+    const launcher = join(dir, 'launcher.sh');
+    // The launcher starts a grandchild (as garden's launcher starts python) that would write after a second.
+    writeFileSync(launcher, `#!/bin/sh\n(sleep 1; echo late > "${late}") &\nwait\n`);
+    chmodSync(launcher, 0o755);
+    const t0 = Date.now();
+    const r = await execScope(launcher, [], { env: process.env, timeoutMs: 200 });
+    expect(r.outcome).toBe('timeout');
+    expect(Date.now() - t0).toBeLessThan(900);
+    await new Promise((res) => setTimeout(res, 1300));
+    expect(existsSync(late)).toBe(false);
+    expect(await execScope(join(dir, 'missing'), [], { env: process.env, timeoutMs: 1000 })).toMatchObject({ outcome: 'spawn' });
+  });
+
+  it('a phrase is kept as its own key whatever it says (a phrase "__proto__" included)', () => {
+    const raw = fixture('scope-mini-cobol.json') as Record<string, unknown>;
+    const card = scopeCardOf({ ...raw, phrases: JSON.parse('{"__proto__": ["app/cbl/PAYCALC1.cbl"]}') })!;
+    expect(Object.keys(card.phrases)).toEqual(['__proto__']);
+    expect(JSON.parse(JSON.stringify(card)).phrases).toEqual(JSON.parse('{"__proto__": ["app/cbl/PAYCALC1.cbl"]}'));
   });
 });
 
@@ -208,6 +250,7 @@ async function daemon(extra: Record<string, unknown> = {}, actor?: Record<string
   dirs.push(dir);
   const db = join(dir, 'estate.db');
   writeFileSync(db, '');
+  mkdirSync(join(dir, 'repo'));
   const repo: RepoEntry = { id: 'repo-1', name: 'r', root_path: join(dir, 'repo'), default_branch: 'main', registered_at: 0, code_graph_db: db };
   const adapter: Record<string, Mock> = {
     launchRun: vi.fn().mockResolvedValue('run-1'),
@@ -291,6 +334,10 @@ describe('POST /runs/preview: the scope card', () => {
     vi.stubEnv('WICKED_GARDEN_ROOT', fakeGarden(dir, "echo 'scope: no index for this checkout' >&2; exit 2"));
     const failed = await app.inject({ method: 'POST', url: '/api/v1/runs/preview', payload: { workflow: 'domain-extraction', repoRef: 'repo-1', domainScope: { intent: 'pay' } } });
     expect(failed.json().scopeError).toBe('the scope failed: scope: no index for this checkout');
+    // A checkout that is gone is said by name: garden would read it as an empty tree and match nothing.
+    rmSync(join(dir, 'repo'), { recursive: true });
+    const gone = await app.inject({ method: 'POST', url: '/api/v1/runs/preview', payload: { workflow: 'domain-extraction', repoRef: 'repo-1', domainScope: { intent: 'pay' } } });
+    expect(gone.json().scopeError).toBe('repository repo-1 has no checkout on this machine (its registered folder is missing)');
     const noRepo = await app.inject({ method: 'POST', url: '/api/v1/runs/preview', payload: { workflow: 'domain-extraction', domainScope: { intent: 'pay' } } });
     expect(noRepo.json().scopeError).toBe('name the repository the model covers to see its scope');
     const plain = await app.inject({ method: 'POST', url: '/api/v1/runs/preview', payload: { workflow: 'domain-extraction', repoRef: 'repo-1' } });

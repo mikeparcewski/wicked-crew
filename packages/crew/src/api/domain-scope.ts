@@ -4,8 +4,8 @@
  * shows. The run's own `domain-run` step re-derives the same scope from the same script and refuses when its hash no
  * longer matches the one Start carried, so the card and the run never disagree silently.
  */
-import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -13,19 +13,48 @@ import type { DomainScopeCard } from 'wicked-crew-api-types';
 
 import { gardenLauncher, unmarkedEnv } from '../learn/scheduler.js';
 
-/** Runs `cmd args` and answers its exit code and stderr (tests inject it). */
-export type ScopeExec = (
-  cmd: string,
-  args: string[],
-  opts: { env: NodeJS.ProcessEnv; timeoutMs: number },
-) => Promise<{ code: number | null; stderr: string }>;
+/** How the scope's process ended: its exit code, killed at the time limit, or never started. */
+export type ScopeExit =
+  | { outcome: 'exit'; code: number; stderr: string }
+  | { outcome: 'timeout'; stderr: string }
+  | { outcome: 'spawn'; error: string };
 
-const execScope: ScopeExec = (cmd, args, opts) =>
+/** Runs `cmd args` to its end (tests inject it). */
+export type ScopeExec = (cmd: string, args: string[], opts: { env: NodeJS.ProcessEnv; timeoutMs: number }) => Promise<ScopeExit>;
+
+const STDERR_CAP = 64 * 1024;
+
+/**
+ * Runs the launcher in its own process group, so the time limit ends the whole tree (the launcher runs Python, maybe
+ * through uv, as children of its own); resolves once every process holding its output has closed.
+ */
+export const execScope: ScopeExec = (cmd, args, opts) =>
   new Promise((resolve) => {
-    execFile(cmd, args, { env: opts.env, timeout: opts.timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (err, _stdout, stderr) => {
-      const code = err === null ? 0 : typeof (err as { code?: unknown }).code === 'number' ? ((err as { code: number }).code) : null;
-      resolve({ code, stderr: String(stderr ?? '') + (err !== null && code === null ? String(err.message) : '') });
+    const group = process.platform !== 'win32';
+    let stderr = '';
+    let timedOut = false;
+    let settled = false;
+    const done = (r: ScopeExit): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+    const child = spawn(cmd, args, { env: opts.env, stdio: ['ignore', 'ignore', 'pipe'], detached: group });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        if (group && child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+        else child.kill('SIGKILL');
+      } catch {
+        // already gone
+      }
+    }, opts.timeoutMs);
+    child.stderr?.on('data', (b: Buffer) => {
+      if (stderr.length < STDERR_CAP) stderr += b.toString('utf8').slice(0, STDERR_CAP - stderr.length);
     });
+    child.on('error', (err) => done({ outcome: 'spawn', error: err.message }));
+    child.on('close', (code) => done(timedOut ? { outcome: 'timeout', stderr } : { outcome: 'exit', code: code ?? 1, stderr }));
   });
 
 /** CardDemo's card takes under 5 s and crew's about 31 s (DES-j6-build S2); past this the preview says so. */
@@ -48,8 +77,10 @@ export function scopeCardOf(raw: unknown): DomainScopeCard | null {
   if (!isObj(raw)) return null;
   const scopeHash = raw['scope_hash'];
   if (typeof scopeHash !== 'string' || !/^[0-9a-f]{64}$/u.test(scopeHash)) return null;
-  const phrases: Record<string, string[]> = {};
-  if (isObj(raw['phrases'])) for (const [p, v] of Object.entries(raw['phrases'])) phrases[p] = matchedOf(v);
+  // Object.fromEntries defines each phrase as an own key (a phrase "__proto__" included).
+  const phrases: Record<string, string[]> = Object.fromEntries(
+    isObj(raw['phrases']) ? Object.entries(raw['phrases']).map(([p, v]) => [p, matchedOf(v)]) : [],
+  );
   const n = raw['n_targets'];
   const more = raw['reached_more'];
   return {
@@ -71,10 +102,13 @@ function lastLine(stderr: string): string {
   return last.length > 300 ? `${last.slice(0, 300)}…` : last;
 }
 
+/** The largest scope file the preview reads (it holds every target; the card needs a summary). */
+export const SCOPE_FILE_MAX_BYTES = 16 * 1024 * 1024;
+
 /**
- * The card for `scope` over the checkout at `root` and the estate store `db`, or why there is none. Runs garden
- * through its launcher under `gardenRoot` (`$WICKED_GARDEN_ROOT`, else the live plugin), in a scratch directory it
- * removes after.
+ * The card for `scope` over the checkout at `root` and the estate store `db`, or why there is none: never throws.
+ * Runs garden through its launcher under `gardenRoot` (`$WICKED_GARDEN_ROOT`, else the live plugin), in a scratch
+ * directory it removes after the whole process tree has ended.
  */
 export async function scopeCardFor(opts: {
   root: string;
@@ -85,30 +119,50 @@ export async function scopeCardFor(opts: {
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
 }): Promise<{ card: DomainScopeCard } | { error: string }> {
-  const dir = await mkdtemp(join(tmpdir(), 'wicked-domain-scope-'));
+  let dir: string;
   try {
-    const input = join(dir, 'scope-in.json');
-    const out = join(dir, 'scope.json');
-    await writeFile(input, JSON.stringify({ intent: opts.scope.intent, ...(opts.scope.phrases !== undefined ? { phrases: opts.scope.phrases } : {}) }));
-    const timeoutMs = opts.timeoutMs ?? SCOPE_TIMEOUT_MS;
-    const r = await (opts.exec ?? execScope)(
-      gardenLauncher(opts.gardenRoot),
-      ['run', 'scripts/domain/scope.py', '--root', opts.root, '--db', opts.db, '--scope', input, '--out', out],
-      { env: unmarkedEnv(opts.env ?? process.env, opts.gardenRoot), timeoutMs },
-    );
-    if (r.code !== 0) {
-      const why = lastLine(r.stderr);
-      return { error: r.code === null ? `the scope did not finish in ${Math.round(timeoutMs / 1000)} s${why !== '' ? ` (${why})` : ''}` : `the scope failed${why !== '' ? `: ${why}` : ''}` };
-    }
-    let raw: unknown;
-    try {
-      raw = JSON.parse(await readFile(out, 'utf8'));
-    } catch {
-      return { error: 'the scope wrote no card' };
-    }
-    const card = scopeCardOf(raw);
-    return card !== null ? { card } : { error: 'the scope wrote a card this daemon cannot read' };
-  } finally {
-    await rm(dir, { recursive: true, force: true });
+    dir = await mkdtemp(join(tmpdir(), 'wicked-domain-scope-'));
+  } catch (err) {
+    return { error: `the scope could not start: ${(err as Error).message}` };
   }
+  try {
+    return await runScope(dir, opts);
+  } catch (err) {
+    return { error: `the scope could not be read: ${(err as Error).message}` };
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function runScope(dir: string, opts: Parameters<typeof scopeCardFor>[0]): Promise<{ card: DomainScopeCard } | { error: string }> {
+  const input = join(dir, 'scope-in.json');
+  const out = join(dir, 'scope.json');
+  await writeFile(input, JSON.stringify({ intent: opts.scope.intent, ...(opts.scope.phrases !== undefined ? { phrases: opts.scope.phrases } : {}) }));
+  const timeoutMs = opts.timeoutMs ?? SCOPE_TIMEOUT_MS;
+  const r = await (opts.exec ?? execScope)(
+    gardenLauncher(opts.gardenRoot),
+    ['run', 'scripts/domain/scope.py', '--root', opts.root, '--db', opts.db, '--scope', input, '--out', out],
+    { env: unmarkedEnv(opts.env ?? process.env, opts.gardenRoot), timeoutMs },
+  );
+  if (r.outcome === 'spawn') return { error: `the scope could not start garden: ${r.error}` };
+  const why = lastLine(r.stderr);
+  if (r.outcome === 'timeout') return { error: `the scope did not finish in ${Math.round(timeoutMs / 1000)} s${why !== '' ? ` (${why})` : ''}` };
+  if (r.code !== 0) return { error: `the scope failed${why !== '' ? `: ${why}` : ''}` };
+  let size: number;
+  try {
+    size = (await stat(out)).size;
+  } catch {
+    return { error: 'the scope wrote no card' };
+  }
+  if (size > SCOPE_FILE_MAX_BYTES) {
+    return { error: `the scope is too large to show (${Math.round(size / 2 ** 20)} MB); narrow it to fewer files or phrases` };
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(await readFile(out, 'utf8'));
+  } catch {
+    return { error: 'the scope wrote a card that is not JSON' };
+  }
+  const card = scopeCardOf(raw);
+  return card !== null ? { card } : { error: 'the scope wrote a card this daemon cannot read' };
 }

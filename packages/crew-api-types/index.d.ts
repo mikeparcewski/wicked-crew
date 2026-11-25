@@ -7974,9 +7974,11 @@ export interface DomainStatement {
   requirementKey: string;
   status: 'Checked' | 'open' | 'confirmed' | 'stale';
   text: string;
-  /** Its anchor and every claim cite valid lines. */
+  /** Its anchor names a repository-relative file and positive lines (core does not check each claim's lines, nor
+   *  the file's length). */
   located: boolean;
-  target: string;
+  /** The id of the target it was stated for; `null` when the writer named none. */
+  target: string | null;
   /** `file#La-Lb` of its anchor, or null. */
   sourceRef: string | null;
   claims: DomainClaim[];

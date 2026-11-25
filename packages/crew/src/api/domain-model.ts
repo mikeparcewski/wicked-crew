@@ -91,7 +91,7 @@ function statementOf(v: unknown, requirementKey: string): DomainStatement | null
     status: status as DomainStatement['status'],
     text,
     located: v['located'] === true,
-    target: str(v['target']) ?? '',
+    target: str(v['target']),
     sourceRef: str(v['source_ref']),
     claims: arr(v['claims']).map(claimOf).filter((c): c is DomainClaim => c !== null),
     checkedBy: checkedBy === 'codex' || checkedBy === 'you' ? checkedBy : null,

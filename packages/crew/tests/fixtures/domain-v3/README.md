@@ -9,4 +9,4 @@ Real-shape fixtures: each file is a product route's own output, not a hand-writt
 | `rulings.json` | wicked-core `domain-ruling` (same binary): `command`, exit code and the one JSON line it printed (`stdout`) | each call also took `--db <store> --repo-root <checkout>` (left out of `command`); `Core.domainRuling` answers the same line |
 | `scope-mini-cobol.json` | wicked-garden `scripts/domain/scope.py` (garden main `2b4066d7`) | `--root <core>/tests/fixtures/domain_v3/mini-cobol --db <the store after the rulings> --scope '{"intent": "How PAYCALC1 computes pay from the payroll file"}'` |
 
-The same model, as built, is wicked-garden's schema fixture `skills/domain/refs/fixtures/core-1.2.0-mini-cobol.json`.
+The same model, as built, is the schema fixture wicked-garden PR 1578 adds (`skills/domain/refs/fixtures/core-1.2.0-mini-cobol.json`; not on garden main until it merges).
