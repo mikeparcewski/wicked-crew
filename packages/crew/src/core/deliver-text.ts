@@ -133,6 +133,19 @@ export interface DeliverAssuranceFact {
   floorOverrides: Array<{ phase: string; by: string; label: string }>;
   /** (program DES-POWER-MODE) The run's power-mode record: the orchestrator and the rigor history. */
   power?: DeliverPowerFact;
+  /** (DES-STANDIN-001 §6, K6) The stand-ins that took part in the run's checks (`session.assurance.standIns`). */
+  standIns?: DeliverStandInFact;
+}
+
+/** (DES-STANDIN-001 §6) What the delivery says about the run's stand-ins. */
+export interface DeliverStandInFact {
+  /** Why they stood in, in words (the first binding's reason). */
+  reason: string;
+  /** Some independent role was also filled by a real helper (`assurance.roles`): the checks were mixed. */
+  mixed: boolean;
+  /** One entry per stand-in, in the order they were seated. */
+  /** `failed`: the stand-in was seated and did not answer (rev 3 N6); it still took part. */
+  roles: Array<{ role: string; by: string; failed: boolean }>;
 }
 
 /** (program DES-POWER-MODE) What the delivery says about a power run. */
@@ -938,7 +951,68 @@ function assuranceSection(a: DeliverAssuranceFact): string[] {
     for (const [label, where] of byLabel) out.push(`- **${cell(label.charAt(0).toUpperCase() + label.slice(1))}**: ${where.join(', ')}`);
   }
   if (a.power !== undefined) out.push(...powerLines(a.power));
+  if (a.standIns !== undefined) out.push(...standInLines(a.standIns));
   return out;
+}
+
+/** The roles a stand-in fills, in a person's words (DES §6). */
+const STAND_IN_ROLE_WORDS: Readonly<Record<string, string>> = {
+  evaluator: 'reviewer',
+  party_excluded: 'reviewer',
+  judge: 'judge',
+  qe_reviewer: 'QE reviewer',
+  rule_judge: 'rule checker',
+  council: 'council member',
+  monitor: 'monitor',
+};
+
+/** (DES-STANDIN-001 §6, K6) The stand-in line: labelled, never called independent. */
+function standInLines(f: DeliverStandInFact): string[] {
+  const who = f.roles.map((r) => `${STAND_IN_ROLE_WORDS[r.role] ?? literal(r.role)} (${literal(r.by)}${r.failed ? ', did not answer' : ''})`);
+  return [
+    `- **${f.mixed ? 'Checked partly by stand-ins' : 'Checked by stand-ins'}**: ${literal(f.reason)}. A stand-in is a fresh session of the same tool `
+      + 'that sees the work but none of the builder\'s reasoning; it is not an independent review.'
+      + (who.length > 0 ? ` Stood in: ${who.join(', ')}.` : ''),
+  ];
+}
+
+/** A stand-in's reason (`StandInReason`, tagged by `kind`) in a person's words, as the engine says it
+ *  (wicked-core `standin::Reason::words`); `null` for a kind this daemon does not know. */
+function standInReasonWords(r: unknown): string | null {
+  if (r === null || typeof r !== 'object') return null;
+  const o = r as Record<string, unknown>;
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+  switch (o['kind']) {
+    case 'only_one_helper': return `only ${str(o['cli'])} was signed in`;
+    case 'all_parties': return `every signed-in helper (${(Array.isArray(o['seats']) ? o['seats'] : []).map(str).join(', ')}) built or reviewed this work`;
+    case 'helpers_short': {
+      const n = num0(o['signed_in']);
+      return `${n} helper${n === 1 ? ' is' : 's are'} signed in: ${num0(o['have'])} can check this job independently and it needs ${num0(o['need'])}`;
+    }
+    case 'lost_mid_run': return `${str(o['seat'])} stopped mid-run (${str(o['cause'])})`;
+    case 'shares_provider': return `${str(o['seat'])} calls the same provider (${str(o['provider'])}) as the work it would check`;
+    default: return null;
+  }
+}
+
+/** (DES-STANDIN-001 §6, K6) The stand-ins from `session.assurance` (`standIns`, `roles`, `standInLabel`); absent when none took part. */
+function standInsOf(a: Record<string, unknown>): DeliverStandInFact | undefined {
+  const bindings = (Array.isArray(a['standIns']) ? a['standIns'] : []) as Array<Record<string, unknown>>;
+  const took = bindings.filter((b) => typeof b['role'] === 'string' && typeof b['key'] === 'string');
+  if (took.length === 0) return undefined;
+  const label = typeof a['standInLabel'] === 'string' ? a['standInLabel'].trim() : '';
+  const reason = standInReasonWords(took[0]!['reason']) ?? (label !== '' ? label : 'too few helpers were signed in');
+  const records = (Array.isArray(a['roles']) ? a['roles'] : []) as Array<Record<string, unknown>>;
+  const mixed = records.some((r) => r['filled'] === 'real');
+  return {
+    reason,
+    mixed,
+    roles: took.map((b) => ({
+      role: b['role'] as string,
+      by: typeof b['display'] === 'string' && b['display'].trim() !== '' ? b['display'].trim() : typeof b['base'] === 'string' ? b['base'] : (b['key'] as string),
+      failed: b['state'] === 'failed',
+    })),
+  };
 }
 
 /** (crew#1186) The assurance labels from the engine's `session.assurance` (`RunAssurance`); absent on an older engine. */
@@ -975,7 +1049,14 @@ function assuranceOf(s: SessionView['session'], units: WorkUnit[]): DeliverAssur
         : 'floor overridden by operator',
   }));
   const power = powerOf(s);
-  return { mode: typeof a.mode === 'string' ? a.mode : 'full', qe, floorOverrides, ...(power !== undefined ? { power } : {}) };
+  const standIns = standInsOf(a as Record<string, unknown>);
+  return {
+    mode: typeof a.mode === 'string' ? a.mode : 'full',
+    qe,
+    floorOverrides,
+    ...(power !== undefined ? { power } : {}),
+    ...(standIns !== undefined ? { standIns } : {}),
+  };
 }
 
 /** (program DES-POWER-MODE) The power record from `session.power` (camelCase), absent on a phased run. */

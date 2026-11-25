@@ -81,7 +81,7 @@ type RecordedOpenGate =
   | { state: 'none' }
   | { state: 'ambiguous'; ords: number[] }
   | { state: 'open'; ord: number; row: InteractionRequest };
-import { detectRefusal, isOpenGate, offeredChoices, replayOpenGate, type GateCache, type GateRead, type GateResolution } from './gate-cache.js';
+import { detectRefusal, gateSeqOf, isOpenGate, offeredChoices, replayOpenGate, type GateCache, type GateRead, type GateResolution } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
 import { acceptanceRequirementOf, buildAcceptanceView } from '../qe/acceptance.js';
 import type { EngineBoundVerdict } from '../qe/ledger.js';
@@ -244,6 +244,7 @@ import type { EvalRunStore } from './eval-store.js';
 import { isSeatKeyList } from '../core/job-seats.js';
 import { engineRosterJson, noEligibleSeatBody, parseNoEligibleSeat, toEngineSeat } from '../core/engine-roster.js';
 import { launchAssuranceNotice, readJudgeCoverage } from '../core/assurance.js';
+import { STAND_IN_NEEDED_GATE, USE_STAND_INS_ACTION, consentFor, isStandInReview, preflightRefusal, readPreflight } from '../core/stand-in.js';
 import { launchPosture, type PostureFacts } from '../core/launch-posture.js';
 import { launchRequiresQe, mayRequireQe, qeAcceptanceMode, qeSettingSkipReason } from '../core/qe-acceptance-setting.js';
 import {
@@ -623,6 +624,10 @@ export interface LaunchContext {
   /** (api-types 0.196.0) A chat job's Start chose a power run: a launch that would run phased is refused (409
    *  `power_unavailable`) before the engine is called, never started phased with a notice. */
   powerRequired?: boolean;
+  /** (DES-STANDIN-001 §4, K2a) This launcher asks the stand-in question: a short roster with no consent is answered
+   *  `409 stand_in_choice` / `no_usable_helper` before anything is written (`POST /runs`; its callers draw the choice).
+   *  Without it a launch takes stand-ins only on the consent a person already gave (the `standInReview` setting). */
+  standInChoice?: boolean;
 }
 
 /**
@@ -990,6 +995,9 @@ export const LaunchSchema = z.strictObject({
    *  "full assurance", the same as omitting it: the launcher never chooses for the caller, and a
    *  full-assurance launch on a one-CLI roster is answered with `assuranceNotice` (`core/assurance.ts`). */
   reducedAssurance: z.boolean().optional(),
+  /** (api-types 0.224.0, DES-STANDIN-001 §4) A PERSON's consent to stand-in checks for this job: the answer to a
+   *  `409 stand_in_choice` (its `retryWith`). A worker's bearer gets 403; never with `reducedAssurance`. */
+  standIns: z.literal(true).optional(),
   /** (api-types 0.149.0, program DES-POWER-MODE) Power mode for this launch. Omitted: the daemon's
    *  `powerModeDefault` setting (on when unset). Applies to a repo-scoped plan or preset launch only. */
   power: z.boolean().optional(),
@@ -1009,6 +1017,9 @@ export const LaunchSchema = z.strictObject({
 }).refine((b) => b.documents === undefined || b.documents.length === 0 || b.chatId !== undefined, {
   path: ['documents'],
   error: 'documents are chat tokens: send the chatId they were named in',
+}).refine((b) => b.standIns !== true || b.reducedAssurance !== true, {
+  path: ['standIns'],
+  error: 'standIns and reducedAssurance are mutually exclusive: stand-in checks are labelled checks, reduced assurance skips them',
 }).refine((b) => b.skipQeAcceptance === undefined || b.forceQeAcceptance !== true, {
   path: ['forceQeAcceptance'],
   error: 'skipQeAcceptance and forceQeAcceptance are mutually exclusive — skip it with a reason, or force it',
@@ -1111,16 +1122,22 @@ export const GateSchema = z.strictObject({
   amend: z.string().optional(),
   action: z
     .union([
-      z.enum(['approve', 'request_changes', 'reject', 'edit_plan', 'amend_intent', OPERATOR_JUDGMENT_ACTION, SKIP_QE_ACTION, SKIP_RULES_ACTION, ...ESCALATION_ACTIONS]),
+      z.enum(['approve', 'request_changes', 'reject', 'edit_plan', 'amend_intent', OPERATOR_JUDGMENT_ACTION, SKIP_QE_ACTION, SKIP_RULES_ACTION, USE_STAND_INS_ACTION, ...ESCALATION_ACTIONS]),
       z.string().regex(CONSENT_CHOICE_ACTION, 'a consent choice is `consent:<choice id>`'),
     ])
     .optional(),
   amendScope: z.enum(['cursor', 'creator']).optional(),
+  /** (api-types 0.224.0, DES-STANDIN-001 §3.10) With `action: 'use_stand_ins'`: this job only, or every job (also
+   *  saves the `standInReview: 'always'` setting). */
+  scope: z.enum(['job', 'always']).optional(),
   /** DES-TEAMING-002 T3 — approve a `plan_approval` gate WITH AN EDIT (`GateDecision.plan`). */
   plan: PlanSchema.optional(),
   /** api-types 0.44.0 — the gate this decision answers (its unit `ord`). A mismatch with the run's
    *  open gate is a 409 `gate_changed`: the decision was made on a gate that is no longer open. */
   ord: z.int().nonnegative().optional(),
+  /** (crew#1698, api-types 0.224.0) The OPENING of the gate this decision answers (`awaitingHuman.gateSeq`): a gate that
+   *  closed and re-opened since, at the same ord too, is a 409 `gate_changed`. */
+  gateSeq: z.int().positive().optional(),
   /** (api-types 0.192.0, DES-CATALOG-002 §4.6) At a `plan_approval` gate: the plan revision this answer was made on.
    *  Passed with `ord` into the engine's own serialized decision, which refuses a stale one (`gate_changed`). */
   planRev: z.int().nonnegative().optional(),
@@ -1143,6 +1160,12 @@ export const GateSchema = z.strictObject({
   (b) => (b.action === SKIP_RULES_ACTION) === (b.skipRules !== undefined),
   { path: ['skipRules'], error: 'skip_rules needs `skipRules`: [{id, reason}] for each rule you skip (unchecked, waived or disputed), each with your written reason; skipRules goes with skip_rules only' },
 ).refine(
+  (b) => (b.action === USE_STAND_INS_ACTION) === (b.scope !== undefined),
+  { path: ['scope'], error: "use_stand_ins needs `scope`: 'job' (this job) or 'always' (every job); scope goes with use_stand_ins only" },
+).refine(
+  (b) => b.action !== USE_STAND_INS_ACTION || (b.approve && b.amend === undefined && b.amendScope === undefined && b.plan === undefined),
+  { path: ['action'], error: 'use_stand_ins takes approve: true and no amend, amendScope or plan' },
+).refine(
   (b) => b.action !== SKIP_RULES_ACTION || (b.approve && b.amend === undefined && b.amendScope === undefined && b.plan === undefined),
   { path: ['action'], error: 'skip_rules takes approve: true and no amend, amendScope or plan — the reasons ride skipRules' },
 ).refine(
@@ -1153,8 +1176,8 @@ export const GateSchema = z.strictObject({
   { path: ['keepRules'], error: 'keepRules goes with a plain approve (no action other than approve, no plan) of a steering-author propose gate' },
 ).refine(
   (b) => b.action === undefined
-    || (b.action === 'approve' || b.action === 'edit_plan' || b.action === 'amend_intent' || b.action === OPERATOR_JUDGMENT_ACTION || b.action === SKIP_QE_ACTION || b.action === SKIP_RULES_ACTION || isEscalationAction(b.action)) === b.approve,
-  { path: ['action'], error: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, amend_intent, operator_judgment, skip_qe, skip_rules, extend, targeted, accept_partial, accept_suggestion, rejudge, retry_rules, retry_qe and consent:<id> require approve: true' },
+    || (b.action === 'approve' || b.action === 'edit_plan' || b.action === 'amend_intent' || b.action === OPERATOR_JUDGMENT_ACTION || b.action === SKIP_QE_ACTION || b.action === SKIP_RULES_ACTION || b.action === USE_STAND_INS_ACTION || isEscalationAction(b.action)) === b.approve,
+  { path: ['action'], error: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve, edit_plan, amend_intent, operator_judgment, skip_qe, skip_rules, extend, targeted, accept_partial, accept_suggestion, rejudge, retry_rules, retry_qe, use_stand_ins and consent:<id> require approve: true' },
 ).refine(
   // (operator ruling 2026-10-21) The override's rationale IS its record: a blank one is a 400 here,
   // before the engine is asked.
@@ -1232,12 +1255,19 @@ export function injectWords(message: string): string {
   return message.slice(0, end);
 }
 
-export const ResumeSchema = z.strictObject({ ord: z.int().nonnegative().optional() });
+/** (crew#1698, api-types 0.224.0) `gateSeq`: which OPENING of the gate an answer was made on (`awaitingHuman.gateSeq`,
+ *  `GET /runs/:id/gate`'s `gateSeq`). A gate that closed and re-opened since, at the same ord too, is another opening:
+ *  409 `gate_changed`. Optional; the ord check stands as before without it. */
+const GateSeqSchema = z.int().positive().optional();
+
+export const ResumeSchema = z.strictObject({ ord: z.int().nonnegative().optional(), gateSeq: GateSeqSchema });
 
 // The manual reassign lever (crew#442): `cli` omitted lets the engine's council re-pick, the
 // same shape the automatic stall-watchdog escalation uses for an unknown failover target.
 const ReassignSchema = z.strictObject({
   ord: z.int().nonnegative().optional(),
+  /** (crew#1698) The gate opening a gated reassign answers (see `ResumeSchema`). */
+  gateSeq: GateSeqSchema,
   cli: z.string().min(1).optional(),
   /** crew#1153: an operator note that rides a GATED reassign as the approve's amendment. Trimmed in
    *  the route; blank counts as absent. The byte cap (on the raw note) is checked there too so the 400 names the limit. */
@@ -2671,6 +2701,9 @@ export function registerRoutes(
       // assurance contract); a one-CLI full-assurance launch answers `assuranceNotice`. A route set
       // that cannot probe the addon reports no capability — never an invented one.
       reducedAssurance: typeof adapter.engineCapabilities === 'function' && addonSupportsReducedAssurance(),
+      // (DES-STANDIN-001 §4, K2a) `POST /runs` asks the stand-in question (409 `stand_in_choice`), takes
+      // `standIns: true`, the `standInReview` setting and the `use_stand_ins` gate answer: the linked engine carries them.
+      standIns: typeof adapter.supportsStandIns === 'function' && adapter.supportsStandIns(),
       // QE-IN-APP-WORKFLOWS: `LaunchRunBody.skipQeAcceptance` / `forceQeAcceptance` reach an addon
       // that carries the QE decision; never an invented capability.
       qeAcceptanceOverride: typeof adapter.engineCapabilities === 'function' && addonSupportsQeOverride(),
@@ -3699,6 +3732,11 @@ export function registerRoutes(
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
     const b = { ...parsed.data };
+    // (DES-STANDIN-001 §3.8) Consent to stand-ins is a person's: a worker's or agent's bearer may only inherit the
+    // consent a person already gave (the `standInReview` setting), never send its own.
+    if (b.standIns === true && !isHumanOperator(req.actor)) {
+      return reply.code(403).send({ code: 'human_operator_only', error: `only a person can consent to stand-in checks (standIns); you are ${req.actor.kind}/${req.actor.trust}` });
+    }
     // DES-CATALOG-002 §4.4: the words as the person gave them, before crew's framing line (the envelope's `words`, which
     // a reshape relaunches from), with any block an earlier launch appended taken out.
     const envelopeWords = stripLinkedIssues(stripRulesBrief(b.problem));
@@ -3927,6 +3965,40 @@ export function registerRoutes(
       input.problem = withBriefLines(input.problem, lines);
       if (ex.baseRef !== undefined) input.baseRef = ex.baseRef;
       reviewChange = { target: ex.target, provenance: ex.provenance, runs: ex.runs, excluded, headSha: ex.headSha };
+    }
+    // (DES-STANDIN-001 §4, K2a) THE STAND-IN CHOICE, before anything is written: the engine's preflight says which
+    // independent roles this launch's roster is short of, on the shape it would take. Short with no consent → the 409
+    // the launcher's caller draws as the choice; with consent (the person's `standIns`, or the `standInReview:
+    // 'always'` setting) the run launches stand-in-aware and fills a short role with a labelled stand-in. A review
+    // (review-change, the prepared reviews, run-evals), a demo and a reduced launch keep today's path (K2a scope).
+    const standInEligible = b.reducedAssurance !== true && reviewChange === undefined
+      && !(b.workflow !== undefined && (reviewPrepared(b.workflow) || b.workflow === RUN_EVALS_WORKFLOW || DEMO_PRESETS.includes(b.workflow)));
+    const standInsSupported = typeof adapter.supportsStandIns === 'function' && adapter.supportsStandIns();
+    if (b.standIns === true && !standInEligible) {
+      return reply.code(400).send({ code: 'stand_ins_refused', error: 'this launch does not take stand-ins (standIns): a review, a demo or a reduced launch keeps its own checks' });
+    }
+    if (b.standIns === true && !standInsSupported) {
+      return reply.code(501).send({ error: 'stand-in checks need a wicked-core-ts that carries them (Core.independencePreflight and grantStandIns); upgrade the engine' });
+    }
+    if (standInEligible && standInsSupported) {
+      const setting = await Promise.resolve().then(() => adapter.getSettings()).then((s) => s.standInReview).catch(() => undefined);
+      const consent = consentFor(b.standIns === true, setting, `${req.actor.id} (${req.actor.kind})`);
+      if (consent !== null) {
+        input.standInAware = true;
+        input.standIn = consent;
+      } else if (ctx.standInChoice === true) {
+        let preflight: ReturnType<typeof readPreflight>;
+        try {
+          preflight = readPreflight(await adapter.independencePreflight(input));
+        } catch (err) {
+          // The engine refuses the shape as the launch would: the launch's own refusal, before anything is written.
+          return reply.code(400).send({ error: `the launch was refused: ${message(err)}` });
+        }
+        const refusal = preflight === null ? null : preflightRefusal(preflight);
+        if (refusal !== null) return reply.code(409).send(refusal);
+        // Not short: launched aware, so a seat lost mid-run holds at the stand-in gate instead of failing.
+        if (preflight !== null) input.standInAware = true;
+      }
     }
     // DES-L9 / crew#550 — REVISION: `revisesPr` names an OPEN same-repository pull request whose
     // head branch becomes the run's base (`baseRef`, crew-internal → the engine's
@@ -4377,7 +4449,10 @@ export function registerRoutes(
       const skillsWarning = skillsAhead === null ? {} : { skillsWarning: { kind: skillsAhead.kind, severity: skillsAhead.severity, message: skillsAhead.message } };
       // wicked-core#850: a full-assurance run on a one-CLI roster will wait at a gate for a seat that
       // can evaluate or judge it; the answer names the explicit opt-in to relaunch with.
-      const notice = launchAssuranceNotice({ runId, reducedAssurance: b.reducedAssurance, coverage: readJudgeCoverage(engineRosterJson(input.clisJson), input.repoRef !== undefined, runtime.judgeCoverage ?? CoreAdapter.judgeCoverage) });
+      // (DES-STANDIN-001 §7.3) A stand-in-aware run asked its question before launching: no reduced-assurance offer.
+      const notice = input.standInAware === true
+        ? null
+        : launchAssuranceNotice({ runId, reducedAssurance: b.reducedAssurance, coverage: readJudgeCoverage(engineRosterJson(input.clisJson), input.repoRef !== undefined, runtime.judgeCoverage ?? CoreAdapter.judgeCoverage) });
       const assuranceNotice = notice === null ? {} : { assuranceNotice: notice };
       // (program DES-POWER-MODE) Whether the run is in power mode, and why not when it was wanted.
       const power = { ...(input.power === true ? { power: true } : {}), ...(powerNotice !== null ? { powerNotice } : {}), ...(humanConfirmNotice !== null ? { humanConfirmNotice } : {}) };
@@ -4462,13 +4537,14 @@ export function registerRoutes(
           // wicked-core#461 — see the catch below); 400: zod reject or a retryOf naming no
           // existing run; 422: the base-skill intake refusal (`base_skill_refused`, crew#554);
           // 501: campaignId attach on an engine addon without the campaign bindings ("upgrade
-          // the engine").
-          statusCodes: [201, 400, 404, 409, 422, 501, 503],
+          // the engine"); 403: `standIns` from a worker's bearer; 409 `stand_in_choice` / `no_usable_helper`: the
+          // stand-in question (DES-STANDIN-001 §4).
+          statusCodes: [201, 400, 403, 404, 409, 422, 501, 503],
         },
       },
     },
     async (req, reply) => {
-      const launch = () => launchRun(req.body, { actor: actorOf(req), log: req.log });
+      const launch = () => launchRun(req.body, { actor: actorOf(req), log: req.log, standInChoice: true });
       const parsed = LaunchSchema.safeParse(req.body);
       const out = parsed.success && parsed.data.chatId !== undefined
         ? await chatProposals.admitChat(parsed.data.chatId, launch)
@@ -7433,6 +7509,11 @@ export function registerRoutes(
         ...(refusal !== undefined ? { refusal } : {}),
         ...(gateKind !== undefined ? { gateKind } : {}),
         ...(frame !== undefined ? offeredChoices(frame) : {}),
+        // (crew#1698) The opening the record shows: the row's `gate_seq`, else the frame's.
+        ...((): { gateSeq?: number } => {
+          const seq = gateSeqOf(durableGate['gate_seq']) ?? gateSeqOf(frame?.['gateSeq']);
+          return seq !== undefined ? { gateSeq: seq } : {};
+        })(),
       };
     }
     const events = await adapter.runEvents(id);
@@ -7481,9 +7562,9 @@ export function registerRoutes(
   async function gateForDecision(
     run: SessionView,
     namedOrd: number | undefined,
-    opts: { declining?: boolean; versioned?: boolean } = {},
-  ): Promise<{ refusal: { code: number; body: unknown } } | { ord: number | undefined; gated: WorkUnit | undefined; prompt: string | undefined; gateKind: string | undefined }> {
-    const decided = await gateOfRecord(run, namedOrd);
+    opts: { declining?: boolean; versioned?: boolean; gateSeq?: number } = {},
+  ): Promise<{ refusal: { code: number; body: unknown } } | { ord: number | undefined; gated: WorkUnit | undefined; prompt: string | undefined; gateKind: string | undefined; gateSeq?: number }> {
+    const decided = await gateOfRecord(run, namedOrd, opts.gateSeq);
     // DES-CATALOG-002 §4.6 (codex r1): a plan held for a run launched from a chat proposal is approved only by an
     // answer bound to its version (`POST /runs/:id/gate` with `planRev`); every other approving path (a gated resume or
     // reassign, a plan edit at the gate, a standing order) is refused there. Declining stays open.
@@ -7508,7 +7589,8 @@ export function registerRoutes(
   async function gateOfRecord(
     run: SessionView,
     namedOrd: number | undefined,
-  ): Promise<{ refusal: { code: number; body: unknown } } | { ord: number | undefined; gated: WorkUnit | undefined; prompt: string | undefined; gateKind: string | undefined }> {
+    namedSeq?: number,
+  ): Promise<{ refusal: { code: number; body: unknown } } | { ord: number | undefined; gated: WorkUnit | undefined; prompt: string | undefined; gateKind: string | undefined; gateSeq?: number }> {
     const id = run.session.id;
     const unitAt = (ord: number): WorkUnit | undefined => (run.units ?? []).find((u) => u.ord === ord);
     const unknown = (why: string) => ({ refusal: { code: 409, body: { error: `Gate unknown: ${why} — refresh and decide again.`, code: 'gate_unknown' } } });
@@ -7527,16 +7609,38 @@ export function registerRoutes(
         } } };
       }
       const kind = recorded.row['gate_kind'];
-      return { ord: recorded.ord, gated: unitAt(recorded.ord), prompt: recorded.row.prompt, gateKind: typeof kind === 'string' && kind !== '' ? kind : undefined };
+      // (core#1808) Which opening of the gate the record shows: a `use_stand_ins` answer names it to the engine.
+      const seq = recorded.row['gate_seq'];
+      const openSeq = typeof seq === 'number' && Number.isInteger(seq) && seq > 0 ? seq : undefined;
+      // (crew#1698) An answer naming another opening of this gate (closed and re-opened since, same ord too).
+      if (namedSeq !== undefined && namedSeq !== openSeq) {
+        return openSeq === undefined
+          ? unknown(`this decision names opening ${namedSeq} of the gate before unit ${recorded.ord}, but the engine's record does not number its openings`)
+          : { refusal: { code: 409, body: {
+            error: `Gate changed: this decision was made on an earlier opening of the gate before unit ${recorded.ord} (opening ${namedSeq}; open now: ${openSeq}). Read the open gate before deciding.`,
+            code: 'gate_changed',
+            openOrd: recorded.ord,
+            openGateSeq: openSeq,
+          } } };
+      }
+      return {
+        ord: recorded.ord,
+        gated: unitAt(recorded.ord),
+        prompt: recorded.row.prompt,
+        gateKind: typeof kind === 'string' && kind !== '' ? kind : undefined,
+        ...(openSeq !== undefined ? { gateSeq: openSeq } : {}),
+      };
     }
-    if (namedOrd !== undefined) {
+    if (namedOrd !== undefined || namedSeq !== undefined) {
       return unknown(
-        `this decision names the gate before unit ${namedOrd}, but the engine's record `
+        `this decision names the gate${namedOrd !== undefined ? ` before unit ${namedOrd}` : ` opening ${namedSeq ?? ''}`}, but the engine's record `
         + `${recorded === null ? 'keeps no durable gate row' : 'shows no open gate'} for this run, so the daemon cannot confirm the named one`,
       );
     }
     const open = await resolveOpenGate(id).catch(() => null);
-    if (isOpenGate(open)) return { ord: open.ord, gated: unitAt(open.ord), prompt: open.prompt, gateKind: open.gateKind };
+    if (isOpenGate(open)) {
+      return { ord: open.ord, gated: unitAt(open.ord), prompt: open.prompt, gateKind: open.gateKind, ...(open.gateSeq !== undefined ? { gateSeq: open.gateSeq } : {}) };
+    }
     const gated = [...(run.units ?? [])].sort((a, b) => a.ord - b.ord)[run.session.unit_ix];
     return { ord: undefined, gated, prompt: undefined, gateKind: undefined };
   }
@@ -7672,6 +7776,17 @@ export function registerRoutes(
         },
       };
     }
+    // (DES-STANDIN-001 §3.8) Consent to stand-ins is a person's: a seat's token or a standing order is refused.
+    if (parsed.data.action === USE_STAND_INS_ACTION && !isHumanOperator(actor)) {
+      audit.record('gate.stand_ins_refused', actor, {
+        runId: id,
+        detail: { reason: 'human_operator_only', ...(parsed.data.ord !== undefined ? { ord: parsed.data.ord } : {}) },
+      });
+      return {
+        code: 403,
+        body: { error: `only a person can consent to stand-in checks (you are ${actor.kind}/${actor.trust})`, code: 'human_operator_only' },
+      };
+    }
     if (parsed.data.action === SKIP_QE_ACTION && !isHumanOperator(actor)) {
       audit.record('gate.skip_qe_refused', actor, {
         runId: id,
@@ -7694,10 +7809,13 @@ export function registerRoutes(
       // Decision integrity (api-types 0.44.0; crew#1083 rounds 3–5): the gate this decision answers
       // is the RECORD's — read first thing inside the lock, so the gated unit and its delivery
       // checks below are the ones the record confirms ({@link gateForDecision}).
-      const decided = await gateForDecision(run, parsed.data.ord, { declining: !parsed.data.approve, versioned: true });
+      const decided = await gateForDecision(run, parsed.data.ord, { declining: !parsed.data.approve, versioned: true, ...(parsed.data.gateSeq !== undefined ? { gateSeq: parsed.data.gateSeq } : {}) });
       if ('refusal' in decided) {
         const r = decided.refusal.body as { code?: unknown } | undefined;
         return r?.code === 'gate_changed' ? { code: decided.refusal.code, body: { ...(await currentPlanOf(id, false)), ...(r as object) } } : decided.refusal;
+      }
+      if (parsed.data.action === USE_STAND_INS_ACTION) {
+        return useStandInsAtGate(id, decided, parsed.data.scope ?? 'job', actor, parsed.data.input, extraDetail);
       }
       // (wicked-core#1683) A noted Land that skips open steering rules is the same human-only
       // decision as skip_rules. Read its rules under the decision lock and keep them for the audit.
@@ -7800,8 +7918,8 @@ export function registerRoutes(
         // gate ("judged by operator").
         adapter.recordGateActor?.(id, `${actor.id} (${actor.kind})`);
         const expect = parsed.data.planRev !== undefined
-          ? { ...expectFor(decided.ord), planRev: parsed.data.planRev }
-          : expectFor(decided.ord);
+          ? { ...expectFor(decided.ord, decided.gateSeq), planRev: parsed.data.planRev }
+          : expectFor(decided.ord, decided.gateSeq);
         const confirmArgs: Parameters<CoreAdapter['confirmGate']> = [
           id,
           parsed.data.approve,
@@ -7901,6 +8019,72 @@ export function registerRoutes(
     });
   }
 
+  /**
+   * (DES-STANDIN-001 §3.10, crew#1856) `{approve: true, action: 'use_stand_ins', scope}` at a `stand_in_needed` gate:
+   * the engine's `grantStandIns` with the open gate's opening (`gateSeq`, from the record) and the person as `actor`,
+   * so a gate that closed and re-opened since is refused `gate_changed`. `always` also saves `standInReview:
+   * 'always'` (after the grant took: a refused grant changes nothing). Runs inside {@link decideExclusively}.
+   */
+  async function useStandInsAtGate(
+    id: string,
+    decided: { ord: number | undefined; gateKind: string | undefined; gateSeq?: number },
+    scope: 'job' | 'always',
+    actor: import('../core/types.js').Actor,
+    input: 'voice' | undefined,
+    extraDetail: Record<string, unknown>,
+  ): Promise<{ code: number; body: unknown }> {
+    if (decided.gateKind !== STAND_IN_NEEDED_GATE) {
+      return { code: 409, body: {
+        code: 'gate_changed',
+        error: `Gate changed: use_stand_ins answers a stand-in gate (stand_in_needed), but the open gate is ${decided.gateKind ?? 'not one'}. Read the gate again.`,
+        ...(decided.ord !== undefined ? { openOrd: decided.ord } : {}),
+      } };
+    }
+    if (decided.gateSeq === undefined) {
+      return { code: 409, body: { code: 'gate_unknown', error: 'Gate unknown: the engine\'s record does not say which opening of this gate is open, so stand-ins cannot be granted for it — refresh and decide again.' } };
+    }
+    if (typeof adapter.grantStandIns !== 'function' || typeof adapter.supportsStandIns !== 'function' || !adapter.supportsStandIns()) {
+      return { code: 501, body: { error: 'Using stand-ins at a gate needs a wicked-core-ts with Core.grantStandIns; upgrade the engine' } };
+    }
+    const who = `${actor.id} (${actor.kind})`;
+    let status: string;
+    try {
+      status = await adapter.grantStandIns(id, scope, decided.gateSeq, who, decided.ord);
+    } catch (err) {
+      if (err instanceof MaintenanceDrainError) return { code: 503, body: maintenanceDrainBody(err) };
+      const changed = await gateChangedRefusal(id, err);
+      if (changed !== null) return changed;
+      return { code: 409, body: { error: message(err) } };
+    }
+    let setting: 'saved' | 'failed' | undefined;
+    if (scope === 'always') {
+      try {
+        await adapter.updateSettings({ standInReview: 'always' });
+        audit.record('settings.updated', actor, { detail: { changed: ['standInReview'], via: 'gate', runId: id } });
+        setting = 'saved';
+      } catch (err) {
+        // The grant took (this run goes on with stand-ins); only the standing choice failed to save, and the answer says so.
+        setting = 'failed';
+        audit.record('settings.update_failed', actor, { detail: { key: 'standInReview', via: 'gate', runId: id, error: message(err) } });
+      }
+    }
+    audit.record('gate.decided', actor, {
+      runId: id,
+      detail: {
+        approve: true,
+        choice: USE_STAND_INS_ACTION,
+        action: USE_STAND_INS_ACTION,
+        scope,
+        gateSeq: decided.gateSeq,
+        ...(decided.ord !== undefined ? { ord: decided.ord } : {}),
+        ...(input !== undefined ? { input } : {}),
+        ...extraDetail,
+        status,
+      },
+    });
+    return { code: 200, body: { status, ...(setting !== undefined ? { standInReview: setting } : {}) } };
+  }
+
   /** (DES-CATALOG-002 §4.6) The plan a gate holds now, for a `gate_changed` answer: its ord and revision, best-effort. */
   async function currentPlanOf(runId: string, readGate = true): Promise<{ openOrd?: number; planRev?: number }> {
     try {
@@ -7918,8 +8102,12 @@ export function registerRoutes(
     return typeof adapter.supportsPlanSendBack === 'function' && adapter.supportsPlanSendBack();
   }
 
-  function expectFor(decidedOrd: number | undefined): { ord: number } | undefined {
-    return decidedOrd !== undefined && adapterSupportsPlanSendBack() ? { ord: decidedOrd } : undefined;
+  /** What a confirm expects the open gate to be: its ord and (crew#1698, core#1808) the opening the record showed, which
+   *  the engine compares inside its serialized decision, so a gate that re-opened after this read still loses. */
+  function expectFor(decidedOrd: number | undefined, gateSeq?: number): { ord: number; gateSeq?: number } | undefined {
+    return decidedOrd !== undefined && adapterSupportsPlanSendBack()
+      ? { ord: decidedOrd, ...(gateSeq !== undefined ? { gateSeq } : {}) }
+      : undefined;
   }
 
   async function gateChangedRefusal(id: string, err: unknown): Promise<{ code: number; body: unknown } | null> {
@@ -8128,7 +8316,7 @@ export function registerRoutes(
       // A gated resume IS an approve, so it is judged by the record like every decision, passes the
       // same delivery checks (freeze, EX-03) — no side door around the deliver gate — and answers
       // with the gated unit's receipt.
-      const decided = gated ? await gateForDecision(run, parsed.data.ord) : undefined;
+      const decided = gated ? await gateForDecision(run, parsed.data.ord, parsed.data.gateSeq !== undefined ? { gateSeq: parsed.data.gateSeq } : {}) : undefined;
       if (decided !== undefined && 'refusal' in decided) return reply.code(decided.refusal.code).send(decided.refusal.body);
       const steeringPropose =
         gated && isSteeringAuthorRun(run);
@@ -8144,7 +8332,7 @@ export function registerRoutes(
         const who = actorOf(req);
         adapter.recordGateActor?.(id, `${who.id} (${who.kind})`);
       }
-      const status = gated ? await adapter.confirmGate(id, true, undefined, undefined, undefined, undefined, expectFor(decided?.ord)) : await adapter.resumeRun(id);
+      const status = gated ? await adapter.confirmGate(id, true, undefined, undefined, undefined, undefined, expectFor(decided?.ord, decided !== undefined && !('refusal' in decided) ? decided.gateSeq : undefined)) : await adapter.resumeRun(id);
       // A resume of a gated run IS a gate approval — audit it as one, so the
       // "who approved" trail has no side door (task #88).
       audit.record(gated ? 'gate.decided' : 'run.resumed', actorOf(req), {
@@ -8581,7 +8769,7 @@ export function registerRoutes(
     // A gated reassign APPROVES the gate, so it is judged by the record like every decision and passes
     // the same delivery checks (freeze, wicked-core#850 EX-03) when the gate holds the deliver unit
     // (codex r1 on the EX-03 PR).
-    const decided = gated ? await gateForDecision(run, parsed.data.ord) : undefined;
+    const decided = gated ? await gateForDecision(run, parsed.data.ord, parsed.data.gateSeq !== undefined ? { gateSeq: parsed.data.gateSeq } : {}) : undefined;
     if (decided !== undefined && 'refusal' in decided) return reply.code(decided.refusal.code).send(decided.refusal.body);
     if (decided !== undefined) {
       const gatedUnit = decided.gated;
@@ -8626,7 +8814,7 @@ export function registerRoutes(
       if (typeof adapter.confirmGate !== 'function') return; // refused above for a gated run
       const who = actorOf(req);
       adapter.recordGateActor?.(id, `${who.id} (${who.kind})`);
-      const status = await adapter.confirmGate(id, true, note, undefined, undefined, undefined, expectFor(decided?.ord));
+      const status = await adapter.confirmGate(id, true, note, undefined, undefined, undefined, expectFor(decided?.ord, decided !== undefined && !('refusal' in decided) ? decided.gateSeq : undefined));
       noteRode = note !== undefined;
       audit.record('gate.decided', actorOf(req), {
         runId: id,
@@ -10487,6 +10675,17 @@ export function registerRoutes(
         return reply.code(403).send({ error: 'Only a person can change the power mode default (powerModeDefault)' });
       }
     }
+    // standInReview (DES-STANDIN-001 §4, K2a): 'ask' | 'always'. 'always' is a person's standing consent to stand-in
+    // checks on every later job (labelled everywhere, never independent), so a typo is a 400 and only a PERSON may
+    // change it (a worker's bearer gets 403): a worker may only inherit the consent a person gave.
+    if (Object.hasOwn(patch, 'standInReview')) {
+      if (!isStandInReview(patch.standInReview)) {
+        return reply.code(400).send({ error: "standInReview must be 'ask' or 'always'" });
+      }
+      if (!isHumanOperator(actorOf(req))) {
+        return reply.code(403).send({ error: 'Only a person can change stand-in review (standInReview)' });
+      }
+    }
     // newWorkSeats (F1/F2): which seats new chats and jobs are drawn from (`core/job-seats.ts`). A list of seat keys,
     // or null for the default rule; a person's choice only (a worker's bearer gets 403).
     if (Object.hasOwn(patch, 'newWorkSeats')) {
@@ -10601,6 +10800,7 @@ export function registerRoutes(
       'deliverDefault',
       'qeAcceptance',
       'powerModeDefault',
+      'standInReview',
       'newWorkSeats',
       'onboardingAutoCapture',
       'deliverIdentityLogin',
