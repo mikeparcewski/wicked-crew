@@ -546,13 +546,14 @@ describe('the run and its plan', () => {
     await refusal('compose_unverified', /^crew cannot confirm this is the compose as it was launched \(the engine did not record the draft step's instructions\); compose again to publish$/);
   });
 
-  it('(7) a real gate edit the engine accepted but did not apply to the units (same ids, same instructions) publishes what ran', async () => {
-    // tests/fixtures/product/compose-run-view-edited.json: the held plan was edited at its gate through confirmGate and the
-    // engine accepted it (plan rev 2 -> 3), yet the distributed draft and review units kept the launched catalog and
-    // instructions, and the draft ran from them. The check reads what ran, so this run is the compose as launched.
+  it('(7) a real gate edit, which reaches the draft unit since wicked-core#1929, is refused in plain words', async () => {
+    // tests/fixtures/product/compose-run-view-edited.json: the held plan was edited at its gate through confirmGate, the
+    // engine accepted it (plan rev 2 -> 3), and the draft unit ran from the edited instructions (core main, #1929).
     const edited = JSON.parse(readFileSync(join(HERE, 'fixtures', 'product', 'compose-run-view-edited.json'), 'utf8')) as typeof FIX;
     const runId = edited.view.session.id;
     expect((edited.view.session as unknown as { team_plan: { accepted: { rev: number; by: string } } }).team_plan.accepted).toMatchObject({ rev: 3, by: 'human' });
+    const draftUnit = edited.view.units.find((u) => u.id === `${runId}:draft`)!;
+    expect(draftUnit.instructions).toBe(`${edited.draft}\n\nAlso add an epic for billing.`);
     view = edited.view;
     index = new RunTimingIndex();
     index.noteLaunchFacts(runId, { compose: composeFactsOf(PID, REFS, 'stories', edited.draft, edited.review) });
@@ -561,12 +562,12 @@ describe('the run and its plan', () => {
     deps.runView = async (id) => (id === runId ? view : undefined);
     deps.workOutput = async (id) => (id === `${runId}:draft` ? output : null);
     try {
-      const r = await app.inject({ method: 'POST', url: `/api/v1/projects/${PID}/product/publish`, payload: { runId, repo: 'owner/app' } });
-      expect(r.statusCode, r.body).toBe(200);
-      // Had the edit reached the draft unit, it is refused in plain words.
-      view.units.find((u) => u.id === `${runId}:draft`)!.instructions = `${edited.draft}\n\nAlso add an epic for billing.`;
       const e = await app.inject({ method: 'POST', url: `/api/v1/projects/${PID}/product/publish`, payload: { runId, repo: 'owner/app' } });
       expect(e.json()).toMatchObject({ code: 'compose_unverified', error: "this plan was edited at its gate; publishing an edited plan isn't supported yet, compose again to publish" });
+      // The same run, had its units run the launched instructions, is the compose and publishes.
+      draftUnit.instructions = edited.draft;
+      const r = await app.inject({ method: 'POST', url: `/api/v1/projects/${PID}/product/publish`, payload: { runId, repo: 'owner/app' } });
+      expect(r.statusCode, r.body).toBe(200);
     } finally {
       deps.runView = before;
       deps.workOutput = beforeOut;
