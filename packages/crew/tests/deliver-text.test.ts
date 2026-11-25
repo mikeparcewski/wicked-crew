@@ -8,6 +8,7 @@
 // composer (`core/deliver-text.ts`) on that exact intent and on a run view shaped like the
 // persisted record of that run, plus the launch-time fallback and the framing both carriers share.
 
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
 import { setCrewStateHome } from '../src/projects/state-home.js';
@@ -1204,6 +1205,34 @@ describe('the run\'s assurance labels (crew#1186)', () => {
     // A skipped decision keeps its own label even beside a satisfied check.
     const skipped = withAssurance({ mode: 'full', required: ['qe_acceptance'], qe: { ...qe, status: 'skipped', basis: 'operator', reason: skipReason } });
     expect(composeDeliverText(factsFromRun(skipped, null, { qeAcceptance: pass })).body).toContain('- **QE acceptance skipped by operator**');
+  });
+
+  // (DES-STANDIN-001 §6, T-K6) The stand-in line, from the engine's own serialized session: `stand-in-session.json` is
+  // the AgentSession wicked-core persisted for a one-seat, consented, stand-in-aware run (its test
+  // `tests/stand_in_review.rs` `a_one_seat_aware_run_with_consent_reviews_on_a_stand_in`), copied verbatim.
+  it('says the run was checked by stand-ins, why, and who stood in, never as an independent review (T-K6)', () => {
+    const engine = JSON.parse(readFileSync(new URL('./fixtures/stand-in-session.json', import.meta.url), 'utf8')) as { assurance: Record<string, unknown> };
+    const body = composeDeliverText(factsFromRun(withAssurance(engine.assurance), null)).body;
+    expect(body).toContain(
+      "- **Checked by stand-ins**: only Claude Code was signed in. A stand-in is a fresh session of the same tool that sees "
+      + "the work but none of the builder's reasoning; it is not an independent review. Stood in: reviewer (Claude Code).",
+    );
+    expect(body).not.toMatch(/independently/i);
+    // Mixed (a real helper filled another role) and a stand-in that did not answer.
+    const mixed = {
+      ...engine.assurance,
+      roles: [{ role: 'judge', filled: 'real', state: 'answered', seat: 'codex', standIn: null, ord: 2, attempt: 0, subject: null }],
+      standIns: [
+        ...(engine.assurance['standIns'] as unknown[]),
+        { ...(engine.assurance['standIns'] as Array<Record<string, unknown>>)[0], key: 'claude~2', slot: 2, role: 'council', state: 'failed' },
+      ],
+    };
+    const mixedBody = composeDeliverText(factsFromRun(withAssurance(mixed), null)).body;
+    expect(mixedBody).toContain('- **Checked partly by stand-ins**: only Claude Code was signed in.');
+    expect(mixedBody).toContain('Stood in: reviewer (Claude Code), council member (Claude Code, did not answer).');
+    // A run no stand-in took part in says nothing about stand-ins.
+    const none = composeDeliverText(factsFromRun(withAssurance({ ...engine.assurance, standIns: [] }), null)).body;
+    expect(none).not.toContain('stand-in');
   });
 
   it('leaves the section out when the engine recorded no assurance contract', () => {

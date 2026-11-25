@@ -1,0 +1,113 @@
+// (crew#1698, core#1808) A PER-OPENING GATE ID: `GET /runs/:id/gate` and the `awaitingHuman` frame carry `gateSeq`;
+// `POST /runs/:id/gate`, `/resume` and `/reassign` accept it and answer 409 `gate_changed` when the gate closed and
+// re-opened since (the same ord too), and every confirm binds the engine to the opening the record shows.
+import Fastify from 'fastify';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { registerRoutes } from '../src/api/routes.js';
+import { GateCache } from '../src/api/gate-cache.js';
+import { ElicitationCache } from '../src/api/elicitation-cache.js';
+import type { CoreAdapter } from '../src/core/adapter.js';
+import type { CoreEvent } from '../src/core/types.js';
+import type { AuditLog } from '../src/api/audit.js';
+import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
+
+const apps: Array<ReturnType<typeof Fastify>> = [];
+afterEach(async () => { await Promise.all(apps.splice(0).map((app) => app.close())); });
+
+/** The engine's durable gate row as wicked-core writes it (`src/interaction.rs` `InteractionRequest`: serde snake_case,
+ *  `gate_seq` the opening, `0` on a row written before the field). */
+const row = (gateSeq: number | null) => ({ kind: 'gate', ord: 4, gate_kind: 'escalation', prompt: 'Retry the review?', created_at: 1, ...(gateSeq !== null ? { gate_seq: gateSeq } : {}) });
+
+/** `null`: a row with no `gate_seq` at all (an engine before core#1808). */
+function harness(gateSeq: number | null = 2) {
+  const run = { session: { id: 'r', status: 'awaiting_human', unit_ix: 0, clis: ['claude', 'codex'], workflow_id: 'bug' },
+    units: [{ id: 'u', ord: 4, phase_ref: 'review', status: 'rejected', assigned_cli: 'claude' }] };
+  const adapter = {
+    runView: vi.fn(async () => run), sessionsDetail: vi.fn(async () => [run]),
+    listRepos: vi.fn(async () => []), listWorkflows: () => BUILTIN_WORKFLOWS,
+    interactionRequests: vi.fn(async () => [row(gateSeq)]),
+    runEvents: vi.fn(async () => [] as CoreEvent[]),
+    supportsPlanSendBack: () => true,
+    confirmGate: vi.fn<(...args: unknown[]) => Promise<string>>(async () => 'executing'),
+    reassignUnit: vi.fn(async () => undefined),
+  };
+  const app = Fastify({ logger: false });
+  apps.push(app);
+  registerRoutes(app, adapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined,
+    { audit: { record: vi.fn() } as unknown as AuditLog, authMode: 'off' });
+  return { app, adapter };
+}
+
+const answers = [
+  { path: 'gate', body: { approve: true } },
+  { path: 'resume', body: {} },
+  { path: 'reassign', body: {} },
+];
+
+describe('the per-opening gate id (crew#1698)', () => {
+  it('GET /runs/:id/gate serves the opening from the durable row', async () => {
+    const { app } = harness(2);
+    const res = await app.inject({ method: 'GET', url: '/api/v1/runs/r/gate' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ ord: 4, gateSeq: 2 });
+  });
+
+  it('a row written before the field (gate_seq 0) serves no opening', async () => {
+    const { app } = harness(0);
+    const res = await app.inject({ method: 'GET', url: '/api/v1/runs/r/gate' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).not.toHaveProperty('gateSeq');
+  });
+
+  it('the live frame\'s gateSeq rides the cached gate', () => {
+    const cache = new GateCache();
+    cache.ingest({ type: 'awaitingHuman', session: 'r', ord: 4, prompt: 'p', gateKind: 'escalation', gateSeq: 5 } as CoreEvent);
+    expect(cache.get('r')).toMatchObject({ ord: 4, gateSeq: 5 });
+    cache.ingest({ type: 'awaitingHuman', session: 'q', ord: 1, prompt: 'p', gateSeq: 0 } as CoreEvent);
+    expect(cache.get('q')).not.toHaveProperty('gateSeq');
+  });
+
+  for (const { path, body } of answers) {
+    it(`/${path}: an answer naming an earlier opening of the same ord is 409 gate_changed, nothing confirmed`, async () => {
+      const { app, adapter } = harness(2);
+      const res = await app.inject({ method: 'POST', url: `/api/v1/runs/r/${path}`, payload: { ...body, ord: 4, gateSeq: 1 } });
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json()).toMatchObject({ code: 'gate_changed', openOrd: 4, openGateSeq: 2 });
+      expect(adapter.confirmGate).not.toHaveBeenCalled();
+      expect(adapter.reassignUnit).not.toHaveBeenCalled();
+    });
+
+    it(`/${path}: the open opening, or none named, confirms bound to the opening the record shows`, async () => {
+      for (const named of [{ gateSeq: 2 }, {}]) {
+        const { app, adapter } = harness(2);
+        const res = await app.inject({ method: 'POST', url: `/api/v1/runs/r/${path}`, payload: { ...body, ...named } });
+        expect(res.statusCode, res.body).toBe(200);
+        expect(adapter.confirmGate.mock.calls[0]?.[6]).toEqual({ ord: 4, gateSeq: 2 });
+      }
+    });
+
+    it(`/${path}: naming an opening the record does not number is 409 gate_unknown`, async () => {
+      const { app, adapter } = harness(null);
+      const res = await app.inject({ method: 'POST', url: `/api/v1/runs/r/${path}`, payload: { ...body, gateSeq: 2 } });
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().code).toBe('gate_unknown');
+      expect(adapter.confirmGate).not.toHaveBeenCalled();
+    });
+  }
+
+  it('a non-positive or non-integer gateSeq is a 400', async () => {
+    const { app } = harness(2);
+    for (const gateSeq of [0, -1, 1.5, '2']) {
+      expect((await app.inject({ method: 'POST', url: '/api/v1/runs/r/gate', payload: { approve: true, gateSeq } })).statusCode).toBe(400);
+      expect((await app.inject({ method: 'POST', url: '/api/v1/runs/r/resume', payload: { gateSeq } })).statusCode).toBe(400);
+    }
+  });
+
+  it('the engine\'s own refusal of a stale opening is 409 gate_changed', async () => {
+    const { app, adapter } = harness(2);
+    adapter.confirmGate.mockRejectedValueOnce(new Error('gate_changed: the gate opened again (opening 3, not 2)'));
+    const res = await app.inject({ method: 'POST', url: '/api/v1/runs/r/gate', payload: { approve: true, gateSeq: 2 } });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().code).toBe('gate_changed');
+  });
+});
