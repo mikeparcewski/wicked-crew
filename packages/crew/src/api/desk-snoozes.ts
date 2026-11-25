@@ -7,9 +7,10 @@
  *
  * The key is the skin's own id for the item (studio's need-row key): opaque here, with one exception crew reads
  * itself. An attention item a person may snooze carries `snooze: {key, rank}` (studio#1416, {@link attentionSnooze});
- * while a snooze on that key is in force and the item is no worse (`rank` at most the stored `severity`), `GET /system`
- * moves it out of `attention[]` (and the level) into `snoozed[]` ({@link holdSnoozed}). Every other key only defers an
- * item in the skin, which brings it back when its time passes or it gets worse.
+ * while a snooze on that key is in force and the item is no worse (`rank` at most the stored `severity`; a snooze stored
+ * with no severity holds nothing back), `GET /system` moves it out of `attention[]` (and the level) into `snoozed[]`
+ * ({@link holdSnoozed}). Every other key only defers an item in the skin, which brings it back when its time passes or
+ * it gets worse.
  *
  * One mechanism for durability: the audit trail. The snoozes are folded from the trail's `desk.need.*` entries of the
  * last {@link DESK_SNOOZE_MAX_MS} at first use and kept in memory after it (this daemon is the trail's only writer),
@@ -41,25 +42,29 @@ export const PutDeskSnoozeSchema = z.strictObject({
 });
 
 /**
- * How a person snoozes one attention item, or null when they can't: only a run's own cause (a component of the system
- * is never hidden) whose occurrence crew can name. The occurrence is the open interaction's id when the item targets
- * one (the engine's own id: a gate asked again at the same ord is a new interaction), else `waitedSince` (crew's own
- * time: a failed run's end). `rank`, higher is worse: `(red ? 200 : 100) + min(blocks, 99)`.
+ * How a person snoozes one attention item, or null when they can't: only one run's own open gate or question (`run:<id>`),
+ * the one cause whose occurrence crew can name. A component of the system is never hidden; an item that gathers several
+ * runs (a reviewer gap, a red floor) is not offered, since its time is its oldest member's; and a failed run is not
+ * offered (its time falls back to the run's launch when crew has no end, so a later failure could match an older
+ * snooze). The occurrence
+ * is the open interaction's id and its opening (`waitedSince`, the interaction row's `created_at`): the engine reuses an
+ * unkeyed gate's id when the run pauses at the same gate again, and stamps a new `created_at` each time it opens, so a
+ * gate asked again is a new key. `rank`, higher is worse: `(red ? 200 : 100) + min(blocks, 99)`, so 100 to 299.
  */
 export function attentionSnooze(item: SystemAttentionItem): SystemAttentionSnooze | null {
-  if (item.source !== 'run') return null;
-  const interaction = item.target.kind === 'run' && typeof item.target.interactionId === 'string' && item.target.interactionId !== '' ? item.target.interactionId : null;
-  const occurrence = interaction ?? (typeof item.waitedSince === 'string' && item.waitedSince !== '' ? item.waitedSince : null);
-  if (occurrence === null) return null;
-  const key = `attention:${item.id}@${occurrence}`;
+  if (item.source !== 'run' || item.target.kind !== 'run' || item.id !== `run:${item.target.runId}`) return null;
+  const interaction = typeof item.target.interactionId === 'string' && item.target.interactionId !== '' ? item.target.interactionId : null;
+  const opened = typeof item.waitedSince === 'string' && item.waitedSince !== '' ? item.waitedSince : null;
+  if (interaction === null || opened === null) return null;
+  const key = `attention:${item.id}@${interaction}@${opened}`;
   if (key.length > DESK_SNOOZE_KEY_MAX) return null;
   return { key, rank: (item.severity === 'red' ? 200 : 100) + Math.min(Math.max(item.blocks, 0), 99) };
 }
 
 /**
- * Split `attention[]` by the snoozes in force: an item whose snooze key has one, with its rank no higher than the stored
- * severity (none stored: only the end counts), is held back in `snoozed[]` with the snooze's end, soonest first. Every
- * item a person may snooze carries its `snooze` either way. Order is kept.
+ * Split `attention[]` by the snoozes in force: an item whose snooze key has one, with a stored severity and its rank no
+ * higher than it, is held back in `snoozed[]` with the snooze's end, soonest first. Every item a person may snooze
+ * carries its `snooze` either way. Order is kept.
  */
 export function holdSnoozed(attention: readonly SystemAttentionItem[], snoozes: readonly DeskSnooze[], now: number): { attention: SystemAttentionItem[]; snoozed: SystemSnoozedItem[] } {
   const byKey = new Map(snoozes.map((s) => [s.key, s]));
@@ -69,7 +74,7 @@ export function holdSnoozed(attention: readonly SystemAttentionItem[], snoozes: 
     const snooze = attentionSnooze(item);
     const marked = snooze !== null ? { ...item, snooze } : item;
     const s = snooze !== null ? byKey.get(snooze.key) : undefined;
-    if (s !== undefined && Date.parse(s.until) > now && (s.severity === null || snooze!.rank <= s.severity)) snoozed.push({ ...marked, until: s.until });
+    if (s !== undefined && Date.parse(s.until) > now && s.severity !== null && snooze!.rank <= s.severity) snoozed.push({ ...marked, until: s.until });
     else kept.push(marked);
   }
   snoozed.sort((a, b) => Date.parse(a.until) - Date.parse(b.until));
