@@ -39,6 +39,8 @@ beforeAll(async () => {
       throw new Error(`storage error: unable to open database file: ${STATE}`);
     },
     getGraphKindsForRepo: async (repo: string) => {
+      // The engine's own spelling for an id no repo is registered under (routes.ts repoReadStatus).
+      if (repo === 'nope') throw new Error(`no registered repo '${repo}'`);
       if (repo === 'unindexed' || repo === 'locked' || repo === 'sealed') throw new Error(`storage error: unable to open database file: ${STATE}`);
       throw new Error(`storage error: disk I/O error at ${STATE}`);
     },
@@ -95,13 +97,25 @@ describe('a server error body', () => {
     expect(res.json()).toEqual({ error: 'source down: config at <path> unreadable; see /api/v1/sources', code: 'source_unavailable' });
   });
 
-  it('a registered repo with no code graph yet is a 404 not_indexed, not a 500 (graph and coverage)', async () => {
-    for (const url of ['/api/v1/governance/graph?repo=unindexed', '/api/v1/governance/coverage?repo=unindexed']) {
-      const res = await app.inject({ method: 'GET', url });
-      expect(res.statusCode, url).toBe(404);
-      expect(res.json()).toMatchObject({ code: 'not_indexed' });
-      expect(res.body).not.toMatch(ABSOLUTE);
-    }
+  it('studio#1402: a registered repo with no code graph yet answers the graph summary 200 with no kinds and code not_indexed, never a 404', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/v1/governance/graph?repo=unindexed' });
+    expect(res.statusCode).toBe(200);
+    // `kinds: []` keeps every reader of `{ kinds }` working (studio 0.16.17 draws "Code graph: not built"); the code says why.
+    expect(res.json()).toEqual({ kinds: [], code: 'not_indexed', error: 'this repository has no code graph yet: index it first' });
+    expect(res.body).not.toMatch(ABSOLUTE);
+  });
+
+  it('an id no repo is registered under is still a plain 404 on the graph summary (no code), apart from "not indexed yet"', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/v1/governance/graph?repo=nope' });
+    expect(res.statusCode).toBe(404);
+    expect((res.json() as { code?: unknown }).code).toBeUndefined();
+  });
+
+  it('a registered repo with no code graph yet is a 404 not_indexed on coverage, not a 500', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/v1/governance/coverage?repo=unindexed' });
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toMatchObject({ code: 'not_indexed' });
+    expect(res.body).not.toMatch(ABSOLUTE);
   });
 
   it('(xreview r1/r2) a graph file that exists but cannot open, or sits under a folder that cannot be searched, is still a server error, not "not indexed"', async () => {
