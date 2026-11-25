@@ -2195,9 +2195,10 @@ export class CoreAdapter {
       opts.extraReadRoots = input.extraReadRoots;
     }
     // wicked-core#1463: an older addon ignores the field, which only keeps every read root
-    // required (today's fail-closed behaviour), so it needs no version gate.
+    // required (today's fail-closed behaviour), so it needs no version gate. Widened locally, as
+    // `primary` and `voice` are, so crew still compiles against an addon's older declarations.
     if (input.optionalReadRoots !== undefined && input.optionalReadRoots.length > 0) {
-      opts.optionalReadRoots = input.optionalReadRoots;
+      (opts as LaunchOptions & { optionalReadRoots?: string[] }).optionalReadRoots = input.optionalReadRoots;
     }
     if (input.excludeSeats !== undefined && input.excludeSeats.length > 0) {
       // Fail CLOSED on an old addon (napi ignores undeclared fields): a silently-dropped exclusion
