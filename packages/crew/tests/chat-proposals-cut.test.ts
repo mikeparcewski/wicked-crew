@@ -20,7 +20,7 @@ import {
   type ProposalDispatcher,
 } from '../src/api/chat-proposals.js';
 import { CutLauncher, refusalWords } from '../src/api/proposal-cut.js';
-import { CUT_OLD_TOOL, type CutBridgeCall } from '../src/api/cut-read.js';
+import { CUT_OLD_TOOL, toolNotRunning, type CutBridgeCall } from '../src/api/cut-read.js';
 import { chatMakeDigest, chatMakeLines } from '../src/api/chat-scope.js';
 
 type Answer = { method: string; path: string; body?: Record<string, unknown>; status: number; answer: Record<string, unknown> };
@@ -289,7 +289,7 @@ describe('cut proposals (crew#1814)', () => {
   it('a video tool that will not start blocks the card with why (the card is never dropped)', async () => {
     const r = rig({ bridge: async () => { throw new Error('the bridge on port 4100 is 0.16.2'); } });
     const p = (await propose(r, 'c1', turn(r, 'c1'), block()))!;
-    expect(p.blocked).toBe("The video tool isn't running here: the bridge on port 4100 is 0.16.2");
+    expect(p.blocked).toBe("The video tool isn't running here: the bridge on port 4100 is 0.16.2.");
   });
 
   it('the seat is told the cut block exists only where the client draws it', () => {
@@ -346,7 +346,7 @@ describe('cut proposals (crew#1814)', () => {
   it('a card crew can tell is wrong is blocked before Go: not the open video, an earlier version, an unknown chapter, a long name, an older tool', async () => {
     const r = rig();
     expect((await propose(r, 'c1', turn(r, 'c1', { open: null }), block()))!.blocked).toBe(`“${DOC}” isn't the video open here.`);
-    expect((await propose(r, 'c1', turn(r, 'c1', { viewed: 1, head: 2 }), block()))!.blocked).toBe('They\'re looking at version 1. Only the latest (version 2) can be changed: open it and ask again.');
+    expect((await propose(r, 'c1', turn(r, 'c1', { viewed: 1, head: 2 }), block()))!.blocked).toBe('You\'re looking at version 1. Only the latest (version 2) can be changed: open it and ask again.');
     expect((await propose(r, 'c1', turn(r, 'c1'), block([{ op: 'chapter-drop', chapter: 'intro' }])))!.blocked).toBe('There\'s no chapter “intro” in this video.');
     expect((await propose(r, 'c1', turn(r, 'c1'), block([{ op: 'chapter-rename', chapter: 'setup', title: 'x'.repeat(81) }])))!.blocked).toBe('A chapter name is one line of 1 to 80 characters.');
     expect((await propose(r, 'c1', turn(r, 'c1'), block([{ op: 'chapter-say', chapter: 'setup', say: 'one\ntwo' }])))!.blocked).toBe('A caption is one line of at most 2000 characters.');
@@ -429,6 +429,7 @@ describe('cut proposals: round-2 folds (crew#1814 R2 C1, C2)', () => {
       [{ method: 'POST', path: '', status: 400, answer: { error: 'ffmpeg_failed', detail: 'frame 1\nConversion failed!' } }, "The new version couldn't be made: Conversion failed. Nothing changed. Go again to try once more."],
       [{ method: 'POST', path: '', status: 400, answer: { error: 'ffmpeg_missing' } }, "The new version couldn't be made: ffmpeg isn't installed. Install ffmpeg. Nothing changed. Go again to try once more."],
       [{ method: 'POST', path: '', status: 500, answer: { error: 'internal' } }, "The new version couldn't be made (the video tool answered 500: internal). Nothing changed. Go again to try once more."],
+      [{ method: 'POST', path: '', status: 500, answer: { error: '' } }, "The new version couldn't be made (the video tool answered 500). Nothing changed. Go again to try once more."],
       ['old', CUT_OLD_TOOL],
       ['broken', "The video tool isn't running here: the bridge on port 4100 is 0.16.2. Go again to try once more."],
     ];
@@ -507,5 +508,31 @@ describe('cut proposals: round-2 folds (crew#1814 R2 C1, C2)', () => {
     expect(go.code, JSON.stringify(go.body)).toBe(409);
     expect(go.body).toMatchObject({ code: 'cut_gone', error: 'This video was deleted.' });
     expect(c.tool.recuts).toHaveLength(1);
+  });
+});
+
+describe('cut card words (coord R2 F6 on studio#1409)', () => {
+  it('a refused change is named once, without its own parenthesis inside the sentence\'s', () => {
+    const ops = [{ op: 'chapter-drop' as const, chapter: 's1' }];
+    const said = refusalWords('ops.0.chapter', 'unknown', ops, ['Drop “Setup” (Undo brings it back)']);
+    expect(said).toBe("Change 1 (Drop “Setup”) can't be made: it names a chapter this video doesn't have. Nothing changed. Ask again.");
+    expect(said).not.toMatch(/\)\)/u);
+  });
+
+  it('a video tool that will not start: the reason is a sentence that ends once', async () => {
+    const r = rig({ bridge: async () => { throw new Error('the bridge on port 4100 is 0.16.2.'); } });
+    const p = (await propose(r, 'c1', turn(r, 'c1'), block()))!;
+    expect(p.blocked).toBe("The video tool isn't running here: the bridge on port 4100 is 0.16.2.");
+  });
+
+  it.each([['stopped. …', 'stopped'], [':', ''], ['. .', ''], ['Connection refused.\n  The bridge exited', 'Connection refused. The bridge exited']])('the error %j is said as %j', (msg, said) => {
+    expect(toolNotRunning(new Error(msg))).toBe(said === '' ? "The video tool isn't running here." : `The video tool isn't running here: ${said}.`);
+  });
+
+  it.each(['', '   ', '...', 'stopped…'])('a video tool that will not start with the error %j still reads as one sentence', async (msg) => {
+    const r = rig({ bridge: async () => { throw new Error(msg); } });
+    const p = (await propose(r, 'c1', turn(r, 'c1'), block()))!;
+    expect(p.blocked).toBe(msg === 'stopped…' ? "The video tool isn't running here: stopped." : "The video tool isn't running here.");
+    expect(toolNotRunning(msg)).toBe(p.blocked);
   });
 });
