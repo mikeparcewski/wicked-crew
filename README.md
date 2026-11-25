@@ -332,17 +332,18 @@ the base skill. Phases, gates, roles, and any phase skill are all **data** on th
 
 ## Requirements, learnings and voice
 
-**Requirements: what the code does, and how much of it is mapped.** The `domain-extraction` workflow
-maps a repository's behaviours to stated business rules, extracting, critiquing and applying one
-page of behaviours at a time until **real** requirements reach the minimum: 80% of the
-behaviour-bearing product code by default (Settings → `requirementsGraph.minCoveragePct`, 1..100). A
-risk-flagged placeholder (an empty statement, or a rule under the confidence threshold) is shown but
-never counted, and tests, data, manifests and documents are left out of the denominator. When the
-run's budget is spent (`maxPages`, `maxMinutes`, `pageSize` beside the minimum) it asks you: map
-more, lower the minimum for that repository, or stop. Then a coverage step checks the share and
-`wicked-core domain-graph` builds the graph into the repository's estate store; nothing is written
-into the checkout. `GET /api/v1/repos/:id/requirements` lists it, with `coverage` (`realPct` against
-`minPct`, real, placeholders, unmapped) and `graphBuild` (whether the listed build is behind the
+**Requirements: the domain model a person asks for.** The `domain-extraction` workflow maps what a
+person says it should cover: a program, a job or a feature (the launch's `domainScope`). Before it
+starts, `POST /api/v1/runs/preview` with that scope answers its scope card: the code the words
+matched, the files and targets in scope, and where that code is reached from. The run has two steps:
+garden reads the scoped code and a writer states its rules, each statement checked by a second
+helper against the lines it cites; then `wicked-core domain-graph` builds the domain model (schema
+1.2.0) into the repository's estate store. Nothing is written into the checkout. There is no minimum
+share to reach and no pages to map: what the check could not confirm becomes a follow-up, and
+`POST /api/v1/repos/:id/requirements/rulings` takes a person's Confirm or Reject (with a note), which
+the next run reads. `GET /api/v1/repos/:id/requirements` carries the `model` (statements, rule groups,
+follow-ups, targets and their accounting). A graph built before v3 still lists, with `coverage` (`realPct`, real,
+placeholders, unmapped) and `graphBuild` (whether the listed build is behind the
 header: its counts differ, or its rows' verdicts do not add up to them). Each item carries its
 `placeholder` flag, `uncounted` when the share does not count it (a TypeScript shape, outside
 product code, or no longer indexed), and `corroboration` (validated by independent sources, or

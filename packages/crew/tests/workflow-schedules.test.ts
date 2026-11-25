@@ -595,4 +595,23 @@ describe('a domain model schedule saved before K1 refused them (J6 M1, coord W2)
     await expect(restarted.scheduler.runNow('map-it')).rejects.toThrow(`not started: ${words}`);
     expect(restarted.launches.map((l) => l.id)).toEqual(['nightly']);
   });
+
+  it('is listed as skipped before it is ever due (codex r1): the listing says it, not only a sweep', async () => {
+    const r = rig();
+    r.store.put('map-it', { workflow: 'domain-extraction', everyHours: 24 }, T0);
+    const app = Fastify();
+    registerScheduleRoutes(app, {
+      store: r.store, scheduler: r.scheduler, knowsWorkflow: () => true, lastReview: () => null,
+      audit: AuditLog.noop(), now: () => r.clock.now,
+    });
+    try {
+      const listed = (await app.inject({ method: 'GET', url: '/api/v1/schedules' })).json() as { schedules: Array<{ id: string; lastNote: string | null }> };
+      expect(listed.schedules.find((x) => x.id === 'map-it')?.lastNote).toBe(
+        "skipped: a domain model run covers what a person says it should and is started by them (a repository's Requirements: Map the domain); it cannot run on a schedule",
+      );
+      expect(r.store.get('map-it')?.lastNote ?? null).toBeNull();
+    } finally {
+      await app.close();
+    }
+  });
 });

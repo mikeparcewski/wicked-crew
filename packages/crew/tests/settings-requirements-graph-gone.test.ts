@@ -52,8 +52,12 @@ describe('PUT /settings with requirementsGraph (J6 M1)', () => {
       expect(put.statusCode, put.body).toBe(200);
       expect(Object.hasOwn((put.json() as { settings: SystemSettings }).settings, 'requirementsGraph')).toBe(false);
     }
-    // The other key in the same patch is kept; the dead one never reaches the store.
+    // The other key in the same patch is written each time and read back; the dead one never reaches the store.
+    expect(patches).toHaveLength(3);
     expect(patches.every((p) => !Object.hasOwn(p, 'requirementsGraph') && p.graphNodeLimit === 200)).toBe(true);
+    const got = await app.inject({ method: 'GET', url: '/api/v1/settings' });
+    expect((got.json() as { settings: SystemSettings }).settings).toMatchObject({ graphNodeLimit: 200 });
+    expect(Object.hasOwn((got.json() as { settings: SystemSettings }).settings, 'requirementsGraph')).toBe(false);
     for (const k of ENGINE_VARS) expect(process.env[k], k).toBeUndefined();
   });
 });

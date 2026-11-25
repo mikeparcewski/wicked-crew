@@ -120,7 +120,8 @@ describe('requirements: mismatches and code age (operator rulings 2026-11-06); n
       builtFromCommit: BUILT, builtAt: null, basis: 'index', commitsBehind: null, headCommit: null,
     });
     // J6 M1: an engine after C3 sends no min_pct; the label stands on its counts. One out of range is left off.
-    const { min_pct: _gone, ...noMin } = live;
+    const noMin: Record<string, unknown> = { ...live };
+    delete noMin['min_pct'];
     expect(coverageOf(noMin)).toEqual({ realPct: 66, behaviorBearing: 3, real: 2, placeholders: 1, unmapped: 0, notProduct: 5 });
     expect(coverageOf({ ...live, min_pct: 0 })).toEqual(coverageOf(noMin));
     expect(coverageOf(live)).toEqual({ ...coverageOf(noMin), minPct: 66 });

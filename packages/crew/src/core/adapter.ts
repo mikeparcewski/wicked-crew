@@ -3839,7 +3839,7 @@ export class CoreAdapter {
   /**
    * ONE registered repo's requirements graph, read from that repo's OWN estate store (the source of
    * truth `wicked-core domain-graph` saves into; never a file in the checkout), with the coverage
-   * label from the store's counts. `graph` is null until a build reached the minimum. The core
+   * label from the store's counts. `graph` is null until one is built (an engine before J6 v3 built it only at its minimum). The core
    * rejects an unknown repo; an engine without the read throws, naming what is needed.
    */
   async getRequirementsGraphForRepo(repoRef: string): Promise<EstateRequirementsRead> {

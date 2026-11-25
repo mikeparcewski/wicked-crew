@@ -4566,26 +4566,32 @@ export function registerRoutes(
     async (req, reply) => {
       const parsed = LaunchPreviewSchema.safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
-      const p = await launchPosture(parsed.data, postureFacts);
-      const posture: LaunchPreviewPosture = {
-        power: p.power,
-        ...(p.humanConfirm !== undefined ? { humanConfirm: p.humanConfirm } : {}),
-        deliver: p.deliver,
-        autoDeliver: p.autoDeliver,
-        ...(p.powerNotice !== null ? { powerNotice: p.powerNotice } : {}),
-        ...(p.humanConfirmNotice !== null ? { humanConfirmNotice: p.humanConfirmNotice } : {}),
-      };
-      const scope = parsed.data.domainScope;
-      if (scope === undefined) return { posture } satisfies LaunchPreviewResponse;
-      // (J6 M1, F6) A person who typed on (studio aborts the older ask) or left closes the request: its read, if still
-      // waiting for a turn, never starts.
+      // (J6 M1, F6) A person who typed on (studio aborts the older ask) or left closes the request: its scope read, if
+      // still waiting for a turn, never starts. Watched from here, so a close during the posture read is not missed.
       const gone = new AbortController();
       const onClose = (): void => { if (!reply.raw.writableFinished) gone.abort(); };
       reply.raw.once('close', onClose);
-      const card = parsed.data.repoRef === undefined
-        ? { error: 'name the repository the model covers to see its scope' }
-        : await domainScopeCard(parsed.data.repoRef, scope, gone.signal).finally(() => reply.raw.off('close', onClose));
-      return ('card' in card ? { posture, scopeCard: card.card } : { posture, scopeError: card.error }) satisfies LaunchPreviewResponse;
+      try {
+        const p = await launchPosture(parsed.data, postureFacts);
+        const posture: LaunchPreviewPosture = {
+          power: p.power,
+          ...(p.humanConfirm !== undefined ? { humanConfirm: p.humanConfirm } : {}),
+          deliver: p.deliver,
+          autoDeliver: p.autoDeliver,
+          ...(p.powerNotice !== null ? { powerNotice: p.powerNotice } : {}),
+          ...(p.humanConfirmNotice !== null ? { humanConfirmNotice: p.humanConfirmNotice } : {}),
+        };
+        const scope = parsed.data.domainScope;
+        if (scope === undefined) return { posture } satisfies LaunchPreviewResponse;
+        // A connection already gone before this point never fires `close` again.
+        if (reply.raw.destroyed) gone.abort();
+        const card = parsed.data.repoRef === undefined
+          ? { error: 'name the repository the model covers to see its scope' }
+          : await domainScopeCard(parsed.data.repoRef, scope, gone.signal);
+        return ('card' in card ? { posture, scopeCard: card.card } : { posture, scopeError: card.error }) satisfies LaunchPreviewResponse;
+      } finally {
+        reply.raw.off('close', onClose);
+      }
     },
   );
 
@@ -10024,7 +10030,7 @@ export function registerRoutes(
     }
     if (page === null) {
       // Not generated yet is a state, typed by `code`, not a refusal (lane repo-page). It says how
-      // far the repository is ("23% real requirements · 4397 placeholders · target 80%";
+      // far the repository is ("23% real requirements · 4397 placeholders";
       // wicked-core#1233), from the very engine read the page used, when it has a store to count.
       // A 200, not a 404 (studio#986): a repository nobody has generated requirements for is a normal
       // answer, and studio reads it for every such repository on each page. `code` is the discriminator;

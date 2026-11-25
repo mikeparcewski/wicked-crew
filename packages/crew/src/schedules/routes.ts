@@ -57,6 +57,9 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: ScheduleRoute
     // (crew#1837) The last start was refused because every seat that could review the work ran some of it: the
     // person's one accept (PUT or Run it now with reducedAssurance) lets it run.
     if (row.lastOutcome === 'refused' && !row.reducedAssurance && isNoIndependentReviewerNote(row.lastNote)) out.retryWith = RETRY_REDUCED;
+    // (J6 M1, codex r1) A row whose workflow can never run on a schedule says so in every listing, due or not.
+    const never = notSchedulable(row.workflow);
+    if (never !== null) out.lastNote = `skipped: ${never}`;
     return out;
   };
 

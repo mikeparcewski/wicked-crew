@@ -40,8 +40,8 @@
  *    unit it was on, audited run.resumed {via: 'boot'}. One machine today; no remote runner.
  *  - Workflows are data: built-ins feature / bug / migration / mcp-server / editor-plugin /
  *    domain-extraction (wicked-core src/catalog.rs); your own is a preset saved with
- *    PUT /api/v1/presets/:name. domain-extraction loops page by page until REAL requirements reach
- *    the minimum (requirementsGraph.minCoveragePct, default 80; placeholders never count).
+ *    PUT /api/v1/presets/:name. domain-extraction (J6 v3) maps what a person names in two steps,
+ *    each statement checked against the lines it cites; there is no minimum and no page loop.
  *  - Power mode is the default launch for a repo-scoped preset or plan (routes.ts powerModeDefault):
  *    one orchestrator seat builds in checkpointed turns, rigor re-scored from the diff, and the
  *    hand-off runs review / security / QE; a NOT-PASS goes back up to 3 rounds, then asks.
@@ -147,8 +147,8 @@ const WORKFLOWS = [
   { name: 'mcp-server', steps: 'build an MCP server, install it on consent' },
   // exactly the steps of wicked-core src/presets/editor-plugin.json (main ca90345); install asks first
   { name: 'editor-plugin', steps: 'scope → design → build → test → security-review → install-plan → install' },
-  // not a fixed sequence of steps: one line, and no step counter
-  { name: 'domain-extraction', steps: 'cover code with real requirements (default 80%)' },
+  // J6 v3: map what a person names, each statement checked; said as one line, with no step counter
+  { name: 'domain-extraction', steps: 'map what you name, each rule checked against its code' },
 ];
 // A workflow's steps as rail nodes: the arrows separate steps; a one-line description is one node.
 const stepsOf = (s: string) => s.split('→').map((x) => x.trim());

@@ -98,7 +98,7 @@ export interface EstateRequirementsGraph {
   domains?: Record<string, ArtifactDomain>;
 }
 
-/** What the engine answers for one repository: its graph (null until a build reached the minimum),
+/** What the engine answers for one repository: its graph (null until one is built; an engine before J6 v3 built it only at its minimum),
  * the coverage label from the store's own counts (present either way), and which build the graph is:
  * its generation and the label that build persisted (wicked-core 2026-11-01; ABSENT from an older
  * engine, null when nothing is built). */
@@ -282,8 +282,8 @@ export interface RequirementsCoverage {
 
 /**
  * The graph the list holds, as it was BUILT. The list's rows are the last `domain-graph` build; the page's
- * `coverage` counts the store NOW, which moves on whenever a run maps more without building (a run stopped at
- * its repeat ask, or one below the minimum, where the build refuses). `behind` says the header's counts are not
+ * `coverage` counts the store NOW, which moves on whenever a run maps more without building (on an engine before
+ * J6 v3: a run stopped at its repeat ask, or one below the minimum, where the build refused). `behind` says the header's counts are not
  * the rows' (req-list-stale 2026-11-01: 1,383 real listed under a header counting 3,585).
  */
 export interface RequirementsGraphBuild {
@@ -300,7 +300,7 @@ export interface RequirementsGraphBuild {
   behind: boolean;
 }
 
-/** The counts that say what the store held; `minPct` is a setting, not a count, and `realPct` follows them. */
+/** The counts that say what the store held; `minPct` (an older engine's) is not a count, and `realPct` follows them. */
 const BUILD_COUNTS = ['behaviorBearing', 'real', 'placeholders', 'unmapped', 'notProduct'] as const;
 
 /**
@@ -877,8 +877,8 @@ export interface RequirementsPage {
    */
   orphanedOverrides: number;
   /**
-   * The share of product behaviours that are REAL requirements, the placeholders apart, and the
-   * minimum ("23% real requirements · 4397 placeholders · minimum 80%"); `null` when the label is
+   * The share of product behaviours that are REAL requirements, the placeholders apart
+   * ("23% real requirements · 4397 placeholders"); `null` when the label is
    * absent, an older engine's `mapped_pct` label, or one its counts do not support.
    */
   coverage: RequirementsCoverage | null;

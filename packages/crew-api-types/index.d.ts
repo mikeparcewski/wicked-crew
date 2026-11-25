@@ -7699,16 +7699,16 @@ export interface RequirementCorroboration {
  * is REAL requirements: label it "23% real requirements · 4397 placeholders". (J6 M1: the minimum the graph was held
  * to is gone; an engine before J6 C3 may still send it as `minPct`.)
  *
- * - `realPct` is the one number the minimum is checked against: `floor(real * 100 /
- *   behaviorBearing)`, floored so it never reads above the minimum it was compared to; 100 when
+ * - `realPct` is the real share: `floor(real * 100 / behaviorBearing)` (an older engine checked its minimum
+ *   against it, floored so it never read above the minimum); 100 when
  *   `behaviorBearing` is 0 (nothing in product code to map). `real + placeholders + unmapped ===
  *   behaviorBearing`; a label that breaks either is not sent.
  * - `weightedPct` (api-types 0.208.0, wicked-crew#1530): optional confidence-weighted headline (integer 0..100) when the engine sends a usable one;
- *   the stated share stays `realPct`, which is still checked against the minimum.
+ *   the stated share stays `realPct`.
  * - `real`: behaviours resolved to a stated, sourced business rule.
  * - `placeholders`: behaviours carrying only a risk-flagged placeholder (an empty statement, a rule
  *   under the confidence threshold, one written unconfirmed). Shown in the graph as unconfirmed,
- *   NEVER counted toward the minimum.
+ *   NEVER counted in the real share.
  * - `unmapped`: behaviours with nothing recorded yet.
  * - `behaviorBearing`: the denominator, product code only. `notProduct` counts the behaviour-kind
  *   nodes left out because their file is a test, data, manifest or document file.
@@ -7869,8 +7869,8 @@ export interface RequirementsPage {
   businessDomains?: RequirementBusinessDomainCatalogEntry[];
   /**
    * (0.165.0) Which build the rows are. The list is the last graph BUILD; `coverage` counts the store NOW,
-   * which moves on when a run maps more without building (stopped at its repeat ask, or below the minimum,
-   * where the build refuses). `null` when the engine does not say; ABSENT from an older daemon.
+   * which moves on when a run maps more without building (on an engine before J6 v3: stopped at its repeat ask,
+   * or below the minimum, where the build refused). `null` when the engine does not say; ABSENT from an older daemon.
    */
   graphBuild?: RequirementsGraphBuild | null;
   /** (0.159.0) How many requirements of the whole corpus are validated / unconfirmed. (0.167.0) Rows the share does
@@ -8068,9 +8068,8 @@ export interface RequirementsNotGenerated {
   workflow: string;
   /**
    * (api-types 0.163.0, domain-graph-3; real requirements since 0.164.0) How far the repository
-   * is, against its target ("23% real requirements · 4397 placeholders · target 80%"): present
-   * when the repository has a store to count.
-   * `minPct` is the target in force (the repository's own when lowered, else the daemon's).
+   * is ("23% real requirements · 4397 placeholders"): present when the repository has a store to count.
+   * (J6 M1) `minPct`, when an engine before J6 C3 still sends it, is that engine's old target; nothing is held to it.
    */
   coverage?: RequirementsCoverage;
 }
