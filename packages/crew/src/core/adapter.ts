@@ -17,6 +17,7 @@ import { RunReadLane } from './run-read-lane.js';
 import type { Core as CoreHandle, LaunchOptions, Subscription } from 'wicked-core-ts';
 import type { GateAction, MaintenanceState, PowerPauseRequest, PowerState, Rigor } from 'wicked-crew-api-types';
 import { AskError, AskUnsupportedError, type AskRequest, type AskTicket, type AskUnit } from './types.js';
+import { factsFromEvents, runFingerprint, RunFactsFile, type KeptFacts, type LogFacts } from './run-log-facts.js';
 import type {
   EditorGrantsResponse,
   CoreEvent,
@@ -1583,6 +1584,10 @@ export class CoreAdapter {
 
     this.stub = opts.stub === true;
     this.dbPath = opts.dbPath;
+    this.runFactsFile =
+      typeof opts.dbPath === 'string' && opts.dbPath !== '' && opts.dbPath !== ':memory:'
+        ? new RunFactsFile(`${opts.dbPath}.run-facts.jsonl`, opts.dbPath)
+        : null;
     // The QE acceptance setting's engine mirror (`syncEngineQeSetting`) must hold BEFORE the engine
     // arms its bus bridge inside `spawn`, or a bus request in between would launch under the
     // default: hand the boot value over in the engine's own variable, read at spawn.
@@ -2195,9 +2200,10 @@ export class CoreAdapter {
       opts.extraReadRoots = input.extraReadRoots;
     }
     // wicked-core#1463: an older addon ignores the field, which only keeps every read root
-    // required (today's fail-closed behaviour), so it needs no version gate.
+    // required (today's fail-closed behaviour), so it needs no version gate. Widened locally, as
+    // `primary` and `voice` are, so crew still compiles against an addon's older declarations.
     if (input.optionalReadRoots !== undefined && input.optionalReadRoots.length > 0) {
-      opts.optionalReadRoots = input.optionalReadRoots;
+      (opts as LaunchOptions & { optionalReadRoots?: string[] }).optionalReadRoots = input.optionalReadRoots;
     }
     if (input.excludeSeats !== undefined && input.excludeSeats.length > 0) {
       // Fail CLOSED on an old addon (napi ignores undeclared fields): a silently-dropped exclusion
@@ -2879,31 +2885,92 @@ export class CoreAdapter {
 
   /**
    * Each run's launch name as the engine RECORDED it — `sessionStarted.workflowId` from its event
-   * log (the preset, the registered def, `<run>:plan-<rev>`, or `null` for free text). Immutable
-   * once written, so it is read once per run: a run whose log holds no `sessionStarted` is memoized
-   * only once it is terminal (a live run's frame may not be flushed yet; a finished run's never
-   * will be). Seam X2 — the one input `resolveRunIdentity` needs that the session record lacks.
+   * log (the preset, the registered def, `<run>:plan-<rev>`, or `null` for free text). Seam X2 — the one input
+   * `resolveRunIdentity` needs that the session record lacks.
+   *
+   * crew#1880: read through the run's log FACTS (run-log-facts.ts), one read per run answering both this and the
+   * `ended_at` backfill ({@link runEndedFact}). A read made while the run is terminal is FINAL (its facts settle);
+   * one made while it is live keeps only a found launch name (a live run's frame may not be flushed yet). A final
+   * read's positive facts are kept beside the store, so the next start reads no log for them.
    */
-  private readonly launchedWorkflows = new Map<string, string | null | undefined>();
+  private readonly runFactsMemo = new Map<string, LogFacts & { final: boolean }>();
+  /** One in-flight read per run and kind (a terminal-time read is never answered by a live-time one). */
+  private readonly runFactsReads = new Map<string, Promise<(LogFacts & { final: boolean }) | null>>();
+  /** crew#1880: `<db>.run-facts.jsonl`; null for an in-memory or unnamed store. */
+  private readonly runFactsFile: RunFactsFile | null;
+
+  /** One read of a run's log, shared by concurrent callers. `null` = no event-log binding; a failed read throws. */
+  private readRunFacts(view: SessionView): Promise<(LogFacts & { final: boolean }) | null> {
+    const id = view.session.id;
+    const final = TERMINAL_RUN_STATUSES.has(view.session.status);
+    const key = `${final ? 'T' : 'L'}:${id}`;
+    const inFlight = this.runFactsReads.get(key);
+    if (inFlight !== undefined) return inFlight;
+    const read = (async () => {
+      const events = await this.runEvents(id);
+      if (events === null) return null;
+      const facts = { ...factsFromEvents(events), final };
+      if (final) {
+        this.runFactsMemo.set(id, facts);
+        this.runFactsFile?.put(id, runFingerprint(view.session.problem), facts);
+      } else if (facts.launched !== undefined && this.runFactsMemo.get(id)?.final !== true) {
+        this.runFactsMemo.set(id, facts);
+      }
+      return facts;
+    })();
+    this.runFactsReads.set(key, read);
+    const clear = (): void => {
+      if (this.runFactsReads.get(key) === read) this.runFactsReads.delete(key);
+    };
+    read.then(clear, clear);
+    return read;
+  }
+
+  /** The facts kept for this run on disk (bound to its problem). A kept launch name is folded into the in-process
+   *  memo (so later folds skip the hash); the memo is FINAL only when both facts were kept (a negative never is). */
+  private keptRunFacts(view: SessionView): KeptFacts | undefined {
+    if (this.runFactsFile === null) return undefined;
+    const kept = this.runFactsFile.get(view.session.id, runFingerprint(view.session.problem));
+    if (kept?.launched !== undefined) {
+      this.runFactsMemo.set(view.session.id, {
+        launched: kept.launched,
+        endedAt: kept.endedAt ?? null,
+        final: kept.endedAt !== undefined,
+      });
+    }
+    return kept;
+  }
 
   private async launchedWorkflowOf(view: SessionView): Promise<string | null | undefined> {
-    const id = view.session.id;
-    if (this.launchedWorkflows.has(id)) return this.launchedWorkflows.get(id);
-    let events: RecordedEvent[] | null;
+    const known = this.runFactsMemo.get(view.session.id);
+    if (known !== undefined && (known.final || known.launched !== undefined)) return known.launched;
+    const kept = this.keptRunFacts(view);
+    if (kept?.launched !== undefined) return kept.launched;
     try {
-      events = await this.runEvents(id);
+      return (await this.readRunFacts(view))?.launched;
     } catch {
       return undefined;
     }
-    if (events === null) return undefined;
-    const started = events.find((e) => e.type === 'sessionStarted') as Record<string, unknown> | undefined;
-    // The engine spells it `workflowId` on the frame (core-ts `CoreEventJson`).
-    const raw = started?.['workflowId'];
-    const launched = started === undefined ? undefined : typeof raw === 'string' ? raw : null;
-    if (launched !== undefined || TERMINAL_RUN_STATUSES.has(view.session.status)) {
-      this.launchedWorkflows.set(id, launched);
-    }
-    return launched;
+  }
+
+  /**
+   * crew#1880: a terminal run's FIRST terminal frame `ts` (millis), for the `ended_at` backfill — from the in-process
+   * memo, the kept facts, or one read of its log (shared with the identity read). `null` = the log holds no terminal
+   * frame; `undefined` = no event-log binding. A failed read throws (the backfill retries it on a later request).
+   */
+  async runEndedFact(view: SessionView): Promise<number | null | undefined> {
+    const known = this.runFactsMemo.get(view.session.id);
+    if (known?.final === true) return known.endedAt;
+    const kept = this.keptRunFacts(view);
+    if (kept?.endedAt !== undefined) return kept.endedAt;
+    const facts = await this.readRunFacts(view);
+    if (facts === null) return undefined;
+    return facts.final ? facts.endedAt : null;
+  }
+
+  /** crew#1880: write the kept facts still buffered (tests; `close` flushes too). */
+  flushRunFacts(): Promise<void> {
+    return this.runFactsFile?.flush() ?? Promise.resolve();
   }
 
   /**
@@ -2911,19 +2978,20 @@ export class CoreAdapter {
    * the run fence's fallback for a run crew no longer holds in memory. Memoized once found; `undefined` = not known.
    */
   async launchedWorkflowOfRun(runId: string): Promise<string | null | undefined> {
-    if (this.launchedWorkflows.has(runId)) return this.launchedWorkflows.get(runId);
+    // As before crew#1880: a found launch name, or a terminal run's settled "none", answers without a read.
+    const known = this.runFactsMemo.get(runId);
+    if (known !== undefined && (known.final || known.launched !== undefined)) return known.launched;
     let events: RecordedEvent[] | null;
     try {
       events = await this.runEvents(runId);
     } catch {
       return undefined;
     }
-    const started = events?.find((e) => e.type === 'sessionStarted') as Record<string, unknown> | undefined;
-    if (started === undefined) return undefined;
-    const raw = started['workflowId'];
-    const launched = typeof raw === 'string' ? raw : null;
-    this.launchedWorkflows.set(runId, launched);
-    return launched;
+    if (events === null) return undefined;
+    const facts = factsFromEvents(events);
+    if (facts.launched === undefined) return undefined;
+    if (known === undefined) this.runFactsMemo.set(runId, { ...facts, final: false });
+    return facts.launched;
   }
 
   /**
@@ -4599,6 +4667,7 @@ export class CoreAdapter {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    void this.runFactsFile?.flush();
     if (this.engineBus !== null && this.busDbPath !== undefined) detachEngineBus(this.busDbPath, this.engineBus);
     this.listeners.clear();
     this.subscription.close();

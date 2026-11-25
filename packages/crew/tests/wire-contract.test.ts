@@ -73,6 +73,7 @@ import type {
   McpRegistryRestoreSchema,
   McpServerConfigSchema,
   PatchMcpServerSchema,
+  RenameMcpServerSchema,
   PatchMcpToolSchema,
   PutMcpSecretSchema,
   SaveMcpServerSchema,
@@ -1277,6 +1278,7 @@ respondsWith<Wire.SourceAgentQuery, SourceAgentQueryEntry>();
 respondsWith<Wire.SourceDataUse, SourceDataUse>();
 respondsWith<Wire.SourceReadEnvelope, SourceReadEnvelope>();
 accepts<z.input<typeof PatchMcpServerSchema>, Wire.PatchMcpServerBody>();
+accepts<z.input<typeof RenameMcpServerSchema>, Wire.RenameMcpServerBody>();
 accepts<z.input<typeof PatchMcpToolSchema>, Wire.PatchMcpToolBody>();
 accepts<z.input<typeof PutMcpSecretSchema>, Wire.PutMcpSecretBody>();
 respondsWith<Wire.McpServersResponse, Awaited<ReturnType<McpRegistry['list']>>>();

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.227.0",
+  "apiTypesVersion": "0.228.0",
   "endpoints": [
     {
       "method": "GET",
@@ -1378,6 +1378,23 @@
         400,
         403,
         404,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/mcp/servers/:name/rename",
+      "requestType": "RenameMcpServerBody",
+      "responseType": "McpServer",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        500,
+        501,
+        502,
         503
       ]
     },

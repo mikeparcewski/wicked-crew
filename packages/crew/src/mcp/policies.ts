@@ -145,6 +145,16 @@ function approvalState(tokens: ReadonlySet<string>, server: string, subject: str
   return null;
 }
 
+/** (crew#1514) Whether a rule token names `server` (`mcp:<server>` or one of its tools). */
+function namesServer(token: string, server: string): boolean {
+  return token === `mcp:${server}` || token.startsWith(`mcp:${server}/`);
+}
+
+/** (crew#1514) The tokens of `list` that name `from`, spelled for `to`. */
+function renamedTokens(list: readonly string[], from: string, to: string): string[] {
+  return list.filter((t) => namesServer(t, from)).map((t) => `mcp:${to}${t.slice(4 + from.length)}`);
+}
+
 export class McpPolicies {
   private chain: Promise<unknown> = Promise.resolve();
   /** Per server: the tail of the work queued by {@link exclusive}. Never rejects. */
@@ -344,7 +354,9 @@ export class McpPolicies {
     try {
       prior = await this.registry.get(next.name);
     } catch (err) {
-      if (err instanceof McpRegistryError && err.status === 404) return [];
+      // (crew#1514) A NEW registration never inherits: approvals left under its name (a removal whose withdrawal
+      // failed, a rename whose registry write failed) belonged to another source.
+      if (err instanceof McpRegistryError && err.status === 404) return this.tokensOf(next.name);
       throw err;
     }
     // A `gone` tool keeps its last saved schema hash (the registry never deletes one), so a tool
@@ -360,6 +372,82 @@ export class McpPolicies {
     if (changed.length === 0) return [];
     const held = new Set(await this.tokensOf(next.name));
     return [`mcp:${next.name}`, ...changed.map((t) => t.subject)].filter((t) => held.has(t));
+  }
+
+  // ── rename (crew#1514) ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * (crew#1514) Before a rename commits: every rule's `applies_to` gains the `to` counterpart of each `from` token (a
+   * restriction never stays behind), and every rule's `excludes` (the approval ledgers, a deny's exemption) for `to`
+   * become exactly those it holds for `from` (stale `to` tokens, from a source that once had that name, are dropped).
+   * One edit, so the rename is judged on the final rules. Answers the rules as they were, for {@link restoreRules}.
+   * The caller has checked that `to` is free first (no live entry is lent these rules), and puts them back when the
+   * rename is refused; one that cannot be put back is reported with its rules (`rules_unrestored`), since only the
+   * approval ledgers' tokens are withdrawn by a later registration of `to`, not a deny's exemption.
+   */
+  async copyRules(from: string, to: string): Promise<ConformanceRule[]> {
+    return this.editRules((rule) => {
+      const applies = rule.applies_to ?? [];
+      const added = renamedTokens(applies, from, to).filter((t) => !applies.includes(t));
+      const ex = rule.excludes ?? [];
+      const kept = ex.filter((t) => !namesServer(t, to));
+      const excludes = [...kept, ...renamedTokens(ex, from, to).filter((t) => !kept.includes(t))];
+      const exChanged = canonicalJson(excludes) !== canonicalJson(ex);
+      if (added.length === 0 && !exChanged) return null;
+      return { ...rule, ...(added.length > 0 ? { applies_to: [...applies, ...added] } : {}), ...(exChanged ? { excludes } : {}) };
+    });
+  }
+
+  /** Put rules back as {@link copyRules} found them (a rename refused or failed after the copy). */
+  async restoreRules(originals: readonly ConformanceRule[]): Promise<void> {
+    if (originals.length === 0) return;
+    const ids = new Set(originals.map((r) => r.id));
+    await this.editRules((rule) => (ids.has(rule.id) ? originals.find((o) => o.id === rule.id)! : null));
+  }
+
+  /**
+   * Whether `from`'s rules hold for `to` once {@link copyRules} has run. Two checks, both fail-closed:
+   * - a rule whose `trigger.contains` contains either name, or is contained in one, is never judged equivalent (it may
+   *   match in a phase, or on a data source's gated tools, that no preview covers). It is a substring test, so a short
+   *   name can coincide with unrelated trigger text: that refuses (fail-closed), naming the rule. A trigger that only
+   *   straddles a name's edge (`"server":"prod-` for `prod-db`) is not caught here; the preview judges it where it can;
+   * - every tool of `from` must be judged at least as strictly under `to` by the engine's own evaluation over the
+   *   preview's cells (allow < ask < deny; an allow keeps every obligation), with each tool judged as callable whatever
+   *   its switches (a disabled tool switched on later is held to the same rules).
+   * Answers the subjects that would loosen and the rules that name the server by content.
+   */
+  async loosenedByRename(from: string, to: string): Promise<{ subjects: string[]; rules: string[] }> {
+    const overlaps = (c: string): boolean => c !== '' && (c.includes(from) || c.includes(to) || from.includes(c) || to.includes(c));
+    const rules = (await this.engine.listRules())
+      .filter((r) => r.retired !== true && typeof r.trigger?.contains === 'string' && overlaps(r.trigger.contains))
+      .map((r) => r.id);
+    const server = await this.registry.get(from);
+    const tools = server.tools.filter((t) => t.status !== 'gone');
+    if (tools.length === 0) return { subjects: [], rules };
+    const cells = this.cells({});
+    const callsOf = (name: string): EngineCall[] => tools.map((t) => ({
+      server: name,
+      tool: t.name,
+      annotations: hints(t.annotations),
+      classOverride: t.classOverride,
+      registered: true,
+      kind: server.kind,
+    }));
+    const [before, after] = await Promise.all([this.judge(callsOf(from), cells), this.judge(callsOf(to), cells)]);
+    const rank = (d: McpDecision): number => (d === 'deny' ? 2 : d === 'ask' ? 1 : 0);
+    const subjects: string[] = [];
+    tools.forEach((t, i) => {
+      const was = before[i] ?? [];
+      const now = after[i] ?? [];
+      const looser = was.some((c, j) => {
+        const n = now[j];
+        if (n === undefined) return true;
+        if (rank(n.decision) !== rank(c.decision)) return rank(n.decision) < rank(c.decision);
+        return c.obligations.some((o) => !n.obligations.includes(o));
+      });
+      if (looser) subjects.push(t.subject);
+    });
+    return { subjects, rules };
   }
 
   /** Every approval token that names `server` (the server's own and each of its tools'). */
@@ -445,6 +533,43 @@ export class McpPolicies {
       firstUse: approvalState(ledgers.firstUse.tokens, server, subject),
       write: approvalState(ledgers.write.tokens, server, subject),
     };
+  }
+
+  /**
+   * (crew#1514) Apply `next` to every rule in the store, serialized with the ledger edits, with the same rollback: a
+   * failed write puts back the rules already written, and what a failed rollback leaves changed is named on the error.
+   * Answers the ORIGINAL form of every rule it changed.
+   */
+  private editRules(next: (rule: ConformanceRule) => ConformanceRule | null): Promise<ConformanceRule[]> {
+    const run = async (): Promise<ConformanceRule[]> => {
+      const rules = await this.engine.listRules();
+      const edits = rules.flatMap((rule) => {
+        const changed = next(rule);
+        return changed === null ? [] : [{ original: rule, changed }];
+      });
+      const applied: ConformanceRule[] = [];
+      try {
+        for (const e of edits) {
+          await this.engine.upsertRule(e.changed);
+          applied.push(e.original);
+        }
+      } catch (err) {
+        const stuck: string[] = [];
+        for (const original of [...applied].reverse()) {
+          try {
+            await this.engine.upsertRule(original);
+          } catch {
+            stuck.push(original.id);
+          }
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new McpLedgerEditError(stuck, `the rule edit failed and was rolled back${stuck.length > 0 ? ` except ${stuck.join(', ')}` : ''}: ${msg}`);
+      }
+      return edits.map((e) => e.original);
+    };
+    const result = this.chain.then(run, run);
+    this.chain = result.catch(() => undefined);
+    return result;
   }
 
   /**
