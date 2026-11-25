@@ -5,7 +5,7 @@
 // through the product's own preview + save routes, never a hand-written record.
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,8 +20,10 @@ import { FIRST_USE_LEDGER, McpPolicies, WRITE_LEDGER } from '../src/mcp/policies
 import { probeMcpServer } from '../src/mcp/probe.js';
 import { McpRegistry } from '../src/mcp/registry.js';
 import { McpRegistryStore } from '../src/mcp/registry-store.js';
+import { CONTEXTS, judgeTrigger, triggerNames } from '../src/mcp/trigger-names.js';
 import { keychainRef, type SecretStore } from '../src/mcp/secrets.js';
 import { removeScratch } from './setup/scratch.js';
+import { requireCoreDir, SKIP_CORE_CHECKS } from './support/core-checkout.js';
 
 const FIXTURE_SERVER = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'mcp', 'fixture-server.mjs');
 
@@ -383,5 +385,243 @@ describe('renaming a source (crew#1514)', () => {
     const calls = previews.flatMap((j) => (JSON.parse(j) as { calls: Array<{ server: string; registered: boolean }> }).calls);
     expect(calls.map((c) => c.server).sort()).toEqual(['fx', 'fx', 'fx2', 'fx2']);
     expect(calls.every((c) => c.registered)).toBe(true);
+  });
+});
+
+// crew#1905 — the static rule check asks whether some match of a trigger can take in a character of either name where an
+// MCP call's context carries it, not whether its text shares a substring with either.
+const SEEDED = ['EDITOR-BUILTIN', 'EDITOR-BUILTIN-PAGE-MEDIA', 'EDITOR-BUILTIN-DOC-MEDIA', 'EDITOR-BUILTIN-THEME', 'EDITOR-OPEN-DEFAULTS', 'MCP-POSTURE-READ', 'MCP-POSTURE-WRITE', 'MCP-MODE-ASK-WRITE'];
+/** Ordinary names #1905 found refused by the seeded triggers' text, as either the old or the new name. */
+const ORDINARY = ['media', 'export', 'sources', 'network', 'theme', 'checks', 'read', 'write', 'page', 'doc', 'class', 'ui', 'id', 'es', 'mcp', 'server', 'a', 'x'];
+
+describe('rename: rules whose trigger can match a name (crew#1905)', () => {
+  it('the seeded editor and MCP triggers, as the engine seeds them, can match no ordinary name', async () => {
+    const seeded = (await adapter.listConformanceRules()).filter((r) => SEEDED.includes(r.id));
+    expect(seeded.map((r) => r.id).sort()).toEqual([...SEEDED].sort());
+    for (const r of seeded) {
+      expect(typeof r.trigger?.contains, r.id).toBe('string');
+      expect(triggerNames(r.trigger!.contains!, ORDINARY), r.id).toEqual([]);
+    }
+  });
+
+  it("the context it reasons over is the engine's own: a trigger spelling the whole context fires in the preview", async () => {
+    await register('fx');
+    const S = '[^"]*';
+    const whole = `^\\{"args":.*,"carrier":"${S}","mcp":\\{"annotations":\\{[^{}]*\\},"class":"${S}","kind":"${S}","registered":(true|false),"server":"fx","subject":"mcp:fx/wt_echo","tool":"wt_echo"\\},"mode":"${S}","phase":"${S}","phase_role":"${S}","scope":"${S}","seat":"${S}","tool":"mcp:fx/wt_echo","work":"mcp:fx/wt_echo","write_posture":"${S}"\\}$`;
+    await upsert({ id: 'SEC-WHOLE-CONTEXT', applies_to: ['mcp'], effect: 'deny', severity: 'critical', trigger: { contains: whole } });
+    const echo = (await matrix('fx')).tools.find((t) => t.tool === 'wt_echo')!;
+    expect(echo.cells.length).toBeGreaterThan(0);
+    expect(echo.cells.every((c) => c.decision === 'deny' && c.ruleIds.includes('SEC-WHOLE-CONTEXT'))).toBe(true);
+    expect(triggerNames(whole, ['fx', 'gx'])).toEqual(['fx']);
+  });
+
+  it('renames a source through ordinary names with the seeded rules in place', async () => {
+    await register('read');
+    let name = 'read';
+    for (const to of ['write', 'media', 'page', 'doc', 'class', 'ui', 'id', 'es', 'x']) {
+      const res = await call('POST', `/mcp/servers/${name}/rename`, { to });
+      expect(res.statusCode, `${name} -> ${to}: ${res.body}`).toBe(200);
+      name = to;
+    }
+    expect((await call('GET', '/mcp/servers')).json().servers.map((s: McpServer) => s.name)).toEqual(['x']);
+  });
+
+  it('names the new name when only the new name is matched, and gives no advice to edit the rule', async () => {
+    await register('support-pg');
+    await upsert({ id: 'SEC-MEDIA-BY-TEXT', applies_to: ['mcp'], effect: 'allow', severity: 'info', trigger: { contains: '"server":"media"' } });
+    const res = await call('POST', '/mcp/servers/support-pg/rename', { to: 'media' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'rules_differ', rules: ['SEC-MEDIA-BY-TEXT'] });
+    const error = res.json().error as string;
+    expect(error).toContain('SEC-MEDIA-BY-TEXT (media, the new name)');
+    expect(error).toContain("A new name no rule's trigger can match avoids this");
+    expect(error).not.toContain('support-pg');
+    expect(error).not.toMatch(/change (it|them)/i);
+  });
+
+  it('offers no other new name when a rule also matches the current one', async () => {
+    await register('fx');
+    await upsert({ id: 'SEC-FX', applies_to: ['release'], effect: 'deny', severity: 'critical', trigger: { contains: '"server":"fx"' } });
+    await upsert({ id: 'SEC-GX', applies_to: ['mcp'], effect: 'allow', severity: 'info', trigger: { contains: '"server":"gx"' } });
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'gx' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect([...res.json().rules].sort()).toEqual(['SEC-FX', 'SEC-GX']);
+    expect(res.json().error).toContain('SEC-FX (fx, the current name)');
+    expect(res.json().error).toContain('SEC-GX (gx, the new name)');
+    expect(res.json().error).not.toContain('A new name');
+  });
+
+  it('refuses a trigger that spans other fields, straddles the name (#1895) or is case-blind, and moves no rule', async () => {
+    await register('prod-db');
+    await upsert({ id: 'SEC-PROD-WRITES', applies_to: ['release'], effect: 'deny', severity: 'critical', trigger: { contains: '"class":"write"[^}]*"server":"prod-db"' } });
+    await upsert({ id: 'SEC-PROD-EDGE', applies_to: ['release'], effect: 'deny', severity: 'critical', trigger: { contains: '"server":"prod-' } });
+    await upsert({ id: 'SEC-PROD-CASE', applies_to: ['release'], effect: 'deny', severity: 'critical', trigger: { contains: '(?i)"SERVER":"PROD-' } });
+    const rulesBefore = JSON.stringify(await adapter.listConformanceRules());
+    const res = await call('POST', '/mcp/servers/prod-db/rename', { to: 'staging-db' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().code).toBe('rules_differ');
+    expect([...res.json().rules].sort()).toEqual(['SEC-PROD-CASE', 'SEC-PROD-EDGE', 'SEC-PROD-WRITES']);
+    expect(res.json().error).toContain('SEC-PROD-EDGE (prod-db, the current name)');
+    expect(res.json().error).not.toContain('A new name');
+    expect(JSON.stringify(await adapter.listConformanceRules())).toBe(rulesBefore);
+  });
+
+  it('judges every rule whatever its applies_to (a phase may be spelled like any token), and any rule id', async () => {
+    await register('fx');
+    await upsert({ id: 'SEC-EDITOR-FX', applies_to: ['editor-origin:first-party'], effect: 'deny', severity: 'critical', trigger: { contains: '"server":"fx"' } });
+    await upsert({ id: 'SEC-OTHER-FX', applies_to: ['mcp:other'], effect: 'deny', severity: 'critical', trigger: { contains: 'mcp:fx/' } });
+    await upsert({ id: '__proto__', applies_to: ['release'], effect: 'deny', severity: 'critical', trigger: { contains: 'fx' } });
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'gx' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect([...res.json().rules].sort()).toEqual(['SEC-EDITOR-FX', 'SEC-OTHER-FX', '__proto__']);
+  });
+
+  it('reads a trigger as Rust does, widening what it cannot model, never narrowing', () => {
+    const cases: Array<[string, string[]]> = [
+      ['fx', ['fx']],
+      ['"server":"[a-z]+"', ['fx', 'gx']],
+      ['mcp:[f]x/wt_echo', ['fx']],
+      ['"work":"mcp:[g]x/', ['gx']],
+      ['fx/execute_sql', ['fx']], // a native source's gated tool: no tool list is needed
+      ['fx.*"seat":"codex"', ['fx', 'gx']], // spans fields after the name (and, widened, over the other name)
+      ['^"|fx', ['fx']],
+      ['\\A.*fx', ['fx', 'gx']],
+      ['\\bx', ['fx', 'gx']],
+      ['\\b","subject"', ['fx', 'gx']], // a boundary reads the character beside the name, though it takes in none
+      ['\\<fx\\>', ['fx']],
+      ['"server":"f{ 1 }x"', ['fx']],
+      ['"server":"[[]]x]x"', ['fx', 'gx']], // a nested class: not read, both named
+      ['"server":"x{"', ['fx', 'gx']], // a bare brace: not read
+      ['(?i)FX', ['fx']],
+      ['"server":"g{,1}x"', ['gx']], // every repeat form, widened to zero or more
+      ['"server":"g{ 1 , 2 }x"', ['gx']],
+      ['f\\x78', ['fx']], // an escape it does not decode: any character
+      ['\\x66x', ['fx', 'gx']],
+      ['(?x) f x', ['fx', 'gx']], // verbose mode: refused, both named
+      ['(unclosed', ['fx', 'gx']],
+      ['"server":"(?:prod|staging)-', []],
+      ['"class":"read"', []],
+      ['"phase":"fx"', []], // a phase is not a name
+      ['"seat":"fx', []],
+      ['"server":"fx[^"]', []], // fx followed by more name: not fx, not gx
+      ['[^a-z]x"', []],
+      ['(a+)+!', []],
+    ];
+    for (const [t, want] of cases) expect(triggerNames(t, ['fx', 'gx']), t).toEqual(want);
+    // Rust's case folding reaches past ASCII both ways; a `]` first in a class is a member, never a range start.
+    expect(triggerNames('(?i)"server":"\u017Fx"', ['sx', 'gx'])).toEqual(['sx', 'gx']); // widened: any letter
+    expect(triggerNames('(?i)"server":"[\u212A-\u212A]"', ['k', 'gx'])).toEqual(['k']);
+    expect(triggerNames('"server":"a[]-a]b"', ['a-b', 'gx'])).toEqual(['a-b']);
+    expect(triggerNames('"server":"a[^]-a]b"', ['a_b', 'gx'])).toEqual(['a_b']);
+    // A character outside the BMP is one character: an optional one may be absent.
+    expect(triggerNames('"server":"fx\u{1F600}?"', ['fx', 'gx'])).toEqual(['fx']);
+    // A trigger whose search would be large is answered as matching (fail-closed), and quickly.
+    const t0 = Date.now();
+    expect(triggerNames('a?'.repeat(2000) + 'zz', ['fx', 'gx'])).toEqual(['fx', 'gx']);
+    expect(triggerNames('x'.repeat(5000), ['fx', 'gx'])).toEqual(['fx', 'gx']);
+    expect(Date.now() - t0).toBeLessThan(10_000);
+    // A long name and a pattern that backtracks in JavaScript: answered quickly, since nothing is run as a RegExp.
+    const started = Date.now();
+    expect(triggerNames('(a+)+!', ['a'.repeat(63), 'b'])).toEqual([]);
+    expect(triggerNames('(a+)+"', ['a'.repeat(63), 'b'])).toEqual(['a'.repeat(63)]);
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+
+  // R2 F1: core judges a source's RESULT in a second context (wicked-core src/mcp_gate/output.rs: context() with `args`
+  // removed and `raw` added), so a trigger may reach the name only through that shape.
+  it("reads the result gate's context too: a trigger that reaches the name only through it is matched", () => {
+    const S = '[^"]*';
+    const whole = `^\\{"carrier":"${S}","mcp":\\{"annotations":\\{[^{}]*\\},"class":"${S}","kind":"${S}","registered":(true|false),"server":"fx","subject":"mcp:fx/wt_echo","tool":"wt_echo"\\},"mode":"${S}","phase":"${S}","phase_role":"${S}","raw":"${S}","scope":"${S}","seat":"${S}","tool":"mcp:fx/wt_echo","work":"mcp:fx/wt_echo","write_posture":"${S}"\\}$`;
+    expect(triggerNames(whole, ['fx', 'gx'])).toEqual(['fx']);
+    expect(triggerNames(`"raw":"${S}","scope":"${S}","seat":"${S}","tool":"mcp:fx`, ['fx', 'gx'])).toEqual(['fx']);
+    const inString = '(?:[^"\\\\]|\\\\.)*';
+    expect(triggerNames(`"raw":"${inString}secret${inString}","scope":"${S}","seat":"${S}","tool":"mcp:fx/`, ['fx', 'gx'])).toEqual(['fx']);
+    // The result context has no args: a trigger that needs both an args key and raw matches neither name.
+    expect(triggerNames(`\\{"args":${S}"raw":"${S}","scope":"${S}","seat":"${S}","tool":"mcp:fx`, ['fx', 'gx'])).toEqual([]);
+  });
+
+  it('the result context is the call context with args removed and raw added, its keys sorted', () => {
+    // Spell each shape as JSON: a name, a string, a boolean, flat hints, and an args value.
+    const fill: Record<string, string> = { N: 'fx', STR: '', BOOL: 'true', NOBRACE: '', ANY: '{}' };
+    const parse = (shape: readonly string[]): Record<string, unknown> => JSON.parse(shape.map((g) => fill[g] ?? g).join('')) as Record<string, unknown>;
+    const call = parse(CONTEXTS.call);
+    const result = parse(CONTEXTS.result);
+    const rest: Record<string, unknown> = { ...call };
+    delete rest['args'];
+    expect(result).toEqual({ ...rest, raw: '' });
+    for (const o of [call, result, call['mcp'] as Record<string, unknown>]) expect(Object.keys(o)).toEqual(Object.keys(o).sort());
+  });
+
+  // Core builds the result context in one place; this holds that place to the derivation above (as the route test holds
+  // the call context to the engine's own preview). The engine judges a result only for a token bound to a running unit.
+  it.skipIf(SKIP_CORE_CHECKS)("core's result gate judges context() with args removed and raw added, nothing else (src/mcp_gate/output.rs)", { tags: ['cross-repo'] }, () => {
+    const src = readFileSync(join(requireCoreDir(), 'src', 'mcp_gate', 'output.rs'), 'utf8');
+    const body = /pub\(crate\) fn evaluate_output\([\s\S]*?\n\}\n/.exec(src)?.[0];
+    expect(body, "core's src/mcp_gate/output.rs no longer declares evaluate_output").toBeDefined();
+    // The whole function was read (its last answer is in it), with its comments taken out.
+    expect(body).toContain('claim_id: Some(verdict.claim_id)');
+    const code = (body as string).replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+    // ctx is built once from context() and never rebound or shadowed.
+    expect(code.match(/\bctx\s*=(?!=)/g)?.length).toBe(1);
+    expect(code).toMatch(/let mut ctx = context\(unit, call, class\);/);
+    expect(code).toMatch(/if let Some\(obj\) = ctx\.as_object_mut\(\) \{\s*obj\.remove\("args"\);\s*\}/);
+    // Every write to ctx: the one removal of args and the one raw string.
+    expect([...code.matchAll(/obj\.(\w+)\(([^)]*)\)/g)].map((m) => `${m[1]}(${m[2]})`)).toEqual(['remove("args")']);
+    expect([...code.matchAll(/ctx\[([^\]]*)\]\s*=/g)].map((m) => m[1])).toEqual(['"raw"']);
+    expect(code).toMatch(/ctx\["raw"\] = serde_json::Value::String\(raw\.to_string\(\)\);/);
+    // The one mutable view of ctx is the one that removes args; no other is taken.
+    expect(code.match(/as_object_mut\(\)|pointer_mut\(|get_mut\(|&mut ctx\b/g)).toEqual(['as_object_mut()']);
+    // The rules are judged on that ctx.
+    expect(code).toMatch(/select_any\(store, &unit\.scope, &phases, &ctx\)/);
+    // serde_json keeps an object's keys sorted unless its preserve_order feature (indexmap) is on anywhere in core.
+    const lock = readFileSync(join(requireCoreDir(), 'Cargo.lock'), 'utf8');
+    const serdeJson = /\[\[package\]\]\nname = "serde_json"\n[\s\S]*?(?=\n\[\[package\]\]|\n*$)/.exec(lock)?.[0];
+    expect(serdeJson, "core's Cargo.lock has no serde_json").toBeDefined();
+    expect(serdeJson).not.toContain('"indexmap');
+  });
+
+  it('refuses a rename past a rule that withholds the source\'s results by the result context alone', async () => {
+    await register('fx');
+    await upsert({ id: 'SEC-FX-RESULTS', applies_to: ['release'], effect: 'deny', severity: 'critical', trigger: { contains: '"raw":"[^"]*","scope":"[^"]*","seat":"[^"]*","tool":"mcp:fx' } });
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'gx' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'rules_differ', rules: ['SEC-FX-RESULTS'] });
+    expect(res.json().error).toContain('SEC-FX-RESULTS (fx, the current name)');
+  });
+
+  it('judges a trigger in full or says it did not: unread syntax, a trigger too long, and a search over budget', () => {
+    expect(judgeTrigger('"server":"fx"', ['fx', 'gx'])).toEqual({ names: ['fx'], judged: true });
+    expect(judgeTrigger('"class":"read"', ['fx', 'gx'])).toEqual({ names: [], judged: true });
+    expect(judgeTrigger('(?x) f x', ['fx', 'gx'])).toEqual({ names: ['fx', 'gx'], judged: false });
+    expect(judgeTrigger('x'.repeat(5000), ['fx', 'gx'])).toEqual({ names: ['fx', 'gx'], judged: false });
+    expect(judgeTrigger('a?'.repeat(2000) + 'zz', ['fx', 'gx'])).toEqual({ names: ['fx', 'gx'], judged: false });
+  });
+
+  it('a rename refused only by a trigger crew cannot judge says so and names it as the next step', async () => {
+    await register('fx');
+    await upsert({ id: 'SEC-VERBOSE', applies_to: ['release'], effect: 'deny', severity: 'critical', trigger: { contains: '(?x) "server" : "nobody"' } });
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'gx' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'rules_differ', rules: ['SEC-VERBOSE'] });
+    const error = res.json().error as string;
+    expect(error).toContain('the trigger of rule SEC-VERBOSE (crew cannot judge its trigger, so it counts for both names)');
+    expect(error).toMatch(/To rename it, first change or retire SEC-VERBOSE$/);
+    expect(error).not.toContain('A new name');
+  });
+
+  // R2 F2: the refusal says when crew could not judge a trigger, and gives the next step when the current name is matched.
+  it('says which triggers crew could not judge, and what to do when a rule matches the current name', async () => {
+    await register('fx');
+    await upsert({ id: 'SEC-VERBOSE', applies_to: ['release'], effect: 'deny', severity: 'critical', trigger: { contains: '(?x) "server" : "nobody"' } });
+    await upsert({ id: 'SEC-FX', applies_to: ['release'], effect: 'deny', severity: 'critical', trigger: { contains: '"server":"fx"' } });
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'gx' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect([...res.json().rules].sort()).toEqual(['SEC-FX', 'SEC-VERBOSE']);
+    const error = res.json().error as string;
+    expect(error).toContain('SEC-VERBOSE (crew cannot judge its trigger, so it counts for both names)');
+    expect(error).not.toContain('SEC-VERBOSE (fx');
+    expect(error).toContain('SEC-FX (fx, the current name)');
+    expect(error).toMatch(/To rename it, first change or retire (SEC-FX, SEC-VERBOSE|SEC-VERBOSE, SEC-FX)$/);
+    expect(error).not.toContain('A new name');
   });
 });
