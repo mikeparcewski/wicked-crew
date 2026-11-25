@@ -52,7 +52,8 @@ describe('GET /repos/:id/requirements — coverage from the engine read', () => 
       real_pct: 23, min_pct: 80, behavior_bearing: 5786, real: 1362, placeholders: 4397, unmapped: 27, not_product: 2380,
     });
     const res = await app!.inject({ method: 'GET', url: '/api/v1/repos/wicked-crew/requirements' });
-    expect(res.statusCode).toBe(404);
+    // studio#986: a state, answered 200 — not a 404 the browser logs for every such repository.
+    expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
       error: 'No requirements graph yet for this repository',
       code: 'notGenerated',
@@ -60,6 +61,17 @@ describe('GET /repos/:id/requirements — coverage from the engine read', () => 
       coverage: { realPct: 23, minPct: 80, behaviorBearing: 5786, real: 1362, placeholders: 4397, unmapped: 27, notProduct: 2380 },
     });
     expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it('an unregistered repository stays a plain 404 with no code, apart from one not generated yet (studio#986)', async () => {
+    const read = await build(null);
+    const unknown = await app!.inject({ method: 'GET', url: '/api/v1/repos/no-such-repo/requirements' });
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json<{ code?: unknown }>().code).toBeUndefined();
+    expect(read).not.toHaveBeenCalled();
+    const notGenerated = await app!.inject({ method: 'GET', url: '/api/v1/repos/wicked-crew/requirements' });
+    expect(notGenerated.statusCode).toBe(200);
+    expect(notGenerated.json<{ code?: unknown }>().code).toBe('notGenerated');
   });
 
   it.each([62, undefined])('serializes a requirements page with engine weightedPct %s', async (weightedPct) => {
@@ -99,7 +111,7 @@ describe('GET /repos/:id/requirements — coverage from the engine read', () => 
   it('says nothing about coverage the engine could not count', async () => {
     await build(null);
     const res = await app!.inject({ method: 'GET', url: '/api/v1/repos/wicked-crew/requirements' });
-    expect(res.statusCode).toBe(404);
+    expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
       error: 'No requirements graph yet for this repository',
       code: 'notGenerated',
