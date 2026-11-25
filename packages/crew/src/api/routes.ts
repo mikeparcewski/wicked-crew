@@ -9348,13 +9348,16 @@ export function registerRoutes(
       return (err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
     }
   };
+  const NOT_INDEXED = { error: 'this repository has no code graph yet: index it first', code: 'not_indexed' } as const;
+  // studio#1402 (codex r1): "not indexed" needs BOTH the engine's own open failure (it reads `open graph <db>: open
+  // estate store read-only at "<db>": storage error: unable to open database file: <db>`) and a confirmed missing graph
+  // file. Any other failure on such a repo (a binding drift, a bad answer) stays a server error, never "not indexed".
+  const notIndexedFailure = async (repo: string, msg: string): Promise<boolean> =>
+    repoReadStatus(msg) === 500 && /unable to open database file/i.test(msg) && (await repoNotIndexed(repo));
   const repoReadFailure = async (reply: FastifyReply, repo: string, err: unknown) => {
     const msg = message(err);
-    const status = repoReadStatus(msg);
-    if (status === 500 && (await repoNotIndexed(repo))) {
-      return reply.code(404).send({ error: 'this repository has no code graph yet: index it first', code: 'not_indexed' });
-    }
-    return reply.code(status).send({ error: msg });
+    if (await notIndexedFailure(repo, msg)) return reply.code(404).send(NOT_INDEXED);
+    return reply.code(repoReadStatus(msg)).send({ error: msg });
   };
 
   app.get(`${V}/governance/coverage`, async (req, reply) => {
@@ -9377,8 +9380,8 @@ export function registerRoutes(
   app.get(`${V}/governance/graph`, async (req, reply) => {
     // #122: node-count-by-kind summary of a repo's OWN code graph. Repo-scoped ONLY — there is no
     // meaningful daemon-wide graph view (the daemon store holds run/governance nodes, not a repo's
-    // code graph), so a missing `?repo=` is a 400, an unknown repo a 404, and an engine/binding
-    // failure a 500 (not masked as 404).
+    // code graph), so a missing `?repo=` is a 400, an unknown repo a 404, a repo not indexed yet a 200 with no
+    // kinds (studio#1402), and an engine/binding failure a 500 (not masked as 404).
     const repo = repoParam(req);
     if (!repo) {
       return reply.code(400).send({ error: 'governance/graph requires a ?repo=<ref>' });
@@ -9387,6 +9390,10 @@ export function registerRoutes(
       const kinds = await adapter.getGraphKindsForRepo(repo);
       return { kinds };
     } catch (err) {
+      // studio#1402: a known repo with no code graph yet is a state, not an error. The summary answers 200 with no
+      // kinds and the reason (`code: 'not_indexed'`), so Repositories, Understand and a repository's page make no 404
+      // per repo not indexed yet; every reader of `{ kinds }` draws "not built". An unknown id stays a plain 404.
+      if (await notIndexedFailure(repo, message(err))) return { kinds: [], ...NOT_INDEXED };
       return repoReadFailure(reply, repo, err);
     }
   });
