@@ -124,6 +124,19 @@ describe('crew#1880: a terminal run log is read once, and never again after a re
     expect(byId(second, 'free')['run_identity']).toEqual(byId(first, 'free')['run_identity']);
   });
 
+  it('the sidecar is a pure cache: deleting it costs one rebuild from the logs and the list is unchanged', async () => {
+    const pick = (r: Record<string, unknown>) => ({ id: r['id'], workflow_id: r['workflow_id'], run_identity: r['run_identity'], ended_at: r['ended_at'] });
+    const before = (await list(newAdapter())).map(pick);
+    rmSync(factsPath());
+    reads.clear();
+    const rebuilt = (await list(newAdapter())).map(pick);
+    expect(Object.fromEntries(reads)).toEqual({ done: 1, free: 1, stopped: 1 });
+    expect(rebuilt).toEqual(before);
+    reads.clear();
+    expect((await list(newAdapter())).map(pick)).toEqual(before);
+    expect(totalReads()).toBe(0);
+  });
+
   it('a run read while live is not kept as final: once terminal it is read once, then kept', async () => {
     store.push(run('live', 'executing'));
     logs.set('live', log('live', 'feature', null));
