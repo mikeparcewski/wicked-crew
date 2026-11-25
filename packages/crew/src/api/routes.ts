@@ -10768,12 +10768,12 @@ export function registerRoutes(
     } satisfies ListProposalsResponse;
   });
 
-  // POST /proposals {content, project?, source?} → proposal.submit → 201 { id } (api-types 0.54.0).
-  // A skin files ONE preference into the same review queue — studio's "takes": the person picks one
-  // of two candidate outputs, and the pick becomes "prefers takes like X", learned only once they
-  // accept it here. The kind (`memory`), tier and `capture: "preference"` marker are the daemon's; a
-  // caller cannot file a policy through this door (the schema is strict). `project` becomes the
-  // `project` facet, so the preference is recalled on that project only.
+  // POST /proposals {content, project?, repo?, tier?, source?} → proposal.submit → 201 { id } (api-types 0.54.0;
+  // tier and repo 0.227.0, studio#1095). A skin files ONE memory into the same review queue — studio's "takes" (the
+  // person picks one of two candidate outputs, and the pick becomes "prefers takes like X") and the Memory page's
+  // add — learned only once they accept it here. The kind (`memory`) and `capture: "preference"` marker are the
+  // daemon's; a caller cannot file a policy through this door (the schema is strict). The tier is the person's
+  // choice of three (a fact by default); `project` and `repo` become those facets, so it is recalled there only.
   app.post(
     `${V}/proposals`,
     {
@@ -10786,15 +10786,15 @@ export function registerRoutes(
       if (!parsed.success) {
         return reply.code(400).send(invalidBody(parsed.error, 'Invalid proposal body'));
       }
-      const { content, project, source } = parsed.data;
-      const payload: Record<string, unknown> = { content, tier: 'semantic', capture: 'preference' };
+      const { content, project, repo, tier, source } = parsed.data;
+      const payload: Record<string, unknown> = { content, tier: tier ?? 'semantic', capture: 'preference' };
       if (source !== undefined) payload.source = source;
       let submitted: { id?: unknown };
       try {
         submitted = (await estateTool('proposal.submit', {
           kind_type: 'memory',
           payload,
-          facets: project !== undefined ? { project } : {},
+          facets: { ...(project !== undefined ? { project } : {}), ...(repo !== undefined ? { repo } : {}) },
         })) as { id?: unknown };
       } catch (err) {
         return estateUpstreamError(reply, err);
