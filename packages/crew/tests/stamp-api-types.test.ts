@@ -26,7 +26,9 @@ afterEach(() => {
 // The host's git config (hooks, signing, templates, an external diff) stays out of the throwaway repos, for the
 // fixture's own git calls and for the script's.
 const GIT_ENV: NodeJS.ProcessEnv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
-for (const k of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY']) delete GIT_ENV[k];
+for (const k of Object.keys(GIT_ENV)) {
+  if (['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT'].includes(k) || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(k)) delete GIT_ENV[k];
+}
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', env: GIT_ENV });
@@ -108,6 +110,7 @@ function smallWorkspace(): string {
       '/** (api-types next, crew#1) A new field. */',
       'export interface New { b?: string }',
       '/** (crew#2, api-types next) Another. */',
+      '/** (api-types\tnext) A tab between the words. */',
       'export interface Other { c?: string }',
       '/**',
       ' * (core#1808,',
@@ -145,8 +148,9 @@ describe('npm run stamp:api-types -- <X.Y.Z>', () => {
     const before = run(root, '--check');
     expect(before.status).toBe(1);
     expect(before.stderr).toContain("packages/crew-api-types/index.d.ts:4 still says 'api-types next'");
-    expect(before.stderr).toContain("packages/crew-api-types/index.d.ts:10 still says 'api-types next'");
     expect(before.stderr).toContain("packages/crew-api-types/index.d.ts:11 still says 'api-types next'");
+    expect(before.stderr).toContain("packages/crew-api-types/index.d.ts:12 still says 'api-types next'");
+    expect(before.stderr).toContain("packages/crew-api-types/index.d.ts:7 still says 'api-types next'");
     expect(before.stderr).toContain("CHANGELOG.md:3 still says 'api-types next'");
     expect(before.stderr).not.toContain('index.d.ts:1 ');
     expect(before.stderr).not.toContain('CHANGELOG.md:4 ');
@@ -168,6 +172,7 @@ describe('npm run stamp:api-types -- <X.Y.Z>', () => {
     expect(types).toContain('tags what it adds `(api-types next)`: prose');
     expect(types).toContain(' *  api-types 0.20.0) A tag wrapped across comment lines.');
     expect(types).toContain('@deprecated (api-types 0.20.0) Replaced by New.');
+    expect(types).toContain('/** (api-types 0.20.0) A tab between the words. */');
     expect(readFileSync(join(root, 'packages/crew/src/api/routes.ts'), 'utf8')).toContain('(api-types 0.20.0) the route');
     expect(readFileSync(join(root, 'CHANGELOG.md'), 'utf8')).toBe(
       '## [Unreleased]\n- New (api-types 0.20.0).\n- api-types 0.20.0: `New`, `Other`.\n- The rule: tag it `(api-types next)`.\n',
@@ -193,7 +198,7 @@ describe('npm run stamp:api-types -- <X.Y.Z>', () => {
 
   it('refuses a version that is not X.Y.Z or that moves the package back, and writes nothing', () => {
     const root = smallWorkspace();
-    for (const bad of ['0.20', 'v0.20.0', '0.18.9', '0.0232.0', '1234567890.0.0', '0.20.0-rc.1']) {
+    for (const bad of ['0.20', 'v0.20.0', '0.18.9', '0.0232.0', '99999999999999999.0.0', '0.20.0-rc.1']) {
       const r = run(root, bad);
       expect(r.status).toBe(1);
       expect(git(root, 'status', '--porcelain')).toBe('');
@@ -289,6 +294,28 @@ describe('the stamp and the guard keep to crew\'s own entries and the tree on di
     expect(run(root, '0.20.0').status).toBe(0);
     expect(readJson(lockPath).packages?.['packages/crew']?.devDependencies?.['wicked-crew-api-types']).toBe('^0.20.0');
     expect(run(root, '--check').status).toBe(0);
+  });
+
+  it('flags a workspace lockfile slot its manifest no longer names', () => {
+    const root = smallWorkspace();
+    expect(run(root, '0.20.0').status).toBe(0);
+    const lockPath = join(root, 'package-lock.json');
+    const lock = readJson(lockPath);
+    const crew = lock.packages?.['packages/crew'];
+    if (crew) crew.peerDependencies = { 'wicked-crew-api-types': '^0.19.0' };
+    writeJson(lockPath, lock);
+    const r = run(root, '--check');
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('package-lock.json "packages/crew" peerDependencies asks for wicked-crew-api-types ^0.19.0, which packages/crew/package.json does not; run npm install');
+  });
+
+  it('refuses --remote with no name rather than reading the local tags', () => {
+    const root = smallWorkspace();
+    for (const args of [['--check', '--remote'], ['--check', '--remote', ''], ['--remote', '--check']]) {
+      const r = run(root, ...args);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain('--remote needs a remote name');
+    }
   });
 
   it("leaves a third-party package's own range on the contract alone", () => {

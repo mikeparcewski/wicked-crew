@@ -380,12 +380,14 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: A version PR carries a whole api-types stamp
         shell: bash
+        # The base commit this run's merge ref was built on, not the branch's tip: a version PR that merges while
+        # this job is queued must not turn a feature PR's comparison into a version PR's.
         env:
-          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          git fetch -q --depth=1 origin "+refs/heads/${BASE_REF}:refs/remotes/origin/base"
-          base="$(git show refs/remotes/origin/base:packages/crew/package.json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).version))')"
+          git fetch -q --depth=1 origin "$BASE_SHA"
+          base="$(git show "$BASE_SHA":packages/crew/package.json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).version))')"
           head="$(node -p "require('./packages/crew/package.json').version")"
           if [ "$base" = "$head" ]; then
             echo "crew stays at $head: not a version PR, so its (api-types next) tags are expected"

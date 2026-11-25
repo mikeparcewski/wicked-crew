@@ -40,13 +40,14 @@ import { fileURLToPath } from 'node:url';
 
 const PKG = 'wicked-crew-api-types';
 const TYPES_DIR = 'packages/crew-api-types';
-const TAG_WORDS = /\bapi-types next\b/g;
+const TAG_WORDS = /\bapi-types[ \t]+next\b/g;
 const DEP_FIELDS = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'];
 // Where an `api-types next` tag is written: the contract itself, the workspaces' source doc comments, and the
 // CHANGELOG. Tests, scripts and the READMEs are not stamped (they may spell the tag on purpose).
 const TAGGED = (path) => path === `${TYPES_DIR}/index.d.ts` || /^packages\/[^/]+\/src\//.test(path) || path === 'CHANGELOG.md';
-// A release version npm accepts: no leading zeros, and parts small enough to compare as numbers.
-const SEMVER = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
+// A release version npm accepts: no leading zeros, and each part a safe integer (npm's own bound).
+const isVersion = (v) =>
+  typeof v === 'string' && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(v) && v.split('.').every((p) => Number.isSafeInteger(Number(p)));
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
@@ -67,13 +68,14 @@ function taggedFiles(root) {
     .filter((p, i, all) => p && TAGGED(p) && all.indexOf(p) === i);
 }
 
-/** Each tag in `text` as `{ index, line }`; a match after an odd number of backticks on its line is in a code span. */
+/** Each tag in `text` as `{ index, length, line }`; a match after an odd number of backticks on its line is in a
+ *  code span (the README's grammar: a tag is outside backticks, on one line). */
 function tagsIn(text) {
   const out = [];
   for (const m of text.matchAll(TAG_WORDS)) {
     const lineStart = text.lastIndexOf('\n', m.index - 1) + 1;
     const ticks = (text.slice(lineStart, m.index).match(/`/g) ?? []).length;
-    if (ticks % 2 === 0) out.push({ index: m.index, line: text.slice(0, m.index).split('\n').length });
+    if (ticks % 2 === 0) out.push({ index: m.index, length: m[0].length, line: text.slice(0, m.index).split('\n').length });
   }
   return out;
 }
@@ -106,10 +108,10 @@ function dependents(root) {
 }
 
 export function stamp(root, version) {
-  if (!SEMVER.test(version)) throw new Error(`usage: stamp-api-types <X.Y.Z> (got '${version}')`);
+  if (!isVersion(version)) throw new Error(`usage: stamp-api-types <X.Y.Z> (got '${version}')`);
   const typesPj = join(root, TYPES_DIR, 'package.json');
   const pj = readJson(typesPj);
-  if (!SEMVER.test(pj.version)) throw new Error(`${PKG}'s version '${pj.version}' is not X.Y.Z; fix it by hand first`);
+  if (!isVersion(pj.version)) throw new Error(`${PKG}'s version '${pj.version}' is not X.Y.Z; fix it by hand first`);
   if (compare(version, pj.version) < 0) throw new Error(`${PKG} is at ${pj.version}; ${version} would move it back`);
   const deps = dependents(root);
   const lockPath = join(root, 'package-lock.json');
@@ -139,6 +141,7 @@ export function stamp(root, version) {
       touched.add('package-lock.json');
     }
   }
+  // A workspace lockfile slot the manifest no longer names is npm install's to drop; the guard flags it.
   if (lock.packages[TYPES_DIR].version !== version) {
     lock.packages[TYPES_DIR].version = version;
     touched.add('package-lock.json');
@@ -150,9 +153,9 @@ export function stamp(root, version) {
     if (tags.length === 0) continue;
     let next = '';
     let from = 0;
-    for (const { index } of tags) {
+    for (const { index, length } of tags) {
       next += `${text.slice(from, index)}api-types ${version}`;
-      from = index + 'api-types next'.length;
+      from = index + length;
     }
     writeFileSync(join(root, path), next + text.slice(from));
     touched.add(path);
@@ -180,7 +183,7 @@ function tagExists(root, tag, remote) {
 export function check(root, remote) {
   const problems = [];
   const version = readJson(join(root, TYPES_DIR, 'package.json')).version;
-  if (!SEMVER.test(version)) problems.push(`${TYPES_DIR}/package.json version '${version}' is not X.Y.Z`);
+  if (!isVersion(version)) problems.push(`${TYPES_DIR}/package.json version '${version}' is not X.Y.Z`);
   for (const path of taggedFiles(root)) {
     for (const { line } of tagsIn(readFileSync(join(root, path), 'utf8'))) problems.push(`${path}:${line} still says 'api-types next'`);
   }
@@ -189,11 +192,21 @@ export function check(root, remote) {
   if (lock.packages?.[TYPES_DIR]?.version !== version) {
     problems.push(`package-lock.json names ${PKG} ${lock.packages?.[TYPES_DIR]?.version}, its package.json ${version}`);
   }
-  for (const [ws, field] of dependents(root)) {
+  const deps = dependents(root);
+  for (const [ws, field] of deps) {
     const spec = readJson(join(root, ws, 'package.json'))[field][PKG];
     if (spec !== caret) problems.push(`${ws}/package.json ${field} asks for ${PKG} ${spec}, not ${caret}`);
     const locked = lock.packages?.[ws]?.[field]?.[PKG];
     if (locked !== caret) problems.push(`package-lock.json "${ws}" ${field} asks for ${PKG} ${locked ?? '(nothing)'}, not ${caret}`);
+  }
+  // Every workspace's lockfile entry, including a slot its manifest no longer names (a moved or dropped dependency).
+  for (const ws of workspaces(root)) {
+    for (const field of DEP_FIELDS) {
+      const locked = lock.packages?.[ws]?.[field]?.[PKG];
+      if (locked !== undefined && !deps.some(([w, f]) => w === ws && f === field)) {
+        problems.push(`package-lock.json "${ws}" ${field} asks for ${PKG} ${locked}, which ${ws}/package.json does not; run npm install`);
+      }
+    }
   }
   try {
     const manifest = readJson(join(root, 'packages/crew/endpoint-manifest.json')).apiTypesVersion;
@@ -220,7 +233,13 @@ function main(argv) {
   const args = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--root') root = resolve(argv[++i]);
-    else if (argv[i] === '--remote') remote = argv[++i];
+    else if (argv[i] === '--remote') {
+      remote = argv[++i];
+      if (remote === undefined || remote === '' || remote.startsWith('-')) {
+        console.error('::error::--remote needs a remote name (for example origin)');
+        return 2;
+      }
+    }
     else args.push(argv[i]);
   }
   try {
