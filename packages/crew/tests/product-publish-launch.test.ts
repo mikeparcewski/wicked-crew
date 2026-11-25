@@ -12,6 +12,7 @@ import { AuditLog } from '../src/api/audit.js';
 import { RunTimingIndex } from '../src/api/run-timing-index.js';
 import { createServer } from '../src/api/server.js';
 import { CoreAdapter } from '../src/core/adapter.js';
+import { baseSkillOff } from './setup/base-skill-off.js';
 
 vi.setConfig({ testTimeout: 120_000, hookTimeout: 60_000 });
 
@@ -35,6 +36,9 @@ beforeAll(async () => {
   adapter.projectMembers = (async () => [{ member_kind: 'crew.repo', member_ref: 'alpha' }]) as never;
   adapter.listRepos = (async () => [{ id: 'alpha', name: 'alpha', root_path: root, code_graph_db: join(root, 'estate.db') }]) as never;
   adapter.getRequirementsGraphForRepo = (async () => ({ graph, coverage: null })) as never;
+  // This suite is about the launch's recorded facts, not grounding: a scratch home has no published skills, so the base
+  // skill is off, the way an operator says so (tests/setup/base-skill-off.ts), before createServer reads it at boot.
+  baseSkillOff();
   app = await createServer(adapter, { auditPath: join(dir, 'audit.log') });
   await app.ready();
 });
