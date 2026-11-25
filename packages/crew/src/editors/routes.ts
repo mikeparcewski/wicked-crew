@@ -4,10 +4,11 @@
  *  - `GET /editors` (operator+): the registry, as Settings → Editors renders it. A run plugin (CS7) lists as an
  *    `EditorView` row too, its `granted_topics` filled from the engine's observe decisions (`[]` when it cannot
  *    decide them: fail closed).
- *  - `POST /editors {packRoot, enabled?}` (HUMAN-only): install or update a pack's editors and/or run plugins —
- *    garden's fail-closed gate, then crew's own conformance run, then the registry (`pack-install.ts`). 200 with
- *    the installed editors; 422 with the verdict or the conformance report; 501 with the approval list
- *    for a pack that also ships skills or blocks; 409 for an id another pack or a first-party editor holds. The
+ *  - `POST /editors {packRoot, enabled?, approve?}` (HUMAN-only): install or update a pack's editors and/or run
+ *    plugins — garden's fail-closed gate, then crew's own conformance run, then the registry (`pack-install.ts`).
+ *    200 with the installed editors; 422 with the verdict or the conformance report; 409 with the approval list for
+ *    a pack that also ships skills or blocks and carries no matching `approve` (crew#1703); 409 for an id another
+ *    pack or a first-party editor holds. The
  *    install consent writes each installed plugin's `observe:<topic>` tokens (CS7 C3), beside the editors'
  *    `mcp.session` tokens, in one ledger edit.
  *  - `DELETE /editors/:id` (HUMAN-only): an installed pack editor or run plugin is removed from the registry (the
@@ -49,7 +50,8 @@ import { z } from '../zod.js';
 import { LOCAL_ACTOR, trustAtLeast } from '../api/auth.js';
 import type { Actor, ConformanceRule, CoreEvent, EditorGrantsChangedFrame, EditorGrantsResponse, EditorView, ListEditorsResponse } from '../core/types.js';
 import { bundleHeaders } from './csp.js';
-import { installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from './pack-install.js';
+import { withdrawPackExtras } from './pack-extras.js';
+import { installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner, type PackPresetsPort, type PackSkillsPort } from './pack-install.js';
 import { EDITOR_ID, EDITOR_VERSION, EditorRegistry, HOST_BUNDLE_CAP_BYTES, notRealEntry, readCapped, type EditorRecord, type PluginRecord, type RegisteredRecord } from './registry.js';
 import { guardBundle, MAX_INLINE_SCRIPTS, type GuardedBundle } from './webrtc-guard.js';
 
@@ -207,6 +209,10 @@ export interface EditorRoutesDeps {
   conformance: ConformanceRunner;
   /** The §6.4 tripwire: is this bearer a governed unit's token? Absent = no engine to ask (nothing refused on it). */
   isUnitToken?: (token: string) => Promise<UnitTokenVerdict>;
+  /** (crew#1703) The daemon skills root a pack's skills join; absent = this daemon has none (such a pack is refused). */
+  skills?: PackSkillsPort | null;
+  /** (crew#1703) The engine's preset store and phase catalog, for a pack's blocks. */
+  presets?: PackPresetsPort | null;
   /** Tell open hosts to read the decided grants again after an editor-route change. */
   broadcast?: (frame: CoreEvent) => void;
   log?: (msg: string) => void;
@@ -281,17 +287,29 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
     },
   );
 
-  const InstallSchema = z.strictObject({ packRoot: z.string().min(1), enabled: z.boolean().optional() });
+  const InstallSchema = z.strictObject({
+    packRoot: z.string().min(1),
+    enabled: z.boolean().optional(),
+    // crew#1703: the one consent for a pack's skills and blocks (exactly the refusal's list).
+    approve: z
+      .strictObject({ skills: z.array(z.string().max(200)).max(200), blocks: z.array(z.string().max(200)).max(200), digest: z.string().regex(/^[0-9a-f]{64}$/).optional() })
+      .optional(),
+  });
   app.post(
     `${V}/editors`,
-    { config: { manifest: { responseType: 'InstallEditorResponse', statusCodes: [200, 400, 403, 404, 409, 422, 501] } } },
+    { config: { manifest: { requestType: 'InstallEditorBody', responseType: 'InstallEditorResponse', statusCodes: [200, 400, 403, 404, 409, 422] } } },
     async (req, reply) => {
       if (!humanOnly(req, reply)) return reply;
       const parsed = InstallSchema.safeParse(req.body);
-      if (!parsed.success) return reply.code(400).send({ error: 'body must be { packRoot: <absolute path>, enabled?: boolean }' });
+      if (!parsed.success) return reply.code(400).send({ error: 'body must be { packRoot: <absolute path>, enabled?: boolean, approve?: { skills: string[], blocks: string[], digest?: string } }' });
       try {
         return await serial(async () => {
-          const installed = await installPack(parsed.data.packRoot, parsed.data.enabled, { check: deps.packCheck, conformance: deps.conformance, registry });
+          const installed = await installPack(
+            parsed.data.packRoot,
+            parsed.data.enabled,
+            { check: deps.packCheck, conformance: deps.conformance, registry, skills: deps.skills ?? null, presets: deps.presets ?? null },
+            parsed.data.approve,
+          );
           const removed = installed.removed ?? [];
           deps.log?.(`[editors] installed ${installed.editors.map((e) => `${e.id}@${e.version}`).join(', ')}${installed.updated ? ' (update)' : ''}${removed.length > 0 ? `; removed ${removed.join(', ')}` : ''}`);
           // The install consent IS the grant (DES-MCP-INSPECTOR-001 §6; CS7 C3): this human-only call, after
@@ -341,7 +359,7 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
 
   app.delete(
     `${V}/editors/:id`,
-    { config: { manifest: { statusCodes: [200, 403, 404, 409, 503] } } },
+    { config: { manifest: { responseType: 'RemoveEditorResponse', statusCodes: [200, 403, 404, 409, 503] } } },
     async (req, reply) => {
       if (!humanOnly(req, reply)) return reply;
       const id = idOf(req);
@@ -352,7 +370,31 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
       return serial(async () => {
         // Installed = served or skipped at boot (codex r2: a skipped one has no live record but is removable).
         if (!registry.isInstalled(id)) return reply.code(404).send({ error: `no editor '${id}' is installed` });
-        // Its grants go first (codex r1): a failed withdrawal keeps the editor installed, so a retry of
+        // (crew#1703 round 2, crew#1916) The pack's last editor going: its skills leave every worker's set and its
+        // presets leave the catalog, BEFORE the record goes, so a withdrawal that fails (a busy or refusing skills root,
+        // a preset that cannot be deleted) is a 503 that keeps the editor installed and a retry of this DELETE finishes
+        // it. The pack keeps them as its own, so a reinstall turns the same skills back on.
+        const packName = registry.packNameOf(id);
+        let withdrawn: Awaited<ReturnType<typeof withdrawPackExtras>> | null = null;
+        if (packName !== null && !registry.hasPack(packName, id)) {
+          const owned = registry.packExtrasOwned(packName);
+          // A skills root is asked even when the record names no skill: one stamped as the pack's goes too (crew#1917 r1).
+          if (owned.skills.length > 0 || owned.presets.length > 0 || (deps.skills ?? null) !== null) {
+            const w = await withdrawPackExtras({
+              packName,
+              skills: owned.skills.map((k) => k.key),
+              presets: owned.presets,
+              skillsPort: deps.skills ?? null,
+              presetsPort: deps.presets ?? null,
+              wholePack: true,
+            });
+            if (w.error !== undefined) {
+              return reply.code(503).send({ error: `${id} was not removed: ${w.error}; try again`, withdrawn: w });
+            }
+            if (owned.skills.length > 0 || owned.presets.length > 0 || w.skills.length > 0 || w.presets.length > 0) withdrawn = w;
+          }
+        }
+        // Its grants go next (codex r1): a failed withdrawal keeps the editor installed, so a retry of
         // this DELETE can still reach it, and never leaves a grant behind a removed editor. Every grant,
         // not only the install's (F37): a reinstall of the same build asks again for what the person allowed.
         try {
@@ -362,7 +404,7 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
         }
         if (!registry.removeInstalled(id)) return reply.code(404).send({ error: `no editor '${id}' is installed` });
         deps.broadcast?.({ type: 'editorGrantsChanged', id, reason: 'removed' } satisfies EditorGrantsChangedFrame);
-        return { removed: true, id };
+        return { removed: true, id, ...(withdrawn !== null ? { withdrawn } : {}) };
       });
     },
   );

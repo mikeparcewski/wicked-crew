@@ -222,14 +222,30 @@ describe('SeatImageReading: off the request path', () => {
   });
 
   it('the daemon reading refreshes on its own every half TTL: a repair is seen with no request in between', async () => {
-    let answer: SeatImageStatus | null = status(baseGone, { codex: { present: false } });
-    const r = new SeatImageReading(async () => answer, { ttlMs: 40 }).start();
-    close.push(() => r.close());
-    await new Promise((res) => setTimeout(res, 5));
-    expect([...(r.unbuildable() ?? new Map()).keys()]).toEqual(['codex']);
-    answer = status();
-    await new Promise((res) => setTimeout(res, 45));
-    expect(r.unbuildable()?.size).toBe(0);
+    // The clock is the test's (crew main macOS flaked on a 5 ms real wait for the first read): each step is an
+    // explicit tick, and every status read is counted, so the repair is seen from the timer alone.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    let stop = (): void => undefined;
+    try {
+      let reads = 0;
+      let answer: SeatImageStatus | null = status(baseGone, { codex: { present: false } });
+      const r = new SeatImageReading(async () => { reads += 1; return answer; }, { ttlMs: 40 }).start();
+      stop = () => r.close();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reads).toBe(1);
+      expect([...(r.unbuildable() ?? new Map()).keys()]).toEqual(['codex']);
+      answer = status();
+      // Half the TTL: the timer reads again with no request in between.
+      await vi.advanceTimersByTimeAsync(20);
+      expect(reads).toBe(2);
+      expect(r.unbuildable()?.size).toBe(0);
+      // …and keeps doing so: the next reading is due at the next half TTL, never older than the TTL when served.
+      await vi.advanceTimersByTimeAsync(20);
+      expect(reads).toBe(3);
+    } finally {
+      stop(); // the interval is the fake clock's: cleared on it
+      vi.useRealTimers();
+    }
   });
 
   it('a failed read is unknown (null), never a bench', async () => {

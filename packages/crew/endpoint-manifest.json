@@ -722,7 +722,7 @@
     {
       "method": "POST",
       "path": "/api/v1/editors",
-      "requestType": null,
+      "requestType": "InstallEditorBody",
       "responseType": "InstallEditorResponse",
       "statusCodes": [
         200,
@@ -730,15 +730,14 @@
         403,
         404,
         409,
-        422,
-        501
+        422
       ]
     },
     {
       "method": "DELETE",
       "path": "/api/v1/editors/:id",
       "requestType": null,
-      "responseType": null,
+      "responseType": "RemoveEditorResponse",
       "statusCodes": [
         200,
         403,
@@ -1849,6 +1848,34 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/api/v1/projects/:id/product/publish",
+      "requestType": "ProductPublishBody",
+      "responseType": "ProductPublishResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/projects/:id/product/publish/:runId",
+      "requestType": null,
+      "responseType": "ProductPublicationsResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        503
+      ]
+    },
+    {
       "method": "GET",
       "path": "/api/v1/projects/:id/prompts",
       "requestType": null,
@@ -2004,7 +2031,8 @@
       "statusCodes": [
         201,
         400,
-        502
+        502,
+        503
       ]
     },
     {

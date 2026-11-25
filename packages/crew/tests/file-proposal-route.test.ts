@@ -94,6 +94,8 @@ describe('POST /proposals — file a preference memory (api-types 0.54.0)', () =
 
   it('studio#1095: the person picks the memory tier and may scope it to one repository (the repo facet)', async () => {
     proposalTool.mockResolvedValue({ id: 'prop-9' });
+    // The repo facet is a registered repository's id, as studio's picker sends it and a run's repo_ref names it.
+    adapter.listRepos.mockResolvedValue([{ id: 'northwind-api', name: 'api', root_path: '/w/api', default_branch: 'main', registered_at: 1 }]);
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/proposals',
@@ -127,6 +129,26 @@ describe('POST /proposals — file a preference memory (api-types 0.54.0)', () =
       expect(res.statusCode, JSON.stringify(payload).slice(0, 60)).toBe(400);
     }
     expect(proposalTool).not.toHaveBeenCalled();
+  });
+
+  it('crew#1878 follow-up: a repository no registry row carries is a 400 naming it (a memory there would never be recalled); estate is not called', async () => {
+    adapter.listRepos.mockResolvedValue([{ id: 'northwind-api', name: 'api', root_path: '/w/api', default_branch: 'main', registered_at: 1 }]);
+    for (const repo of ['northwind-web', 'api']) {
+      const res = await app.inject({ method: 'POST', url: '/api/v1/proposals', payload: { content: 'x', repo } });
+      expect(res.statusCode, repo).toBe(400);
+      expect(res.json()).toMatchObject({ code: 'repo_unknown' });
+      expect((res.json() as { error: string }).error).toContain(`'${repo}'`);
+    }
+    // A registry that cannot be read refuses too (503): nothing is filed on a guess.
+    adapter.listRepos.mockRejectedValueOnce(new Error('engine busy'));
+    const down = await app.inject({ method: 'POST', url: '/api/v1/proposals', payload: { content: 'x', repo: 'northwind-api' } });
+    expect(down.statusCode).toBe(503);
+    expect(proposalTool).not.toHaveBeenCalled();
+    // No repo named: the registry is not read at all.
+    adapter.listRepos.mockClear();
+    proposalTool.mockResolvedValueOnce({ id: 'prop-10' });
+    expect((await app.inject({ method: 'POST', url: '/api/v1/proposals', payload: { content: 'x' } })).statusCode).toBe(201);
+    expect(adapter.listRepos).not.toHaveBeenCalled();
   });
 
   it('400s a blank or missing content, an unknown key (no caller-chosen kind), and never calls estate', async () => {
