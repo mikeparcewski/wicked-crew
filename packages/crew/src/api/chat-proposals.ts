@@ -121,6 +121,7 @@ import { tornTailPrefix } from './chat-transcripts.js';
 import type { JobTurnContext, MakeDigest } from './chat-scope.js';
 import { catalogDigest, detect, detectable } from '../workflow-catalog/detect.js';
 import { OnboardBlock, resolveOnboard, type OnboardBlockBody, type OnboardResolveDeps } from './proposal-onboard.js';
+import { CUT_BLOCKING, CutBlock, cutInterruptedWords, resolveCut, type CutBlockBody, type CutResolveDeps } from './proposal-cut.js';
 
 // ── the block ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -179,7 +180,8 @@ export type ParsedMake =
   | ({ op: 'entry' } & z.infer<typeof EntryBlock>)
   | ({ op: 'refine' } & z.infer<typeof RefineBlock>)
   | ({ op: 'theme' } & z.infer<typeof ThemeBlock>)
-  | ({ op: 'onboard' } & OnboardBlockBody);
+  | ({ op: 'onboard' } & OnboardBlockBody)
+  | ({ op: 'cut' } & CutBlockBody);
 
 /** One block body → its operation, or `null` (not JSON, not exactly one of `entry` / `refine` / `theme`, or a bad shape). */
 export function parseMakeBlock(body: string): ParsedMake | null {
@@ -191,7 +193,7 @@ export function parseMakeBlock(body: string): ParsedMake | null {
   }
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const o = raw as Record<string, unknown>;
-  const ops = (['entry', 'refine', 'theme', 'onboard'] as const).filter((k) => o[k] !== undefined && o[k] !== null);
+  const ops = (['entry', 'refine', 'theme', 'onboard', 'cut'] as const).filter((k) => o[k] !== undefined && o[k] !== null);
   if (ops.length !== 1) return null;
   if (ops[0] === 'entry') {
     const r = EntryBlock.safeParse(o);
@@ -205,6 +207,11 @@ export function parseMakeBlock(body: string): ParsedMake | null {
     // crew-0182: add a git repository to a project (resolved by `proposal-onboard.ts`).
     const r = OnboardBlock.safeParse(o);
     return r.success ? { op: 'onboard', ...r.data } : null;
+  }
+  if (ops[0] === 'cut') {
+    // studio#1140 (a): a change to the demo video open in the chat (resolved by `proposal-cut.ts`).
+    const r = CutBlock.safeParse(o);
+    return r.success ? { op: 'cut', ...r.data } : null;
   }
   const r = ThemeBlock.safeParse(o);
   return r.success ? { op: 'theme', ...r.data } : null;
@@ -421,11 +428,12 @@ export async function liveInRuns(runId: string, runs: RunsOnce): Promise<boolean
 export interface ProposalDispatcher {
   /** The create path's actual readers, so proposal authorization never guesses from attachment metadata. */
   documentPacketDeps?(): PacketDeps;
-  /** Whether the run this identity names already exists (it is then adopted, never started again). */
-  find(identity: ProposalIdentity): Promise<boolean>;
+  /** Whether the run this identity names already exists (it is then adopted, never started again). A `cut` launcher
+   *  answers with the version its Go made (studio#1140 (a)). */
+  find(identity: ProposalIdentity): Promise<boolean | { version: number }>;
   /** Start it, with `identity.runId` as the launch's `sessionId`. Called only when {@link find} said no, under the
-   *  run id's lock. */
-  launch(dispatch: ProposalDispatch): Promise<void>;
+   *  run id's lock. A `cut` launcher answers with the version it made. */
+  launch(dispatch: ProposalDispatch): Promise<void | { version: number }>;
   /** Whether a run it started is still live (the one-live-job-per-chat rule). `runs` is the run list the check reads
    *  (crew#1779: one list for every job a check looks at, never one engine read per job), read only when called. */
   live?(runId: string, runs: RunsOnce): Promise<boolean>;
@@ -487,10 +495,11 @@ export class LaunchOnceRegistry {
   }
 
   /** The run this identity names, when it exists (adopted, never started again), with whether a stub took it. */
-  async find(kind: ArtifactProposalKind, identity: ProposalIdentity): Promise<{ stub: boolean } | null> {
+  async find(kind: ArtifactProposalKind, identity: ProposalIdentity): Promise<{ stub: boolean; version?: number } | null> {
     const d = this.dispatchers.get(kind);
-    if (d === undefined || !(await d.find(identity))) return null;
-    return { stub: d.stub === true };
+    const found = d === undefined ? false : await d.find(identity);
+    if (d === undefined || found === false) return null;
+    return { stub: d.stub === true, ...(typeof found === 'object' ? { version: found.version } : {}) };
   }
 
   async live(kind: ArtifactProposalKind, runId: string, runs: RunsOnce): Promise<boolean> {
@@ -511,11 +520,13 @@ export class LaunchOnceRegistry {
     if (d === undefined) return Promise.reject(new Error(`nothing can start a ${dispatch.kind} on this daemon yet`));
     return this.lock.run(dispatch.identity.runId, async () => {
       const base = { runId: dispatch.identity.runId, artifactRef: dispatch.identity.artifactRef, stub: d.stub === true };
-      if (await d.find(dispatch.identity)) return { ...base, adopted: true };
-      await d.launch(dispatch);
+      const found = await d.find(dispatch.identity);
+      if (found !== false) return { ...base, adopted: true, ...(typeof found === 'object' ? { version: found.version } : {}) };
+      const made = await d.launch(dispatch);
       const ref = dispatch.identity.artifactRef;
-      if (ref !== null) this.byArtifact.set(ref, [...(this.byArtifact.get(ref) ?? []).slice(-15), { kind: dispatch.kind, runId: dispatch.identity.runId }]);
-      return { ...base, adopted: false };
+      // A cut starts no run: nothing of it is live after its launch (its version is its outcome).
+      if (ref !== null && dispatch.kind !== 'cut') this.byArtifact.set(ref, [...(this.byArtifact.get(ref) ?? []).slice(-15), { kind: dispatch.kind, runId: dispatch.identity.runId }]);
+      return { ...base, adopted: false, ...(made !== undefined && made !== null ? { version: made.version } : {}) };
     });
   }
 }
@@ -609,23 +620,23 @@ export function runCostFromEvents(view: SessionView, events: ReadonlyArray<Recor
 // ── resolution ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /** The workflow each operation's run is. */
-export const PROPOSAL_WORKFLOWS: Readonly<Record<Exclude<ArtifactProposalKind, 'theme' | 'job' | 'onboard'>, string>> = {
+export const PROPOSAL_WORKFLOWS: Readonly<Record<Exclude<ArtifactProposalKind, 'theme' | 'job' | 'onboard' | 'cut'>, string>> = {
   create: 'interactive-draft',
   refine: 'interactive-chat',
   demo: 'demo',
 };
 
 /** studio#1140: why a refine of a demo cut is blocked (the card says it after the document's title). */
-export const CUT_BLOCKED = "a demo video: this chat can't change it. Change it by hand in the video editor (chapters, trims, captions, theme)";
+export const CUT_BLOCKED = "a demo video: ask for its change in this chat as a video change, not a page change (or change it by hand in the video editor)";
 
-const STOPS: Readonly<Record<Exclude<ArtifactProposalKind, 'theme' | 'job' | 'onboard'>, string>> = {
+const STOPS: Readonly<Record<Exclude<ArtifactProposalKind, 'theme' | 'job' | 'onboard' | 'cut'>, string>> = {
   create: 'Stops for you if the check fails. The plan or an escalation may also ask.',
   refine: 'Stops for you if the check fails. The plan or an escalation may also ask.',
   demo: 'Stops for you after the script and after the review.',
 };
 
 const STYLE_LABEL: Readonly<Record<string, string>> = { ppt: 'Slides', web: 'Web page', doc: 'Document', brochure: 'Brochure' };
-const NOUN: Readonly<Record<Exclude<ArtifactProposalKind, 'theme' | 'job' | 'onboard'>, [string, string]>> = {
+const NOUN: Readonly<Record<Exclude<ArtifactProposalKind, 'theme' | 'job' | 'onboard' | 'cut'>, [string, string]>> = {
   create: ['document', 'documents'],
   refine: ['revision', 'revisions'],
   demo: ['demo video', 'demo videos'],
@@ -743,6 +754,10 @@ export interface ChatProposalDeps {
   acceptsOnboard?(chatId: string): boolean;
   /** (crew-0182) What an onboard block is resolved against. Absent = onboard cards are not made here. */
   onboard?: OnboardResolveDeps;
+  /** (studio#1140 (a)) Whether the chat's client draws cut cards (`accepts: ['cut']`, its newest declaration). */
+  acceptsCut?(chatId: string): boolean;
+  /** (studio#1140 (a)) What a cut block is resolved against. Absent = cut cards are not made here. */
+  cut?: CutResolveDeps;
   /** What the v2 catalog resolves against now, as a launch filed in `projectId` reads it. */
   served?(projectId: string | null): Promise<ServedState & { rev: string }>;
   /**
@@ -1013,7 +1028,7 @@ export class ChatProposals {
    *  new work too (DES-CATALOG-002 §2.3: job cards for a client that renders them, a command line for an older one).
    *  `o.appearance` (A7): whether the message carried the tab's appearance. A client that sends none cannot preview or
    *  apply a theme, so its seat is not told it can propose one (absent = not known here: the flag alone decides). */
-  digest(chatId?: string, accepts?: boolean, o: { appearance?: boolean; onboard?: boolean } = {}): MakeDigest {
+  digest(chatId?: string, accepts?: boolean, o: { appearance?: boolean; onboard?: boolean; cut?: boolean } = {}): MakeDigest {
     const f = this.deps.flags();
     const on = f.proposals;
     const entries = on
@@ -1034,6 +1049,8 @@ export class ChatProposals {
       // crew-0182: the onboard block, for a client that draws the card (its seat is told only then).
       // `o.onboard`: this message's own declaration (the chat's stored one changes only once the message is accepted).
       ...(on && f.onboard === true && chatId !== undefined && this.deps.onboard !== undefined && (o.onboard ?? this.deps.acceptsOnboard?.(chatId)) === true ? { onboard: true } : {}),
+      // crew#1814: the cut block, for a client that draws the card (crew's note on an open video says when it fits).
+      ...(on && f.cut === true && chatId !== undefined && this.deps.cut !== undefined && (o.cut ?? this.deps.acceptsCut?.(chatId)) === true ? { cut: true } : {}),
       entries,
       ...(jobs !== undefined ? { jobs } : {}),
     };
@@ -1175,6 +1192,15 @@ export class ChatProposals {
       // Only for a client that draws the card (its seat was told the block exists only then).
       if (flags.onboard !== true || this.deps.onboard === undefined || this.deps.acceptsOnboard?.(chatId) !== true) return this.refused(chatId, 'onboard');
       return resolveOnboard(block, { pid, chatId, turnId, seat, chatProjectId: chat.projectId === null || chat.projectId === 'default' ? null : chat.projectId, words }, this.deps.onboard);
+    }
+
+    if (block.op === 'cut') {
+      // Only for a client that draws the card (its seat was told the block exists only then), and only for the video
+      // open in this very turn.
+      if (flags.cut !== true || this.deps.cut === undefined || this.deps.acceptsCut?.(chatId) !== true) return this.refused(chatId, 'cut');
+      const projectId = chat.projectId === null || chat.projectId === 'default' ? null : chat.projectId;
+      const f = await filedIn(projectId);
+      return resolveCut(block, { pid, chatId, turnId, seat, binding: turnHas ? binding : null, projectId, filedInLabel: f.label }, this.deps.cut);
     }
 
     if (block.op === 'theme') {
@@ -1346,7 +1372,7 @@ export class ChatProposals {
   }
 
   /** Time and cost: the catalog's band, the workflow's steps, and medians over completed runs here. */
-  private async timeOf(kind: Exclude<ArtifactProposalKind, 'theme' | 'job' | 'onboard'>, seed: CatalogSeed | null, projectId: string | null): Promise<ProposalTime> {
+  private async timeOf(kind: Exclude<ArtifactProposalKind, 'theme' | 'job' | 'onboard' | 'cut'>, seed: CatalogSeed | null, projectId: string | null): Promise<ProposalTime> {
     const workflow = PROPOSAL_WORKFLOWS[kind];
     const minutes = seed?.typicalMinutes ?? null;
     const cost = seed?.cost ?? null;
@@ -1613,14 +1639,28 @@ export class ChatProposals {
     }
     if (folded.state === 'accepting' && folded.accepting !== undefined) {
       const acc = folded.accepting;
-      const found = await this.deps.registry.find(kind, acc.identity);
+      let found: Awaited<ReturnType<LaunchOnceRegistry['find']>>;
+      try {
+        found = await this.deps.registry.find(kind, acc.identity);
+      } catch (err) {
+        // studio#1140 (a): a cut still rendering is neither decided nor declined; a deleted video blocks its card; a
+        // video tool that can't answer leaves the Go interrupted (Go again asks again).
+        if (err instanceof LaunchRefusal && kind === 'cut' && err.body['code'] === 'cut_pending') {
+          return { code: 409, body: { code: 'cut_pending', error: err.message, view: viewOf(folded) } };
+        }
+        if (err instanceof LaunchRefusal && kind === 'cut' && CUT_BLOCKING.has(err.body['code'])) {
+          return this.blockCut(chatId, folded, acc.resolution, instance, err.body['code'], err.message);
+        }
+        if (kind !== 'cut') throw err;
+        return { code: 502, body: { code: 'launch_failed', error: cutInterruptedWords(err instanceof Error ? err.message : String(err)), view: viewOf(folded) } };
+      }
       if (found !== null) {
         // Its run exists: adopt it and decide (a crash after the launch, or a lost response).
-        const result: ProposalResult = { runId: acc.identity.runId, artifactRef: acc.identity.artifactRef, adopted: true, stub: found.stub };
+        const result: ProposalResult = { runId: acc.identity.runId, artifactRef: acc.identity.artifactRef, adopted: true, stub: found.stub, ...(found.version !== undefined ? { version: found.version } : {}) };
         if (!this.decided(chatId, folded.turnId, pid, actor, 'go', result, acc.resolution, acc.edits, instance)) return this.gone(chatId);
         const after = reread();
         if (body.decision === 'go') return ok(after);
-        return { code: 409, body: { code: 'proposal_decided', error: 'this proposal had already started', view: viewOf(after) } };
+        return { code: 409, body: { code: 'proposal_decided', error: kind === 'cut' ? `The new version was already made${found.version !== undefined ? ` (version ${found.version})` : ''}, so it stays. Undo in the video's editor brings back the one before.` : 'this proposal had already started', view: viewOf(after) } };
       }
       if (body.decision === 'not_now') {
         if (!this.decided(chatId, folded.turnId, pid, actor, 'not_now', null, acc.resolution, acc.edits, instance)) return this.gone(chatId);
@@ -1791,11 +1831,22 @@ export class ChatProposals {
     if (gone !== null) return { code: 409, body: { code: 'source_gone', error: gone, view: viewOf(folded) } };
     // A theme is no job (§15.2): applying colours never waits for a run of this chat.
     // An onboard card starts no job of this chat either (crew-0182): it registers a repository.
-    const busy = kind === 'theme' || kind === 'onboard' ? null : await this.busy(chatId, identity.artifactRef, resolution);
+    // A cut starts no run either (studio#1140): the video tool's queue serializes it with the person's hand edits.
+    const busy = kind === 'theme' || kind === 'onboard' || kind === 'cut' ? null : await this.busy(chatId, identity.artifactRef, resolution);
     if (busy !== null) return { code: 409, body: { code: busy.code, error: busy.reason, view: viewOf(folded) } };
     // A refine is on the head it was proposed on; else the card re-resolves (same pid, the new base). Read last, right
     // before the record: the landing itself is checked against this base (`expect_head`, slices I1 and A5).
-    if (resolution.target !== undefined) {
+    if (kind === 'cut' && resolution.target !== undefined) {
+      // studio#1140 (a): a cut is never rebased. A fresh Go on a moved video blocks the card; Go again (an accepting
+      // record) skips this check, because the video tool checks the Go's request id before its head (DES-B7 R3).
+      const ref = parseArtifactRef(resolution.target.ref)!;
+      const root = await this.deps.docsRoot(ref.projectId);
+      const head = root === null ? null : artifactHead(root, ref.doc);
+      if (head === null) return this.blockCut(chatId, folded, resolution, instance, 'cut_gone', `${resolution.target.title} is gone.`);
+      if (folded.state !== 'accepting' && head !== resolution.target.base) {
+        return this.blockCut(chatId, folded, resolution, instance, 'cut_moved', `The video changed since this was proposed (now version ${head}). Ask again to change the new version.`);
+      }
+    } else if (resolution.target !== undefined) {
       const ref = parseArtifactRef(resolution.target.ref)!;
       const root = await this.deps.docsRoot(ref.projectId);
       const head = root === null ? null : artifactHead(root, ref.doc);
@@ -1857,6 +1908,16 @@ export class ChatProposals {
     } catch (err) {
       // crew#1695: every refusal after this Go's accepting write names that record (`acceptingAt`), so a client marks
       // only it stopped, never another tab's newer Go.
+      // studio#1140 (a): a cut the video tool refused is blocked with its words (asking again is the way on); one still
+      // rendering keeps its accepting record.
+      if (err instanceof LaunchRefusal && kind === 'cut' && err.body['code'] === 'cut_pending') {
+        return { code: 409, body: { code: 'cut_pending', error: err.message, acceptingAt: accepting.at, view: viewOf(foldProposals(this.deps.records(chatId)).get(pid) ?? folded) } };
+      }
+      if (err instanceof LaunchRefusal && kind === 'cut' && CUT_BLOCKING.has(err.body['code'])) {
+        this.deps.audit('chat.proposal.launch_refused', actor, { chatId, pid, code: err.body['code'], error: err.message });
+        const r = this.blockCut(chatId, folded, resolution, instance, err.body['code'], err.message, err.status);
+        return { code: r.code, body: { ...r.body, acceptingAt: accepting.at } };
+      }
       if (err instanceof LaunchRefusal) {
         const reopened = this.reopenLaunch(chatId, folded, resolution, instance);
         if (reopened === null) return this.gone(chatId, accepting.at);
@@ -1872,11 +1933,21 @@ export class ChatProposals {
       const msg = err instanceof Error ? err.message : String(err);
       this.deps.audit('chat.proposal.launch_failed', actor, { chatId, pid, error: msg, ...(power !== undefined ? { power } : {}) });
       const after = foldProposals(this.deps.records(chatId)).get(pid);
-      return { code: 502, body: { code: 'launch_failed', error: `could not start it: ${msg}. Go again resumes the same job.`, acceptingAt: accepting.at, ...(after !== undefined ? { view: viewOf(after) } : {}) } };
+      // A cut starts no run: its card says crew's own sentence and what Go again does (R2 C1).
+      const said = resolution.kind === 'cut' ? cutInterruptedWords(msg) : `could not start it: ${msg}. Go again resumes the same job.`;
+      return { code: 502, body: { code: 'launch_failed', error: said, acceptingAt: accepting.at, ...(after !== undefined ? { view: viewOf(after) } : {}) } };
     }
     if (!this.decided(chatId, folded.turnId, pid, actor, 'go', result, resolution, edits, instance, power)) return this.gone(chatId, accepting.at);
     const after = foldProposals(this.deps.records(chatId)).get(pid) ?? folded;
     return { code: 200, body: { view: viewOf(after) } };
+  }
+
+  /** studio#1140 (a): a cut card that can't make its change any more is re-written blocked with the words (no rebase,
+   *  no Go). The person asks again for a new card. */
+  private blockCut(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, instance: string | null, code: string, words: string, status = 409): DecideResult {
+    if (!this.write(chatId, { at: this.now(), turnId: folded.turnId, kind: 'proposal', proposal: { ...resolution, blocked: words } }, instance)) return this.gone(chatId);
+    const after = foldProposals(this.deps.records(chatId)).get(resolution.pid);
+    return { code: status, body: { code, error: words, ...(after !== undefined ? { view: viewOf(after) } : {}) } };
   }
 
   private reopenLaunch(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, instance: string | null): FoldedProposal | null {
@@ -1921,7 +1992,7 @@ export class ChatProposals {
   /** The identity a Go is named by (DES §4.3 step 2). */
   identityOf(p: ArtifactProposal): ProposalIdentity {
     const runId = proposalRunId(p.pid);
-    if (p.kind === 'refine') return { artifactRef: p.target?.ref ?? null, runId };
+    if (p.kind === 'refine' || p.kind === 'cut') return { artifactRef: p.target?.ref ?? null, runId };
     if (p.kind === 'create') {
       // A retry fills the same document again (§4.3: artifact identity and attempt identity are separate).
       if (p.artifactRef !== undefined) return { artifactRef: p.artifactRef, runId };
@@ -2022,6 +2093,8 @@ export class ChatProposals {
       demo: ['audience', 'show', 'helpers'],
       // An onboard card is changed by saying so in the chat (a new proposal replaces it); Go takes no edits.
       onboard: [],
+      // So is a cut card (studio#1140): its ops are frozen with the head they were proposed on.
+      cut: [],
     };
     const kindAllowed = allowed[p.kind];
     for (const k of Object.keys(edits) as Array<keyof ProposalEdits>) {
@@ -3639,9 +3712,16 @@ export class ChatProposals {
       const f = foldProposals(this.deps.records(chatId)).get(pid);
       const acc = f?.accepting;
       if (f === undefined || acc === undefined || f.state !== 'accepting') return false;
-      const found = await this.deps.registry.find(f.proposal.kind, acc.identity);
+      let found: Awaited<ReturnType<LaunchOnceRegistry['find']>>;
+      try {
+        found = await this.deps.registry.find(f.proposal.kind, acc.identity);
+      } catch (err) {
+        // A cut still rendering, or a video tool that can't answer, settles at the person's Go again.
+        if (f.proposal.kind === 'cut') return false;
+        throw err;
+      }
       if (found === null) return false;
-      const result: ProposalResult = { runId: acc.identity.runId, artifactRef: acc.identity.artifactRef, adopted: true, stub: found.stub };
+      const result: ProposalResult = { runId: acc.identity.runId, artifactRef: acc.identity.artifactRef, adopted: true, stub: found.stub, ...(found.version !== undefined ? { version: found.version } : {}) };
       const actor: Actor = { id: acc.actor, kind: 'human', trust: 'operator' };
       return this.decided(chatId, f.turnId, pid, actor, 'go', result, acc.resolution, acc.edits, instance);
     });

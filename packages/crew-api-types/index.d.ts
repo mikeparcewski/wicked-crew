@@ -474,6 +474,15 @@ export interface ChatArtifactsCapabilities {
    * there.
    */
   cutInView?: boolean;
+  /**
+   * (api-types 0.225.0, studio#1140 option (a), crew#1814) A seat may propose a change to the demo video open in the
+   * chat (`cut` proposals): drop, move, rename or trim chapters and set a chapter's caption words. A client that draws
+   * those cards declares `accepts: ['cut']` on the chat's open and each message; crew tells the seat about them only
+   * then (else the seat says this chat can't change the video, as with {@link cutInView} alone). Go posts the card's
+   * frozen ops to the video tool's recut once; the new version comes back as {@link ProposalResult.version}. ABSENT on
+   * an older daemon.
+   */
+  cut?: boolean;
 }
 
 // ── A run's working document (program DES-POWER-MODE §8.3, §9; api-types 0.148.0) ──────────────────
@@ -7020,7 +7029,9 @@ export interface CoverageReport {
   unaccounted_nodes: UnaccountedNode[];
 }
 
-/** One entry of a repo's code-graph summary — a node kind and how many the graph holds (#122). */
+/** One entry of a repo's code-graph summary — a node kind and how many the graph holds (#122). The summary route
+ *  (`GET /governance/graph?repo=`) answers `{ kinds: GraphKind[] }`; for a registered repo with no code graph yet it is
+ *  `{ kinds: [], code: 'not_indexed', error }` with status 200 (studio#1402, a 404 before); an unknown repo is a 404. */
 export interface GraphKind {
   kind: string;
   count: number;
@@ -9391,7 +9402,7 @@ export interface ChatOpenBody {
   seed?: ChatSeed;
   requestId?: string;
   /** (api-types 0.192.0) As {@link ChatMessageBody.accepts}. */
-  accepts?: Array<'job' | 'onboard'>;
+  accepts?: Array<'job' | 'onboard' | 'cut'>;
 }
 
 /** The scope a `POST /chats` caller may name (api-types 0.39.0, studio#323 R4). */
@@ -10073,7 +10084,28 @@ export interface ChatSeed {
 /** What a proposal makes. `create` and `demo` come from a catalog entry; `refine` changes a document; `theme` is a
  *  studio appearance patch. (api-types 0.192.0) `job`: work from the v2 catalog whose launch is a run, a compose or a
  *  demo (DES-CATALOG-002 §4.6). */
-export type ArtifactProposalKind = 'create' | 'refine' | 'theme' | 'demo' | 'job' | 'onboard';
+export type ArtifactProposalKind = 'create' | 'refine' | 'theme' | 'demo' | 'job' | 'onboard' | 'cut';
+
+/**
+ * (api-types 0.225.0) One change a `cut` card makes to a demo video, as the video tool's recut takes it. Ids are the
+ * cut's chapter ids. `chapter-trim` is seconds of the chapter's own recording; `chapter-say` is the chapter's caption
+ * words (one line, at most 2,000 characters; `""` = no caption); `chapter-drop` takes the chapter out of the video (its
+ * recording is kept, so Undo brings it back). A take swap stays a hand edit.
+ */
+export type CutOp =
+  | { op: 'chapter-rename'; chapter: string; title: string }
+  | { op: 'chapter-move'; chapter: string; after: string | null }
+  | { op: 'chapter-trim'; chapter: string; inSec: number; outSec: number }
+  | { op: 'chapter-say'; chapter: string; say: string }
+  | { op: 'chapter-drop'; chapter: string };
+
+/** (api-types 0.225.0) A `cut` proposal's changes: the ops Go posts exactly, and crew's words for each, in order. */
+export interface ProposalCut {
+  /** 1 to 20, frozen with the card. */
+  ops: CutOp[];
+  /** One line per op, in the same order ("Drop “Setup” (Undo brings it back)"). */
+  changes: string[];
+}
 
 /**
  * (api-types 0.200.0, crew 0.18.2) An `onboard` proposal: register a git repository (cloned to `checkout`), add it to a
@@ -10180,7 +10212,7 @@ export interface ArtifactProposal {
   powerChoice?: boolean;
   /** The project the result is filed in; `label` is the project's name or "Not in a project · this chat". */
   filedIn: { projectId: string | null; label: string };
-  /** refine: the document (`<mount>/<doc>`), its title, and the head it was proposed on. */
+  /** refine (and, api-types 0.225.0, cut): the document (`<mount>/<doc>`), its title, and the head it was proposed on. */
   target?: { ref: string; title: string; base: number };
   /** refine: the parts the seat pointed at (`data-wid`s); hand edits are kept unless the person says otherwise. */
   touches?: string[];
@@ -10202,6 +10234,9 @@ export interface ArtifactProposal {
   demo?: { url: string; audience: string | null; show: string | null };
   /** (api-types 0.200.0) onboard: the repository, where it goes and the project it joins. */
   onboard?: ProposalOnboard;
+  /** (api-types 0.225.0) cut: the changes to the video `target` names, proposed on `target.base` (the video's head the
+   *  seat read). Go makes one new version from exactly these ops, or none: a video changed since blocks the card. */
+  cut?: ProposalCut;
   /** Go is refused with this reason ("Needs a second helper to check it"); the card shows it. `null` = Go is open. */
   blocked: string | null;
   // ── (api-types 0.192.0, DES-CATALOG-002 §4.6) a `job`, and a `create` from the v2 catalog ──
@@ -10320,6 +10355,9 @@ export interface ProposalResult {
   adopted: boolean;
   /** The test configuration's recording stub took it: nothing was started. */
   stub: boolean;
+  /** (api-types 0.225.0) cut: the video's version Go made (or a retry found it had made). ABSENT for every other kind;
+   *  `runId` is then only the Go's identity (a cut starts no run). */
+  version?: number;
 }
 
 export interface ProposalAccepting {
@@ -10575,8 +10613,9 @@ export interface ChatMessageBody {
   context?: ChatMessageContext;
   /** (api-types 0.192.0, DES-CATALOG-002 §4.6) What this client renders: `['job']` once it draws job proposals. Crew makes
    *  job proposals only for a chat whose newest declaration accepts them. Send only where `chatJobProposals` is true.
-   *  (api-types 0.200.0) `'onboard'`: it draws onboard proposals; send only where `chatArtifacts.onboard` is true. */
-  accepts?: Array<'job' | 'onboard'>;
+   *  (api-types 0.200.0) `'onboard'`: it draws onboard proposals; send only where `chatArtifacts.onboard` is true.
+   *  (api-types 0.225.0) `'cut'`: it draws cut proposals; send only where `chatArtifacts.cut` is true. */
+  accepts?: Array<'job' | 'onboard' | 'cut'>;
 }
 
 /** {@link ChatMessageBody.context} (api-types 0.169.0). */
@@ -17901,7 +17940,9 @@ export interface VoiceTtsStatus {
   /** This machine can install it: macOS or Linux (WSL2 counts), arm64 or x86_64, CPython 3.9 to 3.14. `reason` is the plain refusal or the one-line remedy (no Python); `null` when ok. */
   supported: { ok: boolean; reason: string | null };
   python: { found: boolean; path: string | null; version: string | null };
-  engine: { found: boolean; version: string | null };
+  /** `bytes` (crew#1563): about what installing the engine downloads on this machine, from the committed lock for
+   *  its (OS, arch, CPython): the total of the PyPI wheels pip picks there. `null` on an unsupported machine. */
+  engine: { found: boolean; version: string | null; bytes: number | null };
   /** Keyed by voice id (`en_US-joe-medium`, `en_GB-cori-high`). */
   voices: Record<string, { installed: boolean; name: string; accent: string; licence: string; bytes: number; source: string }>;
   /** An install in progress (`step` is `engine` or `voice:<id>`), or the last one's failure; `null` when none. */
