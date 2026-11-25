@@ -613,8 +613,8 @@ function tildify(value: unknown, home: string): unknown {
  * cached for 60 s. `null` on an addon without the static; `{ error }` when the read fails.
  */
 export class FloorCacheCache {
-  private value: { at: number; usage: Record<string, unknown> } | null = null;
-  private inFlight: Promise<Record<string, unknown>> | null = null;
+  private value: { at: number; usage: Record<string, unknown>; raw: Record<string, unknown> } | null = null;
+  private inFlight: Promise<{ usage: Record<string, unknown>; raw: Record<string, unknown> }> | null = null;
 
   constructor(
     private readonly read: (() => Promise<string>) | null = CoreAdapter.floorCacheReader(),
@@ -623,20 +623,30 @@ export class FloorCacheCache {
   ) {}
 
   async get(): Promise<Record<string, unknown> | null> {
+    return (await this.both())?.usage ?? null;
+  }
+
+  /** (crew#1126) The engine's answer as it gave it, real paths and all: for a caller that reads the disk, never a
+   *  response (the tildified copy is lossy: a home of `/home/al` turns `/home/alice` into `~ice`). */
+  async getRaw(): Promise<Record<string, unknown> | null> {
+    return (await this.both())?.raw ?? null;
+  }
+
+  private async both(): Promise<{ usage: Record<string, unknown>; raw: Record<string, unknown> } | null> {
     if (this.read === null) return null;
-    if (this.value !== null && Date.now() - this.value.at < this.ttlMs) return this.value.usage;
+    if (this.value !== null && Date.now() - this.value.at < this.ttlMs) return this.value;
     if (this.inFlight !== null) return this.inFlight;
     const read = this.read;
     this.inFlight = (async () => {
-      let usage: Record<string, unknown>;
+      let raw: Record<string, unknown>;
       try {
-        const parsed: unknown = JSON.parse(await read());
-        usage = tildify(parsed, this.home) as Record<string, unknown>;
+        raw = JSON.parse(await read()) as Record<string, unknown>;
       } catch (err) {
-        usage = tildify({ error: err instanceof Error ? err.message : String(err) }, this.home) as Record<string, unknown>;
+        raw = { error: err instanceof Error ? err.message : String(err) };
       }
-      this.value = { at: Date.now(), usage };
-      return usage;
+      const usage = tildify(raw, this.home) as Record<string, unknown>;
+      this.value = { at: Date.now(), usage, raw };
+      return this.value;
     })().finally(() => {
       this.inFlight = null;
     });

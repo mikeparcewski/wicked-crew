@@ -1,8 +1,11 @@
+import Fastify from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { containerLoginReading, rosterWithStandingFactory } from '../src/api/roster-standing.js';
+import { containerLoginReading, rosterWithStandingFactory, type RosterWithStanding } from '../src/api/roster-standing.js';
+import { SeatSessionSchema } from '../src/api/routes.js';
 import {
-  ARGV_TIMEOUT_MS, SeatContainerStatus, defaultSeatFloor, isContainerSeatFloor, parseBrokerStatus, runSeatLogin, type ExecLike,
+  ARGV_TIMEOUT_MS, SeatContainerStatus, defaultSeatFloor, isContainerSeatFloor, parseBrokerStatus, registerSeatContainerLoginRoutes, runSeatLogin,
+  type ExecLike,
 } from '../src/api/seat-container-login.js';
 import { SEAT_ANSWER_WINDOW_MS, SeatHealthTracker } from '../src/api/seat-health.js';
 import { SeatProbe } from '../src/api/seat-probe.js';
@@ -32,7 +35,7 @@ describe('parseBrokerStatus', () => {
 });
 
 describe('runSeatLogin', () => {
-  it.each(['argv', 'status', 'sign-out', 'ingest'] as const)('passes the engine, gateway and timeout for %s', async (verb) => {
+  it.each(['argv', 'status', 'sign-out', 'ingest', 'abandon'] as const)('passes the engine, gateway and timeout for %s', async (verb) => {
     const exec = vi.fn<ExecLike>(async () => ({ stdout: 'fixture output', stderr: '' }));
     vi.stubEnv('SEAT_LOGIN_FIXTURE', 'inherited');
     expect(await runSeatLogin(verb, 'claude', { exec, gatewayDir: '/fixture/state/gateway' })).toEqual({ rc: 0, stdout: 'fixture output', stderr: '' });
@@ -60,6 +63,95 @@ describe('runSeatLogin', () => {
     vi.stubEnv('WICKED_CORE_EXE', undefined);
     expect((await runSeatLogin('status', 'codex', { exec })).rc).toBe(1);
     expect(exec).toHaveBeenCalledTimes(2);
+  });
+});
+
+// crew#1523 / wicked-core#1673: a pod sign-in's terminal is a `kubectl exec` into the engine's login pod. This is the
+// argv wicked-core prints for it (`k8s::login::login_exec_argv`, src/k8s/login.rs:220, with `Kube::head`,
+// src/k8s/mod.rs:566), as its own k8s test pins it. Crew cannot remove that pod; the engine's `abandon` does.
+const POD_SESSION = 'wicked-agw-0123456789ab-login-claude-0a1b2c3d';
+const POD_ARGV = [
+  '/usr/bin/env', '-u', 'KUBECONFIG', '/opt/k/kubectl', '--kubeconfig', '/state/k8s/kubeconfig', '--context', 'wicked',
+  '--namespace', 'wicked-sys-wabc123def456', 'exec', '-it', POD_SESSION, '-c', 'login', '--', 'sh', '-c', 'claude setup-token', 'wicked-login',
+];
+
+describe('cancelling a pod sign-in (crew#1523)', () => {
+  function podSignIn() {
+    vi.stubEnv('WICKED_SEAT_FLOOR', 'container');
+    const listeners = new Set<(event: { type: string; id?: unknown }) => void>();
+    const closeTerminal = vi.fn(async (id: string) => { for (const l of [...listeners]) l({ type: 'terminalExited', id }); return 'ok'; });
+    const exec = vi.fn<ExecLike>(async (_file, args) => ({ stdout: args[1] === 'argv' ? JSON.stringify(POD_ARGV) : '{"abandoned":true}', stderr: '' }));
+    const app = Fastify();
+    const rosterWithStanding = Object.assign(() => [{ key: 'claude', display_name: 'Claude', binary: 'claude', enabled_for_council: true }], { reprobe: vi.fn() }) as unknown as RosterWithStanding;
+    registerSeatContainerLoginRoutes(app, {
+      adapter: { openTerminal: vi.fn(async () => 'term-1'), closeTerminal, onEvent: (l) => { listeners.add(l as never); return () => { listeners.delete(l as never); }; } },
+      rosterWithStanding, seatHealth: new SeatHealthTracker(), containerStatus: new SeatContainerStatus({ exec, gatewayDir: '/fixture/state/gateway' }),
+      seatLoginDeps: { exec, gatewayDir: '/fixture/state/gateway' }, parseSession: (body) => SeatSessionSchema.safeParse(body),
+    });
+    const exit = (id: string) => { for (const l of [...listeners]) l({ type: 'terminalExited', id }); };
+    return { app, exec, closeTerminal, exit };
+  }
+  const verbs = (exec: ReturnType<typeof vi.fn<ExecLike>>) => exec.mock.calls.map(([file, args]) => [file, ...args].join(' '));
+
+  it('closes the terminal, then asks the engine to end the session (its login pod and store), and never ingests', async () => {
+    const { app, exec, closeTerminal } = podSignIn();
+    expect((await app.inject({ method: 'POST', url: '/api/v1/seats/claude/container-login' })).statusCode).toBe(201);
+    expect((await app.inject({ method: 'DELETE', url: '/api/v1/seats/claude/container-login' })).json()).toEqual({ closed: true });
+    expect(closeTerminal).toHaveBeenCalledWith('term-1');
+    expect(verbs(exec)).toEqual(['/fixture/wicked-core seat-login argv claude', '/fixture/wicked-core seat-login abandon claude']);
+    expect(exec.mock.calls[1]![2].env['WICKED_SEAT_GATEWAY_DIR']).toBe('/fixture/state/gateway');
+    await app.close();
+  });
+
+  it('still reports the cancel when the engine cannot end the session, and logs why with credentials redacted', async () => {
+    const { app, exec } = podSignIn();
+    const info = vi.spyOn(app.log, 'info');
+    await app.inject({ method: 'POST', url: '/api/v1/seats/claude/container-login' });
+    const secret = 'sk-ant-oat01-' + 'A'.repeat(40);
+    exec.mockRejectedValueOnce(Object.assign(new Error('x'), { code: 1, stderr: `wicked-core seat-login: cluster_unreachable: Authorization: Bearer ${secret} refused\nsecond line` }));
+    expect((await app.inject({ method: 'DELETE', url: '/api/v1/seats/claude/container-login' })).json()).toEqual({ closed: true });
+    const line = info.mock.calls.map(([m]) => String(m)).find((m) => m.startsWith('Sign-in cleanup for claude did not finish: wicked-core seat-login: cluster_unreachable:'));
+    expect(line).toBeDefined();
+    expect(line).not.toContain(secret);
+    expect(line).not.toContain('second line');
+    await app.close();
+  });
+
+  it('ends the session of a failed ingest before releasing it (the engine keeps its store for a retry crew never makes)', async () => {
+    const { app, exec, exit } = podSignIn();
+    exec.mockImplementation(async (_file, args) => {
+      if (args[1] === 'ingest') throw Object.assign(new Error('x'), { code: 1, stderr: 'claude login did not leave a setup token' });
+      return { stdout: args[1] === 'argv' ? JSON.stringify(POD_ARGV) : '{"abandoned":true}', stderr: '' };
+    });
+    await app.inject({ method: 'POST', url: '/api/v1/seats/claude/container-login' });
+    exit('term-1');
+    await vi.waitFor(() => expect(verbs(exec)).toEqual([
+      '/fixture/wicked-core seat-login argv claude', '/fixture/wicked-core seat-login ingest claude', '/fixture/wicked-core seat-login abandon claude',
+    ]));
+    await vi.waitFor(async () => expect((await app.inject({ method: 'GET', url: '/api/v1/seats/claude/container-login' })).json()).toMatchObject({ ok: false }));
+    await app.close();
+  });
+
+  it('a sign-in opened while a sign-out is ending the old one runs after the sign-out, never before it', async () => {
+    const { app, exec } = podSignIn();
+    await app.inject({ method: 'POST', url: '/api/v1/seats/claude/container-login' });
+    let finishAbandon: (() => void) | undefined;
+    exec.mockImplementation(async (_file, args) => {
+      // The first abandon (the sign-out's) is held open; the daemon close's later one is not.
+      if (args[1] === 'abandon' && finishAbandon === undefined) await new Promise<void>((resolve) => { finishAbandon = resolve; });
+      return { stdout: args[1] === 'argv' ? JSON.stringify(POD_ARGV) : '{}', stderr: '' };
+    });
+    const signOut = app.inject({ method: 'POST', url: '/api/v1/seats/claude/container-logout' }).then((r) => r);
+    await vi.waitFor(() => expect(finishAbandon).toBeTypeOf('function'));
+    const reopen = app.inject({ method: 'POST', url: '/api/v1/seats/claude/container-login' }).then((r) => r);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    finishAbandon!();
+    expect((await signOut).statusCode).toBe(200);
+    expect((await reopen).statusCode).toBe(201);
+    expect(verbs(exec).slice(1, 4)).toEqual([
+      '/fixture/wicked-core seat-login abandon claude', '/fixture/wicked-core seat-login sign-out claude', '/fixture/wicked-core seat-login argv claude',
+    ]);
+    await app.close();
   });
 });
 

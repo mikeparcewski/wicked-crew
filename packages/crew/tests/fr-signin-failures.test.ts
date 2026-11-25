@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { engineSpotOf, loginContainerFromArgv, signInFailure } from '../src/api/seat-container-login.js';
+import { engineSpotOf, signInFailure } from '../src/api/seat-container-login.js';
 
 let home: string;
 beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'fr-signin-')); vi.stubEnv('HOME', home); });
@@ -77,12 +77,5 @@ describe('signInFailure', () => {
   it('keeps conflict and supersession distinct', () => {
     expect(signInFailure('a sign-in is already open for claude', 'claude')).toEqual({ code: 'signin_already_open', error: 'A Claude sign-in is already open. Finish it, or close it and start again.' });
     expect(signInFailure('the codex sign-in was superseded', 'codex').code).toBe('signin_superseded');
-  });
-  it('extracts exactly the named run container and never a host command or a guessed target', () => {
-    expect(loginContainerFromArgv(['/runtime', 'run', '--name', 'specific-login-deadbeef', 'image'])).toEqual({ runtime: '/runtime', name: 'specific-login-deadbeef' });
-    expect(loginContainerFromArgv(['/runtime', 'run', '--name=specific-login-deadbeef', 'image'])?.name).toBe('specific-login-deadbeef');
-    expect(loginContainerFromArgv(['codex', 'login', '--name', 'unrelated'])).toBeNull();
-    expect(loginContainerFromArgv(['/runtime', 'run', 'image'])).toBeNull();
-    expect(loginContainerFromArgv(['/runtime', 'run', '--name', '-a'])).toBeNull();
   });
 });
