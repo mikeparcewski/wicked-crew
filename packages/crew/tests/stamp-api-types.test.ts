@@ -37,7 +37,16 @@ function write(path: string, text: string): void {
   writeFileSync(path, text);
 }
 
-function readJson(path: string): Record<string, any> {
+/** The fields these cases read from a package.json, a lockfile entry or the endpoint manifest. */
+interface Manifest {
+  version?: string;
+  apiTypesVersion?: string;
+  scripts?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+  packages?: Record<string, Manifest>;
+}
+
+function readJson(path: string): Manifest {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
@@ -133,10 +142,10 @@ describe('npm run stamp:api-types -- <X.Y.Z>', () => {
     expect(r.status, r.stderr).toBe(0);
 
     expect(readJson(join(root, 'packages/crew-api-types/package.json')).version).toBe('0.20.0');
-    expect(readJson(join(root, 'packages/crew/package.json')).devDependencies['wicked-crew-api-types']).toBe('^0.20.0');
+    expect(readJson(join(root, 'packages/crew/package.json')).devDependencies?.['wicked-crew-api-types']).toBe('^0.20.0');
     const lock = readJson(join(root, 'package-lock.json'));
-    expect(lock.packages['packages/crew-api-types'].version).toBe('0.20.0');
-    expect(lock.packages['packages/crew'].devDependencies['wicked-crew-api-types']).toBe('^0.20.0');
+    expect(lock.packages?.['packages/crew-api-types']?.version).toBe('0.20.0');
+    expect(lock.packages?.['packages/crew']?.devDependencies?.['wicked-crew-api-types']).toBe('^0.20.0');
 
     const types = readFileSync(join(root, 'packages/crew-api-types/index.d.ts'), 'utf8');
     expect(types).toContain('(api-types 0.20.0, crew#1) A new field.');
@@ -187,9 +196,9 @@ describe('npm run stamp:api-types -- <X.Y.Z>', () => {
     initGit(root);
     commitAll(root, 'crew at main');
 
-    const version = readJson(join(root, 'packages/crew-api-types/package.json')).version as string;
-    const [major, minor, patch] = version.split('.').map(Number);
-    const next = `${major}.${minor}.${patch + 1}`;
+    const version = readJson(join(root, 'packages/crew-api-types/package.json')).version ?? '';
+    const [major, minor, patch] = version.split('.');
+    const next = `${major}.${minor}.${Number(patch) + 1}`;
     const r = run(root, next);
     expect(r.status, r.stderr).toBe(0);
 
@@ -240,7 +249,7 @@ describe('npm run stamp:api-types -- --check (the release guard)', () => {
     expect(run(root, '0.20.0').status).toBe(0);
     const pj = join(root, 'packages/crew/package.json');
     const crew = readJson(pj);
-    crew.devDependencies['wicked-crew-api-types'] = '^0.19.0';
+    crew.devDependencies = { ...crew.devDependencies, 'wicked-crew-api-types': '^0.19.0' };
     writeJson(pj, crew);
     const r = run(root, '--check');
     expect(r.status).toBe(1);

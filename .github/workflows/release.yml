@@ -85,6 +85,26 @@ jobs:
   # "exactly 2 records" check, run 37140085699) and wicked-ci#36: S04 asserts the teamed routing of wicked-core#590
   # S5, F-SMOKE-004 / F-SMOKE-005); never re-pin to an older ref such as v1.3.2, whose S04 still
   # asserts the removed ballots.
+  # The api-types contract was stamped for this train (coord ruling 2026-11-25, train 15). Feature
+  # PRs tag what they add to packages/crew-api-types `(api-types next)` and leave its version alone,
+  # and the train's crew version PR stamps it (`npm run stamp:api-types -- <X.Y.Z>`). This job goes
+  # red if the stamp was missed: a `next` tag left, a caret or the lockfile on another version, or
+  # the contract changed since the api-types-v<version> tag it claims. Nothing `needs` it: crew's
+  # package does not ship the contract, so a missed stamp must not hold crew's publish. The red job
+  # is the release lane's signal to stamp and tag api-types.
+  api-types-stamped:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: The api-types contract was stamped
+        shell: bash
+        run: |
+          v="$(node -p "require('./packages/crew-api-types/package.json').version")"
+          git fetch -q --depth=1 origin "refs/tags/api-types-v$v:refs/tags/api-types-v$v" \
+            || echo "api-types-v$v is not tagged yet: nothing published to compare against"
+          node scripts/stamp-api-types.mjs --check
   version:
     needs: release
     runs-on: ubuntu-latest
