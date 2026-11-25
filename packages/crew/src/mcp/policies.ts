@@ -156,6 +156,17 @@ function renamedTokens(list: readonly string[], from: string, to: string): strin
   return list.filter((t) => namesServer(t, from)).map((t) => `mcp:${to}${t.slice(4 + from.length)}`);
 }
 
+/**
+ * (crew#1906) A rule as core's boot seeding writes it from one of its packs: provenance `filesystem`, its ref the pack
+ * file and this rule's own id (`governance/packs/<pack>/rules/<file>.json#<ID>`, the pack JSON in wicked-core). A copy
+ * under another id, or one a person re-sourced, is the person's own. It only chooses the refusal's words: a shipped
+ * rule is refused like any other.
+ */
+export function isShippedRule(r: Pick<ConformanceRule, 'id' | 'provenance'>): boolean {
+  const ref = r.provenance?.ref;
+  return r.provenance?.source === 'filesystem' && typeof ref === 'string' && /^governance\/packs\/[^#]+\.json#/.test(ref) && ref.slice(ref.indexOf('#') + 1) === r.id;
+}
+
 export class McpPolicies {
   private chain: Promise<unknown> = Promise.resolve();
   /** Per server: the tail of the work queued by {@link exclusive}. Never rejects. */
@@ -415,23 +426,27 @@ export class McpPolicies {
    *   preview's cells (allow < ask < deny; an allow keeps every obligation), with each tool judged as callable whatever
    *   its switches (a disabled tool switched on later is held to the same rules).
    * Answers the subjects that would loosen, the rules whose trigger tells the names apart, per rule the names it
-   * matches (`from`, `to` or both), and the rules whose trigger crew could not judge (it counts for both names).
+   * matches (`from`, `to` or both), the rules whose trigger crew could not judge (it counts for both names), and the
+   * matched rules that ship with core's packs.
    */
-  async loosenedByRename(from: string, to: string): Promise<{ subjects: string[]; rules: string[]; names: Map<string, string[]>; unjudged: Set<string> }> {
+  async loosenedByRename(from: string, to: string): Promise<{ subjects: string[]; rules: string[]; names: Map<string, string[]>; unjudged: Set<string>; shipped: Set<string> }> {
     const server = await this.registry.get(from);
     const tools = server.tools.filter((t) => t.status !== 'gone');
     // Every live rule with a trigger, whatever its applies_to: core selects by token equality with the unit's phase
     // aliases, which a workflow may spell any way (`mcp:other`, `editor-origin:…`), so no token rules a call out.
     const names = new Map<string, string[]>();
     const unjudged = new Set<string>();
+    const shipped = new Set<string>();
     for (const r of await this.engine.listRules()) {
       if (r.retired === true || typeof r.trigger?.contains !== 'string') continue;
       const judged = judgeTrigger(r.trigger.contains, [from, to]);
       if (judged.names.length > 0) names.set(r.id, judged.names);
       if (!judged.judged) unjudged.add(r.id);
+      // (crew#1906) Seeded by core from one of its packs: a person does not edit it to rename a source.
+      if (judged.names.length > 0 && isShippedRule(r)) shipped.add(r.id);
     }
     const rules = [...names.keys()];
-    if (tools.length === 0) return { subjects: [], rules, names, unjudged };
+    if (tools.length === 0) return { subjects: [], rules, names, unjudged, shipped };
     const cells = this.cells({});
     const callsOf = (name: string): EngineCall[] => tools.map((t) => ({
       server: name,
@@ -455,7 +470,7 @@ export class McpPolicies {
       });
       if (looser) subjects.push(t.subject);
     });
-    return { subjects, rules, names, unjudged };
+    return { subjects, rules, names, unjudged, shipped };
   }
 
   /** Every approval token that names `server` (the server's own and each of its tools'). */

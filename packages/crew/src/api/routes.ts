@@ -12219,6 +12219,8 @@ export function registerRoutes(
     ...(runtime.mcpCalls !== undefined ? { usage: runtime.mcpCalls } : {}),
     // (crew#1514) A rename lists the apps that use the source.
     ...(runtime.apps !== undefined ? { appsUsing: (name: string) => runtime.apps!.appsUsing(name) } : {}),
+    // (crew#1906) A rename withdraws the old name's row-write grants.
+    ...(appsWritePath !== undefined ? { rowWriteGrants: appsWritePath } : {}),
     audit,
     actorOf,
   });
