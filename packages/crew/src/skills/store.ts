@@ -3063,6 +3063,18 @@ export class SkillsStore {
     if (readdirSync(path).length === 0) rmSync(path, { recursive: false, force: true });
   }
 
+  /**
+   * (crew#1703) The blocking findings `add` (a new name) or `replace` (a held one) of these files would meet now,
+   * writing nothing: the same guards those mutations run first. A pack install checks every skill with it before it
+   * writes any, so a refused skill installs nothing.
+   */
+  previewWrite(name: string, files: Readonly<Record<string, string>>): SkillConflictFinding[] {
+    const m = this.manifest();
+    const entry = m.skills[name];
+    const findings = entry === undefined ? this.addGuards(m, name, files) : this.replaceGuards(m, name, entry, files);
+    return findings.filter((f) => f.severity === 'blocking');
+  }
+
   /** Add a user skill at `skills/<name minus the prefix>` — staged, then swapped in (`swapOwnFiles`). */
   add(name: string, files: Readonly<Record<string, string>>, expectedRevision: number): SkillMutationResult {
     const m = this.manifest();

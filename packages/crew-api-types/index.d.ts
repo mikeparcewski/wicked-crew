@@ -16858,9 +16858,11 @@ export interface InstallEditorBody {
   /**
    * (api-types 0.226.0, crew#1703) The one consent for a pack that also ships skills or blocks: the person approves
    * the pack's skill directories and block ids exactly as the refusal listed them (`InstallEditorRefusal.pack`),
-   * together with the editors' permissions. Absent, or not exactly that list, is a 409 that installs nothing.
+   * together with the editors' permissions. Send the refusal's `digest` to bind the approval to the bytes shown (a
+   * consent screen should); a caller that binds the content itself may leave it out (garden's installer does). Absent,
+   * not exactly that list, or a digest that is not this pack's is a 409 that installs nothing.
    */
-  approve?: { skills: string[]; blocks: string[] };
+  approve?: { skills: string[]; blocks: string[]; digest?: string };
 }
 
 /** (api-types 0.226.0, crew#1703) A pack skill: its name in the pack, and the key it is installed under. */
@@ -16953,9 +16955,12 @@ export interface PackCheckResult {
 }
 
 /**
- * `POST /editors` → 501: the pack passed garden's gate but also ships skills or blocks, whose own
- * approval (§3.2 "Add these") is not built yet; this is what it would ask the operator to approve.
- * Nothing was written. (`third_party_editors_not_available` before the install surface: every pack was refused.)
+ * `POST /editors` → 409 (api-types 0.226.0, crew#1703): the pack passed garden's gate and also ships skills or
+ * blocks, so the install asks for one consent first. This is what the person approves: the editors' permissions,
+ * the run plugins' topics, the blocks, and the skills with the key each is installed under. Install again with
+ * `approve: { skills, blocks, digest }`, where `digest` is this one (optional; it binds the approval to these bytes). Nothing was written. A daemon before crew#1703
+ * answered 501 `pack_ships_skills_or_blocks`, which could not be approved. (`third_party_editors_not_available` came
+ * before the install surface, when every pack was refused.)
  */
 export interface InstallEditorRefusal {
   /** `pack_needs_approval` (409, api-types 0.226.0): the pack also ships skills or blocks, and the install carried no
@@ -16964,6 +16969,9 @@ export interface InstallEditorRefusal {
   code: 'pack_needs_approval' | 'pack_approval_mismatch' | 'pack_ships_skills_or_blocks' | 'third_party_editors_not_available';
   error: string;
   check: PackCheckResult;
+  /** (api-types 0.226.0) sha256 over the manifest, every skill file and every block's steps as read: the approval
+   *  carries it back, so a pack that changed after the person looked is refused (`pack_approval_mismatch`). */
+  digest?: string;
   pack: {
     name: string;
     vendor: string;
@@ -16974,6 +16982,10 @@ export interface InstallEditorRefusal {
     skills: string[];
     /** (api-types 0.226.0) Each skill's pack name and the key it would be installed under, so the person recognises it. */
     installedSkills?: InstalledPackSkill[];
+    /** (api-types 0.226.0) Its run plugins and the topics each asks to hear (the install grants them). */
+    plugins?: Array<{ id: string; title: string; version: string; observe: Array<{ topic: string; why: string }> }>;
+    /** (api-types 0.226.0) Skill keys and preset names an earlier install of this pack added, which this one replaces. */
+    replaces?: string[];
   };
 }
 

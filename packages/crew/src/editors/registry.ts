@@ -240,6 +240,14 @@ export interface InstalledPack {
   presets?: string[];
 }
 
+/** (crew#1703) The skills and block presets a pack install added, as an editor or run-plugin row shows them. */
+function packExtrasView(pack: InstalledPack | undefined): Pick<EditorView, 'packSkills' | 'packBlocks'> {
+  return {
+    ...(pack?.skills !== undefined && pack.skills.length > 0 ? { packSkills: pack.skills.map((k) => ({ ...k })) } : {}),
+    ...(pack?.presets !== undefined && pack.presets.length > 0 ? { packBlocks: [...pack.presets] } : {}),
+  };
+}
+
 /** An install the registry refuses: the id is taken, or the pack did not read back. */
 export class EditorInstallConflict extends Error {
   constructor(message: string) {
@@ -680,22 +688,39 @@ export class EditorRegistry {
    * an earlier consent, especially when the new pack came from a different directory. Use the
    * installed map so an entry skipped at boot is removed too, including its persisted switch.
    */
-  installPack(packs: Array<{ id: string; pack: InstalledPack }>, enabled: boolean | undefined): { records: RegisteredRecord[]; updated: boolean; removed: string[] } {
+  /** (crew#1703) Every pack install this daemon has persisted, a record skipped at boot included. */
+  installedPacks(): InstalledPack[] {
+    return [...this.installed.values()];
+  }
+
+  /** (crew#1703) The checks {@link installPack} runs before it commits, committing nothing: a pack install runs them
+   *  before it writes the pack's presets and skills, so an id conflict or an unreadable editor writes nothing. */
+  preflight(packs: Array<{ id: string; pack: InstalledPack }>): void {
+    this.readIncoming(packs);
+  }
+
+  private readIncoming(packs: Array<{ id: string; pack: InstalledPack }>): { read: Array<Omit<RegisteredRecord, 'enabled'>>; held: boolean } {
     const read: Array<Omit<RegisteredRecord, 'enabled'>> = [];
-    const name = packs[0]?.pack.name;
-    const incoming = new Set(packs.map(({ id }) => id));
-    const dropped = [...this.installed].filter(([id, pack]) => pack.name === name && !incoming.has(id)).map(([id]) => id).sort();
-    let updated = dropped.length > 0;
+    let anyHeld = false;
     for (const { id, pack } of packs) {
       const existing = this.records.get(id);
       if (existing?.firstParty === true) throw new EditorInstallConflict(`${id} is a first-party editor's id`);
       const held = this.installed.get(id);
       if (held !== undefined && held.name !== pack.name) throw new EditorInstallConflict(`${id} is already installed from the pack ${held.name}; remove it first`);
-      if (held !== undefined) updated = true;
+      if (held !== undefined) anyHeld = true;
       const r = readPackArtifact(pack, id, this.log);
       if (r === null) throw new EditorInstallConflict(`${id} did not read back from ${pack.root} (see the daemon log)`);
       read.push(r);
     }
+    return { read, held: anyHeld };
+  }
+
+  installPack(packs: Array<{ id: string; pack: InstalledPack }>, enabled: boolean | undefined): { records: RegisteredRecord[]; updated: boolean; removed: string[] } {
+    const name = packs[0]?.pack.name;
+    const incoming = new Set(packs.map(({ id }) => id));
+    const dropped = [...this.installed].filter(([id, pack]) => pack.name === name && !incoming.has(id)).map(([id]) => id).sort();
+    const { read, held } = this.readIncoming(packs);
+    const updated = dropped.length > 0 || held;
     const out: RegisteredRecord[] = read.map((r) => {
       const id = r.manifest.id;
       // An update keeps the operator's switch: the live record's, else the one persisted for a record
@@ -759,6 +784,7 @@ export class EditorRegistry {
         source: 'pack',
         entry_url: `/api/v1/editors/${encodeURIComponent(m.id)}/${encodeURIComponent(m.version)}/entry`,
         ...(m.description !== undefined ? { description: m.description } : {}),
+        ...packExtrasView(r.pack),
       };
     }
     const m = r.manifest;
@@ -780,8 +806,7 @@ export class EditorRegistry {
       entry_url: `/api/v1/editors/${encodeURIComponent(m.id)}/${encodeURIComponent(m.version)}/entry`,
       ...(m.description !== undefined ? { description: m.description } : {}),
       ...(r.visuals !== undefined ? { visuals: structuredClone(r.visuals) } : {}),
-      ...(r.pack?.skills !== undefined && r.pack.skills.length > 0 ? { packSkills: r.pack.skills.map((k) => ({ ...k })) } : {}),
-      ...(r.pack?.presets !== undefined && r.pack.presets.length > 0 ? { packBlocks: [...r.pack.presets] } : {}),
+      ...packExtrasView(r.pack),
     };
   }
 }

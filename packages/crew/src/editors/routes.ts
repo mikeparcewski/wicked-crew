@@ -289,7 +289,9 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
     packRoot: z.string().min(1),
     enabled: z.boolean().optional(),
     // crew#1703: the one consent for a pack's skills and blocks (exactly the refusal's list).
-    approve: z.strictObject({ skills: z.array(z.string().max(200)).max(200), blocks: z.array(z.string().max(200)).max(200) }).optional(),
+    approve: z
+      .strictObject({ skills: z.array(z.string().max(200)).max(200), blocks: z.array(z.string().max(200)).max(200), digest: z.string().regex(/^[0-9a-f]{64}$/).optional() })
+      .optional(),
   });
   app.post(
     `${V}/editors`,
@@ -297,7 +299,7 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
     async (req, reply) => {
       if (!humanOnly(req, reply)) return reply;
       const parsed = InstallSchema.safeParse(req.body);
-      if (!parsed.success) return reply.code(400).send({ error: 'body must be { packRoot: <absolute path>, enabled?: boolean, approve?: { skills: string[], blocks: string[] } }' });
+      if (!parsed.success) return reply.code(400).send({ error: 'body must be { packRoot: <absolute path>, enabled?: boolean, approve?: { skills: string[], blocks: string[], digest?: string } }' });
       try {
         return await serial(async () => {
           const installed = await installPack(

@@ -28,7 +28,7 @@ import type { EditorConformanceSummary, InstallEditorRefusal, InstallEditorRespo
 import { execCapped } from '../core/exec.js';
 import { EditorInstallConflict, EditorRegistry, PackEditorSchema, PluginManifestSchema, RUN_PLUGIN_CASES, editorEntryDigest, packEditorDigest, type InstalledPack } from './registry.js';
 import type { ConformanceProvisioner } from './conformance-runtime.js';
-import { applyExtras, approvalDiff, installedSkillsOf, PackExtrasRefusal, planExtras, type PackApproval, type PackPresetsPort, type PackSkillsPort } from './pack-extras.js';
+import { approvalDiff, installedSkillsOf, PackExtrasRefusal, planExtras, writePresets, writeSkills, type ExtrasPlan, type PackApproval, type PackPresetsPort, type PackSkillsPort } from './pack-extras.js';
 
 export type { PackApproval, PackPresetsPort, PackSkillsPort } from './pack-extras.js';
 
@@ -264,6 +264,8 @@ function parseConformanceReport(stdout: string): EditorConformanceSummary | null
 
 interface ParsedPack {
   root: string;
+  /** The manifest's own text, as read (the consent digest covers it). */
+  manifestText: string;
   manifest: Record<string, unknown>;
   editors: Array<Record<string, unknown>>;
   plugins: Array<Record<string, unknown>>;
@@ -291,8 +293,10 @@ async function readCheckedPack(packRootRaw: string, check: PackCheckRunner): Pro
     throw new PackInstallError(422, `wicked-garden pack check refused the pack (${verdict.errors.length} error${verdict.errors.length === 1 ? '' : 's'})`, verdict);
   }
   let manifest: Record<string, unknown>;
+  let manifestText = '';
   try {
-    manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
+    manifestText = readFileSync(manifestPath, 'utf8');
+    manifest = JSON.parse(manifestText) as Record<string, unknown>;
   } catch (err) {
     throw new PackInstallError(400, `wicked-pack.json is not JSON: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -310,7 +314,7 @@ async function readCheckedPack(packRootRaw: string, check: PackCheckRunner): Pro
   } catch {
     skills = [];
   }
-  return { pack: { root: packRoot, manifest, editors, plugins, blocks, skills }, verdict };
+  return { pack: { root: packRoot, manifestText, manifest, editors, plugins, blocks, skills }, verdict };
 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
@@ -318,12 +322,13 @@ const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is st
 
 /** The approval list a pack with skills or blocks needs (§3.2; crew#1703): the 409 body. Its `error` is what the
  *  person installing reads (garden's installer prints it), so it says what to do, in plain words. */
-function approvalList(pack: ParsedPack, verdict: PackCheckResult, code: 'pack_needs_approval' | 'pack_approval_mismatch', why: string): InstallEditorRefusal {
+function approvalList(pack: ParsedPack, verdict: PackCheckResult, code: 'pack_needs_approval' | 'pack_approval_mismatch', why: string, plan: ExtrasPlan): InstallEditorRefusal {
   const m = pack.manifest;
   return {
     code,
     error: why,
     check: verdict,
+    digest: plan.digest,
     pack: {
       name: str(m['name']),
       vendor: str(m['vendor']),
@@ -340,6 +345,16 @@ function approvalList(pack: ParsedPack, verdict: PackCheckResult, code: 'pack_ne
       blocks: pack.blocks.map((b) => ({ id: str(b['id']), label: str(b['label']), produces_kind: str(b['produces_kind']), skills: strs(b['skills']) })),
       skills: pack.skills,
       installedSkills: installedSkillsOf(pack.skills),
+      // Its run plugins and the topics each asks to hear: the install grants them, so the consent lists them.
+      plugins: pack.plugins.map((p) => ({
+        id: str(p['id']),
+        title: str(p['title']),
+        version: str(p['version']),
+        observe: Array.isArray(p['observe'])
+          ? (p['observe'] as Array<Record<string, unknown>>).map((o) => ({ topic: str(o['topic']), why: str(o['why']) }))
+          : [],
+      })),
+      replaces: plan.replaces,
     },
   };
 }
@@ -369,35 +384,44 @@ export async function installPack(
   const name = str(pack.manifest['name']);
   const blockIds = pack.blocks.map((b) => str(b['id']));
   const extras = pack.blocks.length > 0 || pack.skills.length > 0;
-  if (extras && approve === undefined) {
-    const why =
-      'This pack also brings its own skills or blocks. Nothing was installed: approve them together with the editors’ permissions ' +
-      '(install again with `approve` listing exactly these skills and blocks).';
-    throw new PackInstallError(409, why, verdict, approvalList(pack, verdict, 'pack_needs_approval', why) as unknown as Record<string, unknown>);
-  }
-  if (approve !== undefined) {
-    const diff = approvalDiff(approve, pack.skills, blockIds);
-    if (diff.length > 0) {
-      const why = `The approval is not this pack’s list (${diff.join('; ')}), so nothing was installed.`;
-      throw new PackInstallError(409, why, verdict, approvalList(pack, verdict, 'pack_approval_mismatch', why) as unknown as Record<string, unknown>);
-    }
-  }
   const ids = [...pack.editors, ...pack.plugins].map((e) => str(e['id']));
   for (const id of ids) {
     if (deps.registry.get(id)?.firstParty === true) throw new PackInstallError(409, `${id} is a first-party editor's id`, verdict);
   }
-  // What an earlier install of this same pack added: an update replaces those in place.
-  const earlier = deps.registry.list().flatMap((r) => (r.pack !== undefined && r.pack.name === name ? [r.pack] : []));
+  // What an earlier install of this same pack added (every persisted record, one skipped at boot included): an update
+  // replaces those in place.
+  const earlier = deps.registry.installedPacks().filter((p) => p.name === name);
   const owned = {
     skills: new Set(earlier.flatMap((p) => (p.skills ?? []).map((k) => k.key))),
     presets: new Set(earlier.flatMap((p) => p.presets ?? [])),
   };
-  let plan: Awaited<ReturnType<typeof planExtras>>;
-  try {
-    plan = await planExtras({ root: pack.root, manifest: pack.manifest, skills: pack.skills, blocks: pack.blocks, skillsPort: deps.skills ?? null, presetsPort: deps.presets ?? null, owned });
-  } catch (err) {
-    if (err instanceof PackExtrasRefusal) throw new PackInstallError(err.status, err.message, verdict, { code: err.code });
-    throw err;
+  // Every skill and block is read and checked before the consent is asked for or anything runs: the consent's digest
+  // covers what was read, and a pack that would be refused anyway is refused now.
+  let plan: ExtrasPlan = { skills: [], blocks: [], replaces: [], digest: '' };
+  if (extras) {
+    try {
+      plan = await planExtras({ root: pack.root, manifestText: pack.manifestText, manifest: pack.manifest, packName: name, skills: pack.skills, blocks: pack.blocks, skillsPort: deps.skills ?? null, presetsPort: deps.presets ?? null, owned });
+    } catch (err) {
+      if (err instanceof PackExtrasRefusal) throw new PackInstallError(err.status, err.message, verdict, { code: err.code });
+      throw err;
+    }
+    if (approve === undefined) {
+      const why =
+        'This pack also brings its own skills or blocks. Nothing was installed: approve them together with the editors’ permissions ' +
+        '(install again with `approve` listing exactly these skills and blocks, and this digest to bind them to what was shown).';
+      throw new PackInstallError(409, why, verdict, approvalList(pack, verdict, 'pack_needs_approval', why, plan) as unknown as Record<string, unknown>);
+    }
+  }
+  if (approve !== undefined) {
+    const diff = approvalDiff(approve, pack.skills, blockIds);
+    // The digest binds the approval to the bytes the person was shown (studio's consent sends it). A caller that binds
+    // the content itself sends none: garden's installer stages the pack from one read and refuses a change after its
+    // own plan (wicked-garden scripts/editor/install.py, `pack_inventory` and `plan_digest`).
+    if (extras && approve.digest !== undefined && approve.digest !== plan.digest) diff.push('the pack changed since it was shown (its digest differs)');
+    if (diff.length > 0) {
+      const why = `The approval is not this pack’s list (${diff.join('; ')}), so nothing was installed.`;
+      throw new PackInstallError(409, why, verdict, approvalList(pack, verdict, 'pack_approval_mismatch', why, plan) as unknown as Record<string, unknown>);
+    }
   }
   const conformance = await deps.conformance(pack.root, pack.editors, pack.plugins);
   // The report counts only for the bytes being installed (codex r1): the run's own version and entry
@@ -425,8 +449,12 @@ export async function installPack(
     );
   }
   const now = new Date().toISOString();
-  const packSkills = plan.skills.map((k) => ({ name: k.name, key: k.key }));
-  const packPresets = plan.blocks.map((b) => b.id);
+  // The record keeps what this pack added earlier and no longer ships (it stays installed, and stays its own).
+  const heldKeys = deps.skills ? Object.keys(deps.skills.store.manifest().skills) : [];
+  const keptSkills = earlier.flatMap((p) => p.skills ?? []).filter((k) => heldKeys.includes(k.key) && !plan.skills.some((s) => s.key === k.key));
+  const keptPresets = [...owned.presets].filter((id) => !plan.blocks.some((b) => b.id === id));
+  const packSkills = [...plan.skills.map((k) => ({ name: k.name, key: k.key })), ...keptSkills.filter((k, i, a) => a.findIndex((x) => x.key === k.key) === i)];
+  const packPresets = [...plan.blocks.map((b) => b.id), ...keptPresets];
   const extrasRecord = {
     ...(packSkills.length > 0 ? { skills: packSkills } : {}),
     ...(packPresets.length > 0 ? { presets: packPresets } : {}),
@@ -460,9 +488,18 @@ export async function installPack(
     return { id: str(p['id']), pack: record };
   });
   const packs = [...editorPacks, ...pluginPacks];
-  let applied: Awaited<ReturnType<typeof applyExtras>>;
+  // The registry's own checks first (an id another pack holds, an editor that does not read back), so a conflict
+  // writes nothing; then the presets, then the record (a failed record puts the presets back), then the skills, which
+  // are published for workers last.
   try {
-    applied = await applyExtras(plan, { skills: deps.skills ?? null, presets: deps.presets ?? null }, name);
+    deps.registry.preflight(packs);
+  } catch (err) {
+    if (err instanceof EditorInstallConflict) throw new PackInstallError(409, err.message, verdict);
+    throw err;
+  }
+  let presetsWritten: Awaited<ReturnType<typeof writePresets>>;
+  try {
+    presetsWritten = await writePresets(plan, deps.presets ?? null, name);
   } catch (err) {
     if (err instanceof PackExtrasRefusal) throw new PackInstallError(err.status, err.message, verdict, { code: err.code });
     throw err;
@@ -471,28 +508,15 @@ export async function installPack(
   try {
     installed = deps.registry.installPack(packs, enabled);
   } catch (err) {
-    await applied.undo();
+    await presetsWritten.undo();
     if (err instanceof EditorInstallConflict) throw new PackInstallError(409, err.message, verdict);
     throw err;
   }
-  // Workers get the new skills from the next published snapshot. A publish that cannot go through leaves the
-  // install standing (the editor and presets are in) and says so: the skills reach workers once it is fixed.
-  let skillsError: string | undefined;
-  if (plan.skills.length > 0 && deps.skills) {
-    try {
-      const published = await deps.skills.publish();
-      if (published.verdict === 'blocked') {
-        const why = published.findings.filter((f) => f.severity === 'blocking').map((f) => f.evidence).join('; ');
-        skillsError = `installed, but the skills root could not be published (${why}), so workers do not get the pack’s skills yet; fix that and publish from Skills`;
-      }
-    } catch (err) {
-      skillsError = `installed, but the skills root could not be published (${err instanceof Error ? err.message : String(err)}), so workers do not get the pack’s skills yet; publish from Skills`;
-    }
-  }
+  const skillsError = await writeSkills(plan, deps.skills ?? null);
   return {
     ...(packSkills.length > 0 ? { skills: packSkills } : {}),
     ...(packPresets.length > 0 ? { presets: packPresets } : {}),
-    ...(skillsError !== undefined ? { skillsError } : {}),
+    ...(skillsError !== null ? { skillsError } : {}),
     installed: true,
     updated: installed.updated,
     editors: installed.records.map((r) => EditorRegistry.view(r)),
