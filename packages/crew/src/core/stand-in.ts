@@ -134,17 +134,21 @@ function words(roles: readonly string[]): string {
 /**
  * What the launch answers for this preflight with no consent: `null` = launch, else the `409` body.
  *
- * (crew#1932) The launch asks only for a role EVERY run of its shape seats: the preflight also lists the roles a run
+ * (crew#1932) The launch asks only for the roles a stand-in can fill, which are the ones every run of its shape seats
+ * (the reviewer, the judge, the QE reviewer and the party-excluded review). The preflight also lists the roles a run
  * needs only if an event calls for them (a council on a dispute, the monitors, the rules checks; `conditional`), sized
- * by defaults rather than by the plan the run will score (three monitors where the plan seats one). Those are asked at
- * the run's own `stand_in_needed` gate if the run comes to need them: the launch goes on stand-in-aware with no
- * consent, as a launch that is not short does, and nothing is seated as a stand-in without a person's answer.
- * `oneStep`: a launch with no plan and no workflow, which the engine runs as one neutral unit that seats no
- * independent role, so it is never asked.
+ * by defaults rather than by the plan the run will score (three monitors where the plan seats one). The engine fills
+ * none of those with a stand-in (its one fill site is the review's distribution, plus the judge's and QE reviewer's
+ * holds), so a person's answer changes nothing for them: a short one takes the run's own path (the council falls back,
+ * the team pauses, a rules check holds as `rules_unchecked`), as before crew#1888, whatever the launch asked. Such a
+ * launch goes on stand-in-aware with no consent, as a launch that is not short does.
+ * `oneStep`: a launch with no plan and no workflow, which the engine plans as one unit with no review step. The launch
+ * asks nothing; a check its work calls for (the default floor's judge) still holds at the run's `stand_in_needed` gate,
+ * since the launch is stand-in-aware.
  *
  * A short role every run needs that no helper can stand in for → `no_usable_helper` (§2.5: a stand-in never makes up
  * for a CLI that cannot run); one a stand-in can fill → `stand_in_choice` (§2.1), its words naming the conditional
- * roles too, since the consent covers them.
+ * roles too, though no stand-in fills those today (a wording gap noted on crew#1932).
  */
 export function preflightRefusal(p: IndependencePreflight, oneStep = false): StandInChoiceRefusal | NoUsableHelperRefusal | null {
   if (!p.short || oneStep) return null;

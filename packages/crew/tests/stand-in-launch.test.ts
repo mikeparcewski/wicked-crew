@@ -30,7 +30,9 @@ const THREE_CAPTURE = fixture('stand-in-preflight-three-helpers-capture.json');
  *  host lacks (it admitted none); on the daemon the repro ran on the card named no tester, so the QE row carries that
  *  daemon's answer (one real seat, not short). Every other role is the engine's: the short ones are conditional. */
 const THREE_BUG = fixture('stand-in-preflight-three-helpers-bug.json');
-/** Repro 1: a launch with no plan and no workflow (the engine's one neutral unit) on Claude Code alone. */
+/** Repro 1: a launch with no plan and no workflow on Claude Code alone. The engine's preflight sizes it by the default
+ *  floor (a reviewer and a judge, short here), though its one planned unit has no review step (run f93b8927 ran one
+ *  build step and seated no one). */
 const ONE_PLANLESS = fixture('stand-in-preflight-one-helper-planless.json');
 
 const withActor = (app: FastifyInstance) => app.addHook('onRequest', async (req) => {
@@ -81,10 +83,10 @@ describe('stand-in consent and refusal bodies (pure)', () => {
     expect(e).not.toMatch(/signed in/i);
     expect(e).not.toMatch(/standIns/);
     expect(e).toMatch(/Use stand-ins for this job or for every job, or add another helper to the job\.$/);
-    // (crew#1932) Short only on roles a run needs if an event calls for them: no question at launch (the run's gate asks).
+    // (crew#1932) Short only on roles a run needs if an event calls for them: no question at launch (no stand-in fills them).
     const condOnly = { ...p, roles: p.roles.map((r) => (r.conditional ? r : { ...r, shortBy: 0 })) };
     expect(preflightRefusal(condOnly)).toBeNull();
-    // A conditional role no helper can stand in for does not refuse the launch either.
+    // A conditional role no helper can stand in for does not refuse the launch either (consent could not change it).
     expect(preflightRefusal({ ...condOnly, roles: condOnly.roles.map((r) => (r.conditional ? { ...r, canStandIn: false, standInFrom: null } : r)) })).toBeNull();
     // One step (no plan, no workflow): never asked, whatever is short.
     expect(preflightRefusal(p, true)).toBeNull();
@@ -225,8 +227,8 @@ describe('POST /runs asks the stand-in question (T-K1, T-K2)', () => {
     expect(res.statusCode, res.body).toBe(501);
   });
 
-  // crew#1932: the launch asks only for roles every run of its plan seats. A role the run needs only if an event calls
-  // for it (a council, the monitors, the rules checks) is asked at the run's own stand_in_needed gate if it comes up.
+  // crew#1932: the launch asks only for roles every run of its plan seats, the ones a stand-in can fill. A role the run
+  // needs only if an event calls for it (a council, the monitors, the rules checks) takes the run's own path.
   it('crew#1932 repro 3: Learn my style (capture-learnings) on three helpers launches, asking nothing', async () => {
     preflight = THREE_CAPTURE;
     const res = await post({ workflow: 'capture-learnings' });
@@ -250,6 +252,8 @@ describe('POST /runs asks the stand-in question (T-K1, T-K2)', () => {
     const res = await app.inject({ method: 'POST', url: '/api/v1/runs', headers: { 'x-test-actor': 'human/operator' }, payload: { problem: 'fix it', clisJson: '[]' } });
     expect(res.statusCode, res.body).toBe(201);
     expect(launched).toHaveLength(1);
+    // Aware with no consent: a check its work calls for holds at the run's stand_in_needed gate, never seated unasked.
+    expect(launched[0]!.standInAware).toBe(true);
     expect(launched[0]!.standIn).toBeUndefined();
   });
 
