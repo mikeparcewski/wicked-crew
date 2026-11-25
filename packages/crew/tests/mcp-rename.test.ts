@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { AuditLog } from '../src/api/audit.js';
+import { agentAuditKeys } from '../src/api/audit-view.js';
 import { LOCAL_ACTOR } from '../src/api/auth.js';
 import { registerMcpRoutes } from '../src/api/mcp.js';
 import { CoreAdapter } from '../src/core/adapter.js';
@@ -45,6 +46,8 @@ let keychain: Map<string, string>;
 let policies: McpPolicies;
 /** Every preview the policies asked the engine for (its JSON), in order. */
 let previews: string[];
+/** (crew#1906) Every row-write withdrawal the routes asked for, as `source:why`. */
+let withdrawn: string[];
 
 function secrets(): SecretStore {
   return {
@@ -110,7 +113,8 @@ beforeEach(async () => {
   });
   audit = new AuditLog(join(base, 'audit.log'), () => undefined);
   app = Fastify();
-  registerMcpRoutes(app, { registry, policies, audit, actorOf: () => actor, appsUsing: async () => usingApps });
+  withdrawn = [];
+  registerMcpRoutes(app, { registry, policies, audit, actorOf: () => actor, appsUsing: async () => usingApps, rowWriteGrants: { withdrawForSource: async (source, why) => { withdrawn.push(`${source}:${why}`); return 2; } } });
   await app.ready();
 });
 
@@ -623,5 +627,48 @@ describe('rename: rules whose trigger can match a name (crew#1905)', () => {
     expect(error).toContain('SEC-FX (fx, the current name)');
     expect(error).toMatch(/To rename it, first change or retire (SEC-FX, SEC-VERBOSE|SEC-VERBOSE, SEC-FX)$/);
     expect(error).not.toContain('A new name');
+  });
+});
+
+// crew#1906 — follow-ups from coord's round 2 of the rename (#1514).
+describe('rename follow-ups (crew#1906)', () => {
+  it("withdraws the old name's row-write grants once the rename lands, and none when it is refused", async () => {
+    await register('fx');
+    await register('taken');
+    expect((await call('POST', '/mcp/servers/fx/rename', { to: 'taken' })).statusCode).toBe(409);
+    expect(withdrawn).toEqual([]);
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'gx' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(withdrawn).toEqual(['fx:source_renamed']);
+    await audit.flush();
+    const line = (await audit.read({ action: 'mcp.server.renamed' }))[0]!;
+    expect(line.detail).toMatchObject({ from: 'fx', to: 'gx', withdrawnGrants: 2 });
+  });
+
+  it('removing a renamed source withdraws the approvals its former names hold too', async () => {
+    await register('fx');
+    expect((await call('POST', '/mcp/approvals', { subject: 'mcp:fx' })).statusCode).toBe(200);
+    expect((await call('POST', '/mcp/approvals', { subject: 'mcp:fx/wt_note' })).statusCode).toBe(200);
+    expect((await call('POST', '/mcp/servers/fx/rename', { to: 'fx2' })).statusCode).toBe(200);
+    expect(await policies.tokensOf('fx')).toEqual(expect.arrayContaining(['mcp:fx', 'mcp:fx/wt_note']));
+    expect((await call('DELETE', '/mcp/servers/fx2')).statusCode).toBe(200);
+    expect(await policies.tokensOf('fx')).toEqual([]);
+    expect(await policies.tokensOf('fx2')).toEqual([]);
+  });
+
+  it('an agent reading the audit sees which source was renamed to what', () => {
+    expect(agentAuditKeys('mcp.server.renamed')).toEqual(expect.arrayContaining(['from', 'to']));
+  });
+
+  it("a shipped rule is never offered as the rule to change; the refusal says the name stays", async () => {
+    await register('fx');
+    await upsert({ id: 'SHIPPED-FX', applies_to: ['release'], effect: 'deny', severity: 'critical', trigger: { contains: '"server":"fx"' }, provenance: { source: 'filesystem', ref: 'governance/packs/test-pack/rules/test.json#SHIPPED-FX', source_kinds: ['doc'] } });
+    await upsert({ id: 'OWN-FX', applies_to: ['release'], effect: 'deny', severity: 'critical', trigger: { contains: '"tool":"mcp:fx/' } });
+    const res = await call('POST', '/mcp/servers/fx/rename', { to: 'gx' });
+    expect(res.statusCode, res.body).toBe(409);
+    const error = res.json().error as string;
+    expect(error).toMatch(/To rename it, first change or retire OWN-FX\b/);
+    expect(error).not.toMatch(/change or retire[^.]*SHIPPED-FX/);
+    expect(error).toContain('SHIPPED-FX ships with crew');
   });
 });
