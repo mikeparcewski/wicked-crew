@@ -270,7 +270,7 @@ describe('scope card: garden scope.py output', () => {
     writeFileSync(launcher, `#!/bin/sh\nsh -c 'sleep 30; echo late > "${late}"' &\necho $! > "${pidFile}"\nwait\n`);
     chmodSync(launcher, 0o755);
     // A limit long enough for the grandchild to have started on a loaded host, far short of its 30 s.
-    const r = await execScope(launcher, [], { env: process.env, timeoutMs: 3000 });
+    const r = await execScope(launcher, [], { env: { ...process.env }, timeoutMs: 3000 });
     expect(r.outcome).toBe('timeout');
     expect(existsSync(pidFile), 'the grandchild never started inside the limit').toBe(true);
     const pid = Number(readFileSync(pidFile, 'utf8').trim());
@@ -285,12 +285,12 @@ describe('scope card: garden scope.py output', () => {
     for (let i = 0; i < 100 && alive(); i += 1) await new Promise((res) => setTimeout(res, 20));
     expect(alive()).toBe(false);
     expect(existsSync(late)).toBe(false);
-    expect(await execScope(join(dir, 'missing'), [], { env: process.env, timeoutMs: 1000 })).toMatchObject({ outcome: 'spawn' });
+    expect(await execScope(join(dir, 'missing'), [], { env: { ...process.env }, timeoutMs: 1000 })).toMatchObject({ outcome: 'spawn' });
     // Past the stderr cap, the last line is the one kept.
     const noisy = join(dir, 'noisy.sh');
     writeFileSync(noisy, `#!/bin/sh\nhead -c 70000 /dev/zero | tr '\\0' x >&2\necho >&2\necho FINAL_REASON >&2\nexit 3\n`);
     chmodSync(noisy, 0o755);
-    const r3 = await execScope(noisy, [], { env: process.env, timeoutMs: 5000 });
+    const r3 = await execScope(noisy, [], { env: { ...process.env }, timeoutMs: 5000 });
     expect(r3).toMatchObject({ outcome: 'exit', code: 3 });
     expect(r3.outcome === 'exit' && r3.stderr.trimEnd().endsWith('FINAL_REASON')).toBe(true);
   });
