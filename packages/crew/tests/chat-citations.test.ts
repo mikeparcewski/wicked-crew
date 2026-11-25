@@ -39,6 +39,7 @@ import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 /**
  * A git repo with one file and one commit; returns the commit sha.
@@ -565,7 +566,8 @@ describe('the server wiring: one chatCitations frame per reply, after the rewrit
       chatClose: async () => undefined,
     } as unknown as CoreAdapter;
 
-    app = await createServer(adapter, {
+    // crew#1775: the relay reads the path run alone (`runView`), as the daemon's adapter serves it.
+    app = await createServer(withRunViews(adapter), {
       auth: { mode: 'off' },
       // ASK-C1: admission now applies to the named seat too; the answer is injected so the test does
       // not read this host's worker-home credentials.

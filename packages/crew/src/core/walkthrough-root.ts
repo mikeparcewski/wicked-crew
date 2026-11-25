@@ -8,11 +8,12 @@
  *   <root>/<review step>/        the PROOF ROOT, written only by the jailed `walkthrough_review` Tool
  *
  * One directory per run, outside every sandbox and state home (the demo-root pattern):
- * `$WICKED_WALKTHROUGH_DIR/<runId>`, default `<home>/.wicked/walkthroughs/<runId>`.
+ * `$WICKED_WALKTHROUGH_DIR/<runId>`, default `${WICKED_HOME:-~/.wicked}/walkthroughs/<runId>` (crew#1802).
  */
 import { promises as fsp } from 'node:fs';
 import { join } from 'node:path';
 import type { SessionView, WorkUnit } from './types.js';
+import { wickedHomeDir } from './wicked-home.js';
 
 /** The subdirectory of an evidence root the walkthrough author writes under. */
 export const WALKTHROUGH_AUTHOR_SUBDIR = 'author';
@@ -29,9 +30,7 @@ export function isPlainRunId(runId: string): boolean {
 /** The run's evidence root. Throws for a run id that is not one plain path segment ({@link isPlainRunId}). */
 export function walkthroughRootDir(runId: string): string {
   if (!isPlainRunId(runId)) throw new Error(`run id ${JSON.stringify(runId)} is not a plain path segment, so it has no evidence root`);
-  if (process.env.WICKED_WALKTHROUGH_DIR) return join(process.env.WICKED_WALKTHROUGH_DIR, runId);
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
-  return join(home, '.wicked', 'walkthroughs', runId);
+  return join(wickedHomeDir('WICKED_WALKTHROUGH_DIR', 'walkthroughs'), runId);
 }
 
 /** The step id of a unit (`<run>:<step>` → `<step>`). */

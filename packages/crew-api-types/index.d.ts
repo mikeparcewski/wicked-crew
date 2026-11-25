@@ -398,6 +398,15 @@ export interface HealthCapabilities {
    */
   chatJobProposals?: boolean;
   /**
+   * (crew#1697) The Memory page's soft retire and restore are served: `POST /memory/retire-item` retires (hides, keeps)
+   * instead of erasing, `GET /memory?retired=1` lists the retired ones, `POST /memory/unretire` restores one and
+   * `POST /memory/erase-item` deletes one for good. ABSENT on an older daemon: `retire-item` ERASES there and the
+   * other three are not served.
+   */
+  memoryRestore?: boolean;
+  /** (crew#1697) `POST /knowledge/forget` is served ({@link ForgetKnowledgeBody}). ABSENT on an older daemon. */
+  knowledgeForget?: boolean;
+  /**
    * (api-types 0.196.0) A job proposal's Start takes `power` ({@link ChatProposalDecisionBody.power}). ABSENT on an
    * older daemon: send no `power` (the strict body refuses it); a chat job then always stops at its first plan.
    */
@@ -457,6 +466,14 @@ export interface ChatArtifactsCapabilities {
    * seat about them only then (else it points the person to Repositories → Add a repository). ABSENT on an older daemon.
    */
   onboard?: boolean;
+  /**
+   * (studio#1140) A demo video's cut may be sent as `ChatMessageContext.artifact` (`<mount>/<doc>` of the cut
+   * document): crew reads it as a video the chat can't change. The seat is told so and pointed to the video editor's
+   * own controls (Chapters, Captions, Theme), and a `refine` of it is blocked, at the card and at Go. ABSENT
+   * on an older daemon, which would read a cut as a page a refine may change: a client does not send a cut as in view
+   * there.
+   */
+  cutInView?: boolean;
 }
 
 // ── A run's working document (program DES-POWER-MODE §8.3, §9; api-types 0.148.0) ──────────────────
@@ -816,13 +833,37 @@ export interface RigorRaiseRequest {
   reason: string;
 }
 
-/** `POST /runs/:id/power/pause`: answer a checkpoint pause ({@link PowerPause}); 200 answers {@link PowerView}.
+/** `POST /runs/:id/power/pause`: answer a checkpoint pause ({@link PowerPause}); 200 answers {@link PowerPauseAnswer}.
  *  `continue_high` raises rigor to at least high (an operator floor), `continue` goes on (the `note`, if any, is the
  *  next turn's steer), `switch_phased` flips the switch off (the build hands off as it stands), `stop` cancels the
  *  run. 409 {@link PowerConflict} when the run is not paused. Human actors only; audited `run.power_mode.paused`. */
 export interface PowerPauseRequest {
   decision: 'continue_high' | 'continue' | 'switch_phased' | 'stop';
   note?: string | null | undefined;
+  /** (crew#1739) The pause this answers, as the card showed it ({@link PowerPause.checkpoint}). When either this or
+   *  {@link at} is given and the open pause differs (or none is open), the answer is refused with 409
+   *  {@link PowerPauseChanged} and nothing changes. Omit both to answer whatever pause is open. */
+  checkpoint?: number | undefined;
+  /** (crew#1739) The pause this answers: its {@link PowerPause.at}. */
+  at?: number | undefined;
+}
+
+/** (crew#1739) A power pause's identity: its checkpoint and when it opened. */
+export interface PowerPauseIdentity {
+  checkpoint: number;
+  at: number;
+}
+
+/** (crew#1739) The 200 body of `POST /runs/:id/power/pause`: the run's power view after the answer, and the pause the
+ *  answer consumed (null when the daemon read none open just before answering). */
+export interface PowerPauseAnswer extends PowerView {
+  answered: PowerPauseIdentity | null;
+}
+
+/** (crew#1739) The 409 body when a pause answer names a pause that is no longer open. `open` is the pause open now,
+ *  or null when the run is not paused. */
+export interface PowerPauseChanged extends PowerConflict {
+  open: PowerPauseIdentity | null;
 }
 
 /** The 409 (and 422) body of the power routes. */
@@ -947,6 +988,8 @@ export type ToolActivityEvent = {
   target: string | null;
   ok: boolean | null;
   durationMs: number | null;
+  /** The launch's seat key (core#1786); absent from cores before it, never null. */
+  cli?: string;
 };
 
 /** `/ws` frame: new working notes from the power orchestrator's stream (bus `wicked.run.notes.recorded`): its
@@ -5159,6 +5202,12 @@ export interface SteeringLandingResult {
   error?: string;
   /** (api-types 0.160.0) The drafted rules the approve's `keepRules` left out: never landed. */
   declinedIds?: string[];
+  /** (api-types 0.224.0, crew#1846) Drafted ids already used on the store, landed under a new id (`from` → `to`) so
+   *  the rule that held the id is untouched. Each is audited on its `governance.rule.upserted` entry (`draftedId`). */
+  reminted?: Array<{ from: string; to: string }>;
+  /** (api-types 0.224.0, crew#1846) Rules this run landed at an earlier approve and this approve updated in place (a
+   *  send-back re-approve), audited with `replaced: true`. A landing never replaces a rule another author wrote. */
+  replacedIds?: string[];
 }
 
 /**
@@ -7303,6 +7352,25 @@ export interface GitContributor {
   email: string;
 }
 
+/**
+ * `GET /api/v1/settings/start-on-login` (studio#1324): whether this daemon's port starts at login. The unit is the
+ * one `wicked-crew serve --install-service` writes for the port (crew#1469): a launchd agent on macOS, a systemd user
+ * unit on Linux. Elsewhere (`platform: 'other'`, Windows) nothing is automated: the install command prints a Task
+ * Scheduler recipe and `installed` is always false. Installing and removing stay CLI steps; these are their commands.
+ */
+export interface StartOnLoginStatus {
+  platform: 'darwin' | 'linux' | 'other';
+  /** The port this daemon listens on: the unit is per port. */
+  port: number;
+  installed: boolean;
+  /** The unit file, home-relative (`~/Library/LaunchAgents/…`); `null` when none is installed. */
+  unit: string | null;
+  /** `wicked-crew serve --port <port> --install-service`: always the port, so a shell's `CREW_PORT` can't redirect it. */
+  installCommand: string;
+  /** `wicked-crew serve --port <port> --uninstall-service`. */
+  uninstallCommand: string;
+}
+
 /** Daemon-persisted system settings (~/.config/wicked-core/settings.json). */
 export interface SystemSettings {
   /** Max nodes returned by wicked-estate graph-view (default 150). */
@@ -7731,6 +7799,22 @@ export interface RequirementDetail extends RequirementSummary {
   errorPathCount: number;
   businessRules: unknown[];
   legacyComponents: unknown[];
+  /** (crew#1699, wicked-core-ts >= 0.15.48) The requirement's code links, typed, from the engine's `SatisfiedBy`
+   *  edges (wicked-core#1483): the source for code links (`legacyComponents` is the document's untyped list). Empty
+   *  when no code target remains (a row flagged `uncounted: 'unindexed'`); `null` when the engine does not say (an
+   *  older engine); ABSENT from an older daemon. */
+  components?: RequirementComponent[] | null;
+}
+
+/** (crew#1699) One code link of a requirement. `symbolId` is the estate SymbolId (deep-link key); `kind` the node
+ *  kind label (`Function`, `Method`, or an `Other` tag); `confidence` the edge's (1.0 for the builder's own link,
+ *  0.5 for an older build's name-resolved one). */
+export interface RequirementComponent {
+  symbolId: string;
+  name: string;
+  file: string;
+  kind: string;
+  confidence: number;
 }
 
 export interface RequirementsPage {
@@ -7828,6 +7912,12 @@ export interface BlastRadiusFreshness {
   stale_files?: Array<{ file: string; status: 'modified' | 'deleted' }>;
   /** Per-page counts summed; a file spanning pages counts once per page (crew#1556). */
   stale_files_total: number;
+  /**
+   * (crew#1797) Project blast radius only: `stale_files_total` may still count files of a repository that left the
+   * project and has not been refreshed since, because a page's stale-file evidence was cut to fit estate's reply budget.
+   * The total is then at most this many. ABSENT when the total is exact.
+   */
+  stale_files_total_partial?: true;
   unindexed_files?: number | null;
   checked_files: number;
   not_file_backed: number;
@@ -7842,6 +7932,10 @@ export interface BlastRadius {
     depth?: number;
     stale?: 'modified' | 'deleted';
     via_crossing?: string | null;
+    /** (crew#1714, wicked-estate >= 0.35.10) The edges from this row to the target or to rows exactly one
+     *  ring in (`depth - 1`), at most 3; `via_omitted` counts the rest. ABSENT from an older estate. */
+    via?: ProjectGraphVia[];
+    via_omitted?: number;
   }>;
   /** crew#1555: false means no symbol by that name. */
   resolved?: boolean;
@@ -7867,7 +7961,11 @@ export interface BlastRadius {
   truncated_dependents?: number;
 }
 
-/** An open elicitation as `GET /runs/:id/elicitation` returns it (DES-002). */
+/**
+ * An open elicitation as `GET /runs/:id/elicitation` returns it (DES-002). A run that exists with nothing open
+ * answers `200` with a JSON `null` body (after crew 0.18.20, studio#984; a 404 before); a 404 now means only that the run
+ * does not exist. So the route's body is `ElicitationInfo | null`.
+ */
 export interface ElicitationInfo {
   runId: string;
   elicitationId: string;
@@ -9990,10 +10088,17 @@ export interface ProposalOnboard {
   name: string;
   /** Where it is cloned, home-relative (`~/.wicked/repos/<name>`); `null` for an existing registration. */
   checkout: string | null;
-  /** The project it joins; `null` = none (registered unfiled). */
+  /** The project it joins; `null` = none (registered unfiled), or a project Go creates first (`createProject`). */
   projectId: string | null;
   projectName: string | null;
   existing: { id: string; name: string } | null;
+  /**
+   * (crew#1694) The project Go creates first, when the name given matches no project (ignoring case and spacing) and
+   * `POST /projects` would take it: the trimmed name. `projectId` and `projectName` are then `null`, and `filedIn.label`
+   * says "Creates the project <name>". Nothing is created before Go; a Go again after the create landed reuses that
+   * project. ABSENT (or `null`) when the card joins an existing project or none.
+   */
+  createProject?: { name: string } | null;
 }
 
 /** One "From" chip: a source the block named, as crew resolved and authorized it. */
@@ -10148,6 +10253,12 @@ export interface ArtifactProposal {
   /** (api-types 0.194.0) The held plan this reshape was offered for (a `plan_offer`'s `ord` and `planRev`): its Reject is
    *  bound to that version, so a plan revised since is 409 `gate_changed`, never rejected unseen. */
   heldPlan?: { ord: number; planRev: number };
+  /**
+   * (crew#1840) A job asked to change a pull request a run of this chat delivered (on the job's repository): Go
+   * launches it with `revisesPr: number` and `deliver: "pr"`, so its work is pushed onto that pull request's branch and
+   * no new one is opened. The sentence says so. ABSENT: the job opens a pull request of its own (when it makes one).
+   */
+  revisesPr?: { number: number; url: string; runId: string };
   /** (§2.5) What else a reshape launches with, from the held run's launch envelope. */
   relaunch?: Pick<LaunchEnvelope, 'deliver' | 'deliverGate' | 'campaignId' | 'groupLabel' | 'revisesPr' | 'forceQeAcceptance' | 'clisJson'>;
 }
@@ -10290,6 +10401,21 @@ export interface ChatProposalDecisionBody {
  */
 export interface ChatProposalDecisionResponse {
   view: ChatProposalView;
+}
+
+/**
+ * (crew#1695) A refused `POST /chats/:id/proposals/:pid` (see {@link ChatProposalDecisionResponse} for the codes).
+ * `acceptingAt` is on every refusal that follows THIS Go's `proposal_accepting` record (502 `launch_failed`, a typed
+ * launch refusal, and a `chat_gone` after it): that record's `at`, so a client marks only the Go it pressed as stopped,
+ * never a newer accepting record another tab wrote meanwhile. ABSENT on a refusal before anything was recorded.
+ */
+export interface ChatProposalDecisionRefusal {
+  code?: string;
+  error: string;
+  view?: ChatProposalView;
+  excluded?: unknown;
+  retryWith?: { reducedAssurance: true };
+  acceptingAt?: number;
 }
 
 /**
@@ -10902,6 +11028,20 @@ export interface ProjectGraphHit {
    */
   via_crossing?: string;
   via_crossing_omitted?: boolean;
+  /**
+   * (crew#1714, wicked-estate >= 0.35.10) The edges from this row to the target or to rows exactly one ring
+   * in (`depth - 1`): a ring view draws a true edge from them. At most 3, `via_omitted` counts the rest. An
+   * edge to a row this answer left out (a removed member's) is dropped. ABSENT from an older estate.
+   */
+  via?: ProjectGraphVia[];
+  via_omitted?: number;
+}
+
+/** crew#1714: one `via` edge. `id` is a row's `id` or the target's SymbolId; `kind` is estate's edge-kind
+ *  wire form (`'calls'`, `'contains'`, … or `{ other: '<tag>' }`). */
+export interface ProjectGraphVia {
+  id: string;
+  kind: string | { other: string };
 }
 
 /** Per-repo hit counts, so "which repo does this touch" is answerable without scanning hits. */
@@ -10957,7 +11097,9 @@ export interface ProjectBlastRadius {
   /**
    * (api-types 0.202.0) The project's link generation predates the current indexes (a member was
    * re-indexed, removed, is mid-index, or the last link failed): the crossings are the previous
-   * generation's. `link_stale_labels` names the members that moved. A refresh relinks.
+   * generation's. `link_stale_labels` names the members that moved. A refresh relinks. (crew#1714) THIS
+   * project's state only, and stated on a co-located answer too: the crossing it lacks may be one the
+   * stale links miss.
    */
   link_stale?: boolean;
   link_stale_labels?: string[];
@@ -11017,6 +11159,12 @@ export interface ProjectGraphPath {
   note: string;
   /** The route crossed a detached repository; refresh to rebuild without it. */
   excluded?: string;
+  /** (crew#1714, wicked-estate >= 0.35.10) Current members' link coverage, when estate names this project. */
+  coverage?: ProjectGraphMemberCoverage[];
+  /** (crew#1714) As on {@link ProjectBlastRadius}: this project's links predate the current indexes, so a
+   *  route through a member that moved may be missing. `link_stale_labels` names those members. A refresh relinks. */
+  link_stale?: boolean;
+  link_stale_labels?: string[];
 }
 
 /** crew#1477: an import estate could not prove is a member link; never an edge. */
@@ -12415,6 +12563,39 @@ export interface Proposal {
   state: ProposalState;
   /** Unix seconds. */
   created_at: number;
+  /** (crew#1261) Who rejected it and why, as crew recorded it. Absent means UNKNOWN: no decision on record (rejected
+   *  outside crew, before crew recorded decisions, by a crew path that records none, or a trail that could not be read
+   *  or written). Never infer who rejected a row from its absence. Absent on pending and approved rows. */
+  decision?: ProposalDecision;
+}
+
+/** (crew#1261) Why a proposal ended `rejected`. `rejected`: turned down (by a person when `by` is `operator`).
+ *  `replaced-by-edit`: an accept-with-edit approved an edited copy (`copy_id`) in its place. `withdrawn-copy`: an
+ *  accept-with-edit's copy whose approve failed, withdrawn so a retry leaves no duplicate. */
+/**
+ * (crew#1261) Why a proposal was rejected:
+ *  - `rejected`: a person turned it down (`POST /proposals/:id/reject`, dismissing its decision or its review
+ *    recommendation).
+ *  - `restated`: a person said its decision restates a rule they already have (the decision's "Same").
+ *  - `replaced-by-edit`: an accept-with-edit approved an edited copy (`copy_id`) in its place.
+ *  - `withdrawn-copy`: an accept-with-edit's copy whose approve failed, withdrawn so a retry leaves no duplicate.
+ *  - `withdrawn`: crew withdrew a proposal it filed itself because what it was for did not happen (a widening that
+ *    did not land, a memory edit that was undone).
+ *  - `stale`: a memory replacement whose memory had since been edited or retired; approving it would bring retired
+ *    words back.
+ * A client that does not know a reason reads it as crew's own (never a person's).
+ */
+export type ProposalDecisionReason = 'rejected' | 'restated' | 'replaced-by-edit' | 'withdrawn-copy' | 'withdrawn' | 'stale';
+
+/** (crew#1261) A rejection crew recorded. `by: 'operator'` only for a person's own decision (`rejected`,
+ *  `restated`); `crew` for crew's own or a caller that is not a person. */
+export interface ProposalDecision {
+  by: 'operator' | 'crew';
+  reason: ProposalDecisionReason;
+  /** Unix seconds, like `created_at`. */
+  at: number;
+  /** `replaced-by-edit`: the approved copy that replaced it. */
+  copy_id?: string;
 }
 
 /** `GET /proposals` query filters — both optional; omitting a filter lists across that dimension. */
@@ -12983,6 +13164,9 @@ export interface MemoryItem {
    * cannot assert an undated memory in range.
    */
   created_at?: number;
+  /** (crew#1697) Unix SECONDS when the memory was soft-retired. Present only on a `GET /memory?retired=1` row (estate
+   *  `memory.list {retired: true}`); a live memory never carries it. */
+  retired_at?: number;
 }
 
 /**
@@ -13015,6 +13199,13 @@ export interface ListMemoriesQuery {
    * upper bound.
    */
   until?: string;
+  /**
+   * (crew#1697) `1`/`true` lists the soft-RETIRED memories instead of the live ones (estate `memory.list {retired:
+   * true}`), each with {@link MemoryItem.retired_at}; `0`/`false`/omitted lists the live ones. Any other value is a
+   * 400. 501 `estate_upgrade_required` when the estate predates soft retire (wicked-estate#552). The other filters
+   * apply to either list. Served when {@link HealthCapabilities.memoryRestore} is true.
+   */
+  retired?: string;
 }
 
 /** `GET /memory` → 200. */
@@ -13051,17 +13242,73 @@ export interface RetireMemoryBody {
 
 /**
  * `POST /memory/retire-item` body (studio#206; api-types 0.60.0): exactly ONE memory, by the
- * `memory_id` `GET /memory` listed. 404 when no memory has that id; 501 `estate_upgrade_required`
- * when the estate predates erase-by-id (wicked-estate#188) — nothing is deleted then.
+ * `memory_id` `GET /memory` listed. Since crew#1697 a SOFT retire ({@link RetireMemoryItemResponse}): 404 when
+ * no live memory has that id; 501 `estate_upgrade_required` when the estate predates soft retire
+ * (wicked-estate#552) — nothing is changed then. To delete for good: {@link EraseMemoryItemBody}.
  */
 export interface RetireMemoryItemBody {
   memory_id: string;
 }
 
-/** `POST /memory/retire` / `POST /memory/retire-item` → 200. How many memories were deleted
- *  (always 1 for `retire-item`). */
+/** `POST /memory/retire` / `POST /memory/erase-item` → 200. How many memories were deleted for good
+ *  (always 1 for `erase-item`). */
 export interface RetireMemoryResponse {
   erased: number;
+}
+
+/**
+ * (crew#1697) `POST /memory/retire-item` → 200: the memory was soft-retired (estate `memory.retire`). It is hidden
+ * from every recall and from `GET /memory`, kept with its id, listed by `GET /memory?retired=1` and restored by
+ * `POST /memory/unretire`. Always 1. (Before crew#1697 this route erased the memory and answered
+ * {@link RetireMemoryResponse}; `POST /memory/erase-item` is that hard delete now.)
+ */
+export interface RetireMemoryItemResponse {
+  retired: number;
+}
+
+/**
+ * (crew#1697) `POST /memory/erase-item` body: delete ONE memory for good (estate `memory.erase {id}`), live or
+ * retired; the right-to-erasure path. 404 when no memory has that id; 501 `estate_upgrade_required` when the estate
+ * predates erase-by-id (wicked-estate#188). Answers {@link RetireMemoryResponse}.
+ */
+export interface EraseMemoryItemBody {
+  memory_id: string;
+}
+
+/**
+ * (crew#1697) `POST /memory/unretire` body: restore ONE soft-retired memory with the same id (estate
+ * `memory.unretire`). 404 when no retired memory has that id; 501 `estate_upgrade_required` when the estate predates
+ * soft retire (wicked-estate#552).
+ */
+export interface UnretireMemoryBody {
+  memory_id: string;
+}
+
+/** (crew#1697) `POST /memory/unretire` → 200. Always 1. */
+export interface UnretireMemoryResponse {
+  restored: number;
+}
+
+/**
+ * (crew#1697) `POST /knowledge/forget` body (estate `knowledge.forget`): hard-delete document knowledge by EXACTLY
+ * one of `id` (one item; a document takes its chunks with it), `source` (every item ingested from that exact
+ * source) or `scope_prefix` (a scope subtree; `""` needs `confirm_erase_all: true`). Other kinds (memories, code)
+ * are never touched. A live data source's structure is skipped (counted in `skipped_live_source`) or, named by
+ * `id`, refused with 409: it is refreshed through its source, not forgotten. 400 for a body that names none or more
+ * than one target; 501 `estate_upgrade_required` when the estate predates forget (wicked-estate#553).
+ */
+export interface ForgetKnowledgeBody {
+  id?: string;
+  source?: string;
+  scope_prefix?: string;
+  confirm_erase_all?: boolean;
+}
+
+/** (crew#1697) `POST /knowledge/forget` → 200: how many items were deleted, and how many live-source items a
+ *  `source`/`scope_prefix` target left in place. */
+export interface ForgetKnowledgeResponse {
+  forgotten: number;
+  skipped_live_source: number;
 }
 
 /**
@@ -13163,6 +13410,22 @@ export interface TeamPlanStep {
    *  no `run` step, may be scoped `SCOPE {"touch":[]}`, which scores 0. Set on a code phase it is
    *  refused (`writes_nothing_on_code`). Omitted when unset. */
   writes_nothing?: boolean;
+  // (wicked-core#1259) The step's controls as the plan set them, carried on `plan.proposed`,
+  // `plan.accepted` and `plan.revised` steps so a plan card shows what shapes the step's gates.
+  // Display only (the engine composes from the plan itself); each is omitted when unset.
+  /** The step runs code (a step may raise its entry's). */
+  executes_code?: boolean;
+  /** The validator the step pins. */
+  validator_pin?: string;
+  /** The step's output is an acceptance requirement of its run. */
+  verified_evidence?: boolean;
+  /** The step's output must end with a capture-report marker. */
+  requires_capture_report?: boolean;
+  /** (crew#1311) The step's output is an answer its caller reads: the substance floor asks only
+   *  that an answer exists. */
+  answer_only?: boolean;
+  /** The deliverables the step must produce. */
+  required_deliverables?: string[];
 }
 
 /**
@@ -14992,6 +15255,13 @@ export interface PatchMcpToolBody {
    * Acceptance requires an effective read (409 `not_a_read`) and a registered schema (409 `not_registered`).
    */
   readAccepted?: boolean;
+  /**
+   * (crew#1788) The saved schema the person saw: the row's {@link McpTool.schemaHash} (64 lowercase hex). When set, a
+   * patch against any other saved schema (another save landed since the row was drawn) is refused 409
+   * `schema_changed` and changes nothing; read the tool again and show the new schema. Send it with `readAccepted` and
+   * `disclosure`, so the acceptance or review binds to what was reviewed.
+   */
+  expectedSchemaHash?: string;
 }
 
 /**
@@ -15805,8 +16075,11 @@ export interface SourceProfileJoin {
 /**
  * (api-types 0.186.0) `POST /sources/:name/profile`, a human operator's only (403 `profile_human_only`). The
  * value-free profile of a described native Postgres source, through the data gate's person read, and the data shapes
- * it filed as `knowledge` proposals for the review (one per relation; an identical shape already in the queue is not
- * filed again). 409 `not_in_knowledge`: estate holds no structure for the source yet.
+ * it wrote (one per relation). 409 `not_in_knowledge`: estate holds no structure for the source yet.
+ *
+ * (crew#1625) A profile the person started is their decision: its shapes go straight into knowledge, scoped to the
+ * source, and a re-profile replaces the source's set. Nothing is filed for review, so `proposed` is always empty and
+ * `alreadyProposed` always 0 (kept for clients that still read them; read `written`, `unchanged` and `replaced`).
  */
 export interface SourceProfileResponse {
   name: string;
@@ -15817,7 +16090,17 @@ export interface SourceProfileResponse {
   joins: SourceProfileJoin[];
   /** Code entities named exactly like a relation, in the repos' code graphs. */
   describes: Array<{ relation: string; repo: string; name: string; kind: string; file: string }>;
+  /** (crew#1625) The shapes written into knowledge now: the id names the knowledge node (`kconcept synthetic proposal:<id>:`). */
+  written?: Array<{ id: string; relation: string }>;
+  /** (crew#1625) Shapes already in knowledge and the same (the bands and the links, not the day): left as they are. */
+  unchanged?: number;
+  /** (crew#1625) Older shapes of the source this profile replaced (forgotten from knowledge, or a pending one declined). */
+  replaced?: number;
+  /** (crew#1625) Tables this profile could not read whose earlier shape stays in knowledge as it was (absent: none). */
+  kept?: number;
+  /** @deprecated (crew#1625) Always empty: a profile files nothing for review. */
   proposed: Array<{ id: string; relation: string }>;
+  /** @deprecated (crew#1625) Always 0. */
   alreadyProposed: number;
   codeSearch: { searched: string[]; notSearched: string[] };
   /** Catalog documents estate holds that crew's own catalog does not (or a view not allowed): not profiled. */
@@ -15842,6 +16125,8 @@ export interface KnowledgeShapeRecord {
   describes: Array<{ repo: string; symbolId: string; name: string; kind: string; file: string }>;
   /** Related tables whose join did not fit estate's 200 links per proposal (`joins` above keeps every one). */
   linksNotListed?: number;
+  /** (crew#1625) The actor id of the person whose profile wrote it (provenance). */
+  profiledBy?: string;
 }
 
 /** (api-types 0.186.0) A node of the Knowledge map. `key` is `<store>:<id>` (`source:`, `repo:`, `knowledge:`, `estate:`). */
@@ -16107,6 +16392,11 @@ export interface SourceUploadResponse {
   header: { detected: boolean; columns: string[] } | null;
   /** The first 20 rows, answered to a HUMAN actor only (an agent gets `[]`). */
   sample: string[][];
+  /**
+   * (crew#1731) A `.sqlite` file's virtual tables (a full-text index, an R-tree) that crew dropped from the snapshot,
+   * with their shadow tables: their rows are not in it. `[]` when there were none, and for a CSV/XLSX.
+   */
+  dropped: string[];
   catalog: SqlSourceCatalog;
 }
 
@@ -16932,6 +17222,13 @@ export interface WorkflowSchedule {
   /** (api-types 0.215.0, crew#1578) Set while the last run waits on a person and due times are being skipped: the
    *  schedule never cancels it, and says so. `null` (or absent, before 0.215.0) when nothing blocks it. */
   blocked?: ScheduleBlocked | null;
+  /** (api-types 0.224.0, crew#1837) The person accepted reduced assurance for this schedule: when every seat that could
+   *  review the work ran some of it (a one-seat daemon), one of them does, said in its brief and on the run. Absent
+   *  before 0.224.0 (= false). */
+  reducedAssurance?: boolean;
+  /** (api-types 0.224.0, crew#1837) Present when the last start was refused because every seat that could review the
+   *  work ran some of it: accepting reduced assurance (`PUT` with it, or Run it now with this body) lets it run. */
+  retryWith?: { reducedAssurance: true };
 }
 
 /** (api-types 0.215.0, crew#1578) A schedule held by its last run waiting on a person. */
@@ -16960,9 +17257,19 @@ export interface SchedulePutBody {
   projectIds?: string[];
   repoRef?: string | null;
   problem?: string | null;
+  /** (api-types 0.224.0, crew#1837) Accept (true) or withdraw (false) reduced assurance; absent keeps it. */
+  reducedAssurance?: boolean;
 }
 
-/** `POST /schedules/:id/run` ("Run it now", human-only): 409 when its last run is still going or another run works. */
+/** (api-types 0.224.0, crew#1837) `POST /schedules/:id/run` body, optional. `reducedAssurance: true` is the person
+ *  accepting it: kept on the schedule (audited `schedule.saved`), so its own runs take it too. */
+export interface ScheduleRunBody {
+  reducedAssurance?: true;
+}
+
+/** `POST /schedules/:id/run` ("Run it now", human-only): 409 when its last run is still going or another run works.
+ *  A review every eligible seat took part in answers 409 `code: "no_independent_reviewer"` with `excluded` (the seats)
+ *  and `retryWith: { reducedAssurance: true }` (api-types 0.224.0, crew#1837). */
 export interface ScheduleRunResponse {
   runId: string;
   schedule: WorkflowSchedule;
@@ -18370,10 +18677,23 @@ export interface AppArchived {
 
 /**
  * `GET /apps` (observer); `?project=<id>` keeps one project's apps. (api-types 0.196.0) `?archived=` picks which:
- * `active` (the default: archived apps are hidden from every lister), `archived`, or `all`.
+ * `active` (the default: archived apps are hidden from every lister), `archived`, or `all`. The order is oldest first
+ * (`createdAt`, then `slug`).
+ *
+ * (crew#1678) `?limit=<1..200>` answers one page in that order, with {@link AppsListResponse.nextCursor}; the next
+ * page is `?limit=<n>&cursor=<nextCursor>` with the same `project` and `archived`. A cursor without `limit`, a
+ * malformed one, or one given for another `project` or `archived` is `400`. Without `limit` the answer is every app,
+ * as before. Each page is read when it is asked for: an app made after the cursor's app is on a later page and one
+ * removed is not repeated; one archived, restored, or still being made behind the cursor shows when the list is read
+ * again from the first page.
  */
 export interface AppsListResponse {
   apps: AppSummary[];
+  /**
+   * (crew#1678) Present only when `?limit=` was sent: the opaque cursor for the next page, `null` on the last page.
+   * ABSENT on an older daemon, which ignores `limit` and answers every app.
+   */
+  nextCursor?: string | null;
 }
 
 /**

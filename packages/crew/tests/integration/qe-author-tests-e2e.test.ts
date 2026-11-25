@@ -399,7 +399,7 @@ async function testSetAsPresetRun(runId: string, deliverUrl: string | undefined)
   return registerTestSetForRun(
     {
       adapter: {
-        sessionsDetail: async () => [asPreset],
+        runView: async () => asPreset,
         workOutput: (unitId: string) => adapter.workOutput(unitId),
         listRepos: () => adapter.listRepos(),
       },

@@ -75,7 +75,14 @@ import type { CatalogSeed } from '../workflow-catalog/catalog-data.js';
 import type { ServedState } from '../workflow-catalog/build-v2.js';
 import { parseCommand, resolveOption } from '../workflow-catalog/build-v2.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
-import { REVIEW_CHANGE_WORKFLOW } from './review-change.js';
+import { REVIEW_CHANGE_WORKFLOW, REVIEW_PROVENANCE_WINDOW_DAYS } from './review-change.js';
+
+/** (CJ13, crew#1803) Who a review of a change leaves off: its authors, or, with `unknown`, every seat that worked in the
+ *  repository lately because crew could not read who made it (`unknown` says why). */
+export interface ReviewAuthors {
+  seats: readonly string[];
+  unknown?: string;
+}
 import {
   checksLabel,
   ownWords,
@@ -98,12 +105,16 @@ import {
   seatsShortLine,
   briefOf,
   inputLines,
+  repoNamedIn,
   SELF_SEATED,
+  mentionsPullRequest,
+  prNumberOfUrl,
+  type DeliveredPr,
   type JobChat,
   type JobContext,
   type JobFacts,
 } from './chat-jobs.js';
-import { artifactExists, artifactHead, chatMount, parseArtifactRef, UNFILED_MOUNT } from './chat-context.js';
+import { artifactExists, artifactHead, artifactIsCut, chatMount, parseArtifactRef, UNFILED_MOUNT } from './chat-context.js';
 import { ATTACHMENT_MAX_FILE_BYTES } from './chat-attachments.js';
 import { documentPathPlan, type PacketDeps } from '../interactive/source-packet.js';
 import { tornTailPrefix } from './chat-transcripts.js';
@@ -140,6 +151,10 @@ const EntryBlock = z.object({
   depth: z.enum(['quick', 'standard', 'deep']).nullable().optional(),
   confidence: z.number().optional(),
   title: z.string().trim().max(200).optional(),
+  // crew#1737: who the person named in this message to do the job (`lead` builds or writes, `seats` the others, in
+  // their order). crew keeps only the ones the person's own turn names (`seatNamedIn`).
+  lead: z.string().trim().min(1).max(64).optional(),
+  seats: z.array(z.string().trim().min(1).max(64)).max(8).optional(),
   brief: z.string().max(8000).optional(),
   url: z.string().trim().max(2048).optional(),
   audience: z.string().max(400).optional(),
@@ -393,6 +408,15 @@ export interface ProposalDispatch {
   power?: boolean;
 }
 
+/** The run list, read at most once per check (crew#1779). */
+export type RunsOnce = () => Promise<readonly SessionView[]>;
+
+/** A job's run is live while the check's run list has it and it has not ended (crew#1779: no engine read per job). */
+export async function liveInRuns(runId: string, runs: RunsOnce): Promise<boolean> {
+  const v = (await runs()).find((r) => r.session.id === runId);
+  return v !== undefined && !['completed', 'cancelled', 'failed'].includes(String(v.session.status));
+}
+
 /** One operation's launcher (A3 create, A5 refine, A7 theme, A8 demo register theirs). */
 export interface ProposalDispatcher {
   /** The create path's actual readers, so proposal authorization never guesses from attachment metadata. */
@@ -402,8 +426,9 @@ export interface ProposalDispatcher {
   /** Start it, with `identity.runId` as the launch's `sessionId`. Called only when {@link find} said no, under the
    *  run id's lock. */
   launch(dispatch: ProposalDispatch): Promise<void>;
-  /** Whether a run it started is still live (the one-live-job-per-chat rule). */
-  live?(runId: string): Promise<boolean>;
+  /** Whether a run it started is still live (the one-live-job-per-chat rule). `runs` is the run list the check reads
+   *  (crew#1779: one list for every job a check looks at, never one engine read per job), read only when called. */
+  live?(runId: string, runs: RunsOnce): Promise<boolean>;
   /** Whether a document has an attempt of this launcher still without an outcome (A3: one live job per document). */
   docBusy?(artifactRef: string): Promise<boolean>;
   /** The test configuration's recording stub: nothing is started. */
@@ -468,15 +493,15 @@ export class LaunchOnceRegistry {
     return { stub: d.stub === true };
   }
 
-  async live(kind: ArtifactProposalKind, runId: string): Promise<boolean> {
+  async live(kind: ArtifactProposalKind, runId: string, runs: RunsOnce): Promise<boolean> {
     const d = this.dispatchers.get(kind);
-    return d?.live === undefined ? false : d.live(runId);
+    return d?.live === undefined ? false : d.live(runId, runs);
   }
 
   /** Whether a run this daemon started for the artifact is still live, or a launcher's durable record says an attempt at
    *  it has no outcome yet (A3: across a restart too). */
-  async liveForArtifact(artifactRef: string): Promise<boolean> {
-    for (const r of this.byArtifact.get(artifactRef) ?? []) if (await this.live(r.kind, r.runId)) return true;
+  async liveForArtifact(artifactRef: string, runs: RunsOnce): Promise<boolean> {
+    for (const r of this.byArtifact.get(artifactRef) ?? []) if (await this.live(r.kind, r.runId, runs)) return true;
     for (const d of new Set(this.dispatchers.values())) if (d.docBusy !== undefined && (await d.docBusy(artifactRef))) return true;
     return false;
   }
@@ -589,6 +614,9 @@ export const PROPOSAL_WORKFLOWS: Readonly<Record<Exclude<ArtifactProposalKind, '
   refine: 'interactive-chat',
   demo: 'demo',
 };
+
+/** studio#1140: why a refine of a demo cut is blocked (the card says it after the document's title). */
+export const CUT_BLOCKED = "a demo video: this chat can't change it. Change it by hand in the video editor (chapters, trims, captions, theme)";
 
 const STOPS: Readonly<Record<Exclude<ArtifactProposalKind, 'theme' | 'job' | 'onboard'>, string>> = {
   create: 'Stops for you if the check fails. The plan or an escalation may also ask.',
@@ -706,8 +734,9 @@ export interface ChatProposalDeps {
    *  in `projectId` accepts (a job's Start then chooses how it runs); else `null`. Absent = none. */
   powerPresets?(projectId: string | null): Promise<ReadonlySet<string> | null>;
   /** (CJ13) The seats that wrote the change a review-change job's words name, in `repoRef` (the launch's own
-   *  exclusion); `null` when it cannot be read (the launch then decides). Absent = none excluded. */
-  reviewAuthors?(repoRef: string, words: string): Promise<readonly string[] | null>;
+   *  exclusion); `null` when it cannot be read (the launch then decides). Absent = none excluded. `unknown` (crew#1803)
+   *  is why crew could not read who made the change, when the seats are every recent seat in the repository instead. */
+  reviewAuthors?(repoRef: string, words: string): Promise<ReviewAuthors | null>;
   /** Whether the chat's client renders job proposals (`accepts: ['job']`, its newest declaration). Absent = no. */
   acceptsJobs?(chatId: string): boolean;
   /** (crew-0182) Whether the chat's client draws onboard cards (`accepts: ['onboard']`, its newest declaration). */
@@ -843,6 +872,63 @@ function ownTitle(title: string, words: string): boolean {
   const named = plain(title);
   return named !== '' && plain(words).includes(named);
 }
+
+/**
+ * (crew#1728) A seat's entry block keeps its `title` only when the person named it in their own words, as a job card's
+ * does (`ownTitle`); else the title is dropped and the catalog's title is used.
+ */
+function ownWordsTitle(block: ParsedMake, records: readonly ChatTranscriptRecord[], turnId: string): ParsedMake {
+  if (block.op !== 'entry' || block.title === undefined || ownTitle(block.title, personWords(records, turnId))) return block;
+  const rest = { ...block };
+  delete rest.title;
+  return rest;
+}
+
+/**
+ * (crew#1737) The person's own request with what they only quoted taken out: fenced and inline code, `>` quote lines
+ * and text in quotation marks. A seat named only there was pasted or reported, not chosen.
+ */
+export function ownRequestWords(words: string): string {
+  return words
+    .replace(/(`{3,}|~{3,})[\s\S]*?(?:\1|$)/gu, ' ')
+    .replace(/(`+)[\s\S]*?\1/gu, ' ')
+    .split(/\r?\n/u)
+    .filter((line) => !/^\s*>/u.test(line))
+    .join('\n')
+    .replace(/"[^"]*"|“[^”]*”|‘[^’]*’/gu, ' ');
+}
+
+/** (crew#1737) Whether the person's words name a seat, by its key or its roster name, as a whole word, outside what
+ *  they quoted ({@link ownRequestWords}). */
+export function seatNamedIn(key: string, name: string | undefined, words: string): boolean {
+  const plain = ownRequestWords(words).toLowerCase();
+  return [key, name].some((n) => {
+    const w = (n ?? '').trim().toLowerCase();
+    if (w === '') return false;
+    const esc = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[^\\p{L}\\p{N}])${esc}(?![\\p{L}\\p{N}])`, 'u').test(plain);
+  });
+}
+
+/**
+ * (crew#1737) The seats a routing block names that the person's own turn names too and that can work now: the lead
+ * first, then the others in the person's order. Nothing named (or nothing that passes) leaves both `null`, so the card
+ * draws its own seats.
+ */
+function namedSeats(block: { lead?: string | undefined; seats?: string[] | undefined }, words: string, roster: readonly { key: string; name: string }[]): { lead: string | null; seats: string[] | null } {
+  const ok = (k: string): boolean => roster.some((s) => s.key === k) && seatNamedIn(k, roster.find((s) => s.key === k)?.name, words);
+  const lead = block.lead !== undefined && ok(block.lead) ? block.lead : null;
+  const others = [...new Set(block.seats ?? [])].filter((k) => k !== lead && ok(k));
+  // Seats ride only beside a named lead: a list without one would read as the whole roster (its first seat building),
+  // so a seat named only to check is left to the card's own draw, which the person can swap (xreview r2).
+  return { lead, seats: lead !== null && others.length > 0 ? [lead, ...others] : null };
+}
+
+/**
+ * (crew#1745) A chat that ended (closed, its id reused, or the daemon restarted) can't take a proposal any more. Said
+ * without its id: the person reads this under the card, and the way forward is a new chat.
+ */
+export const CHAT_ENDED = 'this chat has ended (it was closed, or the daemon restarted), so it can’t start this again. Start it again in a new chat.';
 
 /** The person's own words of ONE turn (the message the seat's block answers). */
 function turnWords(records: readonly ChatTranscriptRecord[], turnId: string): string {
@@ -1013,7 +1099,7 @@ export class ChatProposals {
       const jobBlock = jobs && block.op === 'entry' && isJobCardEntry(block);
       const proposal = jobBlock
         ? await this.resolveDetected({ chatId: frame.chat, turnId, seat: frame.cliKey, block: block as Extract<ParsedMake, { op: 'entry' }>, records: this.deps.records(frame.chat) })
-        : await this.resolve({ chatId: frame.chat, turnId, seat: frame.cliKey, block, records: this.deps.records(frame.chat) });
+        : await this.resolve({ chatId: frame.chat, turnId, seat: frame.cliKey, block: ownWordsTitle(block, this.deps.records(frame.chat), turnId), records: this.deps.records(frame.chat) });
       if (proposal === null) return;
       // A job card never appears after the person has written again (codex r4): a newer message ("never mind") supersedes a
       // slow reply's detection.
@@ -1067,7 +1153,7 @@ export class ChatProposals {
    * The block → a card's facts. `null` when the operation is not advertised (the seat was never told about it) or the
    * chat has ended: no card. Everything else resolves, with what cannot be resolved struck or blocking Go.
    */
-  async resolve(input: { chatId: string; turnId: string; seat: string; block: ParsedMake; records: readonly ChatTranscriptRecord[]; helperSeats?: readonly string[] }): Promise<ArtifactProposal | null> {
+  async resolve(input: { chatId: string; turnId: string; seat: string; block: ParsedMake; records: readonly ChatTranscriptRecord[]; helperSeats?: readonly string[]; helperWriterNamed?: boolean }): Promise<ArtifactProposal | null> {
     const { chatId, turnId, seat, block, records } = input;
     const flags = this.deps.flags();
     const chat = this.deps.chat(chatId);
@@ -1088,7 +1174,7 @@ export class ChatProposals {
     if (block.op === 'onboard') {
       // Only for a client that draws the card (its seat was told the block exists only then).
       if (flags.onboard !== true || this.deps.onboard === undefined || this.deps.acceptsOnboard?.(chatId) !== true) return this.refused(chatId, 'onboard');
-      return resolveOnboard(block, { pid, chatId, turnId, seat, chatProjectId: chat.projectId === null || chat.projectId === 'default' ? null : chat.projectId }, this.deps.onboard);
+      return resolveOnboard(block, { pid, chatId, turnId, seat, chatProjectId: chat.projectId === null || chat.projectId === 'default' ? null : chat.projectId, words }, this.deps.onboard);
     }
 
     if (block.op === 'theme') {
@@ -1130,6 +1216,8 @@ export class ChatProposals {
           const root = await this.deps.docsRoot(ref.projectId);
           const head = root === null ? null : artifactHead(root, ref.doc);
           if (head === null) blocked.push(`${title} · no such document`);
+          // studio#1140: a demo video changes in its editor; a page refine would write a page version over a cut.
+          else if (artifactIsCut(root!, ref.doc)) blocked.push(`${title} · ${CUT_BLOCKED}`);
           else {
             target = { ref: ref.ref, title, base: head };
             projectId = projectOfMount(ref.mount);
@@ -1208,7 +1296,7 @@ export class ChatProposals {
       demo = { url, audience: block.audience ?? null, show: block.show ?? null };
     }
     const sources = kind === 'create' ? await this.resolveSources(block.sources, { chatId, turnId, records, binding, turnHas, chat, words, personNamed: false }) : [];
-    const { helpers, block: helperBlock, seatsUnread } = await this.docHelpers(chat, input.helperSeats);
+    const { helpers, block: helperBlock, seatsUnread } = await this.docHelpers(chat, input.helperSeats, input.helperWriterNamed ?? true);
     if (helperBlock !== null) blocked.push(helperBlock);
     return {
       pid, chatId, turnId, kind, seat,
@@ -1498,8 +1586,8 @@ export class ChatProposals {
     return this.lock.run(`pid\u0000${pid}`, () => this.decideLocked(chatId, pid, body, actor, instance)).then((r) => this.served(r));
   }
 
-  private gone(chatId: string): DecideResult {
-    return { code: 409, body: { code: 'chat_gone', error: `chat ${chatId} ended and its id was reused; this proposal can no longer be answered here` } };
+  private gone(chatId: string, acceptingAt?: number): DecideResult {
+    return { code: 409, body: { code: 'chat_gone', error: CHAT_ENDED, ...(acceptingAt !== undefined ? { acceptingAt } : {}) } };
   }
 
   private async decideLocked(chatId: string, pid: string, body: { decision: 'go' | 'not_now'; edits?: ProposalEdits | undefined; power?: boolean | undefined; reducedAssurance?: boolean | undefined }, actor: Actor, instance: string | null): Promise<DecideResult> {
@@ -1712,6 +1800,8 @@ export class ChatProposals {
       const root = await this.deps.docsRoot(ref.projectId);
       const head = root === null ? null : artifactHead(root, ref.doc);
       if (head === null) return { code: 409, body: { code: 'source_gone', error: `${resolution.target.title} is gone`, view: viewOf(folded) } };
+      // studio#1140: a refine recorded before crew blocked cuts (or a document that became one) never launches on a cut.
+      if (artifactIsCut(root!, ref.doc)) return { code: 409, body: { code: 'proposal_blocked', error: `${resolution.target.title} · ${CUT_BLOCKED}`, view: viewOf(folded) } };
       if (head !== resolution.target.base) {
         // A newer proposal exists: this one is not re-opened over it (the chat moved on). The re-resolution is still
         // recorded, so the fold settles it as superseded for every reader (and its frame says so).
@@ -1757,18 +1847,22 @@ export class ChatProposals {
       if (!this.write(chatId, { at: this.now(), turnId: folded.turnId, kind: 'proposal', proposal: { ...(now.accepting?.resolution ?? now.proposal), heldRejected: true } }, instance)) return this.gone(chatId);
     }
     // Recorded before anything starts.
-    const accepting: ProposalRecord = { at: this.now(), turnId: folded.turnId, kind: 'proposal_accepting', pid, actor: actor.id, edits, resolution, identity };
+    // crew#1695: `at` names this Go (its refusals carry it), so it is never the same as an earlier accepting record's.
+    const lastAt = Math.max(-1, ...this.deps.records(chatId).flatMap((r) => (r.kind === 'proposal_accepting' && r.pid === pid ? [r.at] : [])));
+    const accepting: ProposalRecord = { at: Math.max(this.now(), lastAt + 1), turnId: folded.turnId, kind: 'proposal_accepting', pid, actor: actor.id, edits, resolution, identity };
     if (!this.write(chatId, accepting, instance)) return this.gone(chatId);
     let result: ProposalResult;
     try {
       result = await this.deps.registry.launchOnce({ kind, pid, chatId, actor, identity, resolution, ...(power !== undefined ? { power } : {}) });
     } catch (err) {
+      // crew#1695: every refusal after this Go's accepting write names that record (`acceptingAt`), so a client marks
+      // only it stopped, never another tab's newer Go.
       if (err instanceof LaunchRefusal) {
         const reopened = this.reopenLaunch(chatId, folded, resolution, instance);
-        if (reopened === null) return this.gone(chatId);
+        if (reopened === null) return this.gone(chatId, accepting.at);
         this.deps.audit('chat.proposal.launch_refused', actor, { chatId, pid, code: err.body['code'], error: err.message });
         return { code: err.status, body: {
-          code: err.body['code'], error: err.message,
+          code: err.body['code'], error: err.message, acceptingAt: accepting.at,
           ...(err.body['excluded'] !== undefined ? { excluded: err.body['excluded'] } : {}),
           ...(err.body['retryWith'] !== undefined ? { retryWith: err.body['retryWith'] } : {}),
           view: viewOf(reopened),
@@ -1778,9 +1872,9 @@ export class ChatProposals {
       const msg = err instanceof Error ? err.message : String(err);
       this.deps.audit('chat.proposal.launch_failed', actor, { chatId, pid, error: msg, ...(power !== undefined ? { power } : {}) });
       const after = foldProposals(this.deps.records(chatId)).get(pid);
-      return { code: 502, body: { code: 'launch_failed', error: `could not start it: ${msg}. Go again resumes the same job.`, ...(after !== undefined ? { view: viewOf(after) } : {}) } };
+      return { code: 502, body: { code: 'launch_failed', error: `could not start it: ${msg}. Go again resumes the same job.`, acceptingAt: accepting.at, ...(after !== undefined ? { view: viewOf(after) } : {}) } };
     }
-    if (!this.decided(chatId, folded.turnId, pid, actor, 'go', result, resolution, edits, instance, power)) return this.gone(chatId);
+    if (!this.decided(chatId, folded.turnId, pid, actor, 'go', result, resolution, edits, instance, power)) return this.gone(chatId, accepting.at);
     const after = foldProposals(this.deps.records(chatId)).get(pid) ?? folded;
     return { code: 200, body: { view: viewOf(after) } };
   }
@@ -1878,6 +1972,7 @@ export class ChatProposals {
    */
   private async busy(chatId: string, artifactRef: string | null, p: ArtifactProposal): Promise<{ code: 'chat_busy' | 'document_busy'; reason: string } | null> {
     const runs = await this.deps.runs();
+    const runsOnce: RunsOnce = async () => runs;
     // A reshape's held run is the one it replaces: answered Reject inside this Go, so it does not make the chat busy.
     const held = p.reshapes !== undefined && p.heldRejected !== true ? p.reshapes : null;
     for (const f of foldProposals(this.deps.records(chatId)).values()) {
@@ -1885,7 +1980,7 @@ export class ChatProposals {
       // Another proposal of this chat started a job (decided go, or accepting with its run launched) still live.
       const runId = f.state === 'decided' && f.decision === 'go' ? f.result?.runId ?? null
         : f.state === 'accepting' ? f.accepting?.identity.runId ?? null : null;
-      if (runId !== null && runId !== held && (await this.deps.registry.live(f.proposal.kind, runId))) {
+      if (runId !== null && runId !== held && (await this.deps.registry.live(f.proposal.kind, runId, runsOnce))) {
         return { code: 'chat_busy', reason: `This chat already has a job running (${f.proposal.what.label}). Wait, or stop that run.` };
       }
     }
@@ -1894,7 +1989,7 @@ export class ChatProposals {
       return { code: 'chat_busy', reason: `This chat already has a job running (run ${v.session.id.slice(0, 8)}). Wait, or stop that run.` };
     }
     if (artifactRef !== null && (p.kind === 'refine' || (p.kind === 'create' && p.artifactRef !== undefined))) {
-      if (await this.deps.registry.liveForArtifact(artifactRef)) {
+      if (await this.deps.registry.liveForArtifact(artifactRef, runsOnce)) {
         return { code: 'document_busy', reason: `“${p.target?.title ?? p.what.title}” is being ${p.kind === 'create' ? 'drafted' : 'revised'}. Wait, or stop that run.` };
       }
       const ref = parseArtifactRef(artifactRef);
@@ -2163,7 +2258,9 @@ export class ChatProposals {
       });
       const g = d.guess;
       // The repository the block names, when it is one of this chat's (else the chat's own rule picks it).
-      const named = block.repos.map((want) => jc.repos.filter((r) => r.name === want || r.id === want)).find((hits) => hits.length === 1)?.[0];
+      // crew#1791: else the one the person's words clearly name ("In tiny-math-rd, fix …").
+      const named = block.repos.map((want) => jc.repos.filter((r) => r.name === want || r.id === want)).find((hits) => hits.length === 1)?.[0]
+        ?? repoNamedIn(words, jc.repos) ?? undefined;
       // A demo's address only from the person's own words (DES-CHAT-ARTIFACTS-001 §4.3), never the model's.
       const inputs: JobFacts['inputs'] = {};
       if (block.url !== undefined && block.url !== '' && personUrls(words).has(block.url)) inputs['url'] = { kind: 'url', value: block.url };
@@ -2176,8 +2273,7 @@ export class ChatProposals {
         details: [],
         repoRef: named?.id ?? null,
         projectId: jc.projectId,
-        lead: null,
-        seats: null,
+        ...namedSeats(block, words, ctx.roster),
         inputs,
         skipQe: null,
         by: 'detected',
@@ -2509,10 +2605,17 @@ export class ChatProposals {
   }
 
   /** A document's two default helpers from the pool, and the line that blocks it when there are none. */
-  private async docHelpers(chat: ProposalChat, chosen?: readonly string[]): Promise<{ helpers: ProposalHelpers | null; block: string | null; seatsUnread?: boolean }> {
+  private async docHelpers(chat: ProposalChat, chosen?: readonly string[], writerNamed = true): Promise<{ helpers: ProposalHelpers | null; block: string | null; seatsUnread?: boolean }> {
     const { pool, refusal } = await this.seatPool();
     const eligible = new Set(this.deps.rosterEligible().map((s) => s.key));
-    const seats = chosen === undefined ? undefined : [...new Set(chosen)].filter((k) => eligible.has(k)).slice(0, 2);
+    let seats = chosen === undefined ? undefined : [...new Set(chosen)].filter((k) => eligible.has(k)).slice(0, 2);
+    // crew#1737: one helper named: the other is the one the card would draw, never the same seat again. A named writer
+    // writes; a seat named only to check (no writer named, or the one named can't work now) checks.
+    if (seats !== undefined && seats.length === 1) {
+      const drawn = [...(this.helpers(chat, undefined, pool)?.seats ?? []), ...pool.map((s) => s.key)];
+      const other = drawn.find((k) => k !== seats![0] && eligible.has(k));
+      if (other !== undefined) seats = writerNamed && chosen?.[0] === seats[0] ? [seats[0]!, other] : [other, seats[0]!];
+    }
     const helpers = this.helpers(chat, seats, pool);
     return { helpers, block: helpers === null ? NEEDS_HELPER : null, ...(refusal !== undefined ? { seatsUnread: true } : {}) };
   }
@@ -2530,6 +2633,26 @@ export class ChatProposals {
     const powerPresets = (await this.deps.powerPresets?.(chat.projectId).catch(() => null)) ?? null;
     const { eligible: roster, pool, refusal } = await this.seatPool();
     return { chatId, pid, turnId, seat, chat, served, roster, pool, projectLabel, qeOff, powerPresets, ...(this.deps.coverage !== undefined ? { coverage: (keys: readonly string[], bound: boolean) => this.deps.coverage!(keys, bound) } : {}), ...extra, ...(refusal !== undefined ? { seatsUnread: true } : {}) };
+  }
+
+  /** (crew#1840) The pull requests this chat's runs delivered (a run record's `deliverUrl`), newest run last. A failed
+   *  read is none: the job then opens its own pull request, and its card says so when the words asked otherwise. */
+  private async deliveredPrs(chatId: string): Promise<DeliveredPr[]> {
+    try {
+      const out: DeliveredPr[] = [];
+      for (const v of await this.deps.runs()) {
+        if (this.deps.chatOfRun(v.session.id) !== chatId) continue;
+        const url = (v.session as { deliverUrl?: unknown }).deliverUrl;
+        const number = typeof url === 'string' ? prNumberOfUrl(url) : null;
+        if (number === null) continue;
+        const repo = (v.session as { repo_ref?: unknown }).repo_ref;
+        out.push({ number, url: url as string, runId: v.session.id, repoRef: typeof repo === 'string' ? repo : null });
+      }
+      return out;
+    } catch (err) {
+      this.log(`[proposals] chat ${chatId}: its runs could not be read for a delivered pull request: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
   }
 
   /** Source availability matters only to a card that shows this input. Keep a failed read a named refusal. */
@@ -2552,7 +2675,7 @@ export class ChatProposals {
 
   /** (CJ13) The last authors read per repository and words, for a short while: a revision and its rebuild, and a run
    *  of swaps, read the change once (a failed read is never kept). */
-  private readonly reviewAuthorsSeen = new Map<string, { at: number; authors: readonly string[] }>();
+  private readonly reviewAuthorsSeen = new Map<string, { at: number; authors: ReviewAuthors }>();
 
   /**
    * (CJ13) A review of a change is never led or checked by a seat that wrote it: the launch drops the change's authors
@@ -2577,9 +2700,15 @@ export class ChatProposals {
       for (const [k, v] of this.reviewAuthorsSeen) if (now - v.at > 30_000) this.reviewAuthorsSeen.delete(k);
       this.reviewAuthorsSeen.set(key, authors);
     }
-    const roster = ctx.roster.filter((s) => !authors.authors.includes(s.key));
+    const { seats, unknown } = authors.authors;
+    const roster = ctx.roster.filter((s) => !seats.includes(s.key));
     if (roster.length === 0 || roster.length === ctx.roster.length) return ctx;
-    return { ...ctx, roster, ...(ctx.pool !== undefined ? { pool: ctx.pool.filter((s) => !authors.authors.includes(s.key)) } : {}) };
+    // crew#1803: the card names the seats it left off and why, in a note of its own (`notes` refuses a seat edit).
+    const off = ctx.roster.filter((s) => seats.includes(s.key)).map((s) => s.name).join(', ');
+    const reviewNote = unknown === undefined
+      ? `${off} left off: authors of this change don't review it`
+      : `${off} left off: crew could not read who made this change (${unknown}), so seats that worked in this repository in the last ${REVIEW_PROVENANCE_WINDOW_DAYS} days don't review it`;
+    return { ...ctx, roster, reviewNote, ...(ctx.pool !== undefined ? { pool: ctx.pool.filter((s) => !seats.includes(s.key)) } : {}) };
   }
 
   /** Resolve the revision's shape first, then load only the choices that its input checks need. */
@@ -2628,7 +2757,7 @@ export class ChatProposals {
     const words = [r.resolved.brief ?? '', briefOf(facts)].filter((x) => x !== '').join('\n\n');
     const chosen = facts.lead === null && facts.seats === null ? undefined
       : [...new Set([facts.lead, ...(facts.seats ?? [])].filter((k): k is string => k !== null))];
-    const made = await this.resolve({ chatId, turnId, seat: ctx.seat, ...(chosen !== undefined ? { helperSeats: chosen } : {}), block: { op: 'entry', entry: seed.id, ...(facts.title !== null ? { title: facts.title } : {}), brief: words, sources: ['chat'], repos: facts.repoRef !== null ? [facts.repoRef] : [] }, records });
+    const made = await this.resolve({ chatId, turnId, seat: ctx.seat, ...(chosen !== undefined ? { helperSeats: chosen, helperWriterNamed: facts.lead !== null } : {}), block: { op: 'entry', entry: seed.id, ...(facts.title !== null ? { title: facts.title } : {}), brief: words, sources: ['chat'], repos: facts.repoRef !== null ? [facts.repoRef] : [] }, records });
     if (made === null) throw new JobRefusal('operation_unavailable', 'studio cannot start a document from a chat on this daemon yet', 409);
     const shape: ProposalShape = { card: card.id, option: r.option?.id ?? null, depth: null, by: facts.by, source: facts.source, ...(facts.guess !== undefined ? { guess: facts.guess } : {}) };
     const nameOf = (key: string): string => ctx.roster.find((s) => s.key === key)?.name ?? key;
@@ -2692,6 +2821,9 @@ export class ChatProposals {
       ctx = { ...ctx, coverage: (keys, bound) => this.deps.coverage!(keys, bound, relaunch) };
     }
     ctx = await this.reviewRoster(facts, ctx);
+    // (crew#1840) Words that name a pull request: the ones this chat's runs delivered, so a job asked to change one
+    // updates it (the resolution decides; it is pure).
+    if (ctx.deliveredPrs === undefined && mentionsPullRequest(facts.words)) ctx = { ...ctx, deliveredPrs: await this.deliveredPrs(chatId) };
     if (r?.resolved.inputs.some((i) => i.id === 'documents')) {
       if (facts.inputs['documents'] === undefined) {
         const { binding } = bindingOf(records, ctx.turnId ?? '\u0000');
@@ -2759,7 +2891,7 @@ export class ChatProposals {
           return await this.reviseLocked(chatId, { revises: body.revises, edits: body.edits }, { person: actor, source: body.source, pid, request: { id: body.requestId, digest }, turnId: null, message: null }, instance);
         }
         const chat = this.jobChat(chatId);
-        if (chat === null) return { code: 409, body: { code: 'chat_gone', error: `chat ${chatId} has ended; start a new one` } };
+        if (chat === null) return { code: 409, body: { code: 'chat_gone', error: CHAT_ENDED } };
         // A command names its card (and maybe its option); an alias is the only way to a hidden card.
         let card = body.card;
         let option: string | null | undefined = body.option;
@@ -2778,7 +2910,8 @@ export class ChatProposals {
           depth: body.depth ?? null,
           words: (body.words ?? '').slice(0, 8000),
           details: [],
-          repoRef: null,
+          // crew#1791: the repository the person's words clearly name, else the question asks.
+          repoRef: repoNamedIn(body.words ?? '', chat.repos)?.id ?? null,
           projectId: chat.projectId,
           lead: null,
           seats: null,
@@ -2827,7 +2960,7 @@ export class ChatProposals {
     }
     if (parent.proposal.shape === undefined) return { code: 400, body: { code: 'edits_invalid', error: 'only a job proposal is revised this way' } };
     const chat = this.jobChat(chatId);
-    if (chat === null) return { code: 409, body: { code: 'chat_gone', error: `chat ${chatId} has ended; start a new one` } };
+    if (chat === null) return { code: 409, body: { code: 'chat_gone', error: CHAT_ENDED } };
     const fromPerson = src.person !== null;
     // Only the person's own press can give up a check.
     const edits: ProposalRevisionEdits & Record<string, unknown> = { ...rev.edits };
@@ -2859,7 +2992,7 @@ export class ChatProposals {
       const picked = await this.deps.pickFirstRepo(chatId, edits.repoRef, src.person, src.pid);
       if (!picked.ok) return { code: picked.status, body: { code: 'chat_scope_refused', error: picked.error } };
       const scoped = this.jobChat(chatId);
-      if (scoped === null) return { code: 409, body: { code: 'chat_gone', error: `chat ${chatId} has ended; start a new one` } };
+      if (scoped === null) return { code: 409, body: { code: 'chat_gone', error: CHAT_ENDED } };
       ctx0 = { ...ctx0, chat: scoped };
       extraNotes.push(`This chat now reads ${picked.name}: you picked it for this job.`);
     }
@@ -3305,7 +3438,7 @@ export class ChatProposals {
       }
       if (folded === undefined) {
         const chat = this.jobChat(chatId);
-        if (chat === null) return { code: 409, body: { code: 'chat_gone', error: `chat ${chatId} has ended; start a new one` } };
+        if (chat === null) return { code: 409, body: { code: 'chat_gone', error: CHAT_ENDED } };
         const parent = x.parentPid === null ? undefined : foldProposals(this.deps.records(chatId)).get(x.parentPid);
         let proposal: ArtifactProposal;
         try {
@@ -3462,6 +3595,10 @@ export class ChatProposals {
       if (folded.has(pid)) return pid;
       // A retry keeps the accepted choices only for edit ids still present on the new head.
       const fresh = base.kind === 'refine' && base.target !== undefined ? await this.refreshTarget(base) : base;
+      // crew#1745: a chat that has ended (closed, or the daemon restarted under the attempt) can't take Try again: its
+      // Go would only answer chat_gone. The card says so and where to go, with no Try again to press.
+      const ended = this.deps.chat(chatId) === null;
+      const again = ended ? '' : base.kind === 'refine' ? ' Try again revises the latest version, and keeps your edits.' : ' Try again fills the same document.';
       const retry: ArtifactProposal = {
         ...fresh,
         ...(base.kind === 'refine' ? { allow: (failed.accepting?.edits?.allow ?? []).filter((id) => fresh.protected?.some((e) => e.id === id)) } : {}),
@@ -3470,10 +3607,10 @@ export class ChatProposals {
         sourceRunId: runId,
         artifactRef,
         reason: base.kind === 'refine'
-          ? `The last change was not applied: ${reason}. Try again revises the latest version, and keeps your edits.`
-          : `The last attempt ended without a draft: ${reason}. Try again fills the same document.`,
+          ? `The last change was not applied: ${reason}.${again}`
+          : `The last attempt ended without a draft: ${reason}.${again}`,
         // A refine whose edits cannot be read on the new head stays blocked with why (codex A5 r2).
-        blocked: fresh !== base ? fresh.blocked : null,
+        blocked: ended ? CHAT_ENDED : fresh !== base ? fresh.blocked : null,
       };
       return this.write(chatId, { at: this.now(), turnId: failed.turnId, kind: 'proposal', proposal: retry }, instance) ? pid : null;
     });
@@ -3485,9 +3622,12 @@ export class ChatProposals {
    * job per chat, work and artifact runs together (DES §4.3).
    */
   async liveJobOf(chatId: string): Promise<string | null> {
+    // crew#1779: the run list is read once, and only when a job's check needs it.
+    let read: Promise<readonly SessionView[]> | null = null;
+    const runsOnce: RunsOnce = () => (read ??= this.deps.runs());
     for (const f of foldProposals(this.deps.records(chatId)).values()) {
       const runId = f.state === 'decided' && f.decision === 'go' ? f.result?.runId ?? null : f.state === 'accepting' ? f.accepting?.identity.runId ?? null : null;
-      if (runId !== null && (await this.deps.registry.live(f.proposal.kind, runId))) return f.proposal.what.label;
+      if (runId !== null && (await this.deps.registry.live(f.proposal.kind, runId, runsOnce))) return f.proposal.what.label;
     }
     return null;
   }

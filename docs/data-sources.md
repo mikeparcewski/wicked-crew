@@ -23,7 +23,10 @@ crew keeps what. For who may call which route, see [auth](auth.md).
 | **crew** (built in) | nothing | an app can show crew's own runs and system state |
 
 An upload is limited to 50 MB (200 MB after decompression), 1,000,000 rows, 200 columns and 30 s to parse. An
-XLSX file's first sheet is read. A `.sqlite` file that holds a view, a trigger or a virtual table is refused.
+XLSX file's first sheet is read. A `.sqlite` file that holds a view or a trigger is refused. A virtual table (a
+full-text index, an R-tree) is dropped from crew's copy of the file, never from yours, with its own tables; the upload
+answers its name in `dropped`, and its rows are not in the snapshot. One whose module crew's SQLite does not have is
+refused by name: drop it from a copy of the file (`DROP TABLE <name>`) and upload that.
 
 ### Where crew keeps them
 
@@ -167,9 +170,13 @@ both.
 
 **Profile this source** (a native Postgres source, `POST /sources/:name/profile`, a person's only) runs fixed
 count queries only, so no value enters crew. It keeps bands (rows by order of magnitude, nulls to the nearest
-5%), finds likely joins and the code that describes each table, and files one proposal per table into estate's
-review queue. Nothing becomes knowledge until a person approves it. Studio shows the queue and the approved
-shapes on Understand's **Knowledge map** (`GET /knowledge/map`, a person's only).
+5%), finds likely joins and the code that describes each table, and writes one data shape per table straight into
+knowledge, scoped to the source. You started the profile, so it is already your decision: nothing goes to the
+review queue. Profiling again replaces the source's shapes. A shape that is the same is left, a changed one is
+rewritten, and the shape of a table the source no longer has is removed. A table the profile could not read (it
+timed out, ran past the budget, was refused or changed while it was read) keeps its earlier shape. A shape an
+agent proposes still waits for you in the review queue. Studio shows the shapes on Understand's **Knowledge map**
+(`GET /knowledge/map`, a person's only).
 
 ## Trackers: GitHub Issues and Jira
 

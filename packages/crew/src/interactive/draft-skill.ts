@@ -21,7 +21,7 @@
  * it is and name the fix.
  */
 
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -287,6 +287,77 @@ export interface DraftFloorVerdict {
   /** (PLAN G12) The page count the check reported: `measured` when a renderer printed it (else a structural lower
    *  bound). `null` = no count in the report (no budget, or a floor that could not run). */
   pages?: { count: number; measured: boolean; budget: number | null; exact: boolean } | null;
+  /** The claims scan's findings, as the report listed them (before any {@link withoutCarriedClaims}); absent when the
+   *  report carried none it could read. */
+  claimFindings?: ClaimFinding[];
+}
+
+/** One finding of garden's claims scan (`claims_scan.py` `Finding.as_dict`), as the floor compares them. */
+export interface ClaimFinding {
+  kind: string;
+  text: string;
+  detail: string;
+}
+
+/**
+ * The claims findings that depend on the repository's contents rather than on the document alone: a cited line whose
+ * text moved, a cited file that is gone, a URL no file mentions any more. The repository can change under a citation
+ * after it was checked; every other kind (an uncited number, a placeholder, an escaped path) is about the document.
+ */
+export const REPO_DEPENDENT_CLAIM_KINDS: ReadonlySet<string> = new Set(['cite-off', 'dangling-source', 'unsourced-url']);
+
+/** The report's claims findings, every well-formed one (`kind`, `text`, `detail` strings). */
+export function claimFindingsOf(report: unknown): ClaimFinding[] | null {
+  const claims = (report as SelfCheckReport | null)?.checks?.claims;
+  if (typeof claims !== 'object' || claims === null || !Array.isArray(claims.findings)) return null;
+  return claims.findings.flatMap((f: unknown) => {
+    const r = f as Record<string, unknown> | null;
+    return r !== null && typeof r === 'object' && typeof r['kind'] === 'string' && typeof r['text'] === 'string' && typeof r['detail'] === 'string'
+      ? [{ kind: r['kind'], text: r['text'], detail: r['detail'] }]
+      : [];
+  });
+}
+
+/**
+ * The report with the repository-dependent claims findings ({@link REPO_DEPENDENT_CLAIM_KINDS}) that `carried` already
+ * has set aside — the same kind, element text and detail, counted (two copies of a finding the base had once leave one).
+ * `carried` is the claims scan of the version a refine started from, judged against the SAME folders: what it already
+ * had, the revision carried over unchanged, and was checked when it was written. What the revision adds or changes is
+ * still judged. When no claims finding is left, `claims` passes and the report's `failed` / `verdict` are recomputed by
+ * `self_check.py`'s own rules (`run`); any other finding, and a malformed one, stays.
+ */
+export function withoutCarriedClaims(report: unknown, carried: readonly ClaimFinding[]): { report: unknown; dropped: number } {
+  const rep = report as { checks?: { claims?: Record<string, unknown> }; failed?: unknown; unverified?: unknown; verdict?: unknown } | null;
+  const claims = rep?.checks?.claims;
+  if (rep === null || typeof rep !== 'object' || typeof claims !== 'object' || claims === null || !Array.isArray(claims['findings'])) {
+    return { report, dropped: 0 };
+  }
+  const key = (f: ClaimFinding): string => JSON.stringify([f.kind, f.text, f.detail]);
+  const left = new Map<string, number>();
+  for (const f of carried) if (REPO_DEPENDENT_CLAIM_KINDS.has(f.kind)) left.set(key(f), (left.get(key(f)) ?? 0) + 1);
+  const kept: unknown[] = [];
+  let dropped = 0;
+  for (const f of claims['findings'] as unknown[]) {
+    const one = claimFindingsOf({ checks: { claims: { findings: [f] } } })?.[0];
+    const n = one !== undefined ? (left.get(key(one)) ?? 0) : 0;
+    if (one !== undefined && n > 0) {
+      left.set(key(one), n - 1);
+      dropped += 1;
+    } else kept.push(f);
+  }
+  if (dropped === 0) return { report, dropped: 0 };
+  const byKind: Record<string, number> = {};
+  for (const f of kept) {
+    const kind = typeof (f as { kind?: unknown } | null)?.kind === 'string' ? (f as { kind: string }).kind : 'finding';
+    byKind[kind] = (byKind[kind] ?? 0) + 1;
+  }
+  const ok = kept.length === 0;
+  const nextClaims = { ...claims, ok, by_kind: byKind, findings: kept };
+  const failed = Array.isArray(rep.failed) ? rep.failed.filter((n) => !(ok && n === 'claims')) : rep.failed;
+  const unverified = Array.isArray(rep.unverified) ? rep.unverified : [];
+  const verdict =
+    rep.verdict !== 'FAIL' || !Array.isArray(failed) ? rep.verdict : failed.length > 0 ? 'FAIL' : unverified.length > 0 ? 'UNVERIFIED' : 'PASS';
+  return { report: { ...rep, checks: { ...rep.checks, claims: nextClaims }, failed, verdict, ok: verdict === 'PASS' }, dropped };
 }
 
 interface SelfCheckReport {
@@ -548,17 +619,49 @@ export function latestDraftRender(units: readonly unknown[] | undefined): Record
   return best?.rec ?? null;
 }
 
+/** The counter's path below a garden root (wicked-core `draft_render::COUNTER_SCRIPT`). */
+export const DRAFT_PAGE_COUNTER_SCRIPT = 'scripts/draft/page_count.py';
+
+/**
+ * (crew#1750) Who would print the count here: the sha256 of the `page_count.py` this floor runs (its own garden root)
+ * and its browser's own `--version` line. `null` for what this floor cannot name; a count is then never reused.
+ */
+export interface DraftRenderIdentity {
+  counterSha256: string | null;
+  rendererVersion: string | null;
+}
+
 /**
  * (PLAN G12) The engine's measured page count when it is this floor's own measurement of these exact bytes: `outcome`
  * `measured`, an integer count of at least one, the same sha256 (lowercase hex of the raw bytes, the landing record's
- * key) and the same print profile. Anything else is `null`, and the floor prints (or estimates) as before.
+ * key) and the same print profile. (crew#1750, core#1337) And printed the way this floor would print it: the record's
+ * `counter_sha256` and `renderer_version` equal the floor's own ({@link DraftRenderIdentity}); a record without them
+ * (an older engine) is not reused. Anything else is `null`, and the floor prints (or estimates) as before.
  */
-export function reusablePageCount(record: Record<string, unknown> | null, sha256: string | null): number | null {
+export function reusablePageCount(record: Record<string, unknown> | null, sha256: string | null, identity: DraftRenderIdentity): number | null {
   if (record === null || sha256 === null) return null;
   const pages = record['pages'];
   if (record['outcome'] !== 'measured' || typeof pages !== 'number' || !Number.isInteger(pages) || pages < 1) return null;
   if (record['sha256'] !== sha256 || record['profile'] !== DRAFT_RENDER_PROFILE) return null;
+  if (identity.counterSha256 === null || record['counter_sha256'] !== identity.counterSha256) return null;
+  if (identity.rendererVersion === null || record['renderer_version'] !== identity.rendererVersion) return null;
   return pages;
+}
+
+/** (crew#1750) The first non-empty line of a `--version` answer, trimmed, at most 200 characters (core's
+ *  `draft_render::read_version`), or `null`. */
+export function versionLine(text: string): string | null {
+  const line = text.split(/\r?\n/u).map((l) => l.trim()).find((l) => l !== '');
+  return line === undefined ? null : [...line].slice(0, 200).join('');
+}
+
+/** (crew#1750) The browser's own `--version` line, or `null` when it does not answer one in time. */
+export function rendererVersionOf(chrome: string, timeoutMs = 5_000): Promise<string | null> {
+  return new Promise((resolvePromise) => {
+    execFile(chrome, ['--version'], { timeout: timeoutMs, env: childEnvWithBootEstateDb() }, (err, stdout) => {
+      resolvePromise(err !== null ? null : versionLine(String(stdout)));
+    });
+  });
 }
 
 /**
@@ -620,8 +723,11 @@ export interface DraftFloorIo {
   /** (PLAN G12) The run's own `draft_render` record (the engine's {@link latestDraftRender} of its units), read when the
    *  floor runs. A measurement of the same bytes with the same profile is reused ({@link reusablePageCount}). */
   engineRender?: (runId: string) => Promise<Record<string, unknown> | null>;
-  /** The draft's bytes, for the sha256 a reuse is matched on. Default: `readFileSync`. */
+  /** The draft's bytes, for the sha256 a reuse is matched on (and the counter's, for its identity). Default:
+   *  `readFileSync`. */
   readBytes?: (path: string) => Buffer;
+  /** (crew#1750) The browser's own `--version` line ({@link rendererVersionOf}). */
+  rendererVersion?: (chrome: string) => Promise<string | null>;
   /** How long {@link engineRender} may take before the floor prints instead. Default {@link DRAFT_RENDER_READ_TIMEOUT_MS}. */
   engineRenderTimeoutMs?: number;
   timeoutMs?: number;
@@ -657,7 +763,15 @@ export async function runDraftFloor(
   outPath: string,
   budget: PageBudget,
   snapshotDirs: readonly string[],
-  opts: { style?: string; notes?: string; runId?: string } = {},
+  opts: {
+    style?: string;
+    notes?: string;
+    runId?: string;
+    /** A refine's: the claims findings the version it started from already has (that version's own claims scan,
+     *  against the same folders), asked only when this document's claims check fails. Those it carries over are set
+     *  aside ({@link withoutCarriedClaims}); `null` = not known, nothing is set aside. */
+    carried?: () => Promise<ClaimFinding[] | null>;
+  } = {},
   io: DraftFloorIo = {},
 ): Promise<DraftFloorVerdict> {
   const root = (io.gardenRoot ?? gardenPluginRoot)();
@@ -674,7 +788,13 @@ export async function runDraftFloor(
   // the self-check runs without its own render. Any doubt (no record, another hash, another profile, not measured, a
   // read that fails) and the floor prints or estimates as before.
   let reused: number | null = null;
-  if (budget.pages !== null && opts.runId !== undefined && io.engineRender !== undefined) {
+  let chrome: string | null;
+  try {
+    chrome = io.chrome?.() ?? null;
+  } catch {
+    chrome = null;
+  }
+  if (budget.pages !== null && opts.runId !== undefined && io.engineRender !== undefined && chrome !== null) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       // Bounded: the record is an optimisation, and a read that stalls must not hold the floor (and the document's
@@ -682,24 +802,21 @@ export async function runDraftFloor(
       const expiry = new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error('the run read took too long')), io.engineRenderTimeoutMs ?? DRAFT_RENDER_READ_TIMEOUT_MS);
       });
-      const record = await Promise.race([io.engineRender(opts.runId), expiry]);
-      const sha = createHash('sha256').update((io.readBytes ?? readFileSync)(outPath)).digest('hex');
-      reused = reusablePageCount(record, sha);
+      const [record, rendererVersion] = await Promise.race([Promise.all([io.engineRender(opts.runId), (io.rendererVersion ?? rendererVersionOf)(chrome)]), expiry]);
+      const read = io.readBytes ?? readFileSync;
+      const sha = createHash('sha256').update(read(outPath)).digest('hex');
+      const counterSha256 = createHash('sha256').update(read(join(root, DRAFT_PAGE_COUNTER_SCRIPT))).digest('hex');
+      reused = reusablePageCount(record, sha, { counterSha256, rendererVersion });
     } catch {
       reused = null;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
   }
-  let chrome: string | null = null;
-  if (reused === null) {
-    try {
-      chrome = io.chrome?.() ?? null;
-    } catch {
-      chrome = null;
-    }
-  }
-  const argv = draftFloorArgv(root, outPath, budget, snapshotDirs, { ...opts, render: chrome !== null });
+  // A reused count needs no browser: the self-check runs without its own render.
+  if (reused !== null) chrome = null;
+  const { carried: carriedOf, ...argvOpts } = opts;
+  const argv = draftFloorArgv(root, outPath, budget, snapshotDirs, { ...argvOpts, render: chrome !== null });
   let answer: { stdout: string; code: number | null };
   try {
     answer = await (io.run ?? runNode)(argv, io.timeoutMs ?? DRAFT_FLOOR_TIMEOUT_MS, chrome ?? undefined);
@@ -722,9 +839,29 @@ export async function runDraftFloor(
         `JSON report (is Python 3 installed for the wicked-garden launcher?)`,
     };
   }
-  if (reused === null) return draftFloorVerdict(report, budget, { notes: opts.notes !== undefined });
-  const verdict = draftFloorVerdict(withMeasuredPages(report, reused, budget), budget, { notes: opts.notes !== undefined });
+  const claimFindings = claimFindingsOf(report);
+  // A refine: the claims findings the version it started from already had are set aside (coord r2 on crew#1853).
+  let judged = report;
+  let dropped = 0;
+  if (carriedOf !== undefined && (report as SelfCheckReport).checks?.claims?.ok === false) {
+    let carried: ClaimFinding[] | null;
+    try {
+      carried = await carriedOf();
+    } catch {
+      carried = null;
+    }
+    if (carried !== null) ({ report: judged, dropped } = withoutCarriedClaims(report, carried));
+  }
+  const carriedNote =
+    dropped > 0
+      ? ` (${dropped} citation finding(s) the revision carried over unchanged from the version it started from were not ` +
+        `judged again: the repository changed after they were checked)`
+      : '';
+  const withFindings = (v: DraftFloorVerdict): DraftFloorVerdict =>
+    v.verdict === 'unavailable' ? v : { ...v, summary: `${v.summary}${carriedNote}`, ...(claimFindings !== null ? { claimFindings } : {}) };
+  if (reused === null) return withFindings(draftFloorVerdict(judged, budget, { notes: opts.notes !== undefined }));
+  const verdict = draftFloorVerdict(withMeasuredPages(judged, reused, budget), budget, { notes: opts.notes !== undefined });
   return verdict.verdict === 'unavailable'
     ? verdict
-    : { ...verdict, summary: `${verdict.summary} (pages: ${reused}, printed by the run's own draft_render step on these exact bytes)` };
+    : withFindings({ ...verdict, summary: `${verdict.summary} (pages: ${reused}, printed by the run's own draft_render step on these exact bytes)` });
 }

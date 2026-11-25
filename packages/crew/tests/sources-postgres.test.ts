@@ -377,6 +377,8 @@ for (const target of PG_TARGETS) {
         expect((await audit.read()).filter((e) => e.action.startsWith('apps.source.writes_'))).toHaveLength(2);
       } finally {
         await app.close();
+        // The audit trail appends after the route answers: the rm below must not race its last line (crew#1780).
+        await audit.flush();
         rmSync(base, { recursive: true, force: true });
       }
     });
@@ -478,6 +480,8 @@ for (const target of PG_TARGETS) {
           expect(agent.body).toContain('22P02');
         } finally {
           await app.close();
+          // The audit trail appends after the route answers: the rm below must not race its last line (crew#1780).
+          await audit.flush();
           rmSync(base, { recursive: true, force: true });
         }
       });
@@ -716,6 +720,8 @@ for (const target of PG_TARGETS) {
           expect(live).toBe(0);
         } finally {
           await app.close();
+          // The audit trail appends after the route answers: the rm below must not race its last line (crew#1780).
+          await audit.flush();
           rmSync(base, { recursive: true, force: true });
         }
       });

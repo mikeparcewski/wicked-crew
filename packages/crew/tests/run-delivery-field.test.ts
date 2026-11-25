@@ -364,6 +364,7 @@ describe("crew#311 — the 'vacuous' split of 'stranded' and of the reaped 'none
     const index = new DeliveryIndex();
     const cache = new DeliveryDerivationCache({
       listViews: () => mockAdapter.sessionsDetail() as Promise<SessionView[]>,
+      viewOf: async (id: string) => ((await mockAdapter.sessionsDetail()) as SessionView[]).find((v) => v.session.id === id),
       probes: {
         worktreeExists: () => true,
         worktreeIsClean: async () => true,

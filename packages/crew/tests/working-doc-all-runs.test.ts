@@ -301,7 +301,7 @@ describe('a person’s answers as lines', () => {
       { ts: 3, action: 'gate.decided', actor: { id: 'workflow-schedule', kind: 'system' }, detail: { approve: true, amend: 'self-approved' } },
     ]);
     expect(notes).toHaveLength(1);
-    expect(noteLine(notes[0]!)).toMatch(/^Its schedule · \d{2}:\d{2} · stopped the job: “cancelled by its schedule: no seats for 6 h”$/u);
+    expect(noteLine(notes[0]!)).toBe(`Its schedule · ${clock(1)} · stopped the job: “cancelled by its schedule: no seats for 6 h”`);
     expect(isGenerated('decisions', noteLine(notes[0]!))).toBe(true);
   });
 

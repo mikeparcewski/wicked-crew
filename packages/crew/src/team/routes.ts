@@ -203,7 +203,8 @@ export function registerTeamRoutes(
   const { audit } = security;
   const actorOf = (req: { actor?: Actor }): Actor => req.actor ?? LOCAL_ACTOR;
   const unsupported = (err: unknown) => err instanceof TeamUnsupportedError || err instanceof PlanLaunchUnsupportedError;
-  const findRun = async (id: string) => (await adapter.sessionsDetail()).find((v) => v.session.id === id);
+  // crew#1775: studio reads a run's team on every page that shows it; one run, never a fold of the store.
+  const findRun = (id: string) => adapter.runView(id);
 
   app.get<{ Params: { id: string } }>(
     `${V}/runs/:id/team`,

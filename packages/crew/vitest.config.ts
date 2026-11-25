@@ -12,7 +12,11 @@ export default defineConfig({
     //   isolate-workflow-overlay redirects the workflow overlay dir away from the real ~/.config.
     //   bus-double              answers the engine bus calls (src/core/bus.ts) for a bus file no
     //                           engine is attached to — a fake-adapter seam test's temp bus.
-    setupFiles: ['./tests/setup/hermetic-home.ts', './tests/setup/isolate-workflow-overlay.ts', './tests/setup/bus-double.ts'],
+    //   audit-settle            notes every AuditLog that records; the runner below awaits them when a test's body
+    //                           ends, before any after-hook removes their dir (crew#1813).
+    setupFiles: ['./tests/setup/hermetic-home.ts', './tests/setup/isolate-workflow-overlay.ts', './tests/setup/bus-double.ts', './tests/setup/audit-settle.ts'],
+    // crew#1813: vitest's runner plus one step, the audit settle between a test's body and its after-hooks.
+    runner: './tests/setup/audit-flush-runner.ts',
     testTimeout: 30000,
     // crew#649: 15 s was the in-suite deadline the `test_targeted` floor kept blowing on a loaded
     // host — the same run's failures never reproduced when re-run on their own, and the verdict

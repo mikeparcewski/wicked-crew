@@ -9,9 +9,12 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Actor, ArtifactProposal, ChatTranscriptRecord, CoreEvent, SessionView } from '../src/core/types.js';
 import { CATALOG_SEEDS } from '../src/workflow-catalog/catalog-data.js';
 import {
+  CHAT_ENDED,
   ChatProposals,
   foldProposals,
+  LaunchRefusal,
   LaunchOnceRegistry,
+  liveInRuns,
   proposalRunId,
   type ChatProposalDeps,
   type ProposalChat,
@@ -156,6 +159,16 @@ beforeEach(() => {
 });
 
 describe('the resolver', () => {
+  it.each([
+    ['make a deck called Domain coverage for new engineers', 'Domain coverage', 'Domain coverage'],
+    ['make a deck for new engineers', 'Invented by the seat', 'Presentation'],
+  ])('an entry block keeps its title only when the person said it (crew#1728): %s', async (words, title, expected) => {
+    const r = rig();
+    const t = chatWith(r, 'c1', { words });
+    const p = (await propose(r, 'c1', t, { entry: 'presentation', title }))!;
+    expect(p.what.title).toBe(expected);
+  });
+
   it('a refine of an unnamed or out-of-scope document is blocked before anything of it is read, and carries no target', async () => {
     const r = rig();
     const t = chatWith(r, 'c1', { projectId: 'mikes' });
@@ -167,6 +180,65 @@ describe('the resolver', () => {
     const q = await propose(r, 'c2', t2, { refine: 'other/their-deck', ask: 'x' });
     expect(q?.blocked).toBe("their deck · not in this chat's project");
     expect(r.docsRootCalls).not.toContain('other');
+  });
+
+  it('studio#1140: a refine of a demo cut is blocked (chat cannot change a video) and carries no target, so Go starts nothing', async () => {
+    const dir = join(ROOT, 'mikes', 'demo-8e0ffbece431');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, '_v2.html'), '<h1>Sign-in demo</h1>');
+    writeFileSync(join(dir, 'versions.json'), JSON.stringify({ head: 2, kind: 'demo', versions: [{ version: 2, kind: 'demo' }] }));
+    const r = rig();
+    const t = chatWith(r, 'c1', { projectId: 'mikes', open: 'mikes/demo-8e0ffbece431' });
+    const p = (await propose(r, 'c1', t, { refine: 'mikes/demo-8e0ffbece431', ask: 'change the chapter caption' }))!;
+    expect(p.blocked).toBe("Coverage deck · a demo video: this chat can't change it. Change it by hand in the video editor (chapters, trims, captions, theme)");
+    expect(p.target).toBeUndefined();
+    const res = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    expect(res.code).toBe(409);
+    expect(r.launcher.launched).toEqual([]);
+  });
+
+  it('studio#1140: a refine recorded before cuts were blocked never launches on a cut at Go', async () => {
+    const dir = join(ROOT, 'mikes', 'cut-later');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, '_v1.html'), '<h1>v1</h1>');
+    writeFileSync(join(dir, 'versions.json'), JSON.stringify({ head: 1, versions: [{ version: 1 }] }));
+    const r = rig();
+    const t = chatWith(r, 'c1', { projectId: 'mikes', open: 'mikes/cut-later' });
+    const p = (await propose(r, 'c1', t, { refine: 'mikes/cut-later', ask: 'change the caption' }))!;
+    expect(p.blocked).toBeNull();
+    expect(p.target).toMatchObject({ ref: 'mikes/cut-later', base: 1 });
+    // The same document is a cut when Go is pressed (a card an older crew recorded on a cut).
+    writeFileSync(join(dir, 'versions.json'), JSON.stringify({ head: 1, kind: 'demo', versions: [{ version: 1, kind: 'demo' }] }));
+    const res = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    expect(res.code).toBe(409);
+    expect(res.body).toMatchObject({ code: 'proposal_blocked', error: "Coverage deck · a demo video: this chat can't change it. Change it by hand in the video editor (chapters, trims, captions, theme)" });
+    expect(r.launcher.launched).toEqual([]);
+    expect(kinds(r, 'c1')).toEqual(['proposal']);
+  });
+
+  it('studio#1140: the cut a run\'s "Edit the cut" makes (no top-level kind) is blocked at the card and at Go', async () => {
+    const dir = join(ROOT, 'mikes', 'demo-1a2b3c4d5e6f');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, '_v0.html'), '<p>Importing…</p>');
+    writeFileSync(join(dir, '_v1.html'), '<h1>Sign-in demo</h1>');
+    const real = { head: 1, versions: [{ version: 0, parent: null, feedback_file: null, html_file: '_v0.html' }, { version: 1, parent: 0, kind: 'demo' }] };
+    writeFileSync(join(dir, 'versions.json'), JSON.stringify(real));
+    const blockedText = "Coverage deck · a demo video: this chat can't change it. Change it by hand in the video editor (chapters, trims, captions, theme)";
+    const r = rig();
+    const t = chatWith(r, 'c1', { projectId: 'mikes', open: 'mikes/demo-1a2b3c4d5e6f' });
+    const p = (await propose(r, 'c1', t, { refine: 'mikes/demo-1a2b3c4d5e6f', ask: 'change the chapter caption' }))!;
+    expect(p.blocked).toBe(blockedText);
+    expect(p.target).toBeUndefined();
+    // A card recorded while it was still the placeholder (version 0 only, no kind) is stopped at Go once it is a cut.
+    writeFileSync(join(dir, 'versions.json'), JSON.stringify({ head: 0, versions: [real.versions[0]] }));
+    const t2 = chatWith(r, 'c2', { projectId: 'mikes', open: 'mikes/demo-1a2b3c4d5e6f' });
+    const q = (await propose(r, 'c2', t2, { refine: 'mikes/demo-1a2b3c4d5e6f', ask: 'change the chapter caption' }))!;
+    expect(q.blocked).toBeNull();
+    writeFileSync(join(dir, 'versions.json'), JSON.stringify({ ...real, head: 0 }));
+    const res = await r.svc.decide('c2', q.pid, { decision: 'go' }, ME, 'i1');
+    expect(res.code).toBe(409);
+    expect(res.body).toMatchObject({ code: 'proposal_blocked', error: blockedText });
+    expect(r.launcher.launched).toEqual([]);
   });
 
   it('#1406: refine keeps authorized sources, anchors on refresh, and unchanged allow on retry', async () => {
@@ -236,7 +308,7 @@ describe('the resolver', () => {
     const r = rig();
     const t = chatWith(r, 'a1', { analysis: true });
     expect(await propose(r, 'a1', t, { entry: 'presentation' })).toBeNull();
-    const t2 = chatWith(r, 'c1');
+    const t2 = chatWith(r, 'c1', { words: 'a deck called First, please' });
     await propose(r, 'c1', t2, { entry: 'presentation', title: 'First' });
     r.svc.onReply({ chat: 'c1', cliKey: 'codex', turnId: t2, ok: true, blocks: [JSON.stringify({ entry: 'presentation', title: 'Second' })] });
     await r.svc.settled();
@@ -403,7 +475,7 @@ describe('the accept flow', () => {
 
   it('an interrupted Go whose helper signed out resumes with two working helpers chosen now (and nothing else changed)', async () => {
     const r = rig();
-    const t = chatWith(r, 'c1');
+    const t = chatWith(r, 'c1', { words: 'a deck titled Keep' });
     const p = (await propose(r, 'c1', t, { entry: 'presentation', title: 'Keep' }))!;
     r.records.get('c1')!.push({ at: 3, turnId: t, kind: 'proposal_accepting', pid: p.pid, actor: 'maria', edits: null, resolution: p, identity: { artifactRef: '_unfiled/keep', runId: proposalRunId(p.pid) } });
     r.roster = [{ key: 'claude', name: 'Claude Code' }, { key: 'pi', name: 'Pi' }];
@@ -446,6 +518,39 @@ describe('the accept flow', () => {
     const stub: ProposalDispatcher = { stub: true, find: async () => true, launch: async () => undefined };
     stubReg.register('create', stub);
     expect(await stubReg.find('create', { artifactRef: null, runId: 'x' })).toStrictEqual({ stub: true });
+  });
+
+  it('every refusal after the accepting write names that record (crew#1695)', async () => {
+    const r = rig();
+    const t = chatWith(r, 'c1');
+    const p = (await propose(r, 'c1', t, { entry: 'presentation' }))!;
+    r.launcher.fail = 'engine down';
+    const failed = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    const accepting = r.records.get('c1')!.filter((x) => x.kind === 'proposal_accepting');
+    expect(accepting).toHaveLength(1);
+    expect(failed).toMatchObject({ code: 502, body: { code: 'launch_failed', acceptingAt: accepting[0]!.at } });
+    // A typed launch refusal (it reopens the card) names it too.
+    r.launcher.fail = null;
+    const refusing: ProposalDispatcher = { find: async () => false, launch: async () => { throw new LaunchRefusal(409, { code: 'power_unavailable', error: 'no power here' }); } };
+    const reg = (r.svc as unknown as { deps: ChatProposalDeps }).deps.registry;
+    reg.register('create', refusing);
+    const refused = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    const second = r.records.get('c1')!.filter((x) => x.kind === 'proposal_accepting');
+    expect(second).toHaveLength(2);
+    expect(refused).toMatchObject({ code: 409, body: { code: 'power_unavailable', acceptingAt: second[1]!.at } });
+    // The rig's clock never moves: each Go's record is still told apart (xreview r2).
+    expect(second[1]!.at).toBeGreaterThan(second[0]!.at);
+  });
+
+  it('a chat that ended is refused without its id (crew#1745)', async () => {
+    const r = rig();
+    const t = chatWith(r, 'c1');
+    const p = (await propose(r, 'c1', t, { entry: 'presentation' }))!;
+    r.instances.set('c1', 'i2');
+    const out = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    expect(out).toMatchObject({ code: 409, body: { code: 'chat_gone', error: CHAT_ENDED } });
+    expect(JSON.stringify(out.body)).not.toContain('c1');
+    expect(CHAT_ENDED).toMatch(/new chat/u);
   });
 
   it('a chat closed and its id reused mid-accept: nothing is recorded on the new chat and nothing starts', async () => {
@@ -614,5 +719,67 @@ describe('the fold (r2)', () => {
     ]);
     expect(f.get('c1:t1')?.state).toBe('superseded');
     expect(f.get('c1:t2')?.state).toBe('open');
+  });
+});
+
+// crew#1779: a check over the chat's started jobs reads the run list once, never one engine read per job.
+describe('job liveness reads one run list', () => {
+  function startedJobs(r: Rig, chatId: string, statuses: string[]): string[] {
+    const ids: string[] = [];
+    statuses.forEach((status, i) => {
+      const id = `job-run-${i}`;
+      const pid = `${chatId}:job${i}`;
+      const t = chatWith(r, chatId);
+      const proposal = { pid, chatId, turnId: t, kind: 'create', what: { entry: 'presentation', title: `job ${i}`, label: `Job ${i}`, outcome: null } } as unknown as ArtifactProposal;
+      r.records.get(chatId)!.push(
+        { at: 2, turnId: t, kind: 'proposal', proposal } as unknown as ChatTranscriptRecord,
+        { at: 3, turnId: t, kind: 'proposal_decided', pid, actor: 'maria', decision: 'go', result: { runId: id, artifactRef: null, adopted: false, stub: false } } as unknown as ChatTranscriptRecord,
+      );
+      ids.push(id);
+      r.runs.push(run(id, { status }));
+    });
+    return ids;
+  }
+  function countedRuns(r: Rig): { reads: number } {
+    const n = { reads: 0 };
+    const deps = (r.svc as unknown as { deps: ChatProposalDeps }).deps;
+    const read = deps.runs;
+    deps.runs = async () => {
+      n.reads += 1;
+      return read();
+    };
+    deps.registry.register('create', { find: async () => false, launch: async () => undefined, live: liveInRuns });
+    return n;
+  }
+
+  it('liveJobOf names the live job after one run-list read, however many jobs the chat started', async () => {
+    const r = rig();
+    const n = countedRuns(r);
+    startedJobs(r, 'c1', ['completed', 'cancelled', 'failed', 'completed', 'executing']);
+    expect(await r.svc.liveJobOf('c1')).toBe('Job 4');
+    expect(n.reads).toBe(1);
+  });
+
+  it('liveJobOf reads nothing for a chat that started no job, and null when every job ended', async () => {
+    const r = rig();
+    const n = countedRuns(r);
+    chatWith(r, 'quiet');
+    expect(await r.svc.liveJobOf('quiet')).toBeNull();
+    expect(n.reads).toBe(0);
+    startedJobs(r, 'c2', ['completed', 'failed']);
+    expect(await r.svc.liveJobOf('c2')).toBeNull();
+    expect(n.reads).toBe(1);
+  });
+
+  it("Go's busy check reads the run list once for every started job of the chat", async () => {
+    const r = rig();
+    const n = countedRuns(r);
+    startedJobs(r, 'c1', ['completed', 'cancelled', 'executing']);
+    const t = chatWith(r, 'c1');
+    const p = (await propose(r, 'c1', t, { entry: 'presentation', title: 'x' }))!;
+    n.reads = 0;
+    const go = await r.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    expect(go).toMatchObject({ code: 409, body: { code: 'chat_busy' } });
+    expect(n.reads).toBe(1);
   });
 });

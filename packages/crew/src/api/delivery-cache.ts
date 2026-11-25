@@ -68,6 +68,8 @@ export const DERIVATION_RETRY_BASE_MS = 1_000;
 export interface DeliveryDerivationCacheDeps {
   /** The candidate set per sweep — the same ~10ms actor read the routes use. */
   listViews: () => Promise<SessionView[]>;
+  /** One run's view, for the terminal-frame warm (`adapter.runView(runId)`; crew#1775: never a fold of the store). */
+  viewOf: (runId: string) => Promise<SessionView | undefined>;
   /** The probes behind 'stranded'/'vacuous'. In the daemon these are the SAME TTL-memoized git
    *  probes the campaigns rollup uses; only `worktreeExists` (one stat, no git) is ever invoked
    *  on the request path — the git pair runs exclusively under this cache's pool. */
@@ -156,8 +158,7 @@ export class DeliveryDerivationCache {
   async warm(runId: string): Promise<void> {
     try {
       if (this.deps.isDelivered(runId)) return;
-      const views = await this.deps.listViews();
-      const view = views.find((v) => v.session.id === runId);
+      const view = await this.deps.viewOf(runId);
       if (view === undefined || !this.isCandidate(view)) return;
       await this.schedule(view);
     } catch (err) {

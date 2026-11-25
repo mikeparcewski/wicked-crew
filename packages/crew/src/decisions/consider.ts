@@ -42,7 +42,8 @@ export interface ConsiderAdapter {
     in_force: ConformanceRule[];
     set_aside: Array<{ id: string; statement: string; reason: 'out_of_scope' | 'replaced' | 'retired' }>;
   }>;
-  sessionsDetail?(): Promise<SessionView[]>;
+  /** One run's view (crew#1775: one engine read, never a fold of the store), `undefined` when unknown. */
+  runView?(runId: string): Promise<SessionView | undefined>;
   workOutput?(unitId: string): Promise<string | null>;
 }
 
@@ -226,8 +227,8 @@ export class ConsiderationService {
   /** The Consideration of one unit attempt (`unitKey` as `resolveUnit` accepts it), or `null`. */
   async forUnit(runId: string, unitKey: string, attempt = 0): Promise<Consideration | null> {
     const { adapter } = this.deps;
-    if (typeof adapter.sessionsDetail !== 'function') return null;
-    const run = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+    if (typeof adapter.runView !== 'function') return null;
+    const run = await adapter.runView(runId);
     if (run === undefined) return null;
     const unit = resolveUnit(run, unitKey);
     if (unit === null) return null;

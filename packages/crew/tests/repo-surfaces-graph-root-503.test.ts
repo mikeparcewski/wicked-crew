@@ -78,6 +78,7 @@ describe('repo surfaces — a current engine with no repo-graph root answers 503
       ['GET', '/api/v1/repos/r/requirements'],
       ['GET', '/api/v1/repos/r/requirements/some-key'],
       ['PATCH', '/api/v1/repos/r/requirements/some-key'],
+      ['POST', '/api/v1/repos/r/requirements/some-key/retire'],
     ] as const) {
       const res = await app.inject({ method, url, ...(method === 'PATCH' ? { payload: { risk: true } } : {}) });
       expect(res.statusCode, url).toBe(503);
@@ -105,6 +106,10 @@ describe('repo surfaces — a current engine with no repo-graph root answers 503
     // studio#986: not generated yet is the typed state, answered 200 (a 404 before).
     expect(req.statusCode).toBe(200);
     expect((req.json() as { code?: unknown }).code).toBe('notGenerated');
+    // wicked-core#1698: nothing to retire before a graph is built.
+    const retire = await app.inject({ method: 'POST', url: '/api/v1/repos/ok/requirements/src%3A%3AREQ-001/retire' });
+    expect(retire.statusCode).toBe(404);
+    expect((retire.json() as { error: string }).error).toBe('Requirement not found');
   });
 
   it('/graph for a repo whose in-tree graph is IGNORED carries the repos wire\'s own finding as the reason (F-2R2-005)', async () => {

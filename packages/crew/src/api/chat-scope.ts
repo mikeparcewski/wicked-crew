@@ -704,6 +704,26 @@ export function chatSearchLines(paths: readonly string[]): string[] {
   ];
 }
 
+/**
+ * (crew#1795) A seat that starts outside the repositories tends to `cd` into one. The repositories are read-only to the
+ * job, and the engine's input governance (wicked-core gate_hook.rs `bash_cd_escape_targets`) refuses a `cd` into one in
+ * a command that may write there: any write target (a redirect, even into the seat's own folder), a script interpreter
+ * or shell whose writes it cannot see, a git command that changes something (crew#1854: every one is named, so a seat
+ * that keeps its output with `> notes.txt` is not told that only interpreters are refused). Say where to stay and hand the form that works: the repository's path named in the command. `.` (the
+ * working directory itself, a container-floor checkout) needs no such line.
+ */
+export function chatStayLines(paths: readonly string[]): string[] {
+  const outside = paths.filter((p) => p !== '.');
+  if (outside.length === 0) return [];
+  const one = shellWord(outside[0]!);
+  return [
+    "Do NOT `cd` into a repository: run every command from where you start, and name the repository's path in it instead,",
+    `e.g. \`git -C ${one} log -5\` or \`ls ${one}\`. The repositories are read-only: a command that \`cd\`s into one is refused when`,
+    'it also writes anywhere (a `>` redirect or any other write target, even one in your own folder), runs a script',
+    'interpreter (python, node, a shell script) or runs a git command that changes something.',
+  ];
+}
+
 export const CHAT_GROUNDING_COMMAND =
   'wicked-garden run scripts/_estate_client.py --readonly call \'{"tool":"SearchEntity","arguments":{"name":"<symbol>"}}\'';
 
@@ -816,6 +836,8 @@ export function chatJobLines(mode: 'cards' | 'prose'): string[] {
     'ONE question naming them and send no block. One block per reply at most. A question about the code is answered,',
     'with no block.',
     'A document\'s `title` is included only when the person named one, in their words.',
+    '`lead` (who builds or writes) and `seats` (who else works on it, such as who checks) only when the person named',
+    'them in this message, as seat keys in their order: "Codex writes it and Pi checks it" is `"lead":"codex","seats":["pi"]`.',
     '',
     '**A change to the open proposal** ("make it a move", "use billing-api", "add pi too", "go deep"): answer in at most',
     'two sentences, then end with ONE revision block naming the open proposal (its id is in the message\'s job lines):',
@@ -841,6 +863,10 @@ export function chatJobLines(mode: 'cards' | 'prose'): string[] {
     'with the new `card` or `option`; crew asks whether to start it again. Anything else is answered.',
     '',
     '**While a job runs**, a request to add to it is answered in prose, pointing at the job\'s own plan Edit; no block.',
+    '',
+    '**A change to a pull request a job of this chat delivered** ("revise that PR", "add a test on the same PR"): new work,',
+    'routed as above. Crew decides where it is delivered and the card says it ("It updates pull request #N"); never say',
+    'yourself that it lands on, or is constrained to, an existing pull request.',
   ];
 }
 
@@ -1195,9 +1221,9 @@ export function daemonGroundingLines(g: DaemonGrounding): string[] {
       '```',
       '',
       'Give the address exactly as they wrote it. `project`: the listed project they named (its id); null when they named',
-      'none (the repository joins this chat\'s project, if it has one). When their words match no listed project, or more',
-      'than one, ask ONE question naming the listed projects and send no block (a new project is made on Projects → New',
-      'project). A repository already in the list is not added again: say where it is; only to put it into another project',
+      'none (the repository joins this chat\'s project, if it has one). A project they named that is not listed: its name',
+      'as they said it, and the card offers to create it. When their words match more than one listed project, ask ONE',
+      'question naming them and send no block. A repository already in the list is not added again: say where it is; only to put it into another project',
       'send the block with its address. Never say you added, cloned or started it.',
     );
   } else {
@@ -1302,6 +1328,7 @@ export function chatScopeStatement(
       // crew#1497: a search from the folder ABOVE the repositories is outside the read roots, so the hook refuses
       // it (a seat read that refusal as "not there"). Hand the form that works: one path per repository.
       ...chatSearchLines(scope.repos.map((r) => (inWorkingDir(r.id) ? '.' : r.rootPath))),
+      ...chatStayLines(scope.repos.map((r) => (inWorkingDir(r.id) ? '.' : r.rootPath))),
       'Cite files relative to their repository root, prefixed with the repository name',
       '(for example `alpha/src/foo.ts` for a file at `/srv/repos/alpha/src/foo.ts`).',
       ...(scope.repos.some((r) => inWorkingDir(r.id))

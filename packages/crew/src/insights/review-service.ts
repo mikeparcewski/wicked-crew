@@ -23,6 +23,7 @@ import { FACTS_FILE, REPORT_FILE, SNAPSHOT_FILE } from './analyze-cli.js';
 import { runFactOf, type LooseEvent, type RunFact } from './run-facts.js';
 import type { InsightsStore, Recommendation, Review } from './store.js';
 import { REVIEW_WORKFLOW } from './workflow.js';
+import { rosterWithout, seatKey as cliOf } from '../interactive/review-events.js';
 
 export const HANDOFF_FILE = 'handoff.json';
 /** The seat's ONLY write root inside its review directory: the snapshot and the numbers beside it stay out of reach. */
@@ -85,6 +86,31 @@ export type AcceptTarget =
 /** (crew#1592) A review that can't be prepared for a reason the person fixes (its seat: the `newWorkSeats` setting, or
  *  no usable seat). Nothing was written; every launch path answers it as a refusal (409), never an engine failure. */
 export class ReviewPreparationRefused extends Error {}
+
+/** How {@link NoIndependentReviewer}'s words start: a schedule row keeps a refusal only as its words (`lastNote`). */
+export const NO_INDEPENDENT_REVIEWER_LEAD = 'every seat that could interpret this review ';
+
+/** (crew#1837) Whether a schedule's last refusal was {@link NoIndependentReviewer}: reduced assurance would let it run. */
+export function isNoIndependentReviewerNote(note: string | null): boolean {
+  return note !== null && note.startsWith(NO_INDEPENDENT_REVIEWER_LEAD);
+}
+
+/**
+ * (crew#1375, R≠) Every seat that could interpret the review ran some of the work it reviews: none can review it
+ * independently. Refused like {@link ReviewPreparationRefused} (nothing written), and the launch answers it as
+ * `no_independent_reviewer` with `retryWith: { reducedAssurance: true }`, the shape `review-change` answers with
+ * (routes.ts), so the person can sign in another seat or start it again in reduced assurance.
+ */
+export class NoIndependentReviewer extends ReviewPreparationRefused {
+  readonly code = 'no_independent_reviewer';
+  constructor(readonly excluded: readonly string[]) {
+    super(
+      `${NO_INDEPENDENT_REVIEWER_LEAD}(${excluded.join(', ')}) ran some of the work it reviews, so none can ` +
+        'review it independently. Sign in another seat, or start it again in reduced assurance (a seat that ran the work ' +
+        'interprets it, said in its brief and on the run)',
+    );
+  }
+}
 
 export class RecommendationError extends Error {
   constructor(readonly status: 400 | 404 | 409 | 502, message: string) {
@@ -160,14 +186,29 @@ export class ReviewService {
       throw new ReviewPreparationRefused(err instanceof Error ? err.message : String(err));
     }
     const roster = await this.deps.adapter.seatsForWorkflow(REVIEW_WORKFLOW);
-    const seat = pickSeat(picked === null ? roster : roster.filter((s) => picked.includes(String((s as { key?: unknown } | null)?.key))));
+    const pool = picked === null ? roster : roster.filter((s) => picked.includes(String((s as { key?: unknown } | null)?.key)));
+    const projectIds = [...(opts.projectIds ?? [])];
+    const snap = await this.snapshot(projectIds, now.getTime());
+    // (crew#1375, R≠) The seat interprets work it ran none of: the seats that ran a run in the window are left out. With
+    // none left, the person's explicit reduced assurance lets one of them interpret it, said in the brief.
+    const ran = seatsThatRan(snap.runs.filter((r) => r.createdAtMs >= snap.window.startMs && r.createdAtMs < snap.window.endMs));
+    let seat = pickSeat(rosterWithout(pool, ran));
+    let selfReview = false;
+    if (seat === null && pickSeat(pool) !== null) {
+      if (input.reducedAssurance !== true) {
+        throw new NoIndependentReviewer([...new Set(pool.flatMap((s) => {
+          const key = (s as { key?: unknown } | null)?.key;
+          return typeof key === 'string' && ran.includes(cliOf(key)) && pickSeat([s]) !== null ? [cliOf(key)] : [];
+        }))].sort());
+      }
+      seat = pickSeat(pool);
+      selfReview = true;
+    }
     if (seat === null) {
       throw new ReviewPreparationRefused(picked === null
         ? 'no signed-in, eligible agent seat to interpret the review: sign one in (Agents) and run it again'
         : `none of the seats new work may use (newWorkSeats: ${picked.length === 0 ? 'none' : picked.join(', ')}) can interpret the review now: add a signed-in seat to it, or sign one of them in, and run it again`);
     }
-    const projectIds = [...(opts.projectIds ?? [])];
-    const snap = await this.snapshot(projectIds, now.getTime());
     // (xreview r1) Read again after the awaits, with none from here to the record below: a concurrent retry of the same
     // refused id that prepared (and launched) meanwhile owns it now, and its files are never cleared.
     const current = this.deps.store.get(runId);
@@ -194,7 +235,8 @@ export class ReviewService {
       `(${new Date(snap.window.startMs).toISOString()} to ${new Date(snap.window.endMs).toISOString()}). ` +
       `Read the handoff file at ${handoffPath}. It names facts_path (the numbers, computed by a script) and ` +
       `report_path (the one file you write).` +
-      (asked !== '' && asked !== REVIEW_WORKFLOW ? `\n\nThe person also asked: ${asked.slice(0, 2000)}` : '');
+      (asked !== '' && asked !== REVIEW_WORKFLOW ? `\n\nThe person also asked: ${asked.slice(0, 2000)}` : '') +
+      (selfReview ? '\n\nReduced assurance: every seat that could interpret this review ran some of the work it reviews; the person chose to let one of them interpret it.' : '');
     input.workflow = REVIEW_WORKFLOW;
     input.clisJson = JSON.stringify([seat]);
     // The one seat leads: a caller's `primary` validated against the whole roster would name a seat that isn't on it.
@@ -352,8 +394,9 @@ export class ReviewService {
     return { recommendation: rec, open: await this.targetOf(rec) };
   }
 
-  /** Dismiss with a reason. A proposal-backed one rejects its proposal in the approve queue too. */
-  async dismiss(id: string, reason: string): Promise<{ recommendation: Recommendation }> {
+  /** Dismiss with a reason. A proposal-backed one rejects its proposal in the approve queue too, and `rejected` hears
+   *  which (the caller records the person's decision, crew#1261). */
+  async dismiss(id: string, reason: string, rejected?: (proposalId: string) => void): Promise<{ recommendation: Recommendation }> {
     const text = line(reason, 500);
     if (text === null) throw new RecommendationError(400, 'a dismissal needs a reason');
     const found = this.deps.store.findRecommendation(id);
@@ -365,6 +408,7 @@ export class ReviewService {
       } catch (err) {
         throw new RecommendationError(502, `its proposal could not be rejected: ${err instanceof Error ? err.message : String(err)}`);
       }
+      rejected?.(found.rec.proposalId);
     }
     const rec = this.deps.store.updateRecommendation(id, { state: 'dismissed', reason: text, decidedAt: this.now().toISOString() }) as Recommendation;
     return { recommendation: rec };
@@ -436,6 +480,12 @@ export async function collectRunFacts(
     runs.push(fact);
   }
   return runs;
+}
+
+/** (crew#1375) The seats that ran any of `runs` (each run's {@link RunFact.agents} and {@link RunFact.ranBy}: a seat a
+ *  unit moved away from ran it too), as cli keys, sorted. */
+export function seatsThatRan(runs: readonly Pick<RunFact, 'agents' | 'ranBy'>[]): string[] {
+  return [...new Set(runs.flatMap((r) => [...r.agents, ...(r.ranBy ?? [])].map(cliOf)))].sort();
 }
 
 /** The scope a review covers, as one comparable key (its projects, sorted; `''` = every run). */

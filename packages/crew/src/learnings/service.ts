@@ -24,13 +24,13 @@
  */
 
 import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync, existsSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { SessionView } from 'wicked-crew-api-types';
 import type { LaunchRunInput, WorkflowDef } from '../core/types.js';
+import { wickedHomeDir } from '../core/wicked-home.js';
 import type { LooseEvent } from '../insights/run-facts.js';
-import { creatorSeats, extractLearnings, normalizeLearning, projectOf, repoOf, type LearningCandidate, type LearningKind } from './extract.js';
+import { creatorSeats, extractLearnings, normalizeLearning, projectOf, repoOf, type LearningCandidate, type LearningKind, type PersonContextSection } from './extract.js';
 
 export const DISTILL_WORKFLOW = 'distill-learnings';
 export const DISTILL_WORKFLOW_FILE = fileURLToPath(new URL('../../workflows/distill-learnings.json', import.meta.url));
@@ -78,9 +78,14 @@ export function runLearningsMode(env: NodeJS.ProcessEnv = process.env): RunLearn
   return env['VITEST'] !== undefined || env['NODE_ENV'] === 'test' ? 'off' : 'distill';
 }
 
-/** Where each source run's distil handoff lives: outside the daemon state home (the worker fence), like reviews. */
+/**
+ * Where each source run's distil handoff lives: outside the daemon state home (the worker fence), like reviews.
+ * `WICKED_CREW_LEARNINGS_DIR` names it; else `${WICKED_HOME:-~/.wicked}/learnings`, so a daemon on a scratch
+ * `WICKED_HOME` (a proof or test daemon) never writes into the person's live home (crew#1800). An empty value is unset.
+ * Always absolute: the dir becomes the distil seat's read and write roots, which the engine takes only absolute.
+ */
 export function defaultLearningsDir(env: NodeJS.ProcessEnv = process.env): string {
-  return env['WICKED_CREW_LEARNINGS_DIR'] ?? join(homedir(), '.wicked', 'learnings');
+  return wickedHomeDir('WICKED_CREW_LEARNINGS_DIR', 'learnings', env);
 }
 
 export function loadDistillWorkflow(file = DISTILL_WORKFLOW_FILE): WorkflowDef {
@@ -120,7 +125,10 @@ export interface SubmitArgs {
 
 export interface RunLearningsDeps {
   adapter: {
+    /** Every run (recovery's one pass over the learnings directory). */
     sessionsDetail(): Promise<SessionView[]>;
+    /** One run as the engine holds it now (crew#1775: a sweep reads its run alone, never a fold of the store). */
+    runView(runId: string): Promise<SessionView | undefined>;
     runEvents(runId: string): Promise<LooseEvent[] | null>;
     seatsForWorkflow(workflowId: string): Promise<unknown[]>;
     launchRun(input: LaunchRunInput): Promise<string>;
@@ -133,6 +141,8 @@ export interface RunLearningsDeps {
   listProposals(): Promise<ProposalRow[]>;
   /** The text of every memory in the store (the dedupe set). */
   listMemoryContents(): Promise<string[]>;
+  /** (crew#1408) The person's current Goal, Approach and Constraints in the run's context document (`[]` for none). */
+  personContext?(runId: string): Promise<readonly PersonContextSection[]>;
   /** The launch bookkeeping a chained run gets (launch entry, project filing, `runChained` frame). */
   launched?(distillRunId: string, sourceRunId: string, projectId: string | null): void;
   learningsDir: string;
@@ -310,7 +320,7 @@ export class RunLearningsService {
   }
 
   private async viewOf(runId: string): Promise<SessionView | null> {
-    return (await this.deps.adapter.sessionsDetail()).find((v) => v.session.id === runId) ?? null;
+    return (await this.deps.adapter.runView(runId)) ?? null;
   }
 
   private async sweepOnce(runId: string, phase: 'checkpoint' | 'end'): Promise<void> {
@@ -321,7 +331,23 @@ export class RunLearningsService {
     const dir = this.dirOf(runId);
     if (phase === 'end' && (existsSync(join(dir, FILED_FILE)) || this.distillOf(runId) !== null)) return;
     const events = (await this.deps.adapter.runEvents(runId)) ?? [];
-    const candidates = extractLearnings(view, events);
+    // Only the end hands material to the distil seat: the person's context is read then (crew#1408). Not known yet (the
+    // document cannot be read, a write is still settling): the end waits, unfiled, for the next start's recovery,
+    // rather than file or distil without it.
+    let context: readonly PersonContextSection[] = [];
+    let contextUnknown = false;
+    // The end is on disk before anything is awaited for it: a daemon that dies mid-read is found by the next start's
+    // recovery, which ends it again (review r2).
+    if (phase === 'end') mkdirSync(dir, { recursive: true });
+    if (phase === 'end' && this.deps.personContext !== undefined) {
+      try {
+        context = await this.deps.personContext(runId);
+      } catch (err) {
+        contextUnknown = true;
+        this.deps.log(`[learnings] ${runId}: the person's context could not be read (${err instanceof Error ? err.message : String(err)}); its end is tried again at the next start`);
+      }
+    }
+    const candidates = extractLearnings(view, events, context);
     const known = await this.knownTexts();
     const fresh = (c: LearningCandidate): boolean => !known.has(normalizeLearning(c.content));
     let failed = 0;
@@ -332,6 +358,7 @@ export class RunLearningsService {
     if (phase !== 'end') return;
     const material = candidates.filter((x) => x.form === 'material' && fresh(x));
     mkdirSync(dir, { recursive: true });
+    if (contextUnknown) return;
     if (material.length === 0) {
       if (failed === 0) this.markFiled(runId, { distilled: false, filed: 0 });
       return;

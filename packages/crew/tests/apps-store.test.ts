@@ -69,11 +69,11 @@ function fakeRegistry(fail: () => boolean = () => false) {
   return { registry, repos };
 }
 
-function setup(opts: { auth?: boolean; stage?: AppSourceStage | null; turns?: AppTurnLauncher | null; failRegister?: () => boolean; verifyUnitToken?: (t: string) => Promise<{ runId: string; phase: string } | null> } = {}) {
+function setup(opts: { auth?: boolean; stage?: AppSourceStage | null; turns?: AppTurnLauncher | null; failRegister?: () => boolean; verifyUnitToken?: (t: string) => Promise<{ runId: string; phase: string } | null>; now?: () => number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'apps-store-'));
   dirs.push(dir);
   const reg = fakeRegistry(opts.failRegister);
-  const store = new AppStore({ stateFile: join(dir, 'daemon-apps.json'), appsRoot: join(dir, 'apps'), registry: reg.registry, sourceStage: opts.stage ?? null, turns: opts.turns ?? null });
+  const store = new AppStore({ stateFile: join(dir, 'daemon-apps.json'), appsRoot: join(dir, 'apps'), registry: reg.registry, sourceStage: opts.stage ?? null, turns: opts.turns ?? null, ...(opts.now !== undefined ? { now: opts.now } : {}) });
   const app = Fastify({ logger: false });
   apps.push(app);
   const tokens: Record<string, Actor> = { human: HUMAN, agent: AGENT, observer: OBSERVER, plugin: { id: 'plugin:x@1', kind: 'plugin', trust: 'observer' } };
@@ -1281,5 +1281,102 @@ describe('apps: the version read (an accepted version as it was)', () => {
     const agent = (await s.call('GET', '/apps/escalations/versions/2', undefined, 'agent')).body['version'] as Record<string, unknown> & { lock: { sources: Record<string, unknown> } };
     expect(agent).not.toHaveProperty('queryText');
     expect(agent.lock.sources['support-pg']).toEqual({ kind: 'sql', descriptorHash: 'd-support-pg' });
+  });
+});
+
+// crew#1678: GET /apps a page at a time (limit + cursor), in the list's own order; no limit = every app, as before.
+describe('apps: GET /apps pages', () => {
+  const slugsOf = (body: Record<string, unknown>) => (body['apps'] as Array<{ slug: string }>).map((a) => a.slug);
+
+  it('walks the whole list in pages that join to the unpaged answer, with nextCursor null on the last', async () => {
+    const s = setup();
+    for (const slug of ['alpha', 'bravo', 'charlie', 'delta', 'echo']) await newApp(s, slug);
+    const whole = await s.call('GET', '/apps');
+    expect(whole.body).not.toHaveProperty('nextCursor');
+    const pages: string[][] = [];
+    let cursor: string | null = null;
+    for (let i = 0; i < 5; i++) {
+      const res = await s.call('GET', `/apps?limit=2${cursor === null ? '' : `&cursor=${encodeURIComponent(cursor)}`}`);
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      pages.push(slugsOf(res.body));
+      expect(res.body).toHaveProperty('nextCursor');
+      cursor = res.body['nextCursor'] as string | null;
+      if (cursor === null) break;
+    }
+    expect(pages.map((p) => p.length)).toEqual([2, 2, 1]);
+    expect(pages.flat()).toEqual(slugsOf(whole.body));
+    // A page that ends exactly at the end says so.
+    expect((await s.call('GET', '/apps?limit=5')).body['nextCursor']).toBeNull();
+  });
+
+  it('an app made or archived between pages neither repeats nor skips one', async () => {
+    const s = setup();
+    for (const slug of ['alpha', 'bravo', 'charlie']) await newApp(s, slug);
+    const first = await s.call('GET', '/apps?limit=2');
+    expect(slugsOf(first.body)).toEqual(['alpha', 'bravo']);
+    expect((await s.call('POST', '/apps/alpha/archive', {})).status).toBe(200);
+    await newApp(s, 'delta');
+    const next = await s.call('GET', `/apps?limit=2&cursor=${encodeURIComponent(first.body['nextCursor'] as string)}`);
+    expect(slugsOf(next.body)).toEqual(['charlie', 'delta']);
+    expect(next.body['nextCursor']).toBeNull();
+  });
+
+  it('keeps ?project= and ?archived=; refuses a bad limit, a cursor without limit, and a cursor it did not give', async () => {
+    const s = setup();
+    for (const slug of ['alpha', 'bravo']) await newApp(s, slug);
+    expect((await s.call('POST', '/apps/bravo/archive', {})).status).toBe(200);
+    expect(slugsOf((await s.call('GET', '/apps?limit=10&archived=archived')).body)).toEqual(['bravo']);
+    expect(slugsOf((await s.call('GET', '/apps?limit=10&archived=all&project=p1')).body)).toEqual(['alpha', 'bravo']);
+    expect(slugsOf((await s.call('GET', '/apps?limit=10&project=other')).body)).toEqual([]);
+    const cursor = (await s.call('GET', '/apps?limit=1&archived=all')).body['nextCursor'] as string;
+    expect(slugsOf((await s.call('GET', `/apps?limit=1&archived=all&cursor=${cursor}`)).body)).toEqual(['bravo']);
+    // A cursor continues only the list that gave it (codex r1): another scope or project is refused, never a silent skip.
+    for (const q of ['limit=0', 'limit=201', 'limit=two', 'limit=1.5', 'cursor=abc', 'limit=1&cursor=abc', `limit=1&cursor=${Buffer.from('[1]').toString('base64url')}`,
+      `limit=1&cursor=${cursor}`, `limit=1&archived=archived&cursor=${cursor}`, `limit=1&archived=all&project=p1&cursor=${cursor}`]) {
+      const res = await s.call('GET', `/apps?${q}`);
+      expect(res.status, q).toBe(400);
+      expect(res.body.code, q).toBe('bad_request');
+    }
+  });
+
+  it('lists in the order apps were made, never by slug (codex r1)', async () => {
+    let t = 0;
+    const s = setup({ now: () => (t += 1_000) });
+    for (const slug of ['charlie', 'alpha', 'bravo']) await newApp(s, slug);
+    expect(slugsOf((await s.call('GET', '/apps')).body)).toEqual(['charlie', 'alpha', 'bravo']);
+    const first = await s.call('GET', '/apps?limit=1');
+    expect(slugsOf(first.body)).toEqual(['charlie']);
+    const second = await s.call('GET', `/apps?limit=2&cursor=${first.body['nextCursor'] as string}`);
+    expect(slugsOf(second.body)).toEqual(['alpha', 'bravo']);
+  });
+
+  it('a project with a long id pages with a cursor the list accepts back (codex r2)', async () => {
+    const s = setup();
+    const project = '\u30a2'.repeat(128);
+    for (const slug of ['alpha', 'bravo']) expect((await s.call('POST', '/apps', { slug, projectId: project })).status).toBe(201);
+    const q = `project=${encodeURIComponent(project)}`;
+    const first = await s.call('GET', `/apps?limit=1&${q}`);
+    expect(slugsOf(first.body)).toEqual(['alpha']);
+    const next = await s.call('GET', `/apps?limit=1&${q}&cursor=${first.body['nextCursor'] as string}`);
+    expect(next.status, JSON.stringify(next.body)).toBe(200);
+    expect(slugsOf(next.body)).toEqual(['bravo']);
+  });
+
+  it('records written before this with one createdAt page by slug, joined equal to the unpaged list', async () => {
+    const s = setup();
+    for (const slug of ['delta', 'bravo', 'charlie', 'alpha']) await newApp(s, slug);
+    // Records as an earlier daemon wrote them: one shared createdAt.
+    const state = JSON.parse(readFileSync(s.store.stateFile, 'utf8')) as { apps: Record<string, { createdAt: number }> };
+    for (const a of Object.values(state.apps)) a.createdAt = 5;
+    writeFileSync(s.store.stateFile, JSON.stringify(state));
+    const store = new AppStore({ stateFile: s.store.stateFile, appsRoot: s.store.appsRoot, registry: fakeRegistry().registry });
+    const app = Fastify({ logger: false });
+    apps.push(app);
+    registerAppRoutes(app, { store, audit: { record: vi.fn() } });
+    const get = async (q: string) => (await app.inject({ method: 'GET', url: `/api/v1/apps${q}` })).json() as Record<string, unknown>;
+    expect(slugsOf(await get(''))).toEqual(['alpha', 'bravo', 'charlie', 'delta']);
+    const p1 = await get('?limit=3');
+    expect(slugsOf(p1)).toEqual(['alpha', 'bravo', 'charlie']);
+    expect(slugsOf(await get(`?limit=3&cursor=${p1['nextCursor'] as string}`))).toEqual(['delta']);
   });
 });

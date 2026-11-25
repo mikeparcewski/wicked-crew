@@ -1,6 +1,6 @@
 /** Base-only re-delivery: the same resolver and GitHub identity as delivery, with an exact lease. */
 import type { DeliveryAssurance, RedeliverRunResult } from 'wicked-crew-api-types';
-import { CHANGELOG_REBASE_LINES, REBASING_LINE, GH_CALL_LINE, GITHUB_CREDENTIAL_LINES, isSafeRefName, shellSingleQuote } from './deliver.js';
+import { CHANGELOG_REBASE_LINES, REBASING_LINE, GH_CALL_LINE, GITHUB_CREDENTIAL_LINES, SCRIPT_GIT_ENV_LINES, isSafeRefName, shellSingleQuote } from './deliver.js';
 export interface RefreshOptions {
   repo: string;
   base: string;
@@ -14,7 +14,7 @@ function preamble(o: RefreshOptions): string[] {
   if (!/^[\w.-]+\/[\w.-]+$/.test(o.repo) || !isSafeRefName(o.base) || !isSafeRefName(o.head) || !isSafeRefName(o.branch) || !/^[a-f0-9]{40}$/.test(o.deliveredHead))
     throw new Error('redeliver: invalid repository, ref or delivered head');
   return [
-    'set -euo pipefail', 'exec 2>&1',
+    'set -euo pipefail', 'exec 2>&1', ...SCRIPT_GIT_ENV_LINES,
     `GHREPO=${shellSingleQuote(o.repo)}`, `BASE=${shellSingleQuote(o.base)}`, `HEADREF=${shellSingleQuote(o.head)}`, `OLD=${shellSingleQuote(o.deliveredHead)}`,
     `WT=${shellSingleQuote(o.worktree)}`, `BRANCH=${shellSingleQuote(o.branch)}`,
     "GHT=''", "GHPIN=''", "GHGIT=''",

@@ -9,6 +9,10 @@ This directory is the scratch root of wicked-crew chat `k2`. It is the ONLY plac
 Explore and answer questions about these repositories by reading them at the paths above.
 To search text, name each repository's own path, e.g. `grep -rn '<pattern>' /srv/repos/alpha`; only
 these paths are readable, so a search from the folder above them is refused.
+Do NOT `cd` into a repository: run every command from where you start, and name the repository's path in it instead,
+e.g. `git -C /srv/repos/alpha log -5` or `ls /srv/repos/alpha`. The repositories are read-only: a command that `cd`s into one is refused when
+it also writes anywhere (a `>` redirect or any other write target, even one in your own folder), runs a script
+interpreter (python, node, a shell script) or runs a git command that changes something.
 Cite files relative to their repository root, prefixed with the repository name
 (for example `alpha/src/foo.ts` for a file at `/srv/repos/alpha/src/foo.ts`).
 Do NOT read from any `wicked-worktrees/` subdirectory — those are engine-managed run

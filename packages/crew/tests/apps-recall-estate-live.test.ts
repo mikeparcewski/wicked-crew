@@ -16,7 +16,7 @@ import { agentAccessOf } from '../src/knowledge/gate/access.js';
 import type { GateSource } from '../src/knowledge/gate/sources.js';
 import { visibleDeps } from '../src/knowledge/package.js';
 import { sourceGeneration } from '../src/knowledge/projector.js';
-import { fileShapes, shapeProposals } from '../src/knowledge/shapes/shapes.js';
+import { shapeProposals, writeShapes } from '../src/knowledge/shapes/shapes.js';
 import { projectKnowledge } from '../src/knowledge/summary.js';
 import type { CatalogRelation, SqlCatalog } from '../src/sources/catalog/types.js';
 import { removeScratch } from './setup/scratch.js';
@@ -91,9 +91,9 @@ describe.skipIf(EXE === '' || process.platform === 'win32')('recall queries agai
       joins: [{ from: 'support.tickets', columns: ['region'], to: 'support.regions', references: ['id'], basis: 'fk' as const, overlap: 'all' as const }],
     };
     const code = new Map([['support.tickets', [{ repo: 'escalations', symbolId: 'scip-typescript npm escalations 1.0.0 src/ticket.ts/Ticket#', name: 'Ticket', kind: 'class', file: 'src/ticket.ts' }]]]);
-    const filed = await fileShapes(estate, shapeProposals({ id: SOURCE_ID, name: 'support-pg' }, profile, code, new Date().toISOString()));
-    for (const f of filed.filed) await estate('proposal.approve', { id: f.id });
-    expect(filed.filed.map((f) => f.relation).sort()).toEqual(['support.regions', 'support.tickets']);
+    // A person's profile writes its shapes into knowledge (crew#1625).
+    const written = await writeShapes(estate, SOURCE_ID, shapeProposals({ id: SOURCE_ID, name: 'support-pg' }, profile, code, new Date().toISOString()), async () => null, [`source:${SOURCE_ID}`, 'repo:escalations']);
+    expect(written.written.map((f) => f.relation).sort()).toEqual(['support.regions', 'support.tickets']);
   }, 120_000);
 
   afterAll(() => {

@@ -96,7 +96,8 @@ export class PackageKnowledge implements KnowledgeProvider {
 /** The engine, as turns need it. */
 export interface TurnEngine {
   launchRun(input: LaunchRunInput): Promise<string>;
-  sessionsDetail(): Promise<SessionView[]>;
+  /** One run's view (crew#1779: that run alone, never a fold of the store). */
+  runView(runId: string): Promise<SessionView | undefined>;
   cancelRun(runId: string): Promise<string>;
   onEvent(listener: (event: CoreEvent) => void): () => void;
   workOutput(unitId: string): Promise<string | null>;
@@ -767,7 +768,7 @@ export class AppTurnService implements AppTurnLauncher {
   }
 
   private async view(runId: string): Promise<SessionView | null> {
-    return (await this.deps.engine.sessionsDetail()).find((v) => v.session.id === runId) ?? null;
+    return (await this.deps.engine.runView(runId)) ?? null;
   }
 
   /**

@@ -24,7 +24,8 @@
  */
 
 import { issueRefs } from './deliver-text.js';
-import { defaultGhExec, type GhExec } from './deliver.js';
+import { adoRepoOf, ADO_PAT_ENV, ADO_SP_ENV, type AdoRepo } from './deliver-credentials.js';
+import { defaultAdoHelperExec, defaultGhExec, readDeliverOriginUrl, type AdoHelperExec, type GhExec } from './deliver.js';
 import type { RunAddress } from '../knowledge/trackers/addresses.js';
 import { githubRef, jiraRefs, type PmIssueRead, type PmRef } from '../knowledge/trackers/issues.js';
 
@@ -161,12 +162,134 @@ async function readOne(ref: string, cwd: string | undefined, exec: GhExec): Prom
   return { issue: { ref, resolved: true, title, chars: text.length }, text };
 }
 
+/** (crew#1838) An Azure Boards work item reference, `AB#<id>` in any case, as {@link issueRefs} yields it. */
+const WORK_ITEM_REF = /^AB#(\d+)$/i;
+/** `ab#01` → `AB#1`: one spelling per work item, as `adoWorkItemIds` reads them. */
+function workItemRef(ref: string): string | null {
+  const m = WORK_ITEM_REF.exec(ref);
+  return m === null ? null : `AB#${Number(m[1])}`;
+}
+/** Per-read bound for a work item: the helper may mint an Entra token, then reads the item and its comments. */
+export const LINKED_WORK_ITEM_TIMEOUT_MS = 15_000;
+
+/**
+ * (crew#1838, the W2 of crew#1840) The `#N` the intent names only as a pull request (`PR #1`, `pull request #1`,
+ * `MR #1`): a pull request is not an issue, so it is not read as one. A `#N` that also appears on its own is still read.
+ * `PR#1` (glued) is a pull request too: {@link issueRefs} reads it as an owner-less `PR#1`, dropped by the caller.
+ */
+function pullRequestOnlyRefs(intent: string): Set<string> {
+  const count = (re: RegExp): Map<string, number> => {
+    const out = new Map<string, number>();
+    for (const m of intent.matchAll(re)) out.set(`#${m[1]}`, (out.get(`#${m[1]}`) ?? 0) + 1);
+    return out;
+  };
+  const all = count(/(?<![\w/#])#(\d+)\b/g);
+  // Spaced only: a glued `PR#1` is never counted in `all` either (it reads as an owner-less ref, dropped by the caller).
+  const asPr = count(/\b(?:PR|pull[ -]?request|MR|merge[ -]?request)\s+#(\d+)\b/gi);
+  return new Set([...asPr].filter(([ref, n]) => all.get(ref) === n).map(([ref]) => ref));
+}
+
+/** HTML (an Azure Boards description, repro steps or comment) as readable text: blocks become lines, tags go, the
+ *  common entities are decoded. The caller makes the result inert ({@link inertIssueText}). */
+export function htmlText(html: string): string {
+  return html
+    .replace(/<\s*br\s*\/?>/gi, '\n')
+    .replace(/<\s*li\b[^>]*>/gi, '\n- ')
+    .replace(/<\s*\/\s*li\s*>/gi, '')
+    .replace(/<\s*\/\s*(?:p|div|ul|ol|h[1-6]|tr|table|pre|blockquote)\s*>/gi, '\n')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#(\d+);/g, (_, n: string) => String.fromCodePoint(Math.min(Number(n), 0x10ffff)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n: string) => String.fromCodePoint(Math.min(Number.parseInt(n, 16), 0x10ffff)))
+    .replace(/&amp;/g, '&')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+interface AdoWorkItem {
+  title?: unknown;
+  state?: unknown;
+  type?: unknown;
+  description?: unknown;
+  reproSteps?: unknown;
+  url?: unknown;
+  comments?: Array<{ author?: unknown; text?: unknown }> | null;
+  commentsRead?: unknown;
+}
+
+/** The helper's refusals by exit code, in Azure DevOps terms (the helper prints its own redacted line too). */
+// A function, not a constant: deliver-credentials.ts is still evaluating when this module first loads (an import cycle
+// through deliver.ts), so its names are read at call time.
+const noAdoCredential = (): string => `this daemon holds no Azure DevOps credential: set ${ADO_PAT_ENV}, or ${ADO_SP_ENV.join(', ')}, in its environment and restart it`;
+
+/** (crew#1838) Read one Azure Boards work item with the daemon's Azure DevOps credential (the deliver helper's
+ *  `workitem`, which mints its own header: the credential never leaves the helper's environment). */
+async function readWorkItem(ref: string, ado: AdoRepo, exec: AdoHelperExec): Promise<{ issue: LinkedIssue; text: string }> {
+  const id = ref.slice('AB#'.length);
+  const fail = (error: string): { issue: LinkedIssue; text: string } => ({
+    issue: { ref, resolved: false, error },
+    text: inertIssueText(`### ${ref}: could not be read (${error})`),
+  });
+  const projectBase = ado.webUrl.replace(/\/_git\/[^/]+$/, '');
+  let out: { stdout: string; stderr: string; code: number | null };
+  try {
+    out = await exec(['workitem', ado.loginBase, projectBase, id], { timeoutMs: LINKED_WORK_ITEM_TIMEOUT_MS });
+  } catch (err) {
+    return fail(`Azure DevOps: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (out.code === 4) return fail(noAdoCredential());
+  if (out.code !== 0) {
+    const why = (out.stderr || out.stdout).trim().split('\n').slice(-1)[0]?.replace(/^deliver: /, '').slice(0, 200) ?? '';
+    return fail(why !== '' ? why : `Azure DevOps ${out.code === null ? 'did not answer in time' : `could not read work item ${id}`}`);
+  }
+  let parsed: AdoWorkItem;
+  try {
+    parsed = JSON.parse(out.stdout) as AdoWorkItem;
+  } catch {
+    return fail('Azure DevOps did not answer the JSON asked for');
+  }
+  const str = (x: unknown): string => (typeof x === 'string' ? x : '');
+  const title = str(parsed.title).replace(/\s+/g, ' ').trim();
+  if (title === '') return fail('Azure DevOps answered no title');
+  const facts = [str(parsed.type), str(parsed.state)].filter((x) => x !== '').join(', ');
+  const description = htmlText(str(parsed.description));
+  const repro = htmlText(str(parsed.reproSteps));
+  const lines = [`### ${ref}: ${title}${facts !== '' ? ` (${facts})` : ''}`];
+  if (str(parsed.url) !== '') lines.push(str(parsed.url));
+  lines.push('', description !== '' ? capped(description, BODY_CAP) : '_(no description)_');
+  if (repro !== '') lines.push('', 'Repro steps:', '', capped(repro, BODY_CAP));
+  const comments = Array.isArray(parsed.comments) ? parsed.comments : [];
+  if (comments.length > 0) {
+    lines.push('', `Comments (${comments.length}${comments.length > MAX_COMMENTS ? `, the last ${MAX_COMMENTS} shown` : ''}):`);
+    for (const c of comments.slice(-MAX_COMMENTS)) {
+      const who = str(c?.author) !== '' ? str(c?.author) : 'unknown';
+      lines.push('', `- ${who}: ${capped(htmlText(str(c?.text)), COMMENT_CAP).replace(/\n/g, '\n  ')}`);
+    }
+  }
+  if (parsed.commentsRead === false) lines.push('', '_(its comments could not be read)_');
+  const text = inertIssueText(lines.join('\n'));
+  return { issue: { ref, resolved: true, title, chars: text.length }, text };
+}
+
+/** (crew#1838) How a launch reaches Azure DevOps: the repository's origin and the helper seam. Injectable for tests;
+ *  production reads `git remote get-url --push origin` and runs the deliver helper. */
+export interface AdoLinkedIssueReader {
+  origin?: (repoRoot: string) => Promise<string | null>;
+  exec?: AdoHelperExec;
+}
+
 /** crew#825: an exclusion as a caller may spell it — `541`, `#541`, `repo#541`, `owner/repo#541` —
  *  in the form `issueRefs` yields for the same `repoRef` (so the refs `POST /linked-issues/preview`
  *  answered can be sent back verbatim); `null` for anything else. */
 export function normalizeIssueRef(raw: string, repoRef?: string | null): string | null {
   const t = raw.trim();
   if (/^\d+$/.test(t)) return `#${t}`;
+  const wi = workItemRef(t);
+  if (wi !== null) return wi;
   const m = /^((?:[\w.-]+\/)?[\w.-]+)?#(\d+)$/.exec(t);
   if (m === null) return null;
   const prefix = m[1];
@@ -187,13 +310,26 @@ export async function resolveLinkedIssues(
   exec: GhExec = defaultGhExec,
   exclude: readonly string[] = [],
   pm?: PmLinkedIssueReader,
+  ado: AdoLinkedIssueReader = {},
 ): Promise<LinkedIssuesResult> {
   const intent = stripLinkedIssues(problem);
-  const { fixes, refs } = issueRefs(intent, repoRef ?? null);
+  const { fixes: fixesAsWritten, refs: refsAsWritten } = issueRefs(intent, repoRef ?? null);
+  // (crew#1838) A pull request named as one (`PR #1`, `PR#1`) is not an issue; an `AB#<id>` has one spelling.
+  const prOnly = pullRequestOnlyRefs(intent);
+  const tidy = (list: readonly string[]): string[] => [
+    ...new Set(list.filter((r) => !prOnly.has(r) && !/^(?:PR|MR)#\d+$/i.test(r)).map((r) => workItemRef(r) ?? r)),
+  ];
+  const fixes = tidy(fixesAsWritten);
+  const refs = tidy(refsAsWritten).filter((r) => !fixes.includes(r));
   // (DES-PM-001) Jira references exist only once a Jira source is registered, and only for its trackers' keys.
   const jira = pm !== undefined && pm.systems.has('jira') ? jiraRefs(intent, pm.jiraKeys) : [];
   const named = [...fixes, ...refs, ...jira.map((r) => r.ref)];
   if (named.length === 0) return { issues: [], block: null };
+  // (crew#1838) Where the run's repository lives decides who reads what: on Azure DevOps an `AB#<id>` is read through
+  // its REST API with the daemon's Azure DevOps credential and a bare `#N` is never handed to gh (gh cannot read Azure
+  // DevOps); elsewhere an `AB#<id>` is not read (gh has no Azure Boards). The origin is read only when it decides.
+  const needsOrigin = repoRoot !== undefined && named.some((r) => workItemRef(r) !== null || !r.includes('/'));
+  const adoRepo = needsOrigin ? adoRepoOf(await (ado.origin ?? readDeliverOriginUrl)(repoRoot!).catch(() => null)) : null;
   const leftOut = new Set(exclude.map((r) => (jira.some((j) => j.ref === r.trim()) ? r.trim() : normalizeIssueRef(r, repoRef))).filter((r): r is string => r !== null));
   const excluded: LinkedIssue[] = named
     .filter((ref) => leftOut.has(ref))
@@ -201,13 +337,22 @@ export async function resolveLinkedIssues(
   const all = named.filter((ref) => !leftOut.has(ref));
   if (all.length === 0) return { issues: excluded, block: null };
   // (Q-PM5) With a GitHub source registered, no GitHub reference is read through `gh`: an unlinked one is reported.
-  const viaPm = (ref: string): boolean => pm !== undefined && (jira.some((j) => j.ref === ref) || (pm.systems.has('github') && !ref.includes(':')));
+  const viaPm = (ref: string): boolean => pm !== undefined && workItemRef(ref) === null && !(adoRepo !== null && !ref.includes('/') && !jira.some((j) => j.ref === ref)) && (jira.some((j) => j.ref === ref) || (pm.systems.has('github') && !ref.includes(':')));
   const reading = all.slice(0, MAX_LINKED_ISSUES);
   const pmRefs = reading.filter(viaPm).map((ref) => jira.find((j) => j.ref === ref) ?? githubRef(ref) ?? ref);
   const pmRead = pm === undefined || pmRefs.length === 0 ? [] : await pm.read(pmRefs.filter((r): r is PmRef => typeof r !== 'string'));
   const pmByRef = new Map(pmRead.map((r) => [r.issue.ref, r]));
   const read: Array<{ issue: LinkedIssue; text: string; address?: RunAddress }> = await Promise.all(
     reading.map(async (ref): Promise<{ issue: LinkedIssue; text: string; address?: RunAddress }> => {
+      if (workItemRef(ref) !== null) {
+        if (adoRepo !== null) return readWorkItem(ref, adoRepo, ado.exec ?? defaultAdoHelperExec);
+        const why = "an Azure Boards work item, and this run's repository is not on Azure DevOps";
+        return { issue: { ref, resolved: false, error: why }, text: `### ${ref}: not read (${why})` };
+      }
+      if (adoRepo !== null && !ref.includes('/') && !jira.some((j) => j.ref === ref)) {
+        const why = 'this repository is on Azure DevOps: name a work item as AB#<id>';
+        return { issue: { ref, resolved: false, error: why }, text: `### ${ref}: not read (${why})` };
+      }
       if (!viaPm(ref)) return readOne(ref, repoRoot, exec);
       const hit = pmByRef.get(ref);
       if (hit !== undefined) return hit;

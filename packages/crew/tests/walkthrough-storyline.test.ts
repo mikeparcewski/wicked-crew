@@ -24,6 +24,7 @@ import type { CoreEvent } from '../src/core/types.js';
 import { acceptanceSummary, type AcceptanceGateResolution } from '../src/qe/acceptance.js';
 import type { WalkthroughGate } from '../src/qe/walkthrough-acceptance.js';
 import { removeScratch } from './setup/scratch.js';
+import { withRunViews } from './support/run-views.js';
 
 const STORY = "export default { fixture: { start: 'npm start' }, segments: [] };\n";
 
@@ -93,7 +94,7 @@ describe('PUT /runs/:id/walkthrough/storyline (WT-W3)', () => {
     });
     registerRoutes(
       app,
-      {
+      withRunViews({
         sessionsDetail: vi.fn(async () => {
           const out = [view];
           if (afterWrite !== null) view = afterWrite; // the next read sees the run moved on
@@ -102,7 +103,7 @@ describe('PUT /runs/:id/walkthrough/storyline (WT-W3)', () => {
         listRepos: vi.fn(async () => []),
         interactionRequests: vi.fn(async () => []),
         runEvents: vi.fn(async () => []),
-      } as unknown as CoreAdapter,
+      }) as unknown as CoreAdapter,
       gates,
       new ElicitationCache(),
       { bus: null, index: new MembershipIndex(), log: () => undefined },
@@ -313,7 +314,7 @@ describe('PUT /runs/:id/walkthrough/storyline — the post-write gate re-read (c
     const resolveOpenGate = vi.fn<(runId: string) => Promise<{ ord: number } | null | 'no-log' | 'unstable'>>()
       .mockResolvedValueOnce({ ord: 3 })
       .mockResolvedValueOnce('unstable');
-    registerWalkthroughRoutes(app, { sessionsDetail: vi.fn(async () => [view]) } as unknown as CoreAdapter, { resolveOpenGate, audit: AuditLog.noop() });
+    registerWalkthroughRoutes(app, withRunViews({ sessionsDetail: vi.fn(async () => [view]) }) as unknown as CoreAdapter, { resolveOpenGate, audit: AuditLog.noop() });
     await app.ready();
     try {
       const res = await app.inject({ method: 'PUT', url: '/api/v1/runs/r1/walkthrough/storyline', payload: { storyline: STORY } });

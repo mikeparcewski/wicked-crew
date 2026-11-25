@@ -164,6 +164,37 @@ export const HOST_FLOOR_BENCH_COPY =
   'have each action checked, so jobs give this agent no work — run agents in containers ' +
   '(WICKED_SEAT_FLOOR=container) or remove it from the roster';
 
+/**
+ * (crew#1818) The engine also benches, on the host floor, a claude seat whose Claude Code managed settings
+ * (`allowManagedHooksOnly` / `disableAllHooks`) silence the gate hook it checks each action with (core#1744). Its reason
+ * starts with the #653 refusal prefix (wicked-core `MANAGED_HOOKS_ONLY_REFUSAL`); {@link HOST_FLOOR_BENCH_COPY} would
+ * contradict itself for that seat ("only claude … can have each action checked").
+ */
+const MANAGED_HOOKS_REFUSAL = "claude can't be governed on the wrapped path on this machine";
+
+/** (crew#1818) The policy came with the seat's sign-in: a container seat does not carry it. */
+export const HOST_FLOOR_POLICY_COPY =
+  "this computer's Claude Code policy turns off the checks wicked uses on each action, so on the host jobs give " +
+  'claude no work — run agents in containers (WICKED_SEAT_FLOOR=container), where claude does not carry that ' +
+  'policy, or route the work to another agent';
+
+/** (crew#1818) The policy is this computer's system policy: it binds claude in a container too. */
+export const HOST_FLOOR_SYSTEM_POLICY_COPY =
+  "this computer's system policy for Claude Code turns off the checks wicked uses on each action, so jobs give " +
+  'claude no work here — route the work to another agent, or ask whoever manages this computer to change the policy';
+
+/** The operator's sentence for the engine's host-floor bench reason `bench` (wicked-core#976, crew#1818). */
+export function hostFloorBenchCopy(bench: string): string {
+  if (!bench.startsWith(MANAGED_HOOKS_REFUSAL)) return HOST_FLOOR_BENCH_COPY;
+  // wicked-core `managed_hooks_remedy`: a system managed setting binds every claude this host launches, on either floor.
+  return bench.includes("this machine's system policy") ? HOST_FLOOR_SYSTEM_POLICY_COPY : HOST_FLOOR_POLICY_COPY;
+}
+
+/** Is `reason` one of the host-floor bench sentences ({@link hostFloorBenchCopy})? */
+export function isHostFloorBenchCopy(reason: string | null | undefined): boolean {
+  return reason === HOST_FLOOR_BENCH_COPY || reason === HOST_FLOOR_POLICY_COPY || reason === HOST_FLOOR_SYSTEM_POLICY_COPY;
+}
+
 /** The operator's sentence when the host-floor bench could not be read (fail closed). */
 export const HOST_FLOOR_UNKNOWN_COPY =
   "crew could not read which agents the engine gives work to on this computer, so it is left out " +
@@ -398,7 +429,7 @@ export function chatSeatAdmission(
   const hostBenched = typeof seat.host_floor_bench === 'string' && seat.host_floor_bench !== '';
   const hostUnknown = typeof seat.host_floor_unknown === 'string' && seat.host_floor_unknown !== '';
   if (hostBenched || hostUnknown) {
-    reasons.push(hostBenched ? HOST_FLOOR_BENCH_COPY : (seat.host_floor_unknown as string));
+    reasons.push(hostBenched ? hostFloorBenchCopy(seat.host_floor_bench as string) : (seat.host_floor_unknown as string));
     return { ok: false, reason: reasons.join('; '), source: source === 'auth' ? 'auth' : 'engine' };
   }
   if (kind === 'path-bound' || (kind === 'path' && !scoped)) {

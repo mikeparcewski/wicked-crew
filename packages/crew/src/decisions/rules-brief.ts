@@ -11,7 +11,8 @@
  * estate relay answers from the same in-force set the rule judge reads). Agents start with their prompt and tools and
  * pull what they need (operator, 2026-11-11): the statements are no longer pushed into every unit's prompt.
  * The review and QE seats judge each rule to check (garden's governed-worker E7: KEPT / BROKEN / N/A / DEFERRED /
- * UNASSESSED, a broken rule fails review); the builder is told it does not mark its own compliance.
+ * UNASSESSED, a broken rule fails review, but an unedited shipped process rule (RVWL-*) is reported and never fails it;
+ * an edited one is judged like any other rule: core#1316); the builder is told it does not mark its own compliance.
  *
  * Like the learnings block (`learnings/recall.ts`), the deliver text takes it back out (`core/deliver-text.ts`) and a
  * relaunch from an earlier run's problem replaces it, never stacks it. Nothing here records a verdict: per-rule
@@ -163,7 +164,7 @@ export function rulesBriefBlock(rules: ReadonlyArray<BriefRule>, matches: Readon
     RULES_BRIEF_OPEN,
     `Steering rules for this job: ${matches.length} in force, ${check} to check (${applies} apply, ${check - applies} may apply), ${na} not applicable. Each is listed by id (severity): the start of its statement.`,
     'The review and QE steps check the work against each rule to check (kept, broken or not applicable, with evidence);',
-    'a broken rule fails review. The step that builds does not mark its own compliance.',
+    'a broken rule fails review, but a shipped process rule (RVWL-*) is only reported. The step that builds does not mark its own compliance.',
     `Pull a rule's whole statement before you judge it (several ids at once; no "ids" lists every rule in force): ${RULES_PULL_COMMAND}`,
   ];
   // One row per rule: its bare line (id and severity), and the full one (with its one-liner, rules to check only).

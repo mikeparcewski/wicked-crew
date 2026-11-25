@@ -15,7 +15,7 @@
  */
 import { createHash } from 'node:crypto';
 
-import { coverageNote, type JudgeCoverage } from '../core/assurance.js';
+import { coverageNote, sharingNotes, type JudgeCoverage } from '../core/assurance.js';
 import { SEAT_STANDING_FIELDS } from '../core/engine-roster.js';
 import type {
   ArtifactProposal,
@@ -173,6 +173,9 @@ export interface JobContext {
   revises: string | null;
   lineage: string | null;
   notes: string[];
+  /** (crew#1803) A review of a change names the seats it left off and why. Kept apart from `notes`, which a seat edit
+   *  reads as its refusal. */
+  reviewNote?: string;
   /** Authorised in the chat layer before this pure resolution; absent admits no document. */
   documents?: ProposalSource[];
   /** Sources in display order; a reason means the source cannot be picked. Absent = no list. */
@@ -187,6 +190,121 @@ export interface JobContext {
    *  accepts here (the launch's own `namesPreset` source). A job whose workflow is one is started as a power run or held
    *  at its plan by the person's Start, so its sentence promises neither. `null`/absent = no Start chooses. */
   powerPresets?: ReadonlySet<string> | null;
+  /** (crew#1840) The pull requests this chat's runs delivered, read when the words name a pull request. Absent = none
+   *  read (a job then never updates one). */
+  deliveredPrs?: readonly DeliveredPr[];
+}
+
+// ── crew#1840: a job that updates a pull request this chat delivered ──────────────────────────────────────────────
+
+/** A pull request a run of this chat delivered (its run record's `deliverUrl`), on the run's repository. */
+export interface DeliveredPr {
+  number: number;
+  url: string;
+  runId: string;
+  repoRef: string | null;
+}
+
+/** The number of a pull request URL crew records (`…/pull/<n>` on GitHub, `…/_git/<repo>/pullrequest/<n>` on Azure
+ *  DevOps), else `null`. */
+export function prNumberOfUrl(url: string): number | null {
+  const m = /^https:\/\/[^\s?#]+\/(?:pull|pullrequest)\/(\d+)$/i.exec(url.trim());
+  return m === null ? null : Number(m[1]);
+}
+
+const PR_WORD = String.raw`(?:PRs?|pull[ -]?requests?)`;
+/** A pull request URL inside words, up to its number (a `/files` tab, a query or a fragment after it is not part of it). */
+const PR_URL_IN_WORDS = /https:\/\/[^\s?#)\]>"'<]+?\/(?:pull|pullrequest)\/\d+(?!\d)/gi;
+
+/** Words that ask to change an existing pull request rather than make new work: "revise the PR", "update pull request
+ *  #3", "add a test to PR #4", "push it on PR #4", "on the same PR", "do not open a new PR". */
+const ASKS_PR_CHANGE = new RegExp(
+  [
+    String.raw`\b(?:revise|revising|update|updating|amend|amending|fix up)\b[^!?\n]{0,80}?(?:\b${PR_WORD}\b|\/(?:pull|pullrequest)\/\d+)`,
+    String.raw`\b(?:add|adding|push|pushing|commit|committing|put|apply|applying)\b[^!?\n]{0,80}?\b(?:to|on|onto|into)\s+(?:(?:the|that|this|my|our)\s+)?(?:(?:same|existing|open|delivered)\s+)?(?:\b${PR_WORD}\b|https:\/\/\S+\/(?:pull|pullrequest)\/\d+)`,
+    String.raw`\b(?:on|to|onto|into)\s+${PR_WORD}\s*#?\d+`,
+    String.raw`\b(?:same|existing|that|this|delivered|open)\s+${PR_WORD}\b`,
+    String.raw`\b(?:no|not open a|don'?t open a|never open a)\s+(?:new|second)\s+${PR_WORD}\b`,
+  ].join('|'),
+  'i',
+);
+
+/** The verbs of a request to change a pull request (the positive asks above and their negations below share them). */
+const CHANGE_VERBS = String.raw`(?:revise|revising|update|updating|amend|amending|change|changing|touch|touching|fix up|add|adding|push|pushing|commit|committing|put|apply|applying)`;
+const NEW_ADJ = String.raw`(?:new|second|separate|another|fresh)`;
+
+/** Words that ask for a NEW pull request ("open a PR", "create a new pull request", "in a separate PR"), or say not to
+ *  change one ("do not update PR #4", "don't add tests to PR #4"): no existing pull request is attached. A negated
+ *  new-PR ask ("do not open a new PR", "don't open a PR") is not one. */
+const NEW_PR_ASK = new RegExp(
+  String.raw`\b(?:(?:open|opening|create|creating|raise|raising|make|making|start|starting|file|filing)\s+(?:(?:a|an)\s+(?:${NEW_ADJ}\s+)?|${NEW_ADJ}\s+|(?=(?:PRs|pull[ -]?requests)\b))|(?:in|as|into|with)\s+(?:a\s+|an\s+)?${NEW_ADJ}\s+)${PR_WORD}\b`,
+  'gi',
+);
+const NEW_PR_NEGATED = /(?:\b(?:not|never|without|no need to|dont)|n't|n’t)\s+(?:\w+\s+)?$/i;
+const KEEP_PR_ASK = new RegExp(String.raw`(?:\b(?:do not|dont|never|without)|n't|n’t)\s+${CHANGE_VERBS}\b[^!?\n.;,]{0,40}?\b${PR_WORD}\b`, 'i');
+
+function asksForNewPr(words: string): boolean {
+  if (KEEP_PR_ASK.test(words)) return true;
+  return [...words.matchAll(NEW_PR_ASK)].some((m) => !NEW_PR_NEGATED.test(words.slice(Math.max(0, m.index - 24), m.index)));
+}
+
+/** Whether `words` name a pull request at all (the cheap gate before the chat's runs are read). */
+export function mentionsPullRequest(words: string): boolean {
+  return /\b(?:PRs?|pull[ -]?requests?)\b|\/(?:pull|pullrequest)\/\d+/i.test(words);
+}
+
+/** Why a job asked to change a pull request does not update one (the card's note says it). */
+export type PrRevisionMiss = 'not-delivered' | 'none' | 'several';
+
+/**
+ * Which delivered pull request, if any, the person's words ask this job to update. `null` = they do not ask to change
+ * a pull request (or ask for a new one). `{ pr: null, … }` = they ask, but crew cannot attach one: a PR they name (a
+ * URL or a number) is not one this chat delivered on the job's repository (`named`), they name more than one this chat
+ * delivered (`several`), or they name none and there is not exactly one (`none`). Every PR named is a target: one that
+ * cannot be matched never falls back to another.
+ */
+export function prRevisionOf(
+  words: string,
+  delivered: readonly DeliveredPr[],
+  repoRef: string | null,
+): { pr: DeliveredPr; named: null; miss?: undefined } | { pr: null; named: string | null; miss: PrRevisionMiss } | null {
+  if (!ASKS_PR_CHANGE.test(words) || asksForNewPr(words)) return null;
+  const mine = delivered.filter((d) => repoRef !== null && d.repoRef === repoRef);
+  const hits = new Map<string, DeliveredPr>();
+  const urls = [...words.matchAll(PR_URL_IN_WORDS)].map((m) => m[0]);
+  for (const u of urls) {
+    const hit = mine.find((d) => d.url.toLowerCase() === u.toLowerCase());
+    if (hit === undefined) return { pr: null, named: u, miss: 'not-delivered' };
+    hits.set(hit.url.toLowerCase(), hit);
+  }
+  // Numbers outside the URLs: "PR #4", "pull request 4", a list ("PRs #4 and #9") and a repository's ("PR o/r#9").
+  const rest = words.replace(PR_URL_IN_WORDS, ' ');
+  // After a singular head a list member needs its `#` ("PR #4 and 5 more tests" names one PR); after a plural one it may
+  // be bare ("pull requests 4 and 9").
+  const target = String.raw`(?:[\w.-]+\/[\w.-]+)?#?\d+`;
+  const list = new RegExp(
+    String.raw`\b(?:(?:PR|pull[ -]?request)\s*(${target}(?:\s*(?:,|and|&|or)\s*(?:[\w.-]+\/[\w.-]+)?#\d+)*)|(?:PRs|pull[ -]?requests)\s*(${target}(?:\s*(?:,|and|&|or)\s*${target})*))`,
+    'gi',
+  );
+  for (const m of rest.matchAll(list)) {
+    for (const t of (m[1] ?? m[2]!).matchAll(/(?:([\w.-]+\/[\w.-]+)#)?#?(\d+)/g)) {
+      const n = Number(t[2]);
+      const repo = t[1];
+      const hit = mine.find((d) => d.number === n && (repo === undefined || new RegExp(String.raw`/${repo.replace(/[.]/g, '\\.')}/pull/${n}$`, 'i').test(d.url)));
+      if (hit === undefined) return { pr: null, named: repo === undefined ? `pull request #${n}` : `${repo}#${n}`, miss: 'not-delivered' };
+      hits.set(hit.url.toLowerCase(), hit);
+    }
+  }
+  if (hits.size > 1) return { pr: null, named: null, miss: 'several' };
+  if (hits.size === 1) return { pr: [...hits.values()][0]!, named: null };
+  const distinct = [...new Map(mine.map((d) => [d.url.toLowerCase(), d])).values()];
+  return distinct.length === 1 ? { pr: distinct[0]!, named: null } : { pr: null, named: null, miss: 'none' };
+}
+
+/** (crew#1840) What a job's Go adds to its run launch when the job updates a delivered pull request: `revisesPr` and
+ *  `deliver: "pr"` (a revision needs its deliver phase). Empty for any other job. */
+export function jobRevisionLaunch(p: Pick<ArtifactProposal, 'revisesPr' | 'repoRefs'>): { revisesPr?: number; deliver?: 'pr' } {
+  return p.revisesPr !== undefined && p.repoRefs?.[0] !== undefined ? { revisesPr: p.revisesPr.number, deliver: 'pr' } : {};
 }
 
 export class JobRefusal extends Error {
@@ -283,7 +401,7 @@ function needsOf(facts: JobFacts, ctx: JobContext, r: ResolvedOption): ProposalN
     }
     if (i.id === 'repo') {
       const hit = ctx.chat.repos.find((x) => x.id === facts.repoRef);
-      const choices = ctx.chat.repos.slice(0, 8).map((x) => ({ label: x.name, value: x.id }));
+      const choices = repoChoicesFor(facts.words, ctx.chat.repos).map((x) => ({ label: x.name, value: x.id }));
       out.push({ id: i.id, label: i.label, kind: i.kind, required: i.required, status: hit !== undefined ? 'met' : 'missing', ...(hit !== undefined ? { value: hit.id } : {}), ...(choices.length > 0 ? { choices } : {}) });
       continue;
     }
@@ -304,6 +422,89 @@ function needsOf(facts: JobFacts, ctx: JobContext, r: ResolvedOption): ProposalN
     out.push({ id: i.id, label: i.label, kind: i.kind, required: i.required, status: v !== undefined ? 'met' : 'missing', ...(v !== undefined ? { value: inputValueLabel(v).slice(0, 200) } : {}) });
   }
   return out;
+}
+
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Whether `words` name `term` as a whole token (case-insensitive): not inside a longer name (`rg1` is not named by
+ *  `rg10` or `rg1-old`); a sentence's punctuation after it still ends it. studio's `names` (repoProjects.ts), the same
+ *  rule, so the chips studio offers and the repository crew picks agree. */
+function namesTerm(words: string, term: string): boolean {
+  if (term.trim() === '') return false;
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}_./-])${escapeRe(term)}(?=$|[^\\p{L}\\p{N}_./-]|\\.(?:$|[^\\p{L}\\p{N}_./-]))`, 'iu').test(words);
+}
+
+/** A name distinct enough to be read as a repository rather than a word (`tiny-math-rd`, `billing-api`): it carries
+ *  something other than letters. `domain` or `docs` never is (studio's `distinctName`). */
+function distinctName(name: string): boolean {
+  return name.length >= 3 && /[^\p{L}]/u.test(name);
+}
+
+const REPO_OPS = new Set(['pull', 'pulls', 'pull-requests', 'merge_requests', 'tree', 'blob', 'commit', 'commits', 'compare']);
+/** First path segments that are a host's own pages, not an owner: an organisation's or a group's link names no
+ *  repository (`github.com/orgs/acme/projects/7`, `gitlab.com/groups/acme/-/merge_requests`), so it picks none. */
+const NOT_AN_OWNER = new Set(['orgs', 'users', 'enterprises', 'settings', 'sponsors', 'marketplace', 'apps', 'topics', 'collections', 'search', 'notifications', 'groups', 'dashboard', 'explore', 'workspace', 'account']);
+
+/** The repository one link names, or null: studio's `linkedRepo` (repoProjects.ts), and a host's own pages
+ *  ({@link NOT_AN_OWNER}) name none. GitHub and Bitbucket:
+ *  `<owner>/<repo>`, whatever follows. Elsewhere the segment before the first repository operation after it (or
+ *  GitLab's `-` before one; on gitlab.com any `-`); with no operation, a GitLab project home names its last segment and
+ *  a clone link (`…/<repo>.git`) its repository. Other links name nothing. */
+function linkedRepo(link: string): string | null {
+  let url: URL;
+  try { url = new URL(link); } catch { return null; }
+  const segs = url.pathname.split('/').filter((x) => x !== '').map((x) => { try { return decodeURIComponent(x); } catch { return x; } });
+  const host = url.hostname.toLowerCase().replace(/^www\./u, '');
+  if (NOT_AN_OWNER.has((segs[0] ?? '').toLowerCase())) return null;
+  let repo: string | undefined;
+  if (host === 'github.com' || host === 'bitbucket.org') repo = segs.length >= 2 ? segs[1] : undefined;
+  else {
+    const gitlab = host === 'gitlab.com';
+    const at = segs.findIndex((x, i) => i >= 2 && (REPO_OPS.has(x) || (x === '-' && (gitlab || REPO_OPS.has(segs[i + 1] ?? '')))));
+    if (at >= 2) repo = segs[at - 1];
+    else if (gitlab) repo = segs.length >= 2 ? segs[segs.length - 1] : undefined;
+    else if (segs.length >= 2 && /\.git$/iu.test(segs[segs.length - 1]!)) repo = segs[segs.length - 1];
+  }
+  const name = repo?.replace(/\.git$/iu, '').toLowerCase();
+  return name === undefined || name === '' || name === '-' ? null : name;
+}
+
+/** The repositories the links in the words name (lower-cased): studio's `linkedRepos`. A link ends at a space, a
+ *  bracket or a quote, and a sentence's punctuation after it is not part of it. */
+function linkedRepos(words: string): string[] {
+  const out: string[] = [];
+  for (const m of words.matchAll(/https?:\/\/[^\s<>()[\]"'`]+/giu)) {
+    const name = linkedRepo(m[0].replace(/[.,;:!?]+$/u, ''));
+    if (name !== null) out.push(name);
+  }
+  return out;
+}
+
+const linkedTo = (linked: readonly string[], r: { id: string; name: string }): boolean =>
+  linked.includes(r.name.toLowerCase()) || linked.includes(r.id.toLowerCase());
+
+/** The chat's repositories the words name, by name, id or link, in the chat's order (studio's `reposNamedIn`). */
+export function reposNamedIn<R extends { id: string; name: string }>(words: string, repos: readonly R[]): R[] {
+  const linked = linkedRepos(words);
+  return repos.filter((r) => namesTerm(words, r.name) || (r.id !== r.name && namesTerm(words, r.id)) || linkedTo(linked, r));
+}
+
+/** (crew#1791) The one repository the words clearly name ("In tiny-math-rd, fix …", or a link into it): named by a
+ *  link, a distinct name or id, and no other named. `null` = none or several: the proposal asks. Studio's
+ *  `repoNamedInWords`, so the repository crew picks is the one studio would. */
+export function repoNamedIn<R extends { id: string; name: string }>(words: string, repos: readonly R[]): R | null {
+  const named = reposNamedIn(words, repos);
+  if (named.length !== 1) return null;
+  const r = named[0]!;
+  const linked = linkedRepos(words);
+  return linkedTo(linked, r) || (distinctName(r.name) && namesTerm(words, r.name)) || (r.id !== r.name && distinctName(r.id) && namesTerm(words, r.id)) ? r : null;
+}
+
+/** (crew#1791) Every repository the person can pick, those the words name first: no cap, so the named one and every
+ *  other in the chat's scope are reachable from "Which repository?". */
+function repoChoicesFor<R extends { id: string; name: string }>(words: string, repos: readonly R[]): R[] {
+  const named = reposNamedIn(words, repos);
+  return [...named, ...repos.filter((r) => !named.includes(r))];
 }
 
 /** The repository a job runs on: the one named, else the chat's only one. */
@@ -368,7 +569,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
   if (card.depth === true && facts.depth === null) facts = { ...facts, depth: 'standard' };
   const kind = proposalKindOf(r);
   if (kind !== 'job') throw new JobRefusal('not_a_job', `${card.title} makes a document: it is proposed as one`);
-  const notes = [...ctx.notes];
+  const notes = [...ctx.notes, ...(ctx.reviewNote !== undefined ? [ctx.reviewNote] : [])];
   const takesDocuments = r.resolved.inputs.some((i) => i.id === 'documents');
   const takesSources = r.resolved.inputs.some((i) => i.id === 'sources');
   if (takesSources) {
@@ -424,7 +625,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
       question = {
         kind: 'missing',
         text: ctx.chat.repos.length === 0 ? 'Which repository? This chat has none in its scope: start a thread on one.' : 'Which repository?',
-        choices: ctx.chat.repos.slice(0, 4).map((x) => ({ label: x.name, edit: { repoRef: x.id } })),
+        choices: repoChoicesFor(facts.words, ctx.chat.repos).map((x) => ({ label: x.name, edit: { repoRef: x.id } })),
       };
     } else if (missing.kind === 'documents') {
       const why = ctx.documents?.find((s) => s.status === 'struck')?.reason;
@@ -462,10 +663,12 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     swap: ctx.chat.repos.length > 1 ? { choices: ctx.chat.repos.filter((x) => x.id !== repo.id).slice(0, 4).map((x) => ({ label: x.name, edit: { repoRef: x.id } })) } : null,
   });
   const selfSeated = r.workflow !== null && SELF_SEATED.has(r.workflow);
-  const disclosure = !short && !selfSeated
-    ? coverageNote(ctx.coverage?.(seats.keys, repo !== null) ?? null, (key) => ctx.roster.find((s) => s.key === key)?.name ?? key) ?? judgeDisclosure(r, seats.keys.length)
-    : null;
+  const nameOfSeat = (key: string): string => ctx.roster.find((s) => s.key === key)?.name ?? key;
+  const coverage = !short && !selfSeated ? ctx.coverage?.(seats.keys, repo !== null) ?? null : null;
+  const disclosure = !short && !selfSeated ? coverageNote(coverage, nameOfSeat) ?? judgeDisclosure(r, seats.keys.length) : null;
   if (disclosure !== null) notes.push(disclosure);
+  // (crew#1673) A covered card still says, before launch, which seats were seen sharing a provider (core#1594).
+  notes.push(...sharingNotes(coverage, nameOfSeat));
   // Lead swaps come from the pool work is drawn from; the row shows only when it offers a choice (crew#1590).
   const swapChoices = (ctx.pool ?? ctx.roster).filter((x) => x.key !== seats.lead).slice(0, 4).map((x) => ({ label: `${x.name} leads`, edit: { lead: x.key } }));
   const seatsTok = t({
@@ -511,6 +714,21 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     parts.push(`Carrying: ${ds.join(', ')}.`);
   }
   if (facts.skipQe !== null) parts.push(`Without QE acceptance (you said: “${facts.skipQe.reason}”), labelled on the job.`);
+  // (crew#1840) A job that makes a pull request, asked to change one this chat delivered on the same repository,
+  // updates THAT pull request (`revisesPr`); asked but not attachable, the card says it updates none, why, and where a
+  // delivered PR is revised. Nothing else in the proposal ever says where the work is delivered.
+  const prAsk = launch === 'run' && delivers === 'pr' && repo !== null ? prRevisionOf(facts.words, ctx.deliveredPrs ?? [], repo.id) : null;
+  const revisesPr = prAsk?.pr ?? null;
+  if (revisesPr !== null) {
+    parts.push(`It updates pull request #${revisesPr.number}, which an earlier job of this chat delivered; no new pull request is opened.`);
+  } else if (prAsk !== null && prAsk.miss !== undefined) {
+    const why = prAsk.miss === 'not-delivered'
+      ? `${prAsk.named ?? 'the pull request you named'} is not one this chat delivered on ${repo!.name}`
+      : prAsk.miss === 'several'
+        ? `you named more than one pull request this chat delivered on ${repo!.name}`
+        : `this chat has no one pull request on ${repo!.name} it delivered to update`;
+    notes.push(`This job won't update an existing pull request: ${why}. To change a delivered pull request, use Revise this PR on the job that delivered it.`);
+  }
   // crew#1570: a domain extraction runs many hours on a large repository; the catalog's fixed range would mislead.
   const sizeBound = card.id === 'analyze-codebase' && r.option?.id === 'domain';
   const time = sizeBound ? DOMAIN_TIME : minutesLabel(r.resolved.typicalMinutes);
@@ -577,6 +795,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     suggestions: suggestions.slice(0, 2),
     question,
     sketch: sketchOf(r, startChooses),
+    ...(revisesPr !== null ? { revisesPr: { number: revisesPr.number, url: revisesPr.url, runId: revisesPr.runId } } : {}),
     revises: ctx.revises,
     lineage: ctx.lineage ?? ctx.pid,
     ...(ctx.answers !== undefined ? { answers: ctx.answers } : {}),

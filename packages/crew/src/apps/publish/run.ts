@@ -19,7 +19,8 @@ import { PackError, writeImageContext } from './pack.js';
 export interface PublishDeps {
   engine: {
     launchRun(input: LaunchRunInput): Promise<string>;
-    sessionsDetail(): Promise<SessionView[]>;
+    /** One run's view (crew#1779: that run alone, never a fold of the store). */
+    runView(runId: string): Promise<SessionView | undefined>;
   };
   roster: () => Promise<string>;
   registry: AppSourceRegistry | null;
@@ -164,7 +165,7 @@ export class PublishService implements AppPublisher {
   }
 
   async status(runId: string): Promise<'running' | 'failed' | 'cancelled'> {
-    const view = (await this.deps.engine.sessionsDetail()).find((v) => v.session.id === runId);
+    const view = await this.deps.engine.runView(runId);
     if (view === undefined) return 'failed';
     if (view.session.status === 'cancelled') return 'cancelled';
     // A completed run without a produced record did not publish anything.

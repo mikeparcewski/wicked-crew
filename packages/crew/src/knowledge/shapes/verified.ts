@@ -15,7 +15,7 @@
  */
 
 import { effectiveDeps } from '../../mcp/estate-relay.js';
-import { type EstateCall, proposalNodeId } from './shapes.js';
+import { currentShapes, type EstateCall, proposalNodeId } from './shapes.js';
 
 export const VERIFY_BUDGET = 30;
 
@@ -51,7 +51,8 @@ export async function verifiedShapes(
   const want = opts.want ?? Number.POSITIVE_INFINITY;
   const budget = opts.budget ?? VERIFY_BUDGET;
   const candidates: Array<{ id: string; cls: unknown; relation: string; content: string }> = [];
-  for (const p of proposals) {
+  // (crew#1625) Only the shape a re-profile left in knowledge, not the ones it replaced.
+  for (const p of currentShapes(proposals)) {
     if (!isObj(p) || p['state'] !== 'approved' || typeof p['id'] !== 'string' || !isObj(p['payload'])) continue;
     const shape = p['payload']['shape'];
     if (!isObj(shape) || shape['sourceId'] !== sourceId || typeof shape['relation'] !== 'string') continue;

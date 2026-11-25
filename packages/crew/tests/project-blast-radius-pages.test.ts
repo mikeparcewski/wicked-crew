@@ -156,7 +156,8 @@ describe.skipIf(process.platform === 'win32')('blast freshness (crew#1555, crew#
     expect(out.dependents[0]).toMatchObject({ depth: 2, stale: 'modified' });
     expect(out.dependents[1]).not.toHaveProperty('depth');
     expect(out.dependents[1]).not.toHaveProperty('stale');
-    expect(out).toMatchObject({ resolved: false, freshness: { stale_files_total: 2, stale_files: [
+    // crew#1713: the removed member's stale file leaves the total with the sample.
+    expect(out).toMatchObject({ resolved: false, freshness: { stale_files_total: 1, stale_files: [
       { repoId: 'repo-api', repo: 'api', file: 'src/f1.ts', status: 'modified' },
     ] }, coverage: [
       { repoId: 'repo-api', repo: 'api', links_in: 2, links_out: 3, incomplete: true, package_imports: 4, manifests: 1, boundary_counts: { unknown: 2 } },

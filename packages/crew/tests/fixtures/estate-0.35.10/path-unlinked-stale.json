@@ -1,0 +1,43 @@
+{
+ "crossings": [],
+ "depth_bounded": false,
+ "found": false,
+ "from": "page",
+ "hops": [],
+ "link": [
+  {
+   "coverage": [
+    {
+     "boundaries": {},
+     "incomplete": false,
+     "label": "api",
+     "links_in": 1,
+     "links_out": 0,
+     "manifests": 1,
+     "package_imports": 0
+    },
+    {
+     "boundaries": {},
+     "incomplete": false,
+     "label": "web",
+     "links_in": 0,
+     "links_out": 1,
+     "manifests": 2,
+     "package_imports": 1
+    }
+   ],
+   "generation": 5,
+   "last_error": null,
+   "project": "p1",
+   "stale": true,
+   "stale_labels": [
+    "web"
+   ]
+  }
+ ],
+ "node_bounded": false,
+ "resolved": true,
+ "to": "charge",
+ "unresolved": null,
+ "unresolved_on_frontier": 2
+}

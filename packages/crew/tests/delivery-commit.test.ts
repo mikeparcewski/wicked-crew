@@ -74,7 +74,7 @@ function harness(opts: {
   const index = new DeliveryIndex();
   const audited: Array<{ runId: string; detail: DeliveryRecord }> = [];
   const resolver = new DeliveryResolver({
-    listViews: async () => views,
+    viewOf: async (id: string) => views.find((v) => v.session.id === id),
     workOutput: async () => (opts.output === undefined ? DELIVER_TRANSCRIPT : opts.output),
     isDelivered: (runId) => index.isDelivered(runId),
     record: (runId, record) => {

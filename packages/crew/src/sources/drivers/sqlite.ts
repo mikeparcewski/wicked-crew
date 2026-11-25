@@ -126,7 +126,8 @@ function policyContext(catalog: SqlCatalog): { tables: string[]; functions: stri
 }
 
 export interface SqliteInspection {
-  objects: Array<{ type: string; name: string; virtual: boolean }>;
+  /** `virtual`: a virtual table (or a kind SQLite does not call a plain table); `shadow`: a virtual table's own table. */
+  objects: Array<{ type: string; name: string; virtual: boolean; shadow: boolean }>;
   /** Generated or hidden columns (`table.column`): a snapshot holding one is refused. */
   generated: string[];
   catalog: SqlCatalog;
@@ -146,6 +147,17 @@ export async function sqliteIngest(
   limits: typeof import('../uploads.js').UPLOAD_LIMITS, deadlineMs: number,
 ): Promise<SqliteIngestAnswer> {
   return await runChild({ op: 'ingest', path, input, kind, filename, header, limits }, deadlineMs) as SqliteIngestAnswer;
+}
+
+/**
+ * (crew#1731) Drop `tables` (virtual tables) from the upload's copy at `path`, in the writer child, then rewrite the copy
+ * through `into` (VACUUM INTO, rowids kept) and put it back at `path`. Answers the ones that could not be dropped (a
+ * module this SQLite lacks); the copy is not rewritten then.
+ */
+export async function sqliteStrip(path: string, into: string, tables: string[], deadlineMs: number): Promise<{ failed: Array<{ name: string; error: string }> }> {
+  const a = await runChild({ op: 'strip', path, into, tables }, deadlineMs);
+  if (!a.ok) throw new SourceQueryError(null, 'source', a.error ?? 'the virtual tables could not be dropped');
+  return { failed: (a['failed'] as Array<{ name: string; error: string }>) ?? [] };
 }
 
 /** Inspect a snapshot (schema objects and the catalog). No authorizer: crew's own fixed statements. */

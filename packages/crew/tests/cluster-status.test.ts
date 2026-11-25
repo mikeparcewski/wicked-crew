@@ -1,11 +1,21 @@
-import { homedir } from 'node:os';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
+import { join, relative } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  CLUSTER_TIMEOUT_MS,
   ClusterStatusReader,
   publicText,
   clusterDiagnostics,
+  clusterInstallCommand,
   clusterRows,
+  engineCommand,
+  gatewayNamespace,
+  kubectlWord,
+  rustCanonicalSpelling,
   parseClusterStatus,
+  shellPath,
   readClusterStatus,
   type ClusterStatus,
 } from '../src/api/cluster-status.js';
@@ -63,6 +73,21 @@ describe('ClusterStatusReader', () => {
     expect((await second).kind).toBe('ok');
     await reader.read(); expect(exec).toHaveBeenCalledTimes(2);
   });
+  it('a caller never waits past the engine bound, whatever bound it asks for (crew#1780: proven on fake time)', async () => {
+    vi.useFakeTimers();
+    try {
+      const exec = vi.fn(() => new Promise<{ stdout: string; stderr: string }>(() => undefined));
+      const reader = new ClusterStatusReader(() => ({ exe: '/core', home: '/h', exec }));
+      let settled: Settled<ClusterStatus> | null = null;
+      void reader.read(60_000).then((r) => { settled = r; });
+      await vi.advanceTimersByTimeAsync(CLUSTER_TIMEOUT_MS - 1);
+      expect(settled).toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toMatchObject({ kind: 'timeout', ms: CLUSTER_TIMEOUT_MS });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('clusterRows', () => {
@@ -93,6 +118,104 @@ describe('clusterRows', () => {
     const noCtl = clusterRows(ok({ ...READY, controller: { ready: false, detail: 'no sandboxes CRD' } }), true, at);
     expect(noCtl.cluster).toMatchObject({ state: 'down', reason: expect.stringContaining('no sandboxes CRD'), remedy: expect.stringContaining('cluster install') });
   });
+  it('crew#1844: every command a row names is filled in for this daemon, so it pastes and runs', () => {
+    const engine = { exe: join(homedir(), '.wicked', 'bin/wicked-core'), home: join(homedir(), '.wicked-crew') };
+    // The engine's own document for a state home with no cluster (wicked-core k8s/mod.rs resolve_settings).
+    const none = clusterRows(ok({ configured: false, reachable: false, kind: 'no_cluster', detail: 'no cluster is configured for this daemon: run `wicked-core cluster install` or set WICKED_K8S_CONTEXT (the current kubectl context is never used implicitly)' }), true, at, engine);
+    expect(none.cluster.remedy).toBe("Run `~/.wicked/bin/wicked-core cluster install --admin-context rancher-desktop --home ~/.wicked-crew` (rancher-desktop is Rancher Desktop's cluster; for a different cluster, use its context), then re-check.");
+    expect(none.gateway.remedy).toBe(none.cluster.remedy);
+    const unread = clusterRows({ kind: 'error', error: 'boom', ms: 1 }, true, at, engine);
+    expect(unread.cluster.remedy).toBe('Re-check; if it persists, run `~/.wicked/bin/wicked-core cluster status --home ~/.wicked-crew` by hand.');
+    const noCtl = clusterRows(ok({ ...READY, controller: { ready: false } }), true, at, engine);
+    expect(noCtl.cluster.remedy).toContain('`~/.wicked/bin/wicked-core cluster install --admin-context rancher-desktop --home ~/.wicked-crew`');
+    for (const row of [none.cluster, none.gateway, unread.cluster, noCtl.cluster]) {
+      expect(row.remedy).not.toMatch(/<[^>]+>/);
+    }
+    // No kubectl at all is Rancher Desktop missing or stopped, not a cluster to install.
+    const noKubectl = clusterRows(ok({ configured: false, reachable: false, kind: 'no_cluster', detail: 'no kubectl was found (set WICKED_KUBECTL to its path)' }), true, at, engine);
+    expect(noKubectl.cluster).toMatchObject({ state: 'down', remedy: 'Start Rancher Desktop with Kubernetes on, then re-check.' });
+  });
+  it('a symlinked home is ~ in either spelling, and the tilde stays outside the quotes (codex r1)', () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'crew-1844-')));
+    try {
+      const real = join(base, 'homes', 'alice');
+      mkdirSync(join(real, 'State Dir'), { recursive: true });
+      const link = join(base, 'home-alice');
+      symlinkSync(real, link);
+      expect(shellPath(join(real, 'State Dir'), link)).toBe("~/'State Dir'");
+      expect(shellPath(join(link, 'State Dir'), link)).toBe("~/'State Dir'");
+      expect(shellPath(join(real, '.wicked-crew'), link)).toBe('~/.wicked-crew');
+      expect(shellPath(join(real, '.wicked-crew'), link)).not.toContain('alice');
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+  it('a command names the engine path and state home as shell words', () => {
+    expect(shellPath('/opt/homebrew/bin/wicked-core', '/home/a')).toBe('/opt/homebrew/bin/wicked-core');
+    expect(shellPath('/home/a', '/home/a')).toBe('~');
+    expect(shellPath('/home/a/My Tools/wicked-core', '/home/a')).toBe("~/'My Tools/wicked-core'");
+    expect(shellPath("/srv/it's/core", '/home/a')).toBe("'/srv/it'\\''s/core'");
+    expect(shellPath('/home/ab/core', '/home/a')).toBe('/home/ab/core');
+    expect(engineCommand({ exe: null, home: null }, 'cluster status')).toBe('wicked-core cluster status');
+    // A relative engine path is the daemon's, made absolute; a bare name stays for PATH.
+    expect(engineCommand({ exe: 'bin/engine', home: null }, 'cluster status')).toBe(`${shellPath(join(process.cwd(), 'bin', 'engine'))} cluster status`);
+    expect(engineCommand({ exe: 'bin/engine', home: null }, 'cluster status')).not.toMatch(/^bin\//);
+    expect(engineCommand({ exe: 'engine', home: null }, 'cluster status')).toBe('engine cluster status');
+    expect(clusterInstallCommand({ exe: '/opt/wc', home: '/var/crew' })).toBe('/opt/wc cluster install --admin-context rancher-desktop --home /var/crew');
+  });
+  it("names the gateway's namespace the way the engine derives it from the state home (crew#1851)", () => {
+    // wicked-core src/k8s/mod.rs: owner_id = "w" + the first 12 hex of sha256(the canonical home, missing tail kept);
+    // daemon_namespace_name = "wicked-sys-" + owner_id.
+    const base = mkdtempSync(join(tmpdir(), 'crew-1851-ns-'));
+    try {
+      const real = realpathSync(base);
+      const want = (p: string): string => `wicked-sys-w${createHash('sha256').update(rustCanonicalSpelling(p)).digest('hex').slice(0, 12)}`;
+      mkdirSync(join(real, 'home'));
+      symlinkSync(join(real, 'home'), join(real, 'link'));
+      expect(gatewayNamespace(join(real, 'home'))).toBe(want(join(real, 'home')));
+      // A symlinked spelling is the same daemon (canonicalized), and a home not made yet keeps its missing tail.
+      expect(gatewayNamespace(join(real, 'link'))).toBe(want(join(real, 'home')));
+      expect(gatewayNamespace(join(real, 'link', 'not-yet', 'x'))).toBe(want(join(real, 'home', 'not-yet', 'x')));
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+  it('follows a symlink before a `..` after it, as the OS realpath (and Rust) do (codex r1)', () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'crew-1851-dotdot-')));
+    try {
+      // work/home -> work/alias/../state, work/alias -> srv/nested; both srv/state and work/state exist.
+      for (const d of ['srv/nested', 'srv/state', 'work/state']) mkdirSync(join(base, d), { recursive: true });
+      symlinkSync(join(base, 'srv', 'nested'), join(base, 'work', 'alias'));
+      // The target spelled with its `..` (join would fold it away before the OS sees the link).
+      symlinkSync(`${join(base, 'work', 'alias')}/../state`, join(base, 'work', 'home'));
+      const want = (p: string): string => `wicked-sys-w${createHash('sha256').update(rustCanonicalSpelling(p)).digest('hex').slice(0, 12)}`;
+      expect(gatewayNamespace(join(base, 'work', 'home'))).toBe(want(join(base, 'srv', 'state')));
+      expect(gatewayNamespace(join(base, 'work', 'home', 'not-yet'))).toBe(want(join(base, 'srv', 'state', 'not-yet')));
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+  it("spells a Windows home as Rust's canonicalize does, verbatim prefix kept (codex r1)", () => {
+    expect(rustCanonicalSpelling('C:\\Users\\Alice\\.wicked-crew', 'win32')).toBe('\\\\?\\C:\\Users\\Alice\\.wicked-crew');
+    expect(rustCanonicalSpelling('\\\\server\\share\\crew', 'win32')).toBe('\\\\?\\UNC\\server\\share\\crew');
+    expect(rustCanonicalSpelling('\\\\?\\C:\\crew', 'win32')).toBe('\\\\?\\C:\\crew');
+    expect(rustCanonicalSpelling('/home/a/.wicked-crew', 'linux')).toBe('/home/a/.wicked-crew');
+  });
+  it('names the kubectl a terminal can run: WICKED_KUBECTL, else the PATH, else ~/.rd/bin, else the bare name (codex r1)', () => {
+    if (process.platform === 'win32') return; // the executable lookup below is POSIX-shaped
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'crew-1851-kubectl-')));
+    try {
+      const home = join(base, 'home');
+      const exe = (dir: string): string => { mkdirSync(dir, { recursive: true }); const p = join(dir, 'kubectl'); writeFileSync(p, '#!/bin/sh\n'); chmodSync(p, 0o755); return p; };
+      // Nothing on PATH or in ~/.rd/bin: the desktops' install folders (as the engine), else the bare name.
+      const desktop = ['/usr/local/bin/kubectl', '/opt/homebrew/bin/kubectl', '/Applications/Docker.app/Contents/Resources/bin/kubectl'].find((p) => existsSync(p));
+      expect(kubectlWord({ PATH: join(base, 'none') }, home)).toBe(desktop ?? 'kubectl');
+      exe(join(home, '.rd', 'bin'));
+      expect(kubectlWord({ PATH: join(base, 'none') }, home)).toBe('~/.rd/bin/kubectl');
+      const onPath = exe(join(base, 'tools bin'));
+      expect(kubectlWord({ PATH: `${join(base, 'none')}:${join(base, 'tools bin')}` }, home)).toBe(shellPath(onPath, home));
+      expect(kubectlWord({ PATH: join(base, 'tools bin'), WICKED_KUBECTL: '/opt/k/kubectl' }, home)).toBe('/opt/k/kubectl');
+      expect(kubectlWord({ WICKED_KUBECTL: 'kubectl-1.31' }, home)).toBe('kubectl-1.31');
+      // A configured bare name is looked up on the daemon's PATH, as the engine looks it up (codex r1 delta).
+      expect(kubectlWord({ PATH: join(base, 'tools bin'), WICKED_KUBECTL: 'kubectl' }, home)).toBe(shellPath(onPath, home));
+      // A relative PATH entry is the daemon's, resolved against its working directory.
+      expect(kubectlWord({ PATH: relative(process.cwd(), join(base, 'tools bin')) }, join(base, 'nohome'))).toBe(shellPath(onPath, join(base, 'nohome')));
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
   it('each row from its own evidence: a known failure is never hidden by an unread neighbour', () => {
     const noGw = clusterRows(ok({ configured: true, reachable: true, context: 'rd', controller: { ready: false, detail: 'rolling out' } }), true, at);
     expect(noGw.cluster).toMatchObject({ state: 'down', reason: expect.stringContaining('rolling out') });
@@ -114,7 +237,7 @@ describe('clusterRows', () => {
       expect(text).not.toContain('abcdefghijklmnop0123456789');
       expect(text).not.toContain('supersecretvalue');
     }
-    expect(err.cluster.remedy).toContain('--home <this daemon');
+    expect(err.cluster.remedy).toContain('cluster status');
   });
   it('every credential spelling an upstream diagnostic can carry is redacted, and every home path is ~', () => {
     const user = ['C:', 'Users', 'other', '.kube', 'config'].join('\\\\');

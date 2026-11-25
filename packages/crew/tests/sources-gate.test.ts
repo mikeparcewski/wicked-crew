@@ -190,7 +190,7 @@ for (const target of PG_TARGETS) {
     }, 180_000);
 
     afterAll(async () => {
-      sup?.stopAll();
+      await sup?.stopAll();
       await app?.close();
       await db?.drop();
       const b = await import('postgres');

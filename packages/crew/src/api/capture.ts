@@ -24,6 +24,7 @@ import { randomUUID } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import { basename, extname, join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
+import { wickedHomeDir } from '../core/wicked-home.js';
 import { z } from '../zod.js';
 import { refuseStaleReplacement } from '../learnings/replacement-lineage.js';
 import { API_PREFIX } from './api-prefix.js';
@@ -76,11 +77,10 @@ export const FileProposalSchema = z.strictObject({
 });
 
 /** Where a capture's materials land: a per-run inbox on the daemon host (the steering-author
- *  pattern — runs read the daemon's filesystem; only paths ride the problem statement). */
+ *  pattern — runs read the daemon's filesystem; only paths ride the problem statement).
+ *  `WICKED_CAPTURE_INBOX_DIR`, else `${WICKED_HOME:-~/.wicked}/capture-inbox` (crew#1802). */
 export function captureInboxDir(runId: string): string {
-  if (process.env.WICKED_CAPTURE_INBOX_DIR) return join(process.env.WICKED_CAPTURE_INBOX_DIR, runId);
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
-  return join(home, '.wicked', 'capture-inbox', runId);
+  return join(wickedHomeDir('WICKED_CAPTURE_INBOX_DIR', 'capture-inbox'), runId);
 }
 
 /**
@@ -271,6 +271,8 @@ export async function approveEdited(
   id: string,
   edit: z.infer<typeof ApproveEditSchema>,
   projectOf: (runId: string) => string | undefined,
+  /** (crew#1261) Told of each rejection this accept makes: the original replaced by its copy, or the copy withdrawn. */
+  decided?: (proposalId: string, reason: 'replaced-by-edit' | 'withdrawn-copy' | 'stale', copyId?: string) => void,
 ): Promise<EditedApproval> {
   // estate has no compare-and-swap: two accepts of one proposal racing (a double click, two tabs)
   // would each promote a copy. One daemon, so one accept per proposal at a time is enough.
@@ -279,7 +281,7 @@ export async function approveEdited(
   }
   editsInFlight.add(id);
   try {
-    return await acceptEdited(estateTool, id, edit, projectOf);
+    return await acceptEdited(estateTool, id, edit, projectOf, decided);
   } finally {
     editsInFlight.delete(id);
   }
@@ -299,6 +301,7 @@ async function acceptEdited(
   id: string,
   edit: z.infer<typeof ApproveEditSchema>,
   projectOf: (runId: string) => string | undefined,
+  decided?: (proposalId: string, reason: 'replaced-by-edit' | 'withdrawn-copy' | 'stale', copyId?: string) => void,
 ): Promise<EditedApproval> {
   const listed = (await estateTool('proposal.list', { state: 'pending' })) as {
     proposals?: {
@@ -318,7 +321,7 @@ async function acceptEdited(
     };
   }
   // crew#1546: a stale replacement of an edited learning is refused and rejected here too (see the plain approve).
-  const stale = await refuseStaleReplacement(estateTool, id, row.payload);
+  const stale = await refuseStaleReplacement(estateTool, id, row.payload, (pid) => decided?.(pid, 'stale'));
   if (stale !== null) return { status: 409, body: { error: stale, code: 'stale_replacement' } };
   const payload = { ...(typeof row.payload === 'object' && row.payload !== null ? row.payload : {}) } as Record<string, unknown>;
   const capture = payload['capture'];
@@ -362,12 +365,13 @@ async function acceptEdited(
     approved = (await estateTool('proposal.approve', { id: copy })) as Record<string, unknown>;
   } catch (err) {
     // Withdraw the copy so a retry of this accept leaves no stray duplicate pending in review.
-    await estateTool('proposal.reject', { id: copy }).catch(() => undefined);
+    if (await estateTool('proposal.reject', { id: copy }).then(() => true, () => false)) decided?.(copy, 'withdrawn-copy');
     throw err;
   }
   const edited: Record<string, unknown> = { from: id, to: copy };
   try {
     await estateTool('proposal.reject', { id });
+    decided?.(id, 'replaced-by-edit', copy);
   } catch {
     edited['originalPending'] = true;
   }

@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { registerRoutes } from '../src/api/routes.js';
+import { INJECT_WORDS_MAX, registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import type { AuditLog } from '../src/api/audit.js';
@@ -141,7 +141,7 @@ describe('POST /runs/:id/inject {input: "voice"}', () => {
     const res = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN}/inject`, payload: { message: NOTE, target: 'all', input: 'voice' } });
     expect(res.statusCode).toBe(200);
     expect(injected).toEqual([[RUN, NOTE, 'all']]);
-    expect(recorded.find((r) => r.action === 'run.injected')?.detail).toEqual({ target: 'all', input: 'voice' });
+    expect(recorded.find((r) => r.action === 'run.injected')?.detail).toEqual({ target: 'all', words: NOTE, input: 'voice' });
     const ev = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/events` });
     const events = (ev.json() as { events: Array<Record<string, unknown>> }).events;
     expect(events.map((e) => e['input'])).toEqual(['voice', 'voice', undefined, undefined]);
@@ -149,9 +149,18 @@ describe('POST /runs/:id/inject {input: "voice"}', () => {
 
   it('a typed note records no input, and any other input word is a 400', async () => {
     expect((await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN}/inject`, payload: { message: 'typed', target: 'all' } })).statusCode).toBe(200);
-    expect(recorded.find((r) => r.action === 'run.injected')?.detail).toEqual({ target: 'all' });
+    expect(recorded.find((r) => r.action === 'run.injected')?.detail).toEqual({ target: 'all', words: 'typed' });
     const bad = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN}/inject`, payload: { message: 'x', input: 'typing' } });
     expect(bad.statusCode).toBe(400);
+  });
+
+  it('crew#1392: the audit line keeps the words, capped, so the run’s context document shows the steer', async () => {
+    const long = `${'a'.repeat(INJECT_WORDS_MAX - 1)}\u{1F600}tail`;
+    expect((await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN}/inject`, payload: { message: long, target: 'all' } })).statusCode).toBe(200);
+    const words = recorded.find((r) => r.action === 'run.injected')?.detail?.['words'];
+    // Cut at the cap, never inside the emoji's surrogate pair.
+    expect(words).toBe('a'.repeat(INJECT_WORDS_MAX - 1));
+    expect(injected).toEqual([[RUN, long, 'all']]);
   });
 
   it('a send the engine refused (409) is not remembered as spoken', async () => {

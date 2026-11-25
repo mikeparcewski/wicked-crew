@@ -140,9 +140,10 @@ export function plannedUnitsOfRun(runId: string, rows: readonly RunUnitRow[]): P
  * Narration only: an engine that cannot answer leaves the fold as it was, and nothing throws.
  */
 export async function resyncRunUnits(adapter: CoreAdapter, runId: string, units: RunUnits): Promise<void> {
-  if (typeof (adapter as Partial<CoreAdapter>).sessionsDetail !== 'function') return;
+  if (typeof (adapter as Partial<CoreAdapter>).runView !== 'function') return;
   try {
-    const view = (await adapter.sessionsDetail()).find((v) => v.session.id === runId);
+    // crew#1775: this runs after every gate; it reads the one run, never a fold of the store.
+    const view = await adapter.runView(runId);
     if (view !== undefined && view.units.length > 0) {
       units.replace(plannedUnitsOfRun(runId, view.units as readonly RunUnitRow[]));
     }

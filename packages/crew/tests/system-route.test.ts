@@ -13,7 +13,6 @@ import type { DiagnosticsResponse, HealthResponse, SystemSnapshot } from 'wicked
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
 import { SYSTEM_BUDGET_MS } from '../src/api/system-snapshot.js';
-import { CLUSTER_TIMEOUT_MS } from '../src/api/cluster-status.js';
 import { removeScratch } from './setup/scratch.js';
 
 // The disk reading is the real host's by default, so a host under 5% free turns `infra:disk` red and
@@ -252,9 +251,12 @@ describe('GET /api/v1/system', () => {
     const { body, ms } = await snapshot();
     const gw = body.infra.find((r) => r.key === 'gateway')!;
     expect(gw.state).toBe('unknown');
-    // The wait this snapshot gave it: at most the engine's bound, less when the budget had less left.
+    // The wait this snapshot gave it is the settle timer's measured wait. Its clamp to the engine's bound is proven
+    // with fake timers (cluster-status.test.ts); here a loaded runner fires the timer late (6179 ms against the
+    // 6000 ms bound, crew#1780), so the route is held to the order of events: the wait ended inside the snapshot,
+    // and the snapshot answered within its own budget, long before the 30 s hang would have.
     expect(gw.timeoutMs).toBeGreaterThan(0);
-    expect(gw.timeoutMs).toBeLessThanOrEqual(CLUSTER_TIMEOUT_MS + 100);
+    expect(gw.timeoutMs).toBeLessThanOrEqual(ms);
     expect(gw.reason).toMatch(/did not answer within/);
     expect(ms).toBeLessThan(SYSTEM_BUDGET_MS);
     expect(body.attention.find((a) => a.id === 'infra:gateway')!.severity).toBe('yellow');

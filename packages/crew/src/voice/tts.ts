@@ -18,7 +18,7 @@
 
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { type Stats, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { type Stats, closeSync, constants as fsConstants, createWriteStream, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { platform as osPlatform, release as osRelease } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { Readable, Transform } from 'node:stream';
@@ -128,6 +128,8 @@ export function ttsWavProblem(buf: Buffer): string | null {
     }
     at = body + size + (size % 2);
   }
+  // crew#1559 (1): every chunk header, payload and pad byte fits, and the walk ends exactly at the RIFF end.
+  if (at !== buf.length) return at > buf.length ? 'the last chunk is missing its pad byte' : 'the file ends inside a chunk header';
   if (fmt === null) return 'no usable fmt chunk';
   if (dataBeforeFmt) return 'the data chunk comes before the fmt chunk';
   if (data === 0) return 'no audio in the data chunk';
@@ -146,10 +148,11 @@ export interface PythonInfo {
  * What `<cmd>` is as a CPython 3 interpreter; null when it does not run or is not CPython 3. Run isolated (`-I`) with
  * `cwd` (the voice dir), so no file of the daemon's working directory is ever imported.
  */
-export async function probePython(cmd: string, cwd: string, options: { signal?: AbortSignal; spawn?: VoiceSpawn; timeoutMs?: number } = {}): Promise<PythonInfo | null> {
+export async function probePython(cmd: string, cwd: string, options: { signal?: AbortSignal; spawn?: VoiceSpawn; timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}): Promise<PythonInfo | null> {
   try {
+    // The caller's env (the service's injected one), so the probe finds the Python every other child would.
     const env: NodeJS.ProcessEnv = {};
-    for (const [k, v] of Object.entries(childEnvWithBootEstateDb(process.env))) if (v !== undefined && !k.startsWith('PYTHON')) env[k] = v;
+    for (const [k, v] of Object.entries(childEnvWithBootEstateDb(options.env ?? process.env))) if (v !== undefined && !k.startsWith('PYTHON')) env[k] = v;
     const r = await runChild(cmd, ['-I', '-c', 'import sys,platform;print(platform.python_implementation(), sys.version_info[0], sys.version_info[1], sys.version.split()[0], platform.machine(), sys.executable)'],
       { env, timeoutMs: options.timeoutMs ?? 5000, ...(options.signal === undefined ? {} : { signal: options.signal }) }, options.spawn ?? (nodeSpawn as VoiceSpawn), cwd);
     if (r.code !== 0) return null;
@@ -169,17 +172,22 @@ export function archOfMachine(machine: string): string | null {
   return null;
 }
 
-/** The glibc this Node runs on ("2.35"), null on musl or when it cannot be told. */
+/** The runtime glibc cannot change for the daemon's lifetime: read once (the report is a heavy synchronous call). */
+let glibcRead: { value: string | null } | null = null;
+
+/** The glibc this Node runs on ("2.35"), null on musl or when it cannot be told. Read once per process. */
 function glibcRuntime(): string | null {
+  if (glibcRead !== null) return glibcRead.value;
   try {
     const rep = process.report as unknown as { excludeNetwork: boolean; getReport(): unknown };
     const was = rep.excludeNetwork;
     rep.excludeNetwork = true;
     const header = (rep.getReport() as { header?: { glibcVersionRuntime?: string } }).header;
     rep.excludeNetwork = was;
-    return header?.glibcVersionRuntime ?? null;
+    glibcRead = { value: header?.glibcVersionRuntime ?? null };
+    return glibcRead.value;
   } catch {
-    return null;
+    return null; // not kept: a failed read is asked again rather than taken for musl for good
   }
 }
 
@@ -251,18 +259,23 @@ export class TtsService {
   /** Bumped by every removal: a synthesis that queued before it never starts after it. */
   private epoch = 0;
   private removing = 0;
+  /** The removal in flight: a status read waits for it and probes again (crew#1559 (5)). */
+  private removal: Promise<unknown> | null = null;
+  /** Install admissions, one at a time: a second POST waits for the first's probe and checks (crew#1559 (4)). */
+  private admitting: Promise<unknown> = Promise.resolve();
   private readonly synths = new Set<{ abort: AbortController; done: Promise<unknown> }>();
 
   constructor(deps: TtsDeps) {
     this.dir = resolve(deps.dir);
     this.env = { ...(deps.env ?? process.env) };
-    const python = this.env['WICKED_CREW_PYTHON'];
-    if (python !== undefined && /[\\/]/.test(python)) this.env['WICKED_CREW_PYTHON'] = resolve(python);
+    // Trimmed before it is tested or resolved: a padded absolute path is that path, not one under the cwd.
+    const python = this.env['WICKED_CREW_PYTHON']?.trim();
+    if (python !== undefined) this.env['WICKED_CREW_PYTHON'] = /[\\/]/.test(python) ? resolve(python) : python;
     this.plat = deps.platform ?? osPlatform();
     this.fetchImpl = deps.fetch ?? fetch;
     this.spawnImpl = deps.spawn ?? (nodeSpawn as VoiceSpawn);
     this.exists = deps.exists ?? existsSync;
-    this.probe = deps.probe ?? ((cmd, cwd, signal) => probePython(cmd, cwd, { ...(signal === undefined ? {} : { signal }), spawn: this.spawnImpl }));
+    this.probe = deps.probe ?? ((cmd, cwd, signal) => probePython(cmd, cwd, { ...(signal === undefined ? {} : { signal }), spawn: this.spawnImpl, env: this.env }));
     this.release = deps.osRelease ?? osRelease;
     this.glibc = deps.glibc ?? glibcRuntime;
     this.now = deps.now ?? Date.now;
@@ -369,7 +382,7 @@ export class TtsService {
 
   async status(): Promise<TtsStatusBody> {
     const platformProblem = this.platformProblem();
-    const picked: Picked = platformProblem === null ? await this.pickPython() : { python: null, lock: null, problem: null };
+    const picked: Picked = platformProblem === null ? await this.pickSettled() : { python: null, lock: null, problem: null };
     const problem = platformProblem ?? picked.problem;
     const engine = this.engineInstalled();
     const voices: TtsStatusBody['voices'] = {};
@@ -392,24 +405,55 @@ export class TtsService {
   }
 
   /**
+   * crew#1559 (5): the Python this machine will use, never the "being removed" or aborted answer a removal in flight
+   * gives: a read waits for the removal and probes again (status reports what is there, not the transient).
+   */
+  private async pickSettled(): Promise<Picked> {
+    for (;;) {
+      if (this.removal !== null) await this.removal.catch(() => undefined);
+      const epoch = this.epoch;
+      const picked = await this.pickPython();
+      if (epoch === this.epoch && this.removing === 0) return picked;
+    }
+  }
+
+  /**
    * Install the engine if missing, then the named voices. Resolves at once; `status().install` reports it. Only
    * manifest voices are accepted (400 `voice_unknown`); an unsupported machine is 409 `voice_tts_unsupported`.
    */
   async startInstall(ids: readonly string[]): Promise<{ started: boolean }> {
+    // crew#1559 (4): one admission at a time, so a double click waits for the first's probe and then reads its outcome
+    // (an install running, or nothing to install) instead of probing beside it. A removal fences the queue too: a request
+    // received before or during a DELETE is refused when its turn comes, never installed after the removal.
+    for (const id of ids) this.voiceById(id);
+    if (this.removing > 0) throw new VoiceError(409, 'voice_tts_missing', 'The speech engine is being removed.');
+    const received = this.epoch;
+    const turn = this.admitting.then(() => {
+      if (this.epoch !== received) throw new VoiceError(409, 'voice_tts_missing', 'The speech engine was removed while this install waited.');
+      return this.admit(ids);
+    });
+    this.admitting = turn.catch(() => undefined);
+    return turn;
+  }
+
+  private async admit(ids: readonly string[]): Promise<{ started: boolean }> {
     const wanted = ids.map((id) => this.voiceById(id));
     if (this.removing > 0) throw new VoiceError(409, 'voice_tts_missing', 'The speech engine is being removed.');
     if (this.inflight !== null) throw new VoiceError(409, 'voice_install_running', 'The speech install is already running.');
     const before = this.epoch;
-    const problem = this.platformProblem() ?? (await this.pickPython(true)).problem;
+    const platformProblem = this.platformProblem();
+    // The install uses this probe's answer: it never probes a second time (crew#1559).
+    const picked = platformProblem === null ? await this.pickPython(true) : null;
+    const problem = platformProblem ?? picked?.problem ?? null;
     // DELETE fences on its own epoch: an install also bumps gen.
     if (this.removing > 0 || this.epoch !== before) throw new VoiceError(409, 'voice_tts_missing', 'The speech engine is being removed.');
     if (this.inflight !== null) throw new VoiceError(409, 'voice_install_running', 'The speech install is already running.');
-    if (problem !== null) throw new VoiceError(409, 'voice_tts_unsupported', problem);
+    if (problem !== null || picked === null) throw new VoiceError(409, 'voice_tts_unsupported', problem ?? 'No usable Python.');
     if (this.engineInstalled() && wanted.every((v) => this.voiceInstalled(v))) return { started: false };
     const gen = ++this.gen;
     const abort = new AbortController();
     this.installState = { state: 'running', step: 'engine', error: null };
-    const done = this.install(wanted, gen, abort.signal).then(
+    const done = this.install(wanted, gen, abort.signal, picked).then(
       () => { if (this.gen === gen) this.installState = null; },
       (e: unknown) => {
         if (this.gen !== gen) return;
@@ -424,9 +468,9 @@ export class TtsService {
     if (this.gen === gen && this.installState !== null) this.installState.step = step;
   }
 
-  private async install(wanted: readonly TtsVoice[], gen: number, signal: AbortSignal): Promise<void> {
+  private async install(wanted: readonly TtsVoice[], gen: number, signal: AbortSignal, picked: Picked): Promise<void> {
     mkdirSync(this.root(), { recursive: true });
-    if (!this.engineInstalled()) await this.installEngine(gen, signal);
+    if (!this.engineInstalled()) await this.installEngine(gen, signal, picked);
     for (const v of wanted) {
       if (this.voiceInstalled(v)) continue;
       this.step(gen, `voice:${v.id}`);
@@ -444,8 +488,7 @@ export class TtsService {
     return { ...out, ...extra };
   }
 
-  private async installEngine(gen: number, signal: AbortSignal): Promise<void> {
-    const picked = await this.pickPython(true);
+  private async installEngine(gen: number, signal: AbortSignal, picked: Picked): Promise<void> {
     if (picked.python === null || picked.lock === null) throw new Error(picked.problem ?? 'No usable Python.');
     const tmp = join(this.root(), `engine.tmp-${randomBytes(4).toString('hex')}`);
     try {
@@ -555,6 +598,16 @@ export class TtsService {
 
   /** Remove the engine, the voices and the cached samples. An install in flight is cancelled first. */
   async remove(): Promise<{ removed: boolean }> {
+    const run = this.removeNow();
+    this.removal = run;
+    try {
+      return await run;
+    } finally {
+      if (this.removal === run) this.removal = null;
+    }
+  }
+
+  private async removeNow(): Promise<{ removed: boolean }> {
     this.gen += 1;
     this.epoch += 1;
     this.removing += 1;
@@ -603,14 +656,11 @@ export class TtsService {
       const sum = `${cached}.sha256`;
       if (this.exists(cached)) {
         try {
-          const st = lstatSync(cached);
-          if (!st.isFile() || st.size > this.maxWav) throw new Error('Invalid cached sample.');
-          // The sidecar is lstat-checked before it is opened: a FIFO there would block the event loop, and an
-          // oversized file would be read whole. Only a small regular file is read; anything else is a cache miss.
-          const ss = lstatSync(sum);
-          if (!ss.isFile() || ss.size > TTS_SIDECAR_MAX_BYTES) throw new Error('Invalid cached sidecar.');
-          const wav = readFileSync(cached);
-          if (ttsWavProblem(wav) === null && readFileSync(sum, 'utf8').trim() === createHash('sha256').update(wav).digest('hex')) return wav;
+          // Each file is opened once and only that descriptor is checked and read (readCappedFile): a FIFO, a link,
+          // or a file swapped or grown after its check is a cache miss, never a blocked event loop or a large read.
+          const recorded = readCappedFile(sum, TTS_SIDECAR_MAX_BYTES);
+          const wav = recorded === null ? null : readCappedFile(cached, this.maxWav);
+          if (recorded !== null && wav !== null && ttsWavProblem(wav) === null && recorded.toString('utf8').trim() === createHash('sha256').update(wav).digest('hex')) return wav;
         } catch { /* unreadable or unrecorded: re-made below */ }
         rmSync(cached, { recursive: true, force: true });
         rmSync(sum, { recursive: true, force: true });
@@ -703,6 +753,8 @@ interface RunOptions {
 
 /** Shared by probes, installers and synthesis: kill the group, then await close. */
 function runChild(command: string, args: readonly string[], o: RunOptions, spawnImpl: VoiceSpawn, cwd: string): Promise<RunResult> {
+  // Already cancelled: refused before anything starts, never spawned only to be killed.
+  if (o.signal?.aborted === true) return Promise.reject(o.cancelled?.() ?? new Error('The install was cancelled.'));
   mkdirSync(cwd, { recursive: true });
   return new Promise<RunResult>((resolve, reject) => {
     let child: ChildProcess;
@@ -774,6 +826,36 @@ function runChild(command: string, args: readonly string[], o: RunOptions, spawn
     child.stdin?.on('error', () => undefined);
     child.stdin?.end(o.stdin ?? '');
   });
+}
+
+/**
+ * `path`'s bytes when it is a regular file of at most `max` bytes; null otherwise. Opened once, never following a link
+ * and never blocking (a FIFO), then checked and read through that descriptor only, at most one byte past the size it
+ * was checked at: a file swapped after the check is not the one read, and one that grew after it is refused (crew#1559).
+ */
+function readCappedFile(path: string, max: number): Buffer | null {
+  let fd: number;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
+  } catch {
+    return null;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.size > max) return null;
+    // One byte past the size it was checked at: a file that grew after the check is refused, not read on.
+    const buf = Buffer.alloc(st.size + 1);
+    let n = 0;
+    for (;;) {
+      const got = readSync(fd, buf, n, buf.length - n, n);
+      if (got === 0) break;
+      n += got;
+      if (n > st.size) return null;
+    }
+    return buf.subarray(0, n);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function lstatOrNull(p: string): Stats | null {

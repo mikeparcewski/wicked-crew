@@ -5,10 +5,9 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { WorkflowDef } from '../core/types.js';
+import { wickedHomeDir } from '../core/wicked-home.js';
 
 export const REVIEW_WORKFLOW = 'review-recent-work';
 
@@ -17,9 +16,10 @@ export const REVIEW_WORKFLOW_FILE = fileURLToPath(new URL('../../workflows/revie
 /** The analyze script beside this module (`.js` in dist; under vitest the `.ts` source sits here instead). */
 export const ANALYZE_CLI = fileURLToPath(new URL('./analyze-cli.js', import.meta.url));
 
-/** Where each review's run directory lives: outside the daemon state home (the worker fence), like walkthroughs. */
+/** Where each review's run directory lives: outside the daemon state home (the worker fence), like walkthroughs.
+ *  `WICKED_CREW_REVIEWS_DIR`, else `${WICKED_HOME:-~/.wicked}/reviews` (crew#1802). */
 export function defaultReviewsDir(env: NodeJS.ProcessEnv = process.env): string {
-  return env['WICKED_CREW_REVIEWS_DIR'] ?? join(homedir(), '.wicked', 'reviews');
+  return wickedHomeDir('WICKED_CREW_REVIEWS_DIR', 'reviews', env);
 }
 
 export interface ReviewWorkflowTokens {

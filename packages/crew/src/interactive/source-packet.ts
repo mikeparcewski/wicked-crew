@@ -104,6 +104,12 @@ export interface PacketInput {
   recheckProject?: string | null;
   /** Files the document's canonical packet already holds, by token (reused, never rebuilt). */
   held?: { tokens: Record<string, string[]>; bytes: (name: string) => Buffer };
+  /** (crew#1726) A refine's `chat` is read again up to {@link cutoffTurnId} rather than reused; the records the held
+   *  `chat` brought (attachments, run briefs) ride along, so nothing the document already cites leaves the packet. */
+  refreshChat?: boolean;
+  /** (crew#1726) The conversation snapshot a held `chat` carries when the binding holds it (a Go again's own, up to its
+   *  cutoff); else the newest one held. */
+  chatSnapshot?: string;
   /** Where the chat is kept NOW (its own id, or the archive id a reuse of the id moved it to): attachments and the
    *  chat's context briefs are read from there. File names keep {@link chatId}. Default: `chatId`. */
   storageChatId?: string;
@@ -124,6 +130,8 @@ export interface PacketDeps {
 /** A refusal with a plain reason: a source that fails is struck with it, and nothing of it joins the packet. Shared
  *  with the run-documents staging (slice A), which catches it to refuse one document's token. */
 export class PacketRefused extends Error {}
+/** A `chat` token's conversation snapshot (`conversation-<chat>-to-<turn>.md`), as opposed to the records it brought. */
+const isConversationName = (n: string): boolean => /^conversation-.+-to-[^/]+\.md$/u.test(n);
 const Refused = PacketRefused;
 
 /** Shorten a name to `max` characters, keeping a short trailing extension (a long `x.pdf` stays `.pdf`), with no
@@ -314,7 +322,14 @@ async function documentPathEntry(token: string, chatId: string, deps: Pick<Packe
     if (!ATTACHMENT_ID.test(id)) throw new Refused('not an attachment id');
     // Look up the name BEFORE choosing the read cap. readBeneath checks the current descriptor's size before reading
     // any bytes, so even stale attachment metadata cannot make an oversized text file allocate or read its contents.
-    const att = deps.attachment(chatId, id);
+    // A lookup that throws (the store's own "no such attachment") reads as gone: the caller says so, never fails the
+    // whole packet on it (crew#1726 r2).
+    let att: { name: string; path: string } | null;
+    try {
+      att = deps.attachment(chatId, id);
+    } catch {
+      att = null;
+    }
     const pdf = att !== null && /\.pdf$/i.test(safeName(att.name));
     try {
       got = readStagedAttachment(id, () => att, pdf ? ATTACHMENT_MAX_FILE_BYTES : PACKET_FILE_MAX_BYTES);
@@ -456,11 +471,15 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
     if (bytes.length > PACKET_FILE_MAX_BYTES) throw new Refused(`${name} is over ${PACKET_FILE_MAX_BYTES / 1024} KB`);
     return { name, bytes, sha256: sha256(bytes) };
   };
+  /** crew#1726: on a refreshed `chat`, a name the document's binding already holds keeps crew's held bytes (its packet
+   *  never has two contents under one name), and the held token's files are known by name. */
+  const heldChat = input.refreshChat === true ? (input.held?.tokens['chat'] ?? []) : [];
+  const heldNames = input.refreshChat === true ? new Set(Object.values(input.held?.tokens ?? {}).flat()) : new Set<string>();
   /** One source's files, joined to the packet only when the whole source succeeds. */
   class Stage {
     readonly files = new Map<string, PacketFile>();
     add(name: string, bytes: Buffer): PacketFile {
-      const f = fileOf(name, bytes);
+      const f = fileOf(name, heldNames.has(name) ? input.held!.bytes(name) : bytes);
       const had = this.files.get(name) ?? out.get(name);
       if (had !== undefined) {
         if (had.sha256 !== f.sha256) throw new Error(`two different contents under one name: ${name}`);
@@ -547,6 +566,12 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
         names.push(...(tokens[`attachment:${att.id}`] ?? []));
         continue;
       }
+      // crew#1726 r2: a file the held snapshot brought rides by its held bytes, listed as here (it may be gone since).
+      const held = ATTACHMENT_ID.test(att.id) ? heldChat.filter((n) => n.startsWith(`attachment-${att.id}-`)) : [];
+      if (held.length > 0) {
+        for (const n of held) names.push(stage.add(n, input.held!.bytes(n)).name);
+        continue;
+      }
       try {
         names.push(...await attachmentFiles(stage, att.id));
       } catch (err) {
@@ -618,10 +643,16 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
     const stage = new Stage();
     try {
       const held = input.held?.tokens[token];
-      if (held !== undefined && held.length > 0) {
-        for (const n of held) stage.add(n, input.held!.bytes(n));
+      if (held !== undefined && held.length > 0 && !(token === 'chat' && input.refreshChat === true)) {
+        // crew#1726 r2: the binding unions every snapshot a `chat` token was given; a held `chat` carries one conversation
+        // with all its records, so a Go again never grows past what it launched with: this attempt's own snapshot when
+        // held (never a later refine's), else the newest one recorded.
+        const snapshots = token === 'chat' ? held.filter(isConversationName) : [];
+        const one = input.chatSnapshot !== undefined && snapshots.includes(input.chatSnapshot) ? input.chatSnapshot : snapshots.at(-1);
+        const keep = snapshots.length > 1 ? held.filter((n) => !isConversationName(n) || n === one) : held;
+        for (const n of keep) stage.add(n, input.held!.bytes(n));
         stage.commit(token);
-        tokens[token] = [...held];
+        tokens[token] = [...keep];
         continue;
       }
       let names: string[];
@@ -672,6 +703,15 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
         if (leftOut > 0) struck.push({ token: 'chat', reason: `${leftOut} answer${leftOut === 1 ? '' : 's'} left out: records outside the target project` });
         const f = stage.add(`conversation-${chatId}-to-${cutoff ?? 'empty'}.md`, Buffer.from(lines.join('\n'), 'utf8'));
         names = [f.name, ...new Set(extra)];
+        // crew#1726: a refreshed snapshot keeps the records the held one brought (an attachment past the turn window, a
+        // brief no longer readable), by crew's own bytes; a name this read already staged keeps this read's file.
+        if (input.refreshChat === true) {
+          for (const n of input.held?.tokens['chat'] ?? []) {
+            if (packetDirOf(n) !== 'records' || stage.files.has(n) || out.has(n)) continue;
+            stage.add(n, input.held!.bytes(n));
+            names.push(n);
+          }
+        }
       } else if (token.startsWith('message:')) {
         const turn = token.slice('message:'.length);
         if (!TURN_ID.test(turn)) throw new Refused('not a turn id');
@@ -757,6 +797,8 @@ export async function buildSourcePacket(input: PacketInput, deps: PacketDeps): P
  * where figures may come from and how to cite them, and gives the reviewing step the hashes crew holds, which the writer
  * cannot change.
  */
+/** `recordsRepo: false` = a refine: the writer's own self-check has no `--repo` folders (no repository rides a revision,
+ *  CREW-UX-8), and crew's landing guard checks the citations instead (crew#1727). */
 export function packetClause(inboxDir: string, packet: SourcePacket, notesWhere: string, opts: { recordsRepo?: boolean } = {}): string {
   const records = packet.files.filter((f) => packetDirOf(f.name) === 'records').map((f) => f.name);
   const sources = packet.files.filter((f) => packetDirOf(f.name) === 'sources' && !f.name.startsWith('MANIFEST-')).map((f) => f.name);
@@ -772,7 +814,9 @@ export function packetClause(inboxDir: string, packet: SourcePacket, notesWhere:
     `records' figure. Cite each figure ` +
     `with data-source="<file>:<line>", the file's name as it is in records/ without the folder ` +
     (opts.recordsRepo === false
-      ? `(sources/ cannot be cited; this revision's self-check runs without repository folders). `
+      ? `(sources/ cannot be cited; your own self-check runs without folders, but when the revision lands crew checks every ` +
+        `citation against records/ and the document's repositories, and refuses a cited file that is not there or a cited ` +
+        `line that does not carry the text). `
       : `(records/ is one of the self-check's --repo folders; sources/ is not, so nothing there can be cited). `) +
     `Leave out any claim nothing in ` +
     `the packet supports, and list it ${notesWhere}. ` +

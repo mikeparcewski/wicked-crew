@@ -25,7 +25,7 @@ import { lstat, readFile, statfs, stat } from 'node:fs/promises';
 import { cpus, homedir, loadavg } from 'node:os';
 import { delimiter, join } from 'node:path';
 
-import { HOST_FLOOR_BENCH_COPY, HOST_FLOOR_UNKNOWN_COPY } from './seat-standing.js';
+import { HOST_FLOOR_UNKNOWN_COPY, hostFloorBenchCopy } from './seat-standing.js';
 
 import type {
   AcpCliDiagnostics,
@@ -400,7 +400,9 @@ export async function probeBroker(input: BrokerProbeInput): Promise<SystemInfraR
     return infraRow('broker', 'unknown', why, 'Re-check; if it persists, the engine binary (WICKED_CORE_EXE) may be missing.', started, details, timeoutMs);
   }
   if (failing.length > 0) {
-    return infraRow('broker', 'degraded', `credential refresh failing: ${failing.join(', ')}; the credential is served until it expires`, 'Sign the CLI in again before its credential expires.', started, details, timeoutMs);
+    // crew#1845: the remedy names the CLI to sign in again, as the reason names it.
+    const who = failing.map((f) => f.split(' (', 1)[0]!).join(' and ');
+    return infraRow('broker', 'degraded', `credential refresh failing: ${failing.join(', ')}; the credential is served until it expires`, `Sign ${who} in again on the Helpers page before its credential expires.`, started, details, timeoutMs);
   }
   if (signedIn.length === 0) {
     return infraRow('broker', 'degraded', `no CLI is signed in to the broker (${answered.join(', ')} answered signed out)`, 'Sign a CLI in on the Helpers page.', started, details, timeoutMs);
@@ -1131,7 +1133,7 @@ function hostBenched(seat: RosterSeatLike): boolean {
 
 /** The real reason the engine gives the seat no work on this floor: the bench, or the bench read failing closed. */
 function hostFloorReason(seat: RosterSeatLike): string | null {
-  if (typeof seat.host_floor_bench === 'string' && seat.host_floor_bench !== '') return HOST_FLOOR_BENCH_COPY;
+  if (typeof seat.host_floor_bench === 'string' && seat.host_floor_bench !== '') return hostFloorBenchCopy(seat.host_floor_bench);
   if (typeof seat.host_floor_unknown === 'string' && seat.host_floor_unknown !== '') return HOST_FLOOR_UNKNOWN_COPY;
   return null;
 }

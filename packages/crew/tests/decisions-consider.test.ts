@@ -31,6 +31,7 @@ import { RULE_CONSIDERED } from '../src/decisions/events.js';
 import { DecisionLedger } from '../src/decisions/ledger.js';
 import type { DecisionRecord } from '../src/decisions/types.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
+import { withRunViews } from './support/run-views.js';
 
 const scratches: string[] = [];
 afterEach(() => {
@@ -107,7 +108,7 @@ function service(opts: { considerRules?: boolean; emit?: boolean } = {}) {
   const emitted: Array<{ type: string; payload: Record<string, unknown>; key: string }> = [];
   const projects = new Map<string, string>([['c1', 'kestrel'], ['r1', 'kestrel'], ['c2', 'heron']]);
   const svc = new ConsiderationService({
-    adapter: {
+    adapter: withRunViews({
       ...adapter,
       sessionsDetail: vi.fn(async () => [
         {
@@ -119,7 +120,7 @@ function service(opts: { considerRules?: boolean; emit?: boolean } = {}) {
         },
       ]),
       workOutput: vi.fn(async (unitId: string) => (unitId === 'r1:implement' ? 'Ran lint first [rule:proposal:k1]; also [rule:proposal:nope].' : null)),
-    } as never,
+    }) as never,
     ledger,
     transcripts,
     projectOf: (id) => projects.get(id),
@@ -320,7 +321,7 @@ describe('the routes', () => {
     const transcripts = new ChatTranscriptStore({ dir: join(dir, 'chats') });
     const chatHistory = new ChatHistoryStore(transcripts, null, { dir: join(dir, 'history') });
     chatHistory.opened('c1', { cli: 'codex', actorId: 'human-1' });
-    const adapter = {
+    const adapter = withRunViews({
       ...engine(),
       sessionsDetail: vi.fn(async () => [
         { session: { id: 'r1', workflow_id: 'bug', status: 'completed', clis: ['claude'], unit_ix: 0, attempt: 0 }, units: [{ id: 'r1:u0', ord: 0, description: 'plan', status: 'done' }] },
@@ -329,7 +330,7 @@ describe('the routes', () => {
       listRepos: vi.fn(async () => []),
       workOutput: vi.fn(async () => 'All good [rule:proposal:k1].'),
       steeringSupported: vi.fn(() => true),
-    };
+    });
     const index = new MembershipIndex();
     index.set('r1', 'kestrel');
     index.set('c1', 'kestrel');

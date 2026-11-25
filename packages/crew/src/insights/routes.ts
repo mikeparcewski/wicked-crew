@@ -4,7 +4,8 @@
  *
  * (DES-CATALOG-002 CS6) `POST /insights/facts {token}` is WORKER-FACING: the `run-cost` workflow's `facts` Tool
  * (`wicked-crew insights-facts`) asks it with its unit's capability token, which is its only credential (it is a
- * unit-token route in `api/auth.ts`). It answers the cost facts of the last 90 days ({@link costFacts}).
+ * unit-token route in `api/auth.ts`). It answers the cost facts of the last 90 days ({@link costFacts}): the runs of the
+ * asking run's project when it is filed in one (crew#1416), else every run on the daemon.
  */
 
 import type { FastifyInstance, FastifyReply } from 'fastify';
@@ -13,6 +14,7 @@ import type { Actor } from '../core/types.js';
 import { API_PREFIX } from '../api/api-prefix.js';
 import { LOCAL_ACTOR } from '../api/auth.js';
 import type { AuditLog } from '../api/audit.js';
+import { recordProposalDecision } from '../api/proposal-decisions.js';
 import { isHumanOperator } from '../api/watch-routes.js';
 import { METRICS } from './analyze.js';
 import { MIN_SAMPLE } from './stats.js';
@@ -20,6 +22,7 @@ import { RecommendationError, type ReviewService } from './review-service.js';
 import type { InsightsStore } from './store.js';
 import type { SessionView } from 'wicked-crew-api-types';
 import { runNameOf } from '../core/run-identity.js';
+import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import { RUN_COST_FACTS_CMD, RUN_COST_FACTS_STEP, RUN_COST_WORKFLOW, costFacts, costWindow } from './cost.js';
 import type { CollectOptions } from './review-service.js';
 import type { RunFact } from './run-facts.js';
@@ -139,7 +142,8 @@ export function registerInsightsRoutes(app: FastifyInstance, deps: InsightsRoute
       if (!parsed.success) return reply.code(400).send({ error: 'body must be { reason: <why, 1 to 500 characters> }' });
       const { id } = req.params as { id: string };
       try {
-        const res = await deps.service.dismiss(id, parsed.data.reason);
+        // crew#1261: the person turned its proposal down.
+        const res = await deps.service.dismiss(id, parsed.data.reason, (pid) => recordProposalDecision(deps.audit, actor, pid, 'rejected'));
         deps.audit.record('insights.recommendation.dismissed', actor, { detail: { id, reason: parsed.data.reason } });
         return res;
       } catch (err) {
@@ -171,8 +175,19 @@ export function registerInsightsRoutes(app: FastifyInstance, deps: InsightsRoute
       }
       const now = (facts.now ?? Date.now)();
       const window = costWindow(now);
-      const runs = await facts.collect({ startMs: window.startMs, endMs: window.endMs }, now);
-      return costFacts(runs, { window, generatedAtMs: now, excludeRunId: unit.runId });
+      const all = await facts.collect({ startMs: window.startMs, endMs: window.endMs }, now);
+      // (crew#1416) The run-cost card takes a project: a run filed in one models that project's runs (the question was
+      // about them); a run in the default project, or in none, models every run on the daemon, and the facts say which.
+      // The asking run's project is read from the same served views as every other run's (the project membership join).
+      const asked = all.find((r) => r.id === unit.runId)?.projectId ?? null;
+      const project = asked !== null && asked !== '' && asked !== DEFAULT_PROJECT_ID ? asked : null;
+      const runs = project === null ? all : all.filter((r) => r.projectId === project || r.id === unit.runId);
+      return costFacts(runs, {
+        window,
+        generatedAtMs: now,
+        excludeRunId: unit.runId,
+        ...(project !== null ? { scope: `the runs filed in this run's project (${project}), every repository; other projects' runs are left out` } : {}),
+      });
     },
   );
 }

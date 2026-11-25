@@ -24,7 +24,7 @@ import { Core } from 'wicked-core-ts';
 
 import type { EditorConformanceSummary, InstallEditorRefusal, InstallEditorResponse, PackCheckResult } from '../core/types.js';
 import { execCapped } from '../core/exec.js';
-import { EditorInstallConflict, EditorRegistry, PackEditorSchema, PluginManifestSchema, RUN_PLUGIN_CASES, editorEntryDigest, type InstalledPack } from './registry.js';
+import { EditorInstallConflict, EditorRegistry, PackEditorSchema, PluginManifestSchema, RUN_PLUGIN_CASES, editorEntryDigest, packEditorDigest, type InstalledPack } from './registry.js';
 import type { ConformanceProvisioner } from './conformance-runtime.js';
 
 export type PackCheckRunner = (packRoot: string) => Promise<PackCheckResult>;
@@ -311,15 +311,16 @@ async function readCheckedPack(packRootRaw: string, check: PackCheckRunner): Pro
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
 
-/** The approval list a pack with skills or blocks would need (§3.2): the 501 body. */
+/** The approval list a pack with skills or blocks would need (§3.2; crew#1703): the 501 body. Its `error` is what the
+ *  person installing reads (garden's installer prints it), so it says what to do, in plain words. */
 function approvalList(pack: ParsedPack, verdict: PackCheckResult): InstallEditorRefusal {
   const m = pack.manifest;
   return {
     code: 'pack_ships_skills_or_blocks',
     error:
-      'this pack also ships skills or blocks, and their own approval step (DES-artifact-editor-plugins §3.2 ' +
-      '"Add these") is not built yet, so it cannot be installed. An editor-only pack can be. ' +
-      'This is what the install would ask you to approve.',
+      'This pack also brings its own skills or blocks, and this daemon cannot add those yet, so nothing was installed. ' +
+      "To use the pack's editor now, install an editor-only copy of it: its editors folder and a wicked-pack.json " +
+      'without skills_dir, domains or blocks.',
     check: verdict,
     pack: {
       name: str(m['name']),
@@ -340,11 +341,11 @@ function approvalList(pack: ParsedPack, verdict: PackCheckResult): InstallEditor
   };
 }
 
-/** The admitted manifest entry's digest, over the same parse the registry reads it back with. */
+/** The admitted manifest entry's digest, over the same parse and the same digest the registry reads it back with. */
 function digestOf(entry: Record<string, unknown>): string {
   const parsed = PackEditorSchema.safeParse(entry);
   if (!parsed.success) throw new PackInstallError(400, `editor ${str(entry['id'])}: manifest entry refused (${parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')})`);
-  return editorEntryDigest(parsed.data);
+  return packEditorDigest(parsed.data);
 }
 
 /** A run plugin's admitted manifest entry digest (CS7), over the same parse {@link readPackPlugin} reads it with. */

@@ -13,6 +13,7 @@ import { crewStateHome, isDefaultStateHome, wickedWorkRoot } from '../projects/s
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { RunReadLane } from './run-read-lane.js';
 import type { Core as CoreHandle, LaunchOptions, Subscription } from 'wicked-core-ts';
 import type { GateAction, MaintenanceState, PowerPauseRequest, PowerState, Rigor } from 'wicked-crew-api-types';
 import { AskError, AskUnsupportedError, type AskRequest, type AskTicket, type AskUnit } from './types.js';
@@ -54,7 +55,7 @@ import type {
 import { DEFAULT_SETTINGS } from './types.js';
 import type { EstateRequirementsRead } from '../api/requirements.js';
 import { BASE_SKILL_REF_SHAPE } from '../skills/base-skill.js';
-import { execCapped } from './exec.js';
+import { cloneRepository, type AdoCloneSeam } from './repo-clone.js';
 import { gitCommitIdents, usableGitIdent, type GitIdent } from '../setup/known.js';
 import { composeDeliverWorkflow, DELIVER_PHASE_ID, deliverPresetStep, deliverIdentityFor, deliverRepoFor, isGitHubLogin, pushIdentityOf, readDeliverOriginUrl } from './deliver.js';
 import { engineCampaignDef, engineRosterJson } from './engine-roster.js';
@@ -729,6 +730,7 @@ const VIEW_NEUTRAL_CALLS: ReadonlySet<string> = new Set([
   'campaignDetail',
   'sessions',
   'sessionsDetail',
+  'sessionDetail',
   'workOutput',
   'unitTranscript',
   'runEvents',
@@ -804,7 +806,6 @@ interface ViewsRead {
   readonly epoch: number;
   readonly at: number;
   readonly snapshot: RunViewsSnapshot;
-  readonly byId: ReadonlyMap<string, SessionView>;
 }
 
 function deepFreeze(value: unknown): void {
@@ -1418,6 +1419,11 @@ export class CoreAdapter {
   private readonly listeners = new Set<CoreEventListener>();
   /** F35: the views version, moved by every engine frame (bar the live streams) and every engine call that may write. */
   private viewsEpoch = 0;
+  /** crew#1779: one-run reads a frame's listeners start wait in this lane, behind every request's read. */
+  private readonly runReads = new RunReadLane<SessionView | undefined>(
+    (runId) => this.runViewRead(runId),
+    (view) => (view === undefined ? undefined : structuredClone(view)),
+  );
   private readonly launchListeners = new Set<LaunchListener>();
   /** crew#1145: what each engine launch awaits first (`setLaunchGate`); `null` = nothing. */
   private launchGate: (() => Promise<void>) | null = null;
@@ -1645,13 +1651,16 @@ export class CoreAdapter {
     // F35: a frame may follow a change to a run, so the views snapshot is stale from here (before
     // any listener runs, so a read a listener starts sees the change).
     if (!VIEW_NEUTRAL_EVENTS.has(event.type)) this.viewsEpoch++;
-    for (const listener of this.listeners) {
-      try {
-        listener(event);
-      } catch {
-        /* isolate a faulty listener */
+    // crew#1779: a one-run read any listener starts from here takes the frame lane (`runView`).
+    this.runReads.inFrame(() => {
+      for (const listener of this.listeners) {
+        try {
+          listener(event);
+        } catch {
+          /* isolate a faulty listener */
+        }
       }
-    }
+    });
   }
 
   /**
@@ -2929,15 +2938,24 @@ export class CoreAdapter {
 
   /**
    * One run's view (as `sessionsDetail` serves it), or `undefined` for an unknown id: the caller's own
-   * copy of that run only, so a request about one run costs O(1) in the number of runs on the store
-   * once the snapshot is read (F35). `fresh`: the caller holds a newer record of the store than the
-   * snapshot's (say a gate row the engine wrote before its frame landed), so the run is read from a
-   * fold that starts after this call.
+   * copy. crew#1775: read through the engine's per-run read (`sessionDetail`, core#1346), off the actor,
+   * so a request about one run never folds the store. The whole-store snapshot was invalidated by every
+   * engine frame, so while runs were active each gate read paid for a fresh fold of every run (and its
+   * parse on the event loop), and studio's per-page gate reads queued behind those folds. The read
+   * starts now, so it is never older than a change this adapter made or a frame it delivered.
+   * crew#1779: a read a frame listener starts takes the frame lane ({@link RunReadLane}): it waits
+   * behind no request's read, and the listeners of one frame share one read of the run.
    */
-  async runView(runId: string, opts?: { fresh?: boolean }): Promise<SessionView | undefined> {
-    if (opts?.fresh === true) this.viewsEpoch++;
-    const view = (await this.viewsRead()).byId.get(runId);
-    return view === undefined ? undefined : structuredClone(view);
+  async runView(runId: string): Promise<SessionView | undefined> {
+    return this.runReads.get(runId);
+  }
+
+  /** One run's read and its identity, as one operation: the frame lane shares and bounds all of it (crew#1779). */
+  private async runViewRead(runId: string): Promise<SessionView | undefined> {
+    const view = JSON.parse(await this.core.sessionDetail(runId)) as SessionView | null;
+    if (view === null) return undefined;
+    await this.resolveIdentities([view]);
+    return view;
   }
 
   /**
@@ -2992,7 +3010,7 @@ export class CoreAdapter {
       const views = JSON.parse(await this.core.sessionsDetail()) as SessionView[];
       await this.resolveIdentities(views);
       deepFreeze(views);
-      const done: ViewsRead = { epoch, at, snapshot: Object.freeze({ views }), byId: new Map(views.map((v) => [v.session.id, v] as const)) };
+      const done: ViewsRead = { epoch, at, snapshot: Object.freeze({ views }) };
       this.viewsLatest = done;
       return done;
     })();
@@ -3491,7 +3509,7 @@ export class CoreAdapter {
    * Clone a remote git URL and return the persisted `RepoEntry` from registration.
    * `checkoutPath` overrides the state-home-derived repos destination.
    */
-  async cloneAndRegister(name: string, gitUrl: string, checkoutPath?: string, opts: { allowProtocols?: string } = {}): Promise<RepoEntry> {
+  async cloneAndRegister(name: string, gitUrl: string, checkoutPath?: string, opts: { allowProtocols?: string; ado?: AdoCloneSeam } = {}): Promise<RepoEntry> {
     const reposRoot = wickedWorkRoot('repos');
     let cloneDir: string;
     if (checkoutPath) {
@@ -3540,12 +3558,8 @@ export class CoreAdapter {
 
     if (needsClone) {
       try {
-        await execCapped('git', ['clone', '--', gitUrl, cloneDir], {
-          timeout: 5 * 60 * 1000,
-          // crew-0182: a repository that needs a sign-in fails in seconds with git's own reason, instead of waiting on a
-          // credential prompt no one can answer until the 5-minute timeout.
-          env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...(opts.allowProtocols !== undefined ? { GIT_ALLOW_PROTOCOL: opts.allowProtocols } : {}) },
-        });
+        // crew#1839: an Azure DevOps URL clones with the daemon's Azure DevOps credential when it holds one.
+        await cloneRepository(gitUrl, cloneDir, opts);
       } catch (err) {
         // Cleanup is best-effort: swallow any cleanup error so the original
         // clone failure is what the caller sees.

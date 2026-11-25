@@ -11,7 +11,7 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, RosterSeat, TeamRow } from '../src/core/types.js';
 import { openPlanGateRisk } from '../src/team/routes.js';
 import { StandingOrderEvaluator, type GateFact, type RunFacts } from '../src/standing-orders/evaluator.js';
-import { seatParser } from '../src/standing-orders/parse.js';
+import { chatSeat, HOST_FLOOR_NO_ANSWER_SEAT, seatParser } from '../src/standing-orders/parse.js';
 import { registerStandingOrderRoutes, ruleFromAnswer, type ParseOutcome } from '../src/standing-orders/routes.js';
 import { refusal, StandingOrderStore, type StandingOrderRule } from '../src/standing-orders/store.js';
 import { AuditLog } from '../src/api/audit.js';
@@ -497,6 +497,64 @@ describe('the seat parse', () => {
     expect(await seatParser({ adapter: silent.adapter, roster, timeoutMs: 30 })('x')).toMatchObject({ ok: false, code: 502, error: 'the claude seat did not answer in 0.03 s' });
     expect(silent.calls).toEqual(['launch claude with-projects', `cancel ${String(silent.launches[0]!['sessionId'])}`]);
     expect(await seatParser({ adapter: silent.adapter, roster: () => [] })('x')).toMatchObject({ ok: false, code: 409, error: 'no seat can take a turn to read the order — sign a seat in from the Helpers page' });
+  });
+
+  it('on the host floor an answer-only turn is seated on claude or pi, never a seat the engine refuses there (crew#1704, core#1744)', async () => {
+    const prev = process.env['WICKED_SEAT_FLOOR'];
+    const codexFirst = (): RosterSeat[] =>
+      [
+        { key: 'codex', binary: 'codex', chat_admission: { unscoped: { ok: true } } },
+        { key: 'agy', binary: 'agy', chat_admission: { unscoped: { ok: true } } },
+        // The engine runs the invocation's executable, not the binary field (codex r1 on #1817).
+        { key: 'mislabelled', binary: 'claude', headless_invocation: 'codex exec {PROMPT}', chat_admission: { unscoped: { ok: true } } },
+        { key: 'my-sonnet', binary: 'node', headless_invocation: '"/opt/bin/claude.cmd" -p {PROMPT}', chat_admission: { unscoped: { ok: true } } },
+      ] as unknown as RosterSeat[];
+      // (codex r2 on #1817) The engine's own reading of the executable: a quoted directory joins the
+      // name after it, and any final extension is dropped (its `file_stem`).
+      for (const inv of ['"/opt/Agent Tools"/claude -p "{PROMPT}"', '/opt/bin/claude.sh -p {PROMPT}']) {
+        const only = [{ key: 'wrapped', binary: 'x', headless_invocation: inv, chat_admission: { unscoped: { ok: true } } }] as unknown as RosterSeat[];
+        expect(chatSeat(only, true)?.key).toBe('wrapped');
+      }
+    try {
+      // The container floor (the default) keeps the roster's first admitted seat.
+      process.env['WICKED_SEAT_FLOOR'] = 'container';
+      const onContainer = fakeAdapter(JSON.stringify(gateRule('intake', 'approve', 'p-a')));
+      expect(await seatParser({ adapter: onContainer.adapter, roster: codexFirst })('x')).toMatchObject({ ok: true, seat: 'codex' });
+      // Red on main: the host floor seated codex too, which the engine refuses tool-less there (a 502).
+      process.env['WICKED_SEAT_FLOOR'] = 'host';
+      const onHost = fakeAdapter(JSON.stringify(gateRule('intake', 'approve', 'p-a')));
+      expect(await seatParser({ adapter: onHost.adapter, roster: codexFirst })('x')).toMatchObject({ ok: true, seat: 'my-sonnet' });
+      expect(onHost.calls).toEqual(['launch my-sonnet with-projects']);
+      // A claude the engine benches on the host floor (its managed settings silence the gate hook,
+      // core#1744) and a benched pi are never seated: no launch, a 409 that names the floor that works.
+      // Their admissions are what the daemon serves for a benched, signed-in seat (seat-standing.ts):
+      // refused, source `engine` — the only signed-in seats there (codex r1 on #1817).
+      const refusedHere = { ok: false, reason: 'agents on this computer run on the host…', source: 'engine' };
+      const benched = (): RosterSeat[] =>
+        [
+          { key: 'claude', binary: 'claude', chat_admission: { unscoped: refusedHere }, host_floor_bench: "claude can't be governed on the wrapped path on this machine: …" },
+          { key: 'pi', binary: 'pi', chat_admission: { unscoped: refusedHere }, host_floor_bench: 'runs only on the container floor: …' },
+        ] as unknown as RosterSeat[];
+      const none = fakeAdapter(JSON.stringify(gateRule('intake', 'approve', 'p-a')));
+      const out = await seatParser({ adapter: none.adapter, roster: benched })('x');
+      expect(out).toEqual({ ok: false, code: 409, error: HOST_FLOOR_NO_ANSWER_SEAT });
+      expect(HOST_FLOOR_NO_ANSWER_SEAT).toContain('WICKED_SEAT_FLOOR=container');
+      expect(none.calls).toEqual([]);
+      // An admitted codex beside them is signed in too, and refused here as well.
+      const withCodex = (): RosterSeat[] => [{ key: 'codex', binary: 'codex', chat_admission: { unscoped: { ok: true } } }, ...benched()] as unknown as RosterSeat[];
+      expect(await seatParser({ adapter: none.adapter, roster: withCodex })('x')).toEqual({ ok: false, code: 409, error: HOST_FLOOR_NO_ANSWER_SEAT });
+      expect(none.calls).toEqual([]);
+      // No seat signed in at all (a benched seat signed out reads `auth`) is still the caller's own sentence.
+      const signedOut = (): RosterSeat[] =>
+        [{ key: 'claude', binary: 'claude', chat_admission: { unscoped: { ok: false, reason: 'signed out', source: 'auth' } }, host_floor_bench: '…' }] as unknown as RosterSeat[];
+      for (const r of [() => [] as RosterSeat[], signedOut]) {
+        expect(await seatParser({ adapter: none.adapter, roster: r })('x')).toMatchObject({ ok: false, code: 409, error: 'no seat can take a turn to read the order — sign a seat in from the Helpers page' });
+      }
+      expect(chatSeat(withCodex(), false)?.key).toBe('codex');
+    } finally {
+      if (prev === undefined) delete process.env['WICKED_SEAT_FLOOR'];
+      else process.env['WICKED_SEAT_FLOOR'] = prev;
+    }
   });
 
   it('a path that will not launch is a 502 that leaves no reply timer armed (codex on #686)', async () => {

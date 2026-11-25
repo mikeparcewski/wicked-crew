@@ -75,6 +75,8 @@ beforeEach(() => {
       if (holdFolds) held.push(() => resolve(json));
       else setImmediate(() => resolve(json));
     });
+  // crew#1775: the engine's one-run read (core#1346), the store as it is when it starts.
+  core()['sessionDetail'] = async (id: string) => JSON.stringify((store as Array<{ session: { id: string } }>).find((v) => v.session.id === id) ?? null);
   core()['interactionRequests'] = async (sessionId: string) =>
     JSON.stringify([{ id: `g-${sessionId}`, session_id: sessionId, kind: 'gate', ord: 2, prompt: 'Approve step 2?', status: 'open', created_at: 1_785_614_004_730 }]);
   core()['runEvents'] = async () => '[]';
@@ -105,6 +107,11 @@ async function routes(): Promise<FastifyInstance> {
   return app;
 }
 
+/** One run out of the run list's snapshot (what a caller of `sessionsDetail` sees of it). */
+async function viewOf(id: string): Promise<{ session: { status: string } } | undefined> {
+  return (await adapter.sessionsDetail()).find((v) => v.session.id === id);
+}
+
 /** M concurrent gate polls over the N runs; the folds and full parses they cost. */
 async function pollGates(m: number): Promise<{ folds: number; fullParses: number }> {
   const server = await routes();
@@ -118,10 +125,10 @@ async function pollGates(m: number): Promise<{ folds: number; fullParses: number
 }
 
 describe('F35: run views are read through one shared snapshot', () => {
-  it('40 concurrent gate polls over 150 runs cost one fold and one parse of the store, not one per poll', async () => {
+  it('40 concurrent gate polls over 150 runs fold no store and parse no copy of it (crew#1775: one run each)', async () => {
     const cost = await pollGates(40);
-    expect(cost.folds).toBe(1);
-    expect(cost.fullParses).toBe(1);
+    expect(cost.folds).toBe(0);
+    expect(cost.fullParses).toBe(0);
   });
 
   it('the cost does not grow with the number of runs or of polls', async () => {
@@ -136,49 +143,46 @@ describe('F35: run views are read through one shared snapshot', () => {
     expect(large).toEqual(small);
   });
 
-  it('runView copies one run, so a caller decorating it leaves the snapshot and other callers untouched', async () => {
-    const [a, b] = await Promise.all([adapter.runView('run-3'), adapter.runView('run-3')]);
+  it('sessionsDetail hands each caller its own copy, so a caller decorating it leaves the snapshot and other callers untouched', async () => {
+    const [a, b] = await Promise.all([adapter.sessionsDetail(), adapter.sessionsDetail()]);
     expect(folds).toBe(1);
-    a!.session.status = 'failed';
-    expect(b!.session.status).toBe('awaiting_human');
-    expect((await adapter.runView('run-3'))!.session.status).toBe('awaiting_human');
+    a[3]!.session.status = 'failed';
+    expect(b[3]!.session.status).toBe('awaiting_human');
+    expect((await viewOf('run-3'))!.session.status).toBe('awaiting_human');
     expect(Object.isFrozen((await adapter.runViewsSnapshot()).views[3]!.session)).toBe(true);
-    expect(await adapter.runView('no-such-run')).toBeUndefined();
+    expect(await viewOf('no-such-run')).toBeUndefined();
   });
 
   it('a snapshot serves until an engine frame, an engine write, or its age says the store may have changed', async () => {
-    await adapter.runView('run-0');
+    await viewOf('run-0');
     await adapter.sessionsDetail();
     expect(folds).toBe(1);
     // The live streams and the actor's liveness answer change no view.
     for (const type of ['heartbeat', 'cliOutputDelta', 'unitOutputDelta', 'toolActivity', 'chatDelta', 'terminalOutput']) {
       frame({ type, session: 'run-0' });
     }
-    await adapter.runView('run-0');
+    await viewOf('run-0');
     expect(folds).toBe(1);
     // Any other frame may follow a change.
     store = [parkedRun('run-0'), { ...(parkedRun('run-1') as object), session: { id: 'run-1', status: 'completed', team_plan: { rev: 1 } } }];
     frame({ type: 'sessionCompleted', session: 'run-1' });
-    expect((await adapter.runView('run-1'))!.session.status).toBe('completed');
+    expect((await viewOf('run-1'))!.session.status).toBe('completed');
     expect(folds).toBe(2);
     // An engine call that may write (here a cancel) moves the version too: read-your-writes.
     core()['cancelRun'] = async () => JSON.stringify('cancelled');
     store = [{ ...(parkedRun('run-0') as object), session: { id: 'run-0', status: 'cancelled', team_plan: { rev: 1 } } }];
     await adapter.cancelRun('run-0');
-    expect((await adapter.runView('run-0'))!.session.status).toBe('cancelled');
+    expect((await viewOf('run-0'))!.session.status).toBe('cancelled');
     expect(folds).toBe(3);
     // A known read does not.
     await adapter.sessions().catch(() => undefined);
-    await adapter.runView('run-0');
+    await viewOf('run-0');
     expect(folds).toBe(3);
     // Age, on the monotonic clock, bounds a change no frame reported.
     const now = performance.now();
     vi.spyOn(performance, 'now').mockReturnValue(now + VIEWS_SNAPSHOT_MAX_AGE_MS + 1);
-    await adapter.runView('run-0');
+    await viewOf('run-0');
     expect(folds).toBe(4);
-    // A caller holding a newer record asks for a fresh read.
-    await adapter.runView('run-0', { fresh: true });
-    expect(folds).toBe(5);
   });
 
   it('the shared snapshot cannot be changed through what runViewsSnapshot hands out', async () => {
@@ -191,12 +195,12 @@ describe('F35: run views are read through one shared snapshot', () => {
 
   it('a running fold older than the bound is not joined; the caller takes the queued one', async () => {
     holdFolds = true;
-    const first = adapter.runView('run-0');
+    const first = viewOf('run-0');
     await tick();
     expect(folds).toBe(1);
     const now = performance.now();
     vi.spyOn(performance, 'now').mockReturnValue(now + VIEWS_SNAPSHOT_MAX_AGE_MS + 1);
-    const late = adapter.runView('run-0');
+    const late = viewOf('run-0');
     await tick();
     expect(folds).toBe(1);
     held.shift()!();
@@ -209,7 +213,7 @@ describe('F35: run views are read through one shared snapshot', () => {
 
   it('a gate the record shows open is served even when the snapshot predates the pause', async () => {
     store = store.map((v) => ({ ...(v as object), session: { ...(v as { session: object }).session, status: 'executing' } }));
-    await adapter.runView('run-0'); // the snapshot is read while the run executes
+    await viewOf('run-0'); // the snapshot is read while the run executes
     seed(150); // the engine parks it and writes the gate row; its frame has not landed
     const server = await routes();
     const res = await server.inject({ method: 'GET', url: '/api/v1/runs/run-0/gate' });
@@ -219,7 +223,7 @@ describe('F35: run views are read through one shared snapshot', () => {
 
   it('a gate the record shows open is served even when the snapshot predates the run', async () => {
     seed(0);
-    expect(await adapter.runView('run-0')).toBeUndefined(); // the snapshot is read before the run exists
+    expect(await viewOf('run-0')).toBeUndefined(); // the snapshot is read before the run exists
     seed(150); // the engine launches and parks it; no frame has landed
     const server = await routes();
     const res = await server.inject({ method: 'GET', url: '/api/v1/runs/run-0/gate' });
@@ -230,22 +234,22 @@ describe('F35: run views are read through one shared snapshot', () => {
     let commit!: () => void;
     core()['cancelRun'] = () => new Promise<string>((resolve) => (commit = () => resolve('"cancelled"')));
     const write = adapter.cancelRun('run-0');
-    expect((await adapter.runView('run-0'))!.session.status).toBe('awaiting_human'); // folded before the commit
+    expect((await viewOf('run-0'))!.session.status).toBe('awaiting_human'); // folded before the commit
     expect(folds).toBe(1);
     store = [{ ...(parkedRun('run-0') as object), session: { id: 'run-0', status: 'cancelled', team_plan: { rev: 1 } } }];
     commit(); // the write commits and settles; no frame is delivered
     await write;
-    expect((await adapter.runView('run-0'))!.session.status).toBe('cancelled');
+    expect((await viewOf('run-0'))!.session.status).toBe('cancelled');
     expect(folds).toBe(2);
   });
 
   it('a caller never takes a fold that started before a change it saw; at most one fold runs and one is queued', async () => {
     holdFolds = true;
-    const first = adapter.runView('run-0');
+    const first = viewOf('run-0');
     await tick();
     core()['cancelRun'] = async () => JSON.stringify('cancelled');
     await adapter.cancelRun('run-0'); // moves the version while the first fold runs
-    const later = Array.from({ length: 20 }, () => adapter.runView('run-0'));
+    const later = Array.from({ length: 20 }, () => viewOf('run-0'));
     await tick();
     expect(folds).toBe(1); // the 20 wait for the queued fold; they do not start their own
     held.shift()!();

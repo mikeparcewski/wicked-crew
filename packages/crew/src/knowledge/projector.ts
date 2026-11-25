@@ -22,7 +22,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 import { callEstateTool } from '../core/estate-mcp-client.js';
@@ -32,7 +32,7 @@ import type { McpRegistryStore } from '../mcp/registry-store.js';
 import { ASK_ENUM_MAX, ASK_NAME_MAX } from '../sources/ask.js';
 import type { SqlCatalog } from '../sources/catalog/types.js';
 import type { SourceCatalogStore } from '../sources/store.js';
-import { replaceSource } from './estate-write.js';
+import { onEstateLane, replaceSource } from './estate-write.js';
 import { gateSourceOf, type GateSource } from './gate/sources.js';
 import { projectionKey } from './package.js';
 
@@ -274,8 +274,8 @@ export type EstateCall = (tool: string, args: Record<string, unknown>) => Promis
 
 export interface SourceProjectorDeps {
   /** The registry (read after the mutation that wrote a catalog has landed). */
-  /** `mutate` drops an erased source's tombstone (the daemon's store has it; a test that erases nothing may omit it). */
-  store: Pick<McpRegistryStore, 'read' | 'settled'> & Partial<Pick<McpRegistryStore, 'mutate'>>;
+  /** `amend` drops an erased source's tombstone (the daemon's store has it; a test that erases nothing may omit it). */
+  store: Pick<McpRegistryStore, 'read' | 'settled'> & Partial<Pick<McpRegistryStore, 'amend'>>;
   catalogs: SourceCatalogStore;
   /** Estate, in write mode (the operator client's spawn). */
   call?: EstateCall;
@@ -287,10 +287,22 @@ export interface SourceProjectorDeps {
   /**
    * (crew#1328) Where the acknowledgements are kept across a restart (`<mcp state>/knowledge-acks.json`); absent = in
    * memory only. A file that cannot be read starts empty (each source then waits for its next projection, as before).
+   * (crew#1741) One read back from it is provisional until estate is seen to hold its generation (the boot backfill
+   * checks, then projects).
    */
   acksFile?: string;
   /** TESTS ONLY: how a refused erasure is retried later. */
   schedule?: (fn: () => void, ms: number) => void;
+}
+
+/** (crew#1741) The acknowledgement file's version: each entry names the generation estate took. */
+const ACKS_VERSION = 2;
+
+/** One acknowledgement (see {@link SourceProjector}'s `acked`). */
+interface Ack {
+  key: string;
+  generation: number;
+  confirmed: boolean;
 }
 
 /** A refused erasure is tried again after this long (and at the next boot). */
@@ -308,8 +320,12 @@ export class SourceProjector {
   private readonly chains = new Map<string, Promise<void>>();
   /** The last generation sent per source id (this process): the next is always higher. */
   private readonly sent = new Map<string, number>();
-  /** Per source id, the projection key (descriptor and allowed views) estate last ACCEPTED (this process). */
-  private readonly acked = new Map<string, string>();
+  /**
+   * Per source id, the projection key (descriptor and allowed views) and the generation estate last ACCEPTED.
+   * `confirmed` = this process saw estate take it, or saw estate still hold that generation (crew#1741): one read back
+   * from the file is not, since estate's store may have been swapped or rolled back while crew was down.
+   */
+  private readonly acked = new Map<string, Ack>();
   private readonly gate = new Semaphore(PROJECTION_CONCURRENCY);
   /**
    * (crew#1328, codex and agy on #1735) Per source id, the one lane every estate write of that id runs on: a
@@ -326,26 +342,69 @@ export class SourceProjector {
     if (deps.acksFile !== undefined) {
       try {
         const raw = JSON.parse(readFileSync(deps.acksFile, 'utf8')) as { version?: unknown; acked?: unknown };
-        if (raw.version !== 1 || typeof raw.acked !== 'object' || raw.acked === null || Array.isArray(raw.acked)) throw new Error('not a version 1 acknowledgement file');
-        for (const [id, key] of Object.entries(raw.acked as Record<string, unknown>)) if (typeof key === 'string') this.acked.set(id, key);
+        // A version 1 file (crew#1735) names no generation, so none of it can be confirmed: each source waits for its
+        // boot projection, and the next write replaces the file.
+        if (raw.version !== 1 && (raw.version !== ACKS_VERSION || typeof raw.acked !== 'object' || raw.acked === null || Array.isArray(raw.acked))) throw new Error(`not a version ${ACKS_VERSION} acknowledgement file`);
+        if (raw.version === ACKS_VERSION) {
+          for (const [id, v] of Object.entries(raw.acked as Record<string, unknown>)) {
+            const a = v as { key?: unknown; generation?: unknown } | null;
+            if (typeof a === 'object' && a !== null && typeof a.key === 'string' && typeof a.generation === 'number' && Number.isSafeInteger(a.generation)) this.acked.set(id, { key: a.key, generation: a.generation, confirmed: false });
+          }
+        }
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') deps.log?.(`[knowledge] the projection acknowledgements could not be read, so each source waits for its next projection: ${message(err)}`);
       }
     }
   }
 
-  /** Write the acknowledgements (atomic). Throws: a caller that must not go on without it says so. */
+  /**
+   * Write the acknowledgements (atomic and durable: the file is flushed before the rename, the directory synced after
+   * it, as `api/run-sources.ts` does). Throws: a caller that must not go on without it says so.
+   */
   private persistAcks(): void {
     const file = this.deps.acksFile;
     if (file === undefined) return;
-    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+    const dir = dirname(file);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
     const tmp = `${file}.${randomUUID()}.tmp`;
+    const acked = Object.fromEntries([...this.acked].map(([id, a]) => [id, { key: a.key, generation: a.generation }]));
     try {
-      writeFileSync(tmp, JSON.stringify({ version: 1, acked: Object.fromEntries(this.acked) }), { mode: 0o600 });
+      writeFileSync(tmp, JSON.stringify({ version: ACKS_VERSION, acked }), { flag: 'wx', mode: 0o600, flush: true });
       renameSync(tmp, file);
     } finally {
       rmSync(tmp, { force: true });
     }
+    // The rename has committed: a directory sync that fails is said, never the write's failure.
+    try {
+      const fd = openSync(dir, 'r');
+      try {
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+    } catch (err) {
+      this.deps.log?.(`[knowledge] the acknowledgements' directory could not be synced: ${message(err)}`);
+    }
+  }
+
+  /**
+   * (crew#1741) On `sourceId`'s lane: confirm an acknowledgement read back from the file when estate's committed
+   * generation for the source is the acknowledged one. Anything else (another generation, no catalog, estate failing)
+   * leaves it provisional: the source waits for its projection. Never throws.
+   */
+  private async confirmNow(sourceId: string): Promise<void> {
+    const ack = this.acked.get(sourceId);
+    if (ack === undefined || ack.confirmed) return;
+    let held: unknown;
+    try {
+      // On the one estate lane the writes share: N kept acknowledgements never start N estate processes at once.
+      held = await onEstateLane(() => this.call('knowledge.source_catalog', { sourceId, page: 0, visible: [`source:${sourceId}`] }));
+    } catch (err) {
+      this.deps.log?.(`[knowledge] estate's generation of ${sourceId} could not be read, so it waits for its projection: ${message(err)}`);
+      return;
+    }
+    const generation = typeof held === 'object' && held !== null ? (held as { generation?: unknown }).generation : undefined;
+    if (this.acked.get(sourceId) === ack && generation === ack.generation) ack.confirmed = true;
   }
 
   /**
@@ -414,7 +473,8 @@ export class SourceProjector {
         await replaceSource(this.call, removedSourceGeneration(sourceId, this.nextGeneration(sourceId)) as unknown as Record<string, unknown>, this.deps);
       });
     }
-    await this.deps.store.mutate?.((f) => dropEstateTombstones(f, 'source', new Set([sourceId])));
+    // (crew#1740) Housekeeping, not an operator change: written in place, keeping no restore point.
+    await this.deps.store.amend?.((f) => dropEstateTombstones(f, 'source', new Set([sourceId])));
   }
 
   /**
@@ -459,6 +519,12 @@ export class SourceProjector {
     }
     // (crew#1328) A source removed before a restart whose erasure estate had not taken is erased now.
     this.erase(erased);
+    // (crew#1741) An acknowledgement read back from the file is checked against estate on its lane, before the
+    // projection queued below, so a source estate still holds is admitted without waiting for its turn to be sent.
+    for (const [id, a] of this.acked) {
+      if (a.confirmed) continue;
+      void this.exclusive(id, () => this.confirmNow(id));
+    }
     for (const n of names) this.written(n);
     await this.idle();
   }
@@ -494,9 +560,9 @@ export class SourceProjector {
       // (crew#1328) The kept acknowledgement of another key goes BEFORE the send: a crash mid-send then leaves none,
       // never one for a key estate may no longer hold. If it cannot be dropped, nothing is sent (the next describe or
       // boot projects again).
-      if (this.acked.get(s.id) !== key) this.dropAck(s.id);
+      if (this.acked.get(s.id)?.key !== key) this.dropAck(s.id);
       await replaceSource(this.call, gen as unknown as Record<string, unknown>, this.deps);
-      this.acked.set(s.id, key);
+      this.acked.set(s.id, { key, generation: gen.generation, confirmed: true });
       try {
         this.persistAcks();
       } catch (err) {
@@ -509,12 +575,13 @@ export class SourceProjector {
 
   /**
    * The {@link projectionKey} (descriptor and allowed views) whose structure estate holds for `sourceId`, as crew last
-   * saw estate accept it (kept across a restart when {@link SourceProjectorDeps.acksFile} is set); `null` until then. The relay's visible set admits a source only while this
+   * saw estate accept it (kept across a restart when {@link SourceProjectorDeps.acksFile} is set, and answered after one only once estate is seen to still hold it: crew#1741); `null` until then. The relay's visible set admits a source only while this
    * equals the source's current key, so what estate still holds of an earlier descriptor or an earlier view
    * allowlist (a projection pending or failed, a restored registry generation) is never released.
    */
   projectedDescriptor(sourceId: string): string | null {
-    return this.acked.get(sourceId) ?? null;
+    const a = this.acked.get(sourceId);
+    return a?.confirmed === true ? a.key : null;
   }
 }
 

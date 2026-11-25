@@ -35,7 +35,7 @@ import { stripRulesBrief } from '../decisions/rules-brief.js';
 import type { CoreEvent } from '../core/types.js';
 import {
   PLUGIN_SECTIONS, SECTION_LABELS, SECTION_MAX_CHARS, SECTION_STEER, anchorOf, changedSections, encodeSectionText, initialHtml, isSectionId,
-  sectionsOf, type SectionId,
+  sectionsOf, writtenText, type SectionId,
 } from './sections.js';
 import { CONTEXT_SEEN_MAX, type ContextRecipient, type ContextRecord, type DocAuthor, type SteerRecord, type TrailEntry, type WorkingDocRecord, type WorkingDocStore } from './store.js';
 import {
@@ -563,19 +563,13 @@ export class WorkingDocService {
     const surface = plugin !== undefined ? `plugin:${plugin.id}@${plugin.version}` : null;
     const values: Partial<Record<SectionId, string>> = {};
     for (const id of changed) values[id] = wanted[id] ?? '';
-    let written: { version: number; parent: number } | { headMoved: true; head: number };
-    try {
-      written = await this.d.backend.edit(rec.projectId, rec.docId, {
-        expectHead: input.base,
-        // interactive's item selector is the bare anchor id (its own `[data-wid=…]` lookup).
-        items: changed.map((id) => ({ selector: anchorOf(id), value: encodeSectionText(values[id] ?? '') })),
-        // interactive records the batch's author; crew's trail records the full attribution and the surface.
-        author: author.kind === 'human' ? `${author.id}${surface !== null ? ` via ${surface}` : ''}` : author.id,
-      });
-    } catch (err) {
-      if (err instanceof UndeterminedWriteError) this.rememberPending(runId, input.base, author, surface, values, actor, input.input);
-      throw err;
-    }
+    const written = await this.submit(runId, rec, {
+      expectHead: input.base,
+      // interactive's item selector is the bare anchor id (its own `[data-wid=…]` lookup).
+      items: changed.map((id) => ({ selector: anchorOf(id), value: encodeSectionText(values[id] ?? '') })),
+      // interactive records the batch's author; crew's trail records the full attribution and the surface.
+      author: author.kind === 'human' ? `${author.id}${surface !== null ? ` via ${surface}` : ''}` : author.id,
+    }, { author, surface, values, actor, ...(input.input !== undefined ? { spoken: input.input } : {}) });
     if ('headMoved' in written) return { ok: false, code: 409, error: 'the context document changed since', head: written.head };
     // The version's sections, from what it was made on and what it changed (never a second, fallible read: xreview b1).
     const steer = await this.record(runId, written.version, written.parent, author, surface, changed, values, actor, input.input, { ...before, ...values });
@@ -627,18 +621,12 @@ export class WorkingDocService {
         if (changed.length === 0) return null;
         const values: Partial<Record<SectionId, string>> = {};
         for (const sid of changed) values[sid] = wanted[sid] ?? '';
-        let written: { version: number; parent: number } | { headMoved: true; head: number };
-        try {
-          written = await this.d.backend.edit(rec.projectId, rec.docId, {
-            expectHead: head.head,
-            items: changed.map((sid) => ({ selector: anchorOf(sid), value: encodeSectionText(values[sid] ?? '') })),
-            author: id,
-          });
-        } catch (err) {
-          // Not known whether it landed: the same recovery as a person's write (review on #1218).
-          if (err instanceof UndeterminedWriteError) this.rememberPending(runId, head.head, { kind: 'agent', id }, null, values, { id, kind: 'agent' });
-          throw err;
-        }
+        // Not known whether it landed: the same recovery as a person's write (review on #1218).
+        const written = await this.submit(runId, rec, {
+          expectHead: head.head,
+          items: changed.map((sid) => ({ selector: anchorOf(sid), value: encodeSectionText(values[sid] ?? '') })),
+          author: id,
+        }, { author: { kind: 'agent', id }, surface: null, values, actor: { id, kind: 'agent' } });
         if ('headMoved' in written) continue;
         await this.record(runId, written.version, written.parent, { kind: 'agent', id }, null, changed, values, { id, kind: 'agent' }, undefined, { ...before, ...values });
         return written.version;
@@ -751,6 +739,30 @@ export class WorkingDocService {
     });
   }
 
+  /**
+   * (crew#1408) The person's CURRENT Goal, Approach and Constraints in the run's document: each section whose latest
+   * write is a person's (crew's trail), with its text at the head, as the engine's block carries them. `[]` when the run
+   * has no document, or none of it is a person's. What a finished run's learnings read: with the engine's block a
+   * person's context no longer travels as queued notes. A write of unknown outcome is settled first; one still
+   * unsettled throws (the context is not known yet), as does a document that cannot be read.
+   */
+  async personContextOf(runId: string): Promise<Array<{ id: SectionId; text: string }>> {
+    if (this.d.store.get(runId) === undefined) return [];
+    return this.exclusive(runId, async () => {
+      await this.reconcile(runId);
+      const rec = this.d.store.get(runId);
+      if (rec === undefined) return [];
+      // Only a write that may change the person's context (Goal, Approach, Constraints) holds the read back, as for
+      // `contextOwed`; crew's own Decisions or Next lines settling never stall a run's learnings (coord C1).
+      if (rec.pending != null && Object.keys(rec.pending.values).some((k) => CONTEXT_SECTIONS.includes(k as SectionId))) {
+        throw new Error('a write of unknown outcome has not settled yet');
+      }
+      const head = await this.d.backend.read(rec.projectId, rec.docId);
+      if (head === null) return [];
+      return this.contextBlock(runId, head.head, sectionsOf(head.html), { kind: 'system', id: 'crew' }).block.sections.map((x) => ({ id: x.id, text: x.text }));
+    });
+  }
+
   /** (workdoc-all-runs) Something the run's document shows changed outside the engine's log (a person's answer
    *  recorded in crew's trail): bring it up to date shortly, making it if the run has none. */
   nudge(runId: string): void {
@@ -798,18 +810,13 @@ export class WorkingDocService {
       if (changed.length === 0) return 'same';
       const values: Partial<Record<SectionId, string>> = {};
       for (const sid of changed) values[sid] = wanted[sid] ?? '';
-      let written: { version: number; parent: number } | { headMoved: true; head: number };
-      try {
-        written = await this.d.backend.edit(rec.projectId, rec.docId, {
-          expectHead: head.head,
-          items: changed.map((sid) => ({ selector: anchorOf(sid), value: encodeSectionText(values[sid] ?? '') })),
-          author: batchAuthor,
-        });
-      } catch (err) {
-        // Crew's own Decisions lines if this write landed travel with it, installed when it is confirmed (xreview r6).
-        if (err instanceof UndeterminedWriteError) this.rememberPending(runId, head.head, author, null, values, { id: batchAuthor, kind: author.kind }, undefined, ownedAfter?.());
-        throw err;
-      }
+      // Crew's own Decisions lines if this write landed travel with it, installed when it is confirmed (xreview r6).
+      const owns = ownedAfter?.();
+      const written = await this.submit(runId, rec, {
+        expectHead: head.head,
+        items: changed.map((sid) => ({ selector: anchorOf(sid), value: encodeSectionText(values[sid] ?? '') })),
+        author: batchAuthor,
+      }, { author, surface: null, values, actor: { id: batchAuthor, kind: author.kind }, ...(owns !== undefined ? { ownedDecisions: owns } : {}) });
       if ('headMoved' in written) continue;
       await this.record(runId, written.version, written.parent, author, null, changed, values, { id: batchAuthor, kind: author.kind }, undefined, { ...before, ...values });
       return written.version;
@@ -832,16 +839,40 @@ export class WorkingDocService {
     this.linesDue.set(runId, t);
   }
 
-  /** A write whose outcome is not known: remembered, so a later read attributes it if it lands, never to the next
-   *  caller, and looked at again on its own shortly, so its steer (a person's) is not left waiting for a reader. */
-  private rememberPending(runId: string, expectHead: number, author: DocAuthor, surface: string | null, values: Partial<Record<SectionId, string>>, actor: { id: string; kind: string }, spoken?: 'voice', ownedDecisions?: string[]): void {
+  /**
+   * (crew#1409) One batch to interactive, JOURNALED first: the write's values and author are saved as the run's
+   * `pending` record BEFORE interactive is asked, so a daemon that dies after interactive committed the version and
+   * before crew saved its trail entry still attributes it after a restart (`reconcile`, on the next read, write or
+   * context catch-up), never leaving a person's section out of the engine's block. A known outcome clears the journal:
+   * `record` in the same save as the trail entry, a moved head or a refusal here. An unknown outcome keeps it and is
+   * looked at again on its own shortly. Inside the run's turn.
+   */
+  private async submit(runId: string, rec: WorkingDocRecord, batch: { expectHead: number; items: Array<{ selector: string; value: string }>; author: string },
+    j: { author: DocAuthor; surface: string | null; values: Partial<Record<SectionId, string>>; actor: { id: string; kind: string }; spoken?: 'voice'; ownedDecisions?: string[] }):
+    Promise<{ version: number; parent: number } | { headMoved: true; head: number }> {
     // One save: the write and (crew's lines write only) the ownership it carries (xreview r7).
     this.d.store.update(runId, (r) => {
       r.pending = {
-        expectHead, author, surface, values, at: this.now(), actor: { id: actor.id, kind: actor.kind },
-        ...(spoken !== undefined ? { input: spoken } : {}), ...(ownedDecisions !== undefined ? { ownedDecisions } : {}),
+        expectHead: batch.expectHead, author: j.author, surface: j.surface, values: j.values, at: this.now(), actor: { id: j.actor.id, kind: j.actor.kind },
+        ...(j.spoken !== undefined ? { input: j.spoken } : {}), ...(j.ownedDecisions !== undefined ? { ownedDecisions: j.ownedDecisions } : {}),
       };
     });
+    const forget = (): void => { this.d.store.update(runId, (r) => { if (r.pending?.expectHead === batch.expectHead) r.pending = null; }); };
+    let written: { version: number; parent: number } | { headMoved: true; head: number };
+    try {
+      written = await this.d.backend.edit(rec.projectId, rec.docId, batch);
+    } catch (err) {
+      if (err instanceof UndeterminedWriteError) this.settleLater(runId);
+      else forget();
+      throw err;
+    }
+    if ('headMoved' in written) forget();
+    return written;
+  }
+
+  /** A write whose outcome is not known (its journal stays): looked at again on its own shortly, so a later read
+   *  attributes it if it lands, never to the next caller, and its steer (a person's) is not left waiting for a reader. */
+  private settleLater(runId: string): void {
     for (const ms of [30_000, 75_000]) {
       // Once settled, the event lines come too: a write that stalled may have kept them from being written (xreview r2).
       const t = setTimeout(() => { void this.exclusive(runId, () => this.reconcile(runId)).then(() => this.linesSoon(runId), () => undefined); }, ms);
@@ -853,7 +884,14 @@ export class WorkingDocService {
   private async record(runId: string, version: number, parent: number, author: DocAuthor, surface: string | null, changed: SectionId[], values: Partial<Record<SectionId, string>>, actor: { id: string; kind: string }, spoken?: 'voice', after?: Partial<Record<SectionId, string>>): Promise<SteerRecord | null> {
     // The version's trail entry first (its steer, if any, is named on it below): the block and the steer read the trail.
     const entry: TrailEntry = { version, parent, author, surface, sections: changed, at: this.now(), steerId: null };
-    this.d.store.update(runId, (r) => { r.trail.push(entry); });
+    // (crew#1409) The write's journal settles in the same save as its trail entry, with the ownership it carried.
+    this.d.store.update(runId, (r) => {
+      r.trail.push(entry);
+      if (r.pending != null && r.pending.expectHead === parent) {
+        if (r.pending.ownedDecisions !== undefined) r.ownedDecisions = r.pending.ownedDecisions;
+        r.pending = null;
+      }
+    });
     // (context-doc-switch) A version that touched the person's context: the engine's block is set from THIS version's
     // own sections and the trail up to it, inside the run's turn (so no later version is sent ahead of it), and BEFORE
     // the version's Next note is queued, so the next step never takes Next under the context it replaced.
@@ -895,11 +933,13 @@ export class WorkingDocService {
     }
     const got = sectionsOf(html);
     const ids = Object.keys(p.values) as SectionId[];
-    const landed = ids.every((id) => got[id] === p.values[id]);
-    // One save: the write settled and, if it was crew's lines and landed, the ownership it carries (xreview r7).
-    this.d.store.update(runId, (r) => { r.pending = null; if (landed && p.ownedDecisions !== undefined) r.ownedDecisions = p.ownedDecisions; });
+    const landed = ids.every((id) => got[id] === writtenText(p.values[id] ?? ''));
     if (landed) {
+      // `record` settles the journal, and installs the ownership it carries (xreview r7), in the same save as the
+      // version's trail entry: a crash between the two never leaves the version unattributed (coord C3).
       await this.record(runId, v, p.expectHead, p.author, p.surface, ids, p.values, p.actor, p.input, got);
+    } else {
+      this.d.store.update(runId, (r) => { r.pending = null; });
     }
   }
 

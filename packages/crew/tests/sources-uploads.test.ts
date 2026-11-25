@@ -2,7 +2,7 @@
 // child process. Real files: CSV with and without a header, XLSX, a .sqlite holding a trigger, a
 // workbook that expands past 200 MB.
 
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,7 +16,7 @@ import type { McpUpstreamConfig } from '../src/mcp/probe.js';
 import { specWith } from './support/apps-harness.js';
 import { observeSqliteRunnerForTests, runnerEnv, sqliteIngest, sqliteRead } from '../src/sources/drivers/sqlite.js';
 import { checkSqlQuery, readSqlQuery, SourcePolicyError } from '../src/sources/sql.js';
-import { ingestUpload, snapshotPath, UploadError, UPLOAD_LIMITS } from '../src/sources/uploads.js';
+import { ingestUpload, snapshotPath, STALE_TMP_MS, sweepSettled, sweepStale, UploadError, UPLOAD_LIMITS } from '../src/sources/uploads.js';
 import { detectHeader, looksLikeHeader } from '../runners/upload-parse.mjs';
 import { makeSqlite, makeXlsx, makeZipBomb, zip } from './fixtures/apps-sources/uploads/make.mjs';
 
@@ -40,20 +40,37 @@ afterAll(() => {
 describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => {
   it('crew#1289: a large CSV leaves the daemon event loop responsive', async () => {
     const data = largeCsv();
+    // crew#1762: two bounds, because a wall-clock gap alone also measures the runner (556 ms seen on macOS CI, with
+    // the parse in its child, from a process the runner did not schedule for a while):
+    //   - this thread's CPU time per gap, under 500 ms: a parse on the main thread holds it for the whole gap
+    //     (past one second); a descheduled process accrues none;
+    //   - the wall-clock gap, under 2000 ms: a loop blocked while idle (the parse moved to a spawnSync of its
+    //     child) burns no CPU here but stalls for the whole parse (4-7 s on CI runners, 2.5 s locally). Well above
+    //     the runner stalls seen.
+    const cpuMs = (): number => {
+      const u = process.threadCpuUsage();
+      return (u.user + u.system) / 1000;
+    };
     let last = performance.now();
+    let lastCpu = cpuMs();
     let maxGap = 0;
+    let maxBusy = 0;
     let ticks = 0;
     const ticker = setInterval(() => {
       const now = performance.now();
+      const cpu = cpuMs();
       maxGap = Math.max(maxGap, now - last);
+      maxBusy = Math.max(maxBusy, cpu - lastCpu);
       last = now;
+      lastCpu = cpu;
       ticks++;
     }, 10);
     try {
       const result = await ingestUpload('responsive.csv', data, { dir });
       expect(result.catalog.relations[0]?.rowEstimate).toBe(850_000);
       expect(ticks).toBeGreaterThan(10);
-      expect(maxGap).toBeLessThan(500);
+      expect(maxBusy, `the longest gap between ticks was ${Math.round(maxGap)} ms of wall time`).toBeLessThan(500);
+      expect(maxGap, `the loop stalled while idle (a synchronous wait on the parser?); its longest busy stretch was ${Math.round(maxBusy)} ms`).toBeLessThan(2000);
     } finally {
       clearInterval(ticker);
     }
@@ -273,14 +290,118 @@ describe('uploads become content-addressed SQLite snapshots (DES §5.1)', () => 
     db.close();
   });
 
-  it('a .sqlite holding a virtual table (its kind hidden in the schema text, or behind a table named pragma_table_list) or a generated column is refused (codex r1, r2)', async () => {
-    makeSqlite(join(work, 'vt.sqlite'), { hiddenVirtual: true });
+  it('a .sqlite holding a generated column is refused (codex r1)', async () => {
     makeSqlite(join(work, 'gen.sqlite'), { generated: true });
+    const err = await ingestUpload('gen.sqlite', readFileSync(join(work, 'gen.sqlite')), { dir }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(UploadError);
+    expect((err as UploadError).code).toBe('sqlite_code');
+  });
+
+  it('crew#1731: a virtual table is dropped from the snapshot with its shadow tables and named, even with its kind hidden in the schema text or behind a table named pragma_table_list (fails before the fix)', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    makeSqlite(join(work, 'estate.sqlite'), { estateFts: true, implicitRowids: true });
+    makeSqlite(join(work, 'vt.sqlite'), { hiddenVirtual: true });
     makeSqlite(join(work, 'shadow.sqlite'), { shadowPragma: true }); // codex r2: S3
-    for (const f of ['vt.sqlite', 'gen.sqlite', 'shadow.sqlite']) {
-      const err = await ingestUpload(f, readFileSync(join(work, f)), { dir }).catch((e: unknown) => e);
-      expect(err, f).toBeInstanceOf(UploadError);
-      expect((err as UploadError).code, f).toBe('sqlite_code');
+    for (const [f, vtab, tables] of [
+      ['estate.sqlite', 'nodes_fts', ['nodes', 'records', 'refs', 'refunds']],
+      ['vt.sqlite', 'notes', ['refunds']],
+      ['shadow.sqlite', 'geo', ['pragma_table_list', 'refunds']],
+    ] as const) {
+      const up = await ingestUpload(f, readFileSync(join(work, f)), { dir });
+      expect(up.dropped, f).toEqual([vtab]);
+      expect(up.catalog.relations.map((r) => r.name).sort(), f).toEqual(tables);
+      // The snapshot holds plain tables and indexes only: nothing virtual, no shadow table left behind.
+      const snap = new DatabaseSync(snapshotPath(up.digest, dir), { readOnly: true });
+      const kinds = snap.prepare('PRAGMA main.table_list').all().map((r) => `${String(r['name'])}:${String(r['type'])}`).filter((k) => !k.startsWith('sqlite_'));
+      snap.close();
+      expect(kinds.sort(), f).toEqual(tables.map((t) => `${t}:table`));
+    }
+    // The index's own text, and what the file had freed before, are gone from the snapshot's bytes (the copy is rewritten
+    // with VACUUM INTO: codex r2), the person's file is untouched, and a kept table's rowids are as uploaded (a plain
+    // VACUUM renumbers them: codex r1).
+    const estate = await ingestUpload('estate.sqlite', readFileSync(join(work, 'estate.sqlite')), { dir });
+    for (const marker of ['zqxj-only-in-the-index', 'zqxj-freed-before-upload']) {
+      expect(readFileSync(snapshotPath(estate.digest, dir)).includes(marker), marker).toBe(false);
+      expect(readFileSync(join(work, 'estate.sqlite')).includes(marker), marker).toBe(true);
+    }
+    expect(readdirSync(dir).filter((n) => n.startsWith('.tmp-'))).toEqual([]);
+    const snap = new DatabaseSync(snapshotPath(estate.digest, dir), { readOnly: true });
+    expect(snap.prepare('SELECT r.body FROM refs JOIN records r ON r.rowid = refs.record_rowid').all().map((x) => x['body'])).toEqual(['kept']);
+    snap.close();
+  });
+
+  it('crew#1787: a plain .sqlite (no virtual table) is rewritten too: what it freed before the upload is not in the snapshot, its rowids are as uploaded (fails before the fix)', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    makeSqlite(join(work, 'plain.sqlite'), { implicitRowids: true, freed: true });
+    const file = readFileSync(join(work, 'plain.sqlite'));
+    const up = await ingestUpload('plain.sqlite', file, { dir });
+    expect(up.dropped).toEqual([]);
+    expect(up.catalog.relations.map((r) => r.name).sort()).toEqual(['records', 'refs', 'refunds']);
+    const snapshot = readFileSync(snapshotPath(up.digest, dir));
+    for (const marker of ['zqxj-deleted-row', 'zqxj-dropped-table']) {
+      expect(file.includes(marker), marker).toBe(true);
+      expect(snapshot.includes(marker), marker).toBe(false);
+      expect(readFileSync(join(work, 'plain.sqlite')).includes(marker), marker).toBe(true);
+    }
+    expect(snapshot.equals(file)).toBe(false);
+    expect(readdirSync(dir).filter((n) => n.startsWith('.tmp-'))).toEqual([]);
+    const snap = new DatabaseSync(snapshotPath(up.digest, dir), { readOnly: true });
+    expect(snap.prepare('SELECT r.body FROM refs JOIN records r ON r.rowid = refs.record_rowid').all().map((x) => x['body'])).toEqual(['kept']);
+    expect(snap.prepare('SELECT id, region FROM refunds ORDER BY id').all().map((x) => [x['id'], x['region']])).toEqual([[1, 'EMEA'], [2, 'AMER']]);
+    snap.close();
+    // The same file stores once.
+    expect((await ingestUpload('plain.sqlite', file, { dir })).digest).toBe(up.digest);
+  });
+
+  it('crew#1731: a virtual table that cannot be dropped is refused by its own name, never a shadow table called virtual; code is refused first', async () => {
+    makeSqlite(join(work, 'unknown.sqlite'), { unknownModule: true });
+    const err = await ingestUpload('unknown.sqlite', readFileSync(join(work, 'unknown.sqlite')), { dir }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(UploadError);
+    expect((err as UploadError).code).toBe('sqlite_code');
+    expect((err as UploadError).message).toMatch(/could not drop the virtual table notes \(no such module: nosuchmodule\) from its copy; drop it from a copy of the file \(DROP TABLE <name>\)/);
+    // A table of the virtual table's that outlives its drop (a rewritten declaration) is refused, never kept as plain.
+    makeSqlite(join(work, 'rewritten.sqlite'), { contentlessRewrite: true });
+    const before = readdirSync(dir).length;
+    const rewritten = await ingestUpload('rewritten.sqlite', readFileSync(join(work, 'rewritten.sqlite')), { dir }).catch((e: unknown) => e);
+    expect((rewritten as UploadError).code).toBe('sqlite_code');
+    expect((rewritten as UploadError).message).toBe('an uploaded .sqlite may hold only tables and indexes; after its virtual tables were dropped it still holds notes_content');
+    expect(readdirSync(dir).length).toBe(before);
+    makeSqlite(join(work, 'fts-trig.sqlite'), { estateFts: true, trigger: true });
+    const both = await ingestUpload('fts-trig.sqlite', readFileSync(join(work, 'fts-trig.sqlite')), { dir }).catch((e: unknown) => e);
+    expect((both as UploadError).message).toBe('an uploaded .sqlite may hold only tables and indexes; it holds the trigger t');
+  });
+
+  it('crew#1724: an upload removes the .tmp-* files a crashed upload left, and only stale ones (fails before the fix)', async () => {
+    const store = mkdtempSync(join(tmpdir(), 'apps-sweep-'));
+    try {
+      const id = '0f8fad5b-d9cb-469f-a165-70867728950e';
+      const fresh = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+      const stale = [`.tmp-${id}.upload`, `.tmp-${id}.sqlite`, `.tmp-${id}.sqlite-journal`, `.tmp-${id}.sqlite-wal`];
+      const old = new Date(Date.now() - STALE_TMP_MS - 60_000);
+      for (const n of stale) {
+        writeFileSync(join(store, n), 'left by a crash');
+        utimesSync(join(store, n), old, old);
+      }
+      // A live upload's file (young), and a file that is not an upload's: both kept.
+      writeFileSync(join(store, `.tmp-${fresh}.upload`), 'in flight');
+      writeFileSync(join(store, '.tmp-notes.txt'), 'not ours');
+      utimesSync(join(store, '.tmp-notes.txt'), old, old);
+      await ingestUpload('ok.csv', Buffer.from('a,b\n1,2\n'), { dir: store });
+      await sweepSettled();
+      const left = readdirSync(store).filter((n) => n.startsWith('.tmp-')).sort();
+      expect(left).toEqual([`.tmp-${fresh}.upload`, '.tmp-notes.txt']);
+      // A live upload's files are never swept, however old they look (codex r1): a sweep while one runs keeps them.
+      const live = ingestUpload('big.csv', Buffer.from('a,b,c\n' + '1234,2345,3456\n'.repeat(900_000)), { dir: store });
+      const own = (): string[] => readdirSync(store).filter((n) => /^\.tmp-.*\.(upload|sqlite)$/.test(n) && n !== `.tmp-${fresh}.upload`);
+      for (let i = 0; i < 2000 && own().length === 0; i++) await new Promise((r) => setTimeout(r, 2));
+      const inFlight = own();
+      expect(inFlight.length).toBeGreaterThan(0);
+      await sweepStale(store, Date.now() + 10 * STALE_TMP_MS);
+      expect(readdirSync(store).filter((n) => inFlight.includes(n))).toEqual(inFlight);
+      expect(readdirSync(store)).not.toContain(`.tmp-${fresh}.upload`);
+      expect((await live).table).toBe('big');
+    } finally {
+      rmSync(store, { recursive: true, force: true });
     }
   });
 

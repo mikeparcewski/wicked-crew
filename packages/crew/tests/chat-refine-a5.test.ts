@@ -5,9 +5,9 @@
 // announces, and that every refusal (or a check that cannot run) lands nothing.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { ArtifactProposal, ChatTranscriptRecord, CoreEvent, LaunchRunInput } from '../src/core/types.js';
@@ -41,6 +41,10 @@ function gardenIo(state: { keep: 'kept' | 'broken' | 'error'; argv: string[][] }
     },
   };
 }
+/** A refine that cites nothing: no packet records, no grounded repositories. */
+const NO_CLAIMS = { files: [], packetBytes: (): Buffer => { throw new Error('no packet'); }, repos: [] };
+/** The `--repo` folders of one floor argv. */
+const repoDirs = (argv: string[]): string[] => argv.flatMap((a, i) => (argv[i - 1] === '--repo' ? [a] : []));
 /** The draft floor's self-check: notes valid, no leaks. */
 const floorIo = { gardenRoot: () => '/garden', run: async () => ({ stdout: JSON.stringify({ verdict: 'PASS', checks: { claims: { ok: true }, contrast: { ok: true }, leaks: { ok: true }, notes: { ok: true } } }), code: 0 }) };
 
@@ -105,7 +109,7 @@ describe('A5: a refine of the open document', () => {
   it('the landing guard is fail closed: a broken edit, a leak, or a check that cannot run lands nothing', async () => {
     const out = join(dir, 'revised.html');
     writeFileSync(out, '<h2 data-wid="h">Release 0.17</h2>');
-    const input = { outPath: out, notesPath: join(dir, 'notes.json'), runId: RUN, docsRoot, doc: 'deck', base: 3, allow: [], allowOf: () => [] };
+    const input = { outPath: out, notesPath: join(dir, 'notes.json'), runId: RUN, docsRoot, doc: 'deck', base: 3, allow: [], allowOf: () => [], claims: NO_CLAIMS };
     const state = { keep: 'kept' as 'kept' | 'broken' | 'error', argv: [] as string[][] };
     expect(await guardRefine(input, { floor: floorIo, garden: gardenIo(state) })).toMatchObject({ ok: true, kept: 1 });
     state.keep = 'broken';
@@ -184,8 +188,15 @@ describe('A5: a refine of the open document', () => {
     });
     const floorCalls: string[][] = [];
     const outcomes: Array<{ runId: string; outcome: unknown }> = [];
+    const recordsAtFloor: string[] = [];
     const w = await start({ keep: 'kept', argv: [] }, outcomes, undefined, {
-      floor: { ...floorIo, run: async (argv) => { floorCalls.push(argv); return floorIo.run(); } },
+      floor: { ...floorIo, run: async (argv) => {
+        floorCalls.push(argv);
+        // crew#1727: the records folder is crew's own copy (never the writer's inbox), and holds the packet's records.
+        const [records] = repoDirs(argv);
+        recordsAtFloor.push(records!.startsWith(join(chatDir)) ? 'inbox' : readFileSync(join(records!, 'run-evidence-x.md'), 'utf8'));
+        return floorIo.run();
+      } },
     });
     bindings.begin({ ref: '_unfiled/deck', mount: '_unfiled', doc: 'deck', projectId: null, owner: 'mike', chatId: 'c1', chatInstance: null, scopeProject: null, proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [], graphDb: '/graphs/chat.db' }, { pid: 'c1:t1', runId: RUN, base: 3, op: 'refine' });
     bindings.addPacket('_unfiled/deck', packet.canonical, packet.tokens);
@@ -195,6 +206,7 @@ describe('A5: a refine of the open document', () => {
     expect(w.launches[0]!.problem).toContain('MANIFEST-');
     expect(w.launches[0]!.problem).not.toContain('--repo');
     expect(w.launches[0]!.problem).not.toContain("records/ is one of the self-check's");
+    expect(w.launches[0]!.problem).toContain('when the revision lands crew checks every citation against records/');
     expect(w.launches[0]!.projectGraph).toBeUndefined(); // Unfiled: its chat's repo graph is no project graph (W24)
     expect(w.launches[0]!.repoRef).toBeUndefined();
     if (tampered) writeFileSync(join(runDir, 'records', 'run-evidence-x.md'), 'Coverage 99%');
@@ -209,7 +221,9 @@ describe('A5: a refine of the open document', () => {
     } else {
       await waitFor(() => w.announced.some((e) => e.event_type === DRAFT_COMPLETED));
       expect(floorCalls).toHaveLength(1);
-      expect(floorCalls[0]).not.toContain('--repo');
+      expect(repoDirs(floorCalls[0]!)).toHaveLength(1);
+      expect(recordsAtFloor).toEqual(['Coverage 80%']);
+      expect(existsSync(repoDirs(floorCalls[0]!)[0]!)).toBe(false); // crew's copy is removed after the floor
       expect(existsSync(join(chatDir, 'landed', RUN, 'records'))).toBe(false);
     }
   });
@@ -234,20 +248,26 @@ describe('A5: a refine of the open document', () => {
     expect(w.launches[0]!).toMatchObject({ projectId: 'proj-a', projectGraph: { dbPath: '/graphs/proj-a.db' } });
   });
 
-  it('lands a refine with existing repository citations without passing --repo to the floor', async () => {
+  it('crew#1727: checks a refine against its records and a snapshot of each repository the document is grounded on', async () => {
     const cited = '<html><body><h2 data-wid="h">Release 0.17</h2><p data-source="src/x.ts:12">Coverage reached 80%.</p></body></html>';
     writeFileSync(join(docsRoot, 'deck', '_v3.html'), cited);
+    const repo = join(dir, 'widgets');
+    mkdirSync(join(repo, 'src'), { recursive: true });
+    writeFileSync(join(repo, 'src', 'x.ts'), `${'//\n'.repeat(11)}// Coverage reached 80%.\n`);
     const floorCalls: string[][] = [];
+    const atFloor: string[] = [];
     const outcomes: Array<{ runId: string; outcome: unknown }> = [];
     const w = await start({ keep: 'kept', argv: [] }, outcomes, undefined, {
       floor: { ...floorIo, run: async (argv) => {
         floorCalls.push(argv);
         expect(readFileSync(argv[3]!, 'utf8')).toBe(cited);
-        if (argv.includes('--repo')) return { stdout: JSON.stringify({ verdict: 'FAIL', failed: ['claims'], checks: { claims: { ok: false, by_kind: { 'dangling-source': 1 } }, contrast: { ok: true }, leaks: { ok: true }, notes: { ok: true } } }), code: 1 };
+        // A snapshot, never the live checkout, and it holds the cited file.
+        const dirs = repoDirs(argv);
+        atFloor.push(...dirs.slice(1).map((d) => (d === repo ? 'live' : readFileSync(join(d, 'src', 'x.ts'), 'utf8').split('\n')[11]!)));
         return floorIo.run();
       } },
     });
-    bindings.begin({ ref: '_unfiled/deck', mount: '_unfiled', doc: 'deck', projectId: null, owner: 'mike', chatId: 'c1', chatInstance: null, scopeProject: null, proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [], graphDb: null }, { pid: 'c1:t1', runId: RUN, base: 3, op: 'refine' });
+    bindings.begin({ ref: '_unfiled/deck', mount: '_unfiled', doc: 'deck', projectId: null, owner: 'mike', chatId: 'c1', chatInstance: null, scopeProject: null, proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [{ id: 'repo-1', name: 'widgets', rootPath: repo }], graphDb: null }, { pid: 'c1:t1', runId: RUN, base: 3, op: 'refine' });
     await w.sub.launchBound(spec());
     const runDir = join(chatDir, `refine-${RUN}`);
     expect(readFileSync(join(runDir, 'current.html'), 'utf8')).toBe(cited);
@@ -256,10 +276,56 @@ describe('A5: a refine of the open document', () => {
     w.fire({ type: 'sessionCompleted', session: RUN });
     await waitFor(() => outcomes.length > 0 || w.announced.some((e) => e.event_type === DRAFT_COMPLETED));
     expect(floorCalls).toHaveLength(1);
-    expect(floorCalls[0]).not.toContain('--repo');
+    expect(repoDirs(floorCalls[0]!)).toHaveLength(2);
+    expect(atFloor).toEqual(['// Coverage reached 80%.']);
     expect(outcomes).toEqual([]);
     expect(w.announced.find((e) => e.event_type === DRAFT_COMPLETED)?.payload).toMatchObject({ document_id: 'deck', expect_head: 3 });
     expect(readFileSync(join(chatDir, 'landed', RUN, 'revised.html'), 'utf8')).toBe(cited);
+  });
+
+  it('crew#1727: a refused citation names a grounded repository that could not be read, and what to do', async () => {
+    const out = join(dir, 'revised.html');
+    writeFileSync(out, '<h2 data-wid="h">Release 0.17</h2>');
+    const dangling = { ...floorIo, run: async () => ({ stdout: JSON.stringify({ verdict: 'FAIL', failed: ['claims'], checks: { claims: { ok: false, by_kind: { 'dangling-source': 1 } }, contrast: { ok: true }, leaks: { ok: true }, notes: { ok: true } } }), code: 1 }) };
+    const input = { outPath: out, notesPath: join(dir, 'notes.json'), runId: RUN, docsRoot, doc: 'deck', base: 3, allow: [], allowOf: () => [],
+      claims: { ...NO_CLAIMS, repos: [{ name: 'widgets', rootPath: join(dir, 'gone') }] } };
+    const r = await guardRefine(input, { floor: dangling, garden: gardenIo({ keep: 'kept', argv: [] }) });
+    expect(r).toMatchObject({ ok: false, reason: expect.stringContaining('dangling-source') });
+    expect(r.ok ? '' : r.reason).toContain('The repository widgets this document is grounded on is no longer readable at its folder on this host');
+    const big = await guardRefine(input, { floor: dangling, garden: gardenIo({ keep: 'kept', argv: [] }), snapshot: async () => ({ ok: false, reason: 'too-large' }) });
+    expect(big.ok ? '' : big.reason).toContain('The repository widgets is larger than the 200 MB crew copies to check citations');
+    // A record whose bytes no longer match the launch's is refused before any floor runs.
+    let floorRan = false;
+    const bad = await guardRefine(
+      { ...input, claims: { files: [{ name: 'run-a-x.md', sha256: '0'.repeat(64), bytes: 3 }], packetBytes: () => Buffer.from('abc'), repos: [] } },
+      { floor: { ...floorIo, run: async () => { floorRan = true; return floorIo.run(); } }, garden: gardenIo({ keep: 'kept', argv: [] }) },
+    );
+    expect(bad).toMatchObject({ ok: false, reason: expect.stringContaining('could not read the records this document cites') });
+    expect(floorRan).toBe(false);
+  });
+
+  it('crew#1727: a snapshot that kept read-only folders never fails a passing revision, and is removed', async () => {
+    const out = join(dir, 'revised.html');
+    writeFileSync(out, '<h2 data-wid="h">Release 0.17</h2>');
+    const roots: string[] = [];
+    const r = await guardRefine(
+      { outPath: out, notesPath: join(dir, 'notes.json'), runId: RUN, docsRoot, doc: 'deck', base: 3, allow: [], allowOf: () => [],
+        claims: { ...NO_CLAIMS, repos: [{ name: 'widgets', rootPath: join(dir, 'widgets') }] } },
+      {
+        // snapshot.ts's copy fallback keeps a directory's mode: a read-only folder with files in it.
+        snapshot: async (_from, dest) => {
+          mkdirSync(join(dest, 'locked'), { recursive: true });
+          writeFileSync(join(dest, 'locked', 'a.md'), 'a');
+          chmodSync(join(dest, 'locked'), 0o555);
+          return { ok: true };
+        },
+        floor: { ...floorIo, run: async (argv) => { roots.push(dirname(repoDirs(argv)[0]!)); return floorIo.run(); } },
+        garden: gardenIo({ keep: 'kept', argv: [] }),
+      },
+    );
+    expect(r).toMatchObject({ ok: true });
+    expect(roots).toHaveLength(1);
+    expect(existsSync(roots[0]!)).toBe(false);
   });
 
   it('changes the open document as a new version on its head, keeping the person\'s edits: the derived run, the two helpers, the keep list, and the checked bytes announced with run_id + expect_head', async () => {
@@ -550,6 +616,155 @@ describe('A5: the refine launcher', () => {
       removeScratch(dir);
     }
   });
+});
+
+describe('crew#1726: a refine that names chat reads the conversation up to its own turn', () => {
+  const user = (at: number, turnId: string, text: string, attachments?: Array<{ id: string; name: string }>): ChatTranscriptRecord =>
+    ({ at, turnId, kind: 'user', text, seats: ['claude'], owner: true, ...(attachments !== undefined ? { attachments } : {}) }) as unknown as ChatTranscriptRecord;
+  const refine = (chatId: string, sources: Array<{ token: string; label: string; status: 'ok' }>, turn = 't3'): ArtifactProposal => ({ pid: `${chatId}:${turn}`, chatId, turnId: turn, kind: 'refine', brief: 'use the new figure', what: { title: 'Deck', label: 'Change · Deck' }, sources, helpers: { seats: ['codex', 'claude'] }, filedIn: { projectId: null }, target: { ref: '_unfiled/deck', title: 'Deck', base: 1 }, protected: [] }) as unknown as ArtifactProposal;
+  const CHAT = [{ token: 'chat', label: 'this chat', status: 'ok' as const }];
+  const text = (spec: BoundRefine, prefix = 'conversation-'): string => spec.packet.files.filter((f) => f.name.startsWith(prefix)).map((f) => f.bytes.toString('utf8')).join('\n');
+
+  /** A document made at t1 (its packet's `chat` holds the conversation to t1 and a file attached at t1), then a figure
+   *  and a file at t2 and the refine at t3, all in chat `c1` (instance `i1`). */
+  async function made(o: { instanceNow?: string; doc?: boolean } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), 'crew-refine-chat-'));
+    const docs = join(dir, 'docs', 'deck');
+    mkdirSync(docs, { recursive: true });
+    writeFileSync(join(docs, '_v1.html'), '<h2>x</h2>');
+    writeFileSync(join(docs, 'versions.json'), JSON.stringify({ head: 1, versions: [{ version: 1, html_file: '_v1.html' }] }));
+    const files: Record<string, string> = { 'att-0': join(dir, 'plan.csv'), 'att-1': join(dir, 'figures.csv') };
+    writeFileSync(files['att-0']!, 'quarter,target\nq3,40\n');
+    writeFileSync(files['att-1']!, 'region,revenue\nnorth,42\n');
+    const gone = new Set<string>();
+    const packetDeps = {
+      runs: async () => [] as never,
+      brief: async () => null as never,
+      docsRoot: async () => (o.doc === true ? join(dir, 'docs') : null),
+      // As the daemon's lookup does (routes.ts proposalPacketDeps → ChatAttachmentStore.resolve): an attachment whose
+      // metadata is gone throws (404 attachment_unknown); it never answers null.
+      attachment: (chat: string, id: string) => {
+        if (files[id] === undefined || gone.has(id)) throw new Error(`chat ${chat} has no attachment ${id}`);
+        return { name: id === 'att-0' ? 'plan.csv' : 'figures.csv', path: files[id]! };
+      },
+    };
+    const records: ChatTranscriptRecord[] = [user(1, 't1', 'Write a note on revenue against the plan.', [{ id: 'att-0', name: 'plan.csv' }])];
+    if (o.doc === true) {
+      // The t1 answer had the document open (its v1): the snapshot carries that version as a record.
+      records.push({ at: 1.2, turnId: 't1', kind: 'context', runs: [], refused: [], artifact: { ref: '_unfiled/deck', viewed: 1, head: 1, copies: [], anchors: [] }, page: true } as unknown as ChatTranscriptRecord);
+      records.push({ at: 1.5, turnId: 't1', kind: 'seat', cliKey: 'claude', text: 'Revenue is on track.', ok: true, usage: null } as unknown as ChatTranscriptRecord);
+    }
+    // The create's packet, as the create launcher builds it (the conversation up to the create's turn).
+    const created = await buildSourcePacket({ runId: 'original-draft', chatId: 'c1', pid: 'c1:t1', cutoffTurnId: 't1', records: [...records],
+      resolution: { what: { title: 'Deck', label: 'Document' }, sources: CHAT } as unknown as ArtifactProposal }, packetDeps);
+    const bindings = new DocBindingStore(join(dir, 'b'));
+    bindings.begin({ ref: '_unfiled/deck', mount: '_unfiled', doc: 'deck', projectId: null, owner: 'mike', chatId: 'c1', chatInstance: 'i1', scopeProject: null, proposalId: 'c1:t1', cutoffTurnId: 't1', repos: [], graphDb: null }, { pid: 'c1:t1', runId: 'original-draft', base: 0 });
+    bindings.addPacket('_unfiled/deck', created.canonical, created.tokens);
+    // Its v1 is replaced in place after the create (removed and made again under the same version).
+    if (o.doc === true) writeFileSync(join(docs, '_v1.html'), '<h2>y</h2>');
+    records.push(user(2, 't2', 'North was 42 this quarter.', [{ id: 'att-1', name: 'figures.csv' }]));
+    records.push(user(3, 't3', 'Use the new figure in the note.'));
+    const launched: BoundRefine[] = [];
+    const launcher = new RefineLauncher({
+      bindings, runExists: async () => false, docsRoot: async () => join(dir, 'docs'),
+      launchBound: async (sp) => { launched.push(sp); },
+      records: () => records, instanceOf: () => o.instanceNow ?? 'i1', chatIdOf: (id) => id, packetDeps,
+      clisJsonFor: (seats) => JSON.stringify(seats),
+    });
+    const go = async (chatId: string, sources: Array<{ token: string; label: string; status: 'ok' }>, runId: string, turn = 't3'): Promise<BoundRefine> => {
+      await launcher.launch({ kind: 'refine', pid: `${chatId}:${turn}`, chatId, actor: { id: 'mike', kind: 'human', trust: 'operator' }, identity: { artifactRef: '_unfiled/deck', runId }, resolution: refine(chatId, sources, turn) } as never);
+      return launched.at(-1)!;
+    };
+    return { dir, go, gone, bindings, records };
+  }
+
+  it('turns and files added after the create reach the refine; the files the create held stay; a Go again reuses its own snapshot', async () => {
+    const m = await made();
+    try {
+      // The file attached at the create's turn can no longer be read (removed since).
+      m.gone.add('att-0');
+      const named = await go1(m);
+      expect(text(named)).toContain('North was 42 this quarter.');
+      expect(text(named)).toContain('Use the new figure in the note.');
+      expect(text(named, 'attachment-')).toContain('north,42');
+      // The file the create held rides along even when it can no longer be read again.
+      expect(text(named, 'attachment-')).toContain('q3,40');
+      // ... and the conversation lists it as here, never as left out.
+      expect(text(named)).toContain('Files attached to this turn: `attachment-att-0-plan.csv`');
+      expect(text(named)).not.toContain('is not in the packet');
+      // A Go again of the same refine (its launch failed after the packet was kept) reuses that snapshot, and
+      // rebuilding nothing it cannot read again: never two contents under one name.
+      m.gone.add('att-1');
+      const again = await m.go('c1', CHAT, 'refine-run-2');
+      expect(text(again)).toContain('North was 42 this quarter.');
+      expect(text(again, 'attachment-')).toContain('north,42');
+      // The binding now holds both snapshots; a Go again carries only its own (never both: the packet would grow).
+      expect(m.bindings.get('_unfiled/deck')!.tokens['chat']!.filter((n) => n.startsWith('conversation-'))).toHaveLength(2);
+      expect(again.packet.files.filter((f) => f.name.startsWith('conversation-')).map((f) => f.name)).toEqual(['conversation-c1-to-t3.md']);
+      // A later refine that does not name chat carries the newest snapshot only, with every record.
+      const later = await m.go('c1', [], 'refine-run-3');
+      expect(later.packet.files.filter((f) => f.name.startsWith('conversation-')).map((f) => f.name)).toEqual(['conversation-c1-to-t3.md']);
+      expect(text(later, 'attachment-')).toContain('q3,40');
+    } finally {
+      removeScratch(m.dir);
+    }
+  });
+
+  it('the archived alias of the same chat refreshes too; a chat that reused the id never does', async () => {
+    const alias = await made();
+    try {
+      expect(text(await alias.go('c1--archived', CHAT, 'refine-run-1'))).toContain('North was 42 this quarter.');
+    } finally {
+      removeScratch(alias.dir);
+    }
+    const reused = await made({ instanceNow: 'i2' });
+    try {
+      const spec = await reused.go('c1', CHAT, 'refine-run-1');
+      expect(text(spec)).not.toContain('North was 42 this quarter.');
+      expect(text(spec)).toContain('Write a note on revenue against the plan.');
+    } finally {
+      removeScratch(reused.dir);
+    }
+  });
+
+  it('a refine that does not name chat keeps the create-time snapshot', async () => {
+    const m = await made();
+    try {
+      const spec = await m.go('c1', [], 'refine-run-1');
+      expect(text(spec)).not.toContain('North was 42 this quarter.');
+      expect(text(spec)).toContain('Write a note on revenue against the plan.');
+    } finally {
+      removeScratch(m.dir);
+    }
+  });
+
+  it('a record the document holds keeps its held bytes when the refresh reads a changed copy under the same name', async () => {
+    const m = await made({ doc: true });
+    try {
+      const named = await go1(m);
+      expect(text(named)).toContain('North was 42 this quarter.');
+      expect(text(named, 'doc-')).toContain('<h2>x</h2>');
+      expect(text(named, 'doc-')).not.toContain('<h2>y</h2>');
+    } finally {
+      removeScratch(m.dir);
+    }
+  });
+
+  it('a Go again of an earlier refine keeps its own snapshot after a later refine kept a newer one', async () => {
+    const m = await made();
+    try {
+      await go1(m);
+      m.records.push(user(4, 't4', 'Also say south was 17.'));
+      expect(text(await m.go('c1', CHAT, 'refine-run-4', 't4'))).toContain('Also say south was 17.');
+      const again = await m.go('c1', CHAT, 'refine-run-1b');
+      expect(again.packet.files.filter((f) => f.name.startsWith('conversation-')).map((f) => f.name)).toEqual(['conversation-c1-to-t3.md']);
+      expect(text(again)).not.toContain('Also say south was 17.');
+    } finally {
+      removeScratch(m.dir);
+    }
+  });
+
+  const go1 = (m: Awaited<ReturnType<typeof made>>): Promise<BoundRefine> => m.go('c1', CHAT, 'refine-run-1');
 });
 
 describe('A5: chat changes the open document, never a new page', () => {

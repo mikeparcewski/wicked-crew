@@ -27,6 +27,7 @@
  * person's own processes (DES §7.3).
  */
 
+import { createHash } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { record, z } from '../zod.js';
 
@@ -34,7 +35,7 @@ import { LOCAL_ACTOR, trustAtLeast, viewOf } from '../api/auth.js';
 import type { AuditLog } from '../api/audit.js';
 import type { Actor, AppEditOp, AppErrorBody, AppPublishBody } from '../core/types.js';
 import { APP_NAMED_ID_RE, parseSpec } from './spec.js';
-import { APP_SLUG_RE, AppStore, AppStoreError } from './store.js';
+import { APP_SLUG_RE, AppStore, AppStoreError, type AppListKey } from './store.js';
 import { QUERY_TEXT_MAX_BYTES } from './check.js';
 import { AppWriteError, type AppWritePath } from './actions/write-path.js';
 import { AppExecError, type AppExecutor } from './exec/executor.js';
@@ -123,6 +124,35 @@ export const AppHistoryMoveSchema = z.strictObject({ base });
 /** (G16) Archive and unarchive take no fields: `{}` (or no body). */
 export const AppArchiveSchema = z.strictObject({});
 const LIST_SCOPES = ['active', 'archived', 'all'] as const;
+
+/** (crew#1678) The most apps one page of `GET /apps` answers. */
+export const APPS_PAGE_MAX = 200;
+
+/** Which list a cursor continues: its `project` (`null` = every project) and `archived` scope. */
+type AppsListFilter = { project: string | null; scope: (typeof LIST_SCOPES)[number] };
+
+/** The list a cursor belongs to, as a short fixed-length tag (a project id may be long: the cursor stays bounded). */
+function appsListTag(filter: AppsListFilter): string {
+  return createHash('sha256').update(JSON.stringify([filter.project, filter.scope])).digest('base64url').slice(0, 16);
+}
+
+/** (crew#1678) A page's `nextCursor`: the last app's place in the list's order and the list it is in, opaque to a client. */
+function appsCursorOf(key: AppListKey, filter: AppsListFilter): string {
+  return Buffer.from(JSON.stringify([key.createdAt, key.slug, appsListTag(filter)]), 'utf8').toString('base64url');
+}
+
+/** The place a cursor names, or `undefined` when it is malformed or was given for another list (project or scope). */
+function appsCursorKey(cursor: string, filter: AppsListFilter): AppListKey | undefined {
+  try {
+    const v: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    if (!Array.isArray(v) || v.length !== 3) return undefined;
+    const [createdAt, slug, tag] = v as [unknown, unknown, unknown];
+    if (tag !== appsListTag(filter)) return undefined;
+    return typeof createdAt === 'number' && Number.isFinite(createdAt) && typeof slug === 'string' && slug !== '' ? { createdAt, slug } : undefined;
+  } catch {
+    return undefined;
+  }
+}
 const version = z.union([z.int().min(1), z.string().regex(/^[0-9a-fA-F]{40}$/)]);
 export const AppRestoreSchema = z.strictObject({ base, version });
 export const AppQuerySchema = z.strictObject({ version, query: z.string().regex(APP_NAMED_ID_RE), params: record(z.string(), z.unknown()).optional() });
@@ -176,9 +206,24 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
   };
 
   app.get(`${V}/apps`, { config: { manifest: { responseType: 'AppsListResponse', statusCodes: [200, 400] } } }, async (req, reply) => {
-    const q = z.object({ project: z.string().min(1).max(128).optional(), archived: z.enum(LIST_SCOPES).optional() }).safeParse(req.query ?? {});
+    const q = z.object({
+      project: z.string().min(1).max(128).optional(),
+      archived: z.enum(LIST_SCOPES).optional(),
+      // (crew#1678) A page at a time: `limit` apps, after `cursor` (the previous page's `nextCursor`).
+      limit: z.coerce.number().int().min(1).max(APPS_PAGE_MAX).optional(),
+      cursor: z.string().min(1).max(512).optional(),
+    }).safeParse(req.query ?? {});
     if (!q.success) return badRequest(reply, q.error);
-    return { apps: store.list(q.data.project, q.data.archived ?? 'active') };
+    const scope = q.data.archived ?? 'active';
+    if (q.data.limit === undefined) {
+      if (q.data.cursor !== undefined) return refuse(reply, 400, { code: 'bad_request', error: 'cursor: a cursor continues a paged list; send limit with it' });
+      return { apps: store.list(q.data.project, scope) };
+    }
+    const filter: AppsListFilter = { project: q.data.project ?? null, scope };
+    const after = q.data.cursor === undefined ? null : appsCursorKey(q.data.cursor, filter);
+    if (after === undefined) return refuse(reply, 400, { code: 'bad_request', error: 'cursor: not a cursor of this list (send the same project and archived as the page that gave it)' });
+    const page = store.listPage(q.data.project, scope, q.data.limit, after);
+    return { apps: page.apps, nextCursor: page.next === null ? null : appsCursorOf(page.next, filter) };
   });
 
   app.post(`${V}/apps`, { config: { manifest: { requestType: 'CreateAppBody', responseType: 'AppDetailResponse', statusCodes: [201, 400, 404, 409, 422, 503] } } }, async (req, reply) => {

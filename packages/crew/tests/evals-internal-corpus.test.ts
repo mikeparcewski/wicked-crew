@@ -1370,25 +1370,31 @@ describe('materialize — git archive of each pinned tag', () => {
   it(
     'S15n: two CONCURRENT materializations into one root — each either publishes or is refused by `.materialize.lock` (never interleaved); the surviving trees are the committed trees, the receipt describes them, no staging/prev/lock debris',
     async () => {
+      // crew#1764: the publication that takes the lock holds it until the other has been refused (a test-only
+      // hold), so the two always collide and the refusal is always exercised.
+      const release = `${outDir}.release`;
+      const hold = { [(await mod()).FAULT_ENV]: `lock-hold-until:${release}` };
       const spawnMaterialize = () =>
         new Promise<{ status: number | null; stderr: string }>((resolveRun) => {
           const args = [SCRIPT, 'materialize', outDir, '--pin', pinPath, '--source-root', sourceRoot, '--known-bad', knownBadPath];
           // `env` spreads process.env (the hermetic arming); re-stated for the harness-hygiene scan.
-          const child = spawn(process.execPath, args, { env: { ...process.env, ...env } });
+          const child = spawn(process.execPath, args, { env: { ...process.env, ...env, ...hold } });
           let stderr = '';
           child.stderr.on('data', (d: Buffer) => {
             stderr += d.toString();
           });
           child.on('close', (status) => resolveRun({ status, stderr }));
         });
-      const [x, y] = await Promise.all([spawnMaterialize(), spawnMaterialize()]);
-      for (const r of [x, y]) {
-        expect([0, 1]).toContain(r.status);
-        // The loser can open the lock in the instant after the winner's exclusive create and before it
-        // writes `pid … generation …`: the script then names the lock without a holder (withPublicationLock).
-        if (r.status === 1) expect(r.stderr).toMatch(/another `materialize` publication holds .*\.materialize\.lock(?: \(pid \d+ generation \d{8}-\d{6}-[0-9a-f]{8}\))? — refusing to interleave/);
-      }
-      expect([x.status, y.status]).toContain(0); // at least one published
+      const runs = [spawnMaterialize(), spawnMaterialize()] as const;
+      const refused = await Promise.race(runs);
+      // Released and both collected before any assertion: a failing one never leaves the holder running.
+      writeFileSync(release, '');
+      const [x, y] = await Promise.all(runs);
+      rmSync(release);
+      // The lock is published whole (a hard link of a written file), so the loser always names the holder.
+      expect(refused.status, refused.stderr).toBe(1);
+      expect(refused.stderr).toMatch(/another `materialize` publication holds .*\.materialize\.lock \(pid \d+ generation \d{8}-\d{6}-[0-9a-f]{8}\) — refusing to interleave/);
+      expect([x.status, y.status].sort()).toEqual([0, 1]); // one published, one refused
       const trees = ['alpha@v0.3.0', 'beta@v0.2.0', 'gamma@v0.3.0'];
       expect(readdirSync(outDir).sort()).toEqual([...trees, 'materialized.json']);
       // A reference materialization into another root: the surviving trees are byte-identical to it.
@@ -2299,22 +2305,28 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
     'S14g: two CONCURRENT publishers into one dir — each either publishes or is refused by the lock; the surviving pair verifies as one generation',
     async () => {
       okEngine();
+      // crew#1764: as S15n, the publisher that takes the lock holds it until the other has been refused.
+      const release = `${outDir}.release`;
+      const hold = { [(await mod()).FAULT_ENV]: `lock-hold-until:${release}` };
       const spawnRun = () =>
         new Promise<{ status: number | null; stderr: string }>((resolveRun) => {
           const args = [SCRIPT, 'run', outDir, '--pin', pinPath, '--source-root', sourceRoot, '--rules', rulesDir];
           // `env` spreads process.env (the hermetic arming); re-stated for the harness-hygiene scan.
-          const child = spawn(process.execPath, args, { env: { ...process.env, ...env, PATH: `${fakeBin}:${process.env['PATH'] ?? ''}` } });
+          const child = spawn(process.execPath, args, { env: { ...process.env, ...env, ...hold, PATH: `${fakeBin}:${process.env['PATH'] ?? ''}` } });
           let stderr = '';
           child.stderr.on('data', (d: Buffer) => {
             stderr += d.toString();
           });
           child.on('close', (status) => resolveRun({ status, stderr }));
         });
-      const [x, y] = await Promise.all([spawnRun(), spawnRun()]);
-      for (const r of [x, y]) {
-        expect([0, 1]).toContain(r.status);
-        if (r.status === 1) expect(r.stderr).toMatch(/another `run` publication holds .*\.report\.lock/);
-      }
+      const runs = [spawnRun(), spawnRun()] as const;
+      const refused = await Promise.race(runs);
+      writeFileSync(release, ''); // released and both collected before any assertion, as in S15n
+      const [x, y] = await Promise.all(runs);
+      rmSync(release);
+      expect(refused.status, refused.stderr).toBe(1);
+      expect(refused.stderr).toMatch(/another `run` publication holds .*\.report\.lock \(pid \d+ generation \d{8}-\d{6}-[0-9a-f]{8}\) — refusing to interleave/);
+      expect([x.status, y.status].sort()).toEqual([0, 1]);
       expect([x.status, y.status]).toContain(0); // at least one published
       const m = await mod();
       const { report, meta } = m.readPublishedReport(outDir); // verifies report_sha256 + generation
@@ -2364,6 +2376,59 @@ describe('publication — atomic (tmp+rename), locked, one generation per public
     rmSync(lock);
     expect(run('samples', outDir).status).toBe(0);
     expect(existsSync(lock)).toBe(false);
+  });
+
+  it('a lock released between the refused link and the read of its holder is taken again, never refused without a holder (crew#1764)', async () => {
+    const m = await mod();
+    const lock = join(outDir, m.SAMPLES_LOCK);
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(lock, 'pid 4242 generation 20260909-000000-deadbeef\n', 'utf8');
+    // The test-only point removes the lock right after the EEXIST: the holder released it in that instant.
+    const s = runEnv({ [m.FAULT_ENV]: 'lock-released-after-eexist' }, 'samples', outDir);
+    expect(s.status, s.stderr).toBe(0);
+    expect(s.stderr).not.toMatch(/publication holds/);
+    expect(readdirSync(outDir).sort()).toEqual(['samples.json', 'samples.meta.json']); // published; no tmp, no lock left
+  });
+
+  it('a lock released and taken again between every refused link and its read still ends in a refusal naming a holder (crew#1764)', async () => {
+    const m = await mod();
+    const lock = join(outDir, m.SAMPLES_LOCK);
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(lock, 'pid 4242 generation 20260909-000000-deadbeef\n', 'utf8');
+    // Three times over, the holder releases right after the refused link and another publisher takes the lock right
+    // after the read: no count of such retries ends in a refusal without a holder.
+    const s = runEnv({ [m.FAULT_ENV]: 'lock-churn:3' }, 'samples', outDir);
+    expect(s.status).toBe(1);
+    expect(s.stderr).toMatch(/another `samples` publication holds .*\.samples\.lock \(pid \d+ generation churn-3\) — refusing to interleave/);
+    expect(existsSync(join(outDir, 'samples.json'))).toBe(false);
+    rmSync(lock);
+  });
+
+  it('a dangling symlink at the lock path is a refusal naming it — never a retake loop, never removed (crew#1771 coord F2)', async () => {
+    const m = await mod();
+    const lock = join(outDir, m.SAMPLES_LOCK);
+    mkdirSync(outDir, { recursive: true });
+    symlinkSync(join(outDir, 'nowhere'), lock); // the link refuses with EEXIST, its read is ENOENT
+    // runEnv's spawn with a deadline: the old loop never ended here.
+    const args = [SCRIPT, 'samples', outDir, '--pin', pinPath, '--source-root', sourceRoot, '--known-bad', knownBadPath];
+    const s = spawnSync(process.execPath, args, { env: { ...process.env, ...env }, encoding: 'utf8', timeout: 20_000 });
+    expect(s.error, 'the publication spun instead of refusing').toBeUndefined();
+    expect(s.status).toBe(1);
+    expect(s.stderr).toMatch(/\.samples\.lock is a symlink to nothing — refusing to publish `samples` through it/);
+    expect(lstatSync(lock).isSymbolicLink()).toBe(true); // not ours: left as found
+    expect(readdirSync(outDir)).toEqual([m.SAMPLES_LOCK]); // nothing published, no temp left
+    rmSync(lock);
+  });
+
+  it('a failure removing the lock\'s temp name after the lock was taken still releases the lock (crew#1764)', async () => {
+    const m = await mod();
+    const lock = join(outDir, m.SAMPLES_LOCK);
+    const s = runEnv({ [m.FAULT_ENV]: 'lock-temp-cleanup' }, 'samples', outDir);
+    expect(s.status).not.toBe(0);
+    expect(s.stderr).toMatch(/injected fault at lock-temp-cleanup/);
+    expect(existsSync(lock)).toBe(false); // never a stale lock that refuses every later publication
+    rmSync(outDir, { recursive: true, force: true }); // the temp name the fault left
+    expect(run('samples', outDir).status).toBe(0);
   });
 });
 

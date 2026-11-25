@@ -112,7 +112,7 @@ interface Harness {
 
 const harnesses: Harness[] = [];
 
-async function harness(opts: { authMode?: 'off' | 'required'; mode?: 'off' | 'ledger' | 'on'; dir?: string; inForce?: ConformanceRule[]; dropProject?: boolean } = {}): Promise<Harness> {
+async function harness(opts: { authMode?: 'off' | 'required'; mode?: 'off' | 'ledger' | 'on'; dir?: string; inForce?: ConformanceRule[]; dropProject?: boolean; audit?: AuditLog } = {}): Promise<Harness> {
   const dir = opts.dir ?? mkdtempSync(join(tmpdir(), 'crew-decisions-'));
   const rules = new Map<string, ConformanceRule>();
   for (const r of opts.inForce ?? []) rules.set(r.id, r);
@@ -137,6 +137,7 @@ async function harness(opts: { authMode?: 'off' | 'required'; mode?: 'off' | 'le
       return r !== undefined;
     }),
     listConformanceRules: vi.fn(async () => [...rules.values()]),
+    projectList: vi.fn(async () => [{ id: 'kestrel', name: 'Kestrel' }, { id: 'heron', name: 'Heron' }]),
     considerRules: vi.fn(async (q: { projects?: string[] }) => ({
       in_force: [...rules.values()].filter(
         (r) => r.retired !== true && (r.targets.project === undefined || (q.projects ?? []).includes(r.targets.project)),
@@ -167,7 +168,7 @@ async function harness(opts: { authMode?: 'off' | 'required'; mode?: 'off' | 'le
     new GateCache(),
     elicitations,
     { bus: null, index, log: () => undefined },
-    { audit: AuditLog.noop(), authMode: opts.authMode ?? 'required' },
+    { audit: opts.audit ?? AuditLog.noop(), authMode: opts.authMode ?? 'required' },
     {
       callEstateTool: estate.tool as (t: string, a: Record<string, unknown>) => Promise<unknown>,
       decisionLedger: ledger,
@@ -314,6 +315,68 @@ describe('DC-S4a structured hosts → ledger → one landing path', () => {
     expect(rej.statusCode, rej.body).toBe(200);
     const states = Object.fromEntries((await list(h)).map((d) => [d.origin.run_id, [d.state, d.how ?? null]]));
     expect(states).toEqual({ r1: ['remembered', 'needs-you'], r2: ['dismissed', null] });
+  });
+
+  it('crew#1261: a person rejecting a decision\'s proposal, or dismissing the decision, is on record as their rejection', async () => {
+    const auditDir = mkdtempSync(join(tmpdir(), 'crew-decisions-audit-'));
+    try {
+      const audit = new AuditLog(join(auditDir, 'audit.log'), () => undefined);
+      const h = await harness({ audit });
+      await gateNote(h, 'r1', 'rebase onto main before requesting review');
+      await gateNote(h, 'r2', 'prefer small focused PRs over large batches');
+      const [a, b] = await list(h);
+      expect((await h.app.inject({ method: 'POST', url: `/api/v1/proposals/${a!.proposal_id}/reject`, headers: HUMAN })).statusCode).toBe(200);
+      expect((await h.app.inject({ method: 'POST', url: `/api/v1/decisions/${b!.id}/dismiss`, headers: HUMAN, payload: { reason: 'one-off' } })).statusCode).toBe(200);
+      await audit.flush();
+      const lines = (await audit.readAll({ action: 'proposal.decided' })).map((e) => [e.detail?.['proposalId'], e.detail?.['by'], e.detail?.['reason'], e.actor.kind]);
+      expect(lines.sort()).toEqual([[a!.proposal_id, 'operator', 'rejected', 'human'], [b!.proposal_id, 'operator', 'rejected', 'human']].sort());
+      const rejected = ((await h.app.inject({ method: 'GET', url: '/api/v1/proposals?state=rejected', headers: HUMAN })).json() as { proposals: Array<{ id: string; decision?: unknown }> }).proposals;
+      expect(rejected.map((p) => p.decision)).toEqual([expect.objectContaining({ by: 'operator', reason: 'rejected' }), expect.objectContaining({ by: 'operator', reason: 'rejected' })]);
+    } finally {
+      rmSync(auditDir, { recursive: true, force: true });
+    }
+  });
+
+  it('crew#1261: "Same as your rule" records the person\'s restated decision; a widening that does not land records crew withdrawing its own filing', async () => {
+    const auditDir = mkdtempSync(join(tmpdir(), 'crew-decisions-audit-'));
+    try {
+      const audit = new AuditLog(join(auditDir, 'audit.log'), () => undefined);
+      const h = await harness({ authMode: 'off', audit });
+      await gateNote(h, 'r1', ALWAYS, {});
+      const [d] = await list(h, {});
+      expect(d).toMatchObject({ state: 'offered' });
+      // The model said it may restate an in-force rule (derive.ts: `same_as` → maybe-restated); a model label is not
+      // reachable from a gate note here, so the folded record is given that route in place (the ledger keeps the first).
+      Object.assign(h.ledger.record(d!.id)!, { route: 'maybe-restated', rule_ref: 'proposal:old' });
+      const same = await h.app.inject({ method: 'POST', url: `/api/v1/decisions/${d!.id}/same`, headers: HUMAN, payload: { same: true } });
+      expect(same.statusCode, same.body).toBe(200);
+
+      // Widening: two projects remember the same rule, then the successor's landing fails.
+      await gateNote(h, 'r1', ALWAYS_KESTREL.replace('kestrel', 'shared'), {});
+      await gateNote(h, 'r2', ALWAYS_KESTREL.replace('kestrel', 'shared'), {});
+      const fresh = (await list(h, {})).filter((x) => x.id !== d!.id);
+      for (const x of fresh) {
+        const r = await h.app.inject({ method: 'POST', url: `/api/v1/decisions/${x.id}/remember`, headers: {}, payload: { scope: 'project' } });
+        expect(r.statusCode, r.body).toBe(200);
+      }
+      h.adapter.upsertConformanceRule!.mockRejectedValueOnce(new Error('store refused'));
+      const widen = await h.app.inject({ method: 'POST', url: `/api/v1/decisions/${fresh[0]!.id}/widen`, headers: {} });
+      expect(widen.statusCode).toBe(502);
+      const widening = [...h.estate.proposals.values()].find((p) => p.payload['widens'] !== undefined)!;
+      expect(widening.state).toBe('rejected');
+
+      await audit.flush();
+      const lines = (await audit.readAll({ action: 'proposal.decided' })).map((e) => [e.detail?.['proposalId'], e.detail?.['by'], e.detail?.['reason']]);
+      expect(lines).toContainEqual([d!.proposal_id, 'operator', 'restated']);
+      expect(lines).toContainEqual([widening.id, 'crew', 'withdrawn']);
+      const rejected = ((await h.app.inject({ method: 'GET', url: '/api/v1/proposals?state=rejected', headers: HUMAN })).json() as { proposals: Array<{ id: string; decision?: unknown }> }).proposals;
+      expect(Object.fromEntries(rejected.map((p) => [p.id, p.decision]))).toEqual({
+        [d!.proposal_id!]: expect.objectContaining({ by: 'operator', reason: 'restated' }),
+        [widening.id]: expect.objectContaining({ by: 'crew', reason: 'withdrawn' }),
+      });
+    } finally {
+      rmSync(auditDir, { recursive: true, force: true });
+    }
   });
 
   it('a forged payload (a decision id the ledger does not know) lands as an ordinary policy, with no ORIGIN', async () => {

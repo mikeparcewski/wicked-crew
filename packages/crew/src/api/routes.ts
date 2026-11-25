@@ -3,6 +3,7 @@ import { registerRedeliverRoutes, type CheckRunTree, type RedeliverExec } from '
 import type { GhExec } from '../core/deliver.js';
 import { REVIEW_WORKFLOW } from '../insights/workflow.js';
 import { runUsageCost, type LooseEvent, type RunUsageCost } from '../insights/run-facts.js';
+import { NoIndependentReviewer } from '../insights/review-service.js';
 import { appsRuntimeDir, appsServerArtifact, containerEngineKnown } from '../apps/publish/artifacts.js';
 import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { busSeamsOffWarning, busUnavailableWarning } from '../core/bus-notice.js';
@@ -16,6 +17,7 @@ import {
   setRepoMinimum,
   getRequirement,
   patchRequirement,
+  retireRequirement,
   readRequirementsGraph,
   REQUIREMENTS_NOT_GENERATED,
 } from './requirements.js';
@@ -101,6 +103,9 @@ import type {
   PolicyReach,
   RejectProposalResponse,
   RetireMemoryResponse,
+  RetireMemoryItemResponse,
+  UnretireMemoryResponse,
+  ForgetKnowledgeResponse,
   QeAcceptanceCheck,
   SessionStatus,
   SessionView,
@@ -170,10 +175,11 @@ import {
 import { DocRunIndex } from '../interactive/doc-run-index.js';
 import { listInteractiveDocs } from '../interactive/docs-index.js';
 import { SearchService, registerSearchRoutes } from './search-routes.js';
+import { RepoOrigins, originOf } from './repo-origins.js';
 import type { FreshenCheckout } from './chat-freshness.js';
 import { TestSetIndex } from '../qe/test-sets.js';
 import { estateExe, parseEstateTotals, projectGraphRefreshDiagnostics, readBlastRadiusPages, resolveProjectGraphBinding } from '../projects/graph.js';
-import { attachRepoToProject, registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
+import { attachRepoToProject, createProjectRecorded, registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { registerProjectAggregateRoutes } from './project-aggregates.js';
 import { composeLaunch, composePreflight, registerProductRoutes } from './product.js';
 import { buildWorkflowCatalogV2, parseCommand, resolveOption } from '../workflow-catalog/build-v2.js';
@@ -276,6 +282,8 @@ import {
   deliverRepoFor,
   deliverTargetView,
   isGitHubLogin,
+  pinnedGhExec,
+  pinnedGitExec,
   pushIdentityOf,
   readDeliverOriginUrl,
   resolvePullRequest as resolvePullRequestViaGh,
@@ -303,7 +311,7 @@ import {
 import { createDocInProcess, registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { CreateLauncher } from '../interactive/proposal-create.js';
 import { ThemeLauncher } from './proposal-theme.js';
-import { CHAT_GIT_PROTOCOLS, OnboardLauncher, probeGitUrl, shownGitUrl, withoutCredentials } from './proposal-onboard.js';
+import { CHAT_GIT_PROTOCOLS, OnboardLauncher, probeGitUrl, withoutCredentials } from './proposal-onboard.js';
 import { RefineLauncher } from '../interactive/proposal-refine.js';
 import { lineageSteps, protectedEdits } from '../interactive/protected-edits.js';
 import type { DocBindingStore } from '../interactive/doc-binding.js';
@@ -318,11 +326,11 @@ const BRIEF_COPY_MAX = 512 * 1024;
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
 import { crewStateHome, stateHomeOfDb, wickedWorkRoot } from '../projects/state-home.js';
-import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, jobLaunchRoster, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
+import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, jobLaunchRoster, jobRevisionLaunch, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
 import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, removeStagedDocuments, stagedDocumentsRemoved, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
 import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks, webScopeReason } from './run-sources.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
-import { LaunchRefusal, ChatProposals, LaunchOnceRegistry, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
+import { CHAT_ENDED, LaunchRefusal, ChatProposals, LaunchOnceRegistry, liveInRuns, proposalRunId, RecordingStubDispatcher, RevisionEditsSchema, runCostFromEvents } from './chat-proposals.js';
 import { CATALOG_SEEDS } from '../workflow-catalog/catalog-data.js';
 import { registerInteractiveDocList } from '../interactive/doc-list-routes.js';
 import { REVIEWS_DIRNAME } from '../interactive/review-ledger.js';
@@ -339,6 +347,7 @@ import type { TrackerProjector } from '../knowledge/trackers/projector.js';
 import { registerTrackerRoutes } from '../knowledge/trackers/routes.js';
 import { AuditLog } from './audit.js';
 import { auditFor } from './audit-view.js';
+import { ProposalDecisionIndex, recordProposalDecision } from './proposal-decisions.js';
 import {
   AcpFoldCache,
   EngineVersionCache,
@@ -397,6 +406,9 @@ import { idleClis, probeSeatImages, SeatImageRebuilder, seatImageStatusVia, type
 import { RunCostCache } from './needs.js';
 import { governanceStoreFix, legacyHomeOutboxPath } from '../core/governance-store.js';
 import { UsageError, replayOutboxInto } from '../cli/governance.js';
+import { DEFAULT_DAEMON_PORT } from '../cli/port.js';
+import type { ServicePlatform } from '../cli/service.js';
+import { startOnLoginStatus } from './start-on-login.js';
 import { foldDeadletters } from './governance-health.js';
 import { RetryIndex } from './retry-index.js';
 import { SEAT_RECORD_DEFAULT_DAYS, SEAT_RECORD_MAX_DAYS, seatRecord } from './seat-record.js';
@@ -744,6 +756,8 @@ function shapeMemoryItem(raw: unknown): MemoryItem {
   // `created_at` (unix seconds) rides through from estate `memory.list` verbatim — the "added" time
   // the surface date-filters on. Absent on an item the store did not stamp; never fabricated.
   if (typeof r['created_at'] === 'number') item.created_at = r['created_at'];
+  // crew#1697: a retired row (`memory.list {retired: true}`) carries when it was retired.
+  if (typeof r['retired_at'] === 'number') item.retired_at = r['retired_at'];
   return item;
 }
 
@@ -1206,6 +1220,18 @@ const InjectSchema = z.strictObject({
   input: z.literal('voice').optional(),
 });
 
+/** (crew#1392) Most characters of a dock steer's words its `run.injected` audit line keeps. */
+export const INJECT_WORDS_MAX = 2_000;
+
+/** A dock steer's words as the audit line keeps them: at most {@link INJECT_WORDS_MAX} characters, never half a pair. */
+export function injectWords(message: string): string {
+  if (message.length <= INJECT_WORDS_MAX) return message;
+  let end = INJECT_WORDS_MAX;
+  const last = message.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return message.slice(0, end);
+}
+
 export const ResumeSchema = z.strictObject({ ord: z.int().nonnegative().optional() });
 
 // The manual reassign lever (crew#442): `cli` omitted lets the engine's council re-pick, the
@@ -1254,9 +1280,19 @@ export const RetireMemorySchema = z.strictObject({
 });
 
 /** `POST /memory/retire-item` body (studio#206): ONE memory, by its `memory_id` from `GET /memory`.
- *  `.strict()`: a stray `scope_prefix` is a 400, never read as a wider erase than one row. */
+ *  `.strict()`: a stray `scope_prefix` is a 400, never read as a wider erase than one row. The same body
+ *  names the one memory for `POST /memory/erase-item` and `POST /memory/unretire` (crew#1697). */
 export const RetireMemoryItemSchema = z.strictObject({
   memory_id: z.string().min(1).max(512),
+});
+
+/** `POST /knowledge/forget` body (crew#1697): estate `knowledge.forget`'s own arguments. Exactly one target is
+ *  checked at the route (a 400 before any spawn); `.strict()`: an unknown field is a 400. */
+export const ForgetKnowledgeSchema = z.strictObject({
+  id: z.string().optional(),
+  source: z.string().optional(),
+  scope_prefix: z.string().optional(),
+  confirm_erase_all: z.boolean().optional(),
 });
 
 /** `POST /memory/edit` body (wicked-studio's Memory page): ONE memory's new words. `.strict()`: an
@@ -1282,6 +1318,33 @@ const memoryEditsInFlight = new Set<string>();
 /** The error an estate from before wicked-estate#188 answers to `memory.erase {id}`: it knows only the
  *  subtree erase, so it refuses the call (deleting nothing) for want of a `scope_prefix`. */
 const ESTATE_NO_ERASE_BY_ID = /scope_prefix \(non-empty\) required/i;
+
+/** crew#1697: how an estate without a tool refuses it. Before wicked-estate#552/#553 `memory.retire`,
+ *  `memory.unretire` and `knowledge.forget` are unknown tools (-32602 "unknown tool: …"); a memory implementer
+ *  without retirement answers -32601 "… does not support retirement" / "… retirement is unsupported". Either way
+ *  nothing was changed. A domain whose store did not open (-32601 "memory domain not available: <why>") is NOT
+ *  this: it stays a 502 with its own words (codex review). */
+const estateLacksTool = (err: unknown): boolean =>
+  err instanceof EstateMcpError &&
+  ((err.code === -32602 && /unknown tool/i.test(err.message)) ||
+    (err.code === -32601 && /does not support retirement|retirement is unsupported/i.test(err.message)));
+
+/** crew#1697: the count a one-memory estate tool answered (`deleted_count`, `retired_count`, `restored_count`):
+ *  0 or 1. Any other answer is estate misbehaving, thrown as an upstream fault (502). */
+function oneMemoryCount(raw: unknown, tool: string, key: string): 0 | 1 {
+  const n = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)[key] : undefined;
+  if (typeof n !== 'number') throw new EstateMcpError(`${tool} returned an unexpected shape`);
+  if (n !== 0 && n !== 1) throw new EstateMcpError(`${tool} {id} changed ${n} memories, expected 1`);
+  return n;
+}
+
+/** crew#1697: the 501 body for an estate that lacks a tool. */
+function estateUpgrade(what: string, estatePr: string, unchanged: string): { error: string; code: 'estate_upgrade_required' } {
+  return { error: `this wicked-estate ${what} (it needs wicked-estate${estatePr}); upgrade wicked-estate-mcp — ${unchanged}`, code: 'estate_upgrade_required' };
+}
+
+/** crew#1697: estate's `knowledge.forget` refusing a target (live-source structure named by id): a conflict, not a fault. */
+const ESTATE_FORGET_REFUSED = /knowledge\.forget refused/i;
 
 /**
  * A SKIN-OWNED settings key (crew#323): one lowercase segment under the `studio.` namespace,
@@ -1431,6 +1494,8 @@ interface RuntimeServices {
   resolvePullRequest?: (repoRoot: string, number: number) => Promise<PullRequestResolution>;
   /** Review provenance must be testable without contacting GitHub or mutating a real clone. */
   reviewChange?: Partial<Pick<ReviewChangeDeps, 'gh' | 'git'>>;
+  /** studio#1324: where the start-on-login read looks (tests); production reads this host's platform and home. */
+  startOnLogin?: { platform?: ServicePlatform; home?: string };
   /** crew#627: how the issues a launch's intent links are read (`gh issue view`, 5 s each).
    *  Injectable so route tests answer without gh; production uses `core/linked-issues.ts`. */
   resolveLinkedIssues?: (
@@ -1449,6 +1514,8 @@ interface RuntimeServices {
    *  `GET /runs/:id/events` at serve time so a reloaded page sees the `workerStalled` /
    *  `workerStallEscalated` facts the live socket carried. Absent ⇒ engine events only. */
   stallFrames?: (runId: string) => readonly RecordedStallFrame[];
+  /** (crew#1744) The daemon's one `git_url` reader, shared with the review service. Absent (route tests): one of its own. */
+  repoOrigins?: RepoOrigins;
   /** (DES-VOICE) The notes said by voice, shared with the `/ws` path that stamps their frames. Absent ⇒ this route
    *  set keeps its own (a directly-driven test). */
   voiceInputs?: VoiceInjectInputs;
@@ -1899,6 +1966,8 @@ export function registerRoutes(
       : {}),
   };
   const { audit } = security;
+  // crew#1261: who rejected a proposal and why, as crew recorded it (`GET /proposals` returns it on the row).
+  const proposalDecisions = new ProposalDecisionIndex(audit, (m) => app.log.warn(m));
   const seatHealth = runtime.seatHealth ?? new SeatHealthTracker();
   const deliveryFreeze = runtime.deliveryFreeze ?? new DeliveryFreeze();
   registerDeliveryFreezeRoutes(app, { freeze: deliveryFreeze, audit });
@@ -1945,20 +2014,15 @@ export function registerRoutes(
     'demo',
   ];
   const chatArtifactFlags: import('../core/types.js').ChatArtifactsCapabilities = chatArtifactsStub
-    ? { context: true, instructions: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps, onboard: true }
-    : { context: true, instructions: true, proposals: true, create: realCreate, refine: realRefine, theme: true, demo: false, onboard: true };
+    ? { context: true, instructions: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps, onboard: true, cutInView: true }
+    : { context: true, instructions: true, proposals: true, create: realCreate, refine: realRefine, theme: true, demo: false, onboard: true, cutInView: true };
   const proposalLaunchers = new LaunchOnceRegistry();
   proposalLaunchers.register('theme', new ThemeLauncher());
   // crew-0182: what an onboard card is resolved and its Go is checked against (one set of reads for both).
-  const originOf = async (rootPath: string): Promise<string | null> => {
-    try {
-      const out = await execCapped('git', ['-C', rootPath, 'remote', 'get-url', 'origin'], { timeout: 5_000 });
-      return out.stdout.trim() || null;
-    } catch {
-      return null;
-    }
-  };
+  // crew#1744: the one `git_url` reader (GET /repos, the repo search; the daemon hands the review service the same).
+  const repoOrigins = runtime.repoOrigins ?? new RepoOrigins();
   const onboardReads = {
+    projects: async () => (await adapter.projectList()).filter((p) => p.id !== DEFAULT_PROJECT_ID && p.status !== 'archived').map((p) => ({ id: p.id, name: p.name })),
     repos: () => adapter.listRepos(),
     projectRepoRefs: async (projectId: string) => (await adapter.projectMembers(projectId)).filter((m) => m.member_kind === 'crew.repo').map((m) => m.member_ref),
     checkoutOf: (name: string) => homeless(join(wickedWorkRoot('repos'), name)),
@@ -1973,6 +2037,8 @@ export function registerRoutes(
   proposalLaunchers.register('onboard', new OnboardLauncher({
     ...onboardReads,
     sessions: () => adapter.sessions(),
+    // crew#1694: the one project create, as `POST /projects` makes it (bus event, audit line, charter).
+    createProject: async (name, actor) => createProjectRecorded(adapter, projects, audit, actor, { name }),
     register: (data, ctx) => registerAndOnboard(data, { actor: ctx.actor, runId: ctx.runId, gitProtocols: CHAT_GIT_PROTOCOLS, log: { warn: (o, m) => app.log.warn(o as object, m) } }),
     attach: async (projectId, repoId, actor) => {
       await attachRepoToProject(adapter, projects, { projectId, repoId, actor, attachedBy: 'studio' });
@@ -2045,6 +2111,7 @@ export function registerRoutes(
     runtime.deliveryCache ??
     new DeliveryDerivationCache({
       listViews: () => adapter.sessionsDetail(),
+      viewOf: (id) => adapter.runView(id),
       probes: vacuityProbes,
       isDelivered: (runId) => deliveryIndex.isDelivered(runId),
       canDeliver,
@@ -2214,6 +2281,17 @@ export function registerRoutes(
   /** Repo root for a repo ref, from the registry — shared by the reprovision path below. */
   const repoRootOf = async (repoRef: string): Promise<string | undefined> =>
     (await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path;
+  /** (crew#1792) The push identity a repository's PR reads run as: its pin or the setting, else `GH_ACCOUNT` (the
+   *  deliver-target route's own resolution). Settings that cannot be read leave it to `GH_ACCOUNT`. */
+  const readIdentityOf = (repoRef: string) => async (): Promise<string | null> => {
+    let configured = '';
+    try {
+      configured = deliverIdentityFor(await adapter.getSettings(), repoRef).login;
+    } catch {
+      configured = '';
+    }
+    return pushIdentityOf(configured);
+  };
   /** The lookups a review-change exclusion reads (the launch and the job proposal read the same ones, CJ13). */
   const reviewChangeDeps = (repoRef: string, repoRoot: string): ReviewChangeDeps => ({
     repoRef,
@@ -2223,19 +2301,24 @@ export function registerRoutes(
     pushed: (id) => deliveryIndex.pushedFor(id),
     deliveredCommit: (id) => deliveryIndex.commitFor(id),
     revisesPr: (id) => retryIndex.revisesPrFor(id),
-    gh: runtime.reviewChange?.gh ?? defaultGhExec,
-    git: runtime.reviewChange?.git ?? (async (args, cwd) => {
+    gh: pinnedGhExec(readIdentityOf(repoRef), runtime.reviewChange?.gh ?? defaultGhExec),
+    // crew#1804: a branch or commit target's fetch runs as the deliver identity too, like the deliver script's `_gnet`.
+    git: pinnedGitExec(readIdentityOf(repoRef), runtime.reviewChange?.git ?? (async (args, cwd, env) => {
       try {
-        return { ...(await execCapped('git', args, { cwd, timeout: 5_000 })), code: 0 };
+        return { ...(await execCapped('git', args, { cwd, timeout: 5_000, ...(env !== undefined ? { env: { ...process.env, ...env } } : {}) })), code: 0 };
       } catch (err) {
         // Only exit 1 proves non-membership; preserve it separately from lookup failures.
         const code = (err as { code?: unknown }).code;
         return { code: typeof code === 'number' ? code : null, stdout: '', stderr: message(err) };
       }
-    }),
+    }), runtime.reviewChange?.gh ?? defaultGhExec),
   });
-  /** DES-L9: PR number → head branch, through `gh pr view` unless the runtime injected an answerer. */
-  const resolvePullRequest = runtime.resolvePullRequest ?? resolvePullRequestViaGh;
+  /** DES-L9: PR number → head branch, through `gh pr view` as the repository's push identity (crew#1792) unless the
+   *  runtime injected an answerer. */
+  const resolvePullRequest = (repoRoot: string, number: number, repoRef: string): Promise<PullRequestResolution> =>
+    runtime.resolvePullRequest !== undefined
+      ? runtime.resolvePullRequest(repoRoot, number)
+      : resolvePullRequestViaGh(repoRoot, number, pinnedGhExec(readIdentityOf(repoRef)));
   /** crew#627: the intent's linked issues, read under the daemon's identity at launch. */
   /** (DES-PM-001 §3.2) A project's live `crew.repo` members, for a tracker set. */
   const repoMembersOf = async (projectId: string): Promise<string[]> => (await adapter.projectMembers(projectId)).filter((m) => m.member_kind === 'crew.repo').map((m) => m.member_ref);
@@ -2534,20 +2617,37 @@ export function registerRoutes(
       ...[adapter.vaultBin != null ? vaultBinWarning(adapter.vaultBin) : null].filter((w) => w !== null),
     ];
   // crew#1157: the engine's built-in presets are compiled in, so the chat workflows it carries are
-  // read once (on the first probe that can read them) and held until restart.
+  // read once and held until restart. crew#1767: the read is an actor round trip, so it starts here,
+  // at registration (the first probe usually finds it held), at most one is in flight, and `/health`
+  // waits for it only inside the ping's own bound: a probe while the actor is busy answers `[]` (the
+  // engine's answer is not known yet) and a later probe answers the held list. A failed read is
+  // dropped, so the next probe reads again.
   let chatWorkflowsHeld: string[] | null = null;
-  const chatWorkflowsNow = async (): Promise<string[]> => {
-    if (chatWorkflowsHeld !== null) return chatWorkflowsHeld;
-    if (typeof adapter.listPresets !== 'function') return [];
-    try {
-      chatWorkflowsHeld = servedChatWorkflows(await adapter.listPresets());
-      return chatWorkflowsHeld;
-    } catch {
-      return [];
-    }
+  let chatWorkflowsRead: Promise<string[]> | null = null;
+  const chatWorkflowsLoad = (): Promise<string[]> => {
+    if (chatWorkflowsHeld !== null) return Promise.resolve(chatWorkflowsHeld);
+    if (typeof adapter.listPresets !== 'function') return Promise.resolve([]);
+    chatWorkflowsRead ??= Promise.resolve()
+      .then(() => adapter.listPresets())
+      .then((presets) => (chatWorkflowsHeld = servedChatWorkflows(presets)))
+      .catch(() => [] as string[])
+      .finally(() => {
+        chatWorkflowsRead = null;
+      });
+    return chatWorkflowsRead;
   };
+  void chatWorkflowsLoad();
   app.get(`${V}/health`, { config: { manifest: { statusCodes: [200] } } }, async () => {
+    const deadline = performance.now() + HEALTH_PING_WAIT_MS;
+    const workflowsRead = chatWorkflowsLoad();
     const ping = await enginePing();
+    let chatWorkflowsTimer: NodeJS.Timeout | undefined;
+    const chatWorkflows = await Promise.race([
+      workflowsRead,
+      new Promise<string[]>((resolve) => {
+        chatWorkflowsTimer = setTimeout(() => resolve([]), Math.max(0, deadline - performance.now()));
+      }),
+    ]).finally(() => clearTimeout(chatWorkflowsTimer));
     // F-E2E-030: what this deployment can keep. A composer reads `capabilities.deliverGate`
     // before it promises "pauses at the deliver gate"; a stub-driven route set without the
     // probe honestly reports no gate.
@@ -2588,7 +2688,7 @@ export function registerRoutes(
       chatAttachments: true,
       // api-types 0.141.0 (crew#1157): the read-only workflows `POST /chats {workflow}` runs on THIS
       // engine (`analyze` on a core-ts that carries it); `[]` = plain chats only.
-      chatWorkflows: await chatWorkflowsNow(),
+      chatWorkflows,
       // api-types 0.145.0: the evals, insights and schedules surfaces, read off the route table this
       // daemon serves, so a route set booted without one says false rather than an invented true.
       defaultEvals: app.hasRoute({ method: 'GET', url: `${V}/testing/default-evals/suites` }),
@@ -2617,6 +2717,9 @@ export function registerRoutes(
       chatJobProposals: chatJobProposalsOn,
       chatJobPower: chatJobProposalsOn,
       reshapeRun: chatJobProposalsOn,
+      // crew#1697: soft retire + restore on the Memory page, forget on the Knowledge page.
+      memoryRestore: app.hasRoute({ method: 'POST', url: `${V}/memory/unretire` }),
+      knowledgeForget: app.hasRoute({ method: 'POST', url: `${V}/knowledge/forget` }),
       // (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §14) Per operation: A1 serves `context` (the chat sees the open
       // artifact and the runs the person names; `seedFromArtifact`); A2 (0.170.0) `proposals`. The operations are later
       // slices (all on, with `stub`, in the test configuration).
@@ -3303,46 +3406,9 @@ export function registerRoutes(
   });
 
   // Registered repos → target-repo picker. Each carries `git_url` (studio#1012: the repo page's "This repository"
-  // tracker row reads it): the address the engine recorded, else — it records none for its own clones — the checkout's
-  // `origin` through `originOf` (the onboard card's own read), held a minute per checkout and read at most eight at a
-  // time across every list, so a list never runs a `git` per repository per request. Shown through `shownGitUrl`
-  // (credentials and query removed, an address it can't vouch for dropped); none = no field.
-  const originCache = new Map<string, { at: number; url: Promise<string | null> }>();
-  let originReads = 0;
-  const originQueue: Array<() => void> = [];
-  const limitedOrigin = async (rootPath: string): Promise<string | null> => {
-    if (originReads < 8) originReads += 1;
-    else await new Promise<void>((go) => originQueue.push(go));
-    try {
-      return await originOf(rootPath);
-    } finally {
-      // The slot passes straight to the next waiter, so no new read can take it in between.
-      const next = originQueue.shift();
-      if (next !== undefined) next();
-      else originReads -= 1;
-    }
-  };
-  const listedOrigin = (rootPath: string): Promise<string | null> => {
-    const now = Date.now();
-    const hit = originCache.get(rootPath);
-    if (hit !== undefined && now - hit.at < 60_000) return hit.url;
-    const url = limitedOrigin(rootPath);
-    originCache.set(rootPath, { at: now, url });
-    return url;
-  };
-  const withGitUrl = async (r: RepoEntry): Promise<RepoEntry> => {
-    const { git_url: recorded, ...rest } = r;
-    const raw = typeof recorded === 'string' && recorded.trim() !== '' ? recorded : await listedOrigin(r.root_path);
-    const shown = raw === null ? null : shownGitUrl(raw);
-    return shown === null ? rest : { ...rest, git_url: shown };
-  };
-  app.get(`${V}/repos`, async () => {
-    const listed = await adapter.listRepos();
-    // A checkout no longer registered leaves the cache.
-    const roots = new Set(listed.map((r) => r.root_path));
-    for (const root of originCache.keys()) if (!roots.has(root)) originCache.delete(root);
-    return { repos: await Promise.all(listed.map(withGitUrl)) };
-  });
+  // tracker row reads it), through the daemon's one origin reader (repo-origins.ts, crew#1744): the review's issue
+  // link and the repo search read the same.
+  app.get(`${V}/repos`, async () => ({ repos: await repoOrigins.list(() => adapter.listRepos()) }));
 
   app.delete(`${V}/repos/:id`, { config: { manifest: { responseType: 'UnregisterRepoResponse', statusCodes: [200, 404, 409, 501] } } }, async (req, reply) => {
     const { id } = req.params as { id: string };
@@ -3885,7 +3951,7 @@ export function registerRoutes(
       if (root === undefined) {
         return reply.code(404).send({ error: `repoRef names an unknown repo: ${revisedRepo}` });
       }
-      const resolved = await resolvePullRequest(root, b.revisesPr);
+      const resolved = await resolvePullRequest(root, b.revisesPr, revisedRepo);
       if (!resolved.ok) return reply.code(409).send({ error: resolved.error });
       revisesPr = { number: b.revisesPr, headRef: resolved.pr.headRef, url: resolved.pr.url };
       input.baseRef = revisesPr.headRef;
@@ -4049,6 +4115,11 @@ export function registerRoutes(
       try {
         await (runtime.reviewLaunch as NonNullable<RuntimeDeps['reviewLaunch']>)(input);
       } catch (err) {
+        // (crew#1375) No seat that ran none of the reviewed work: the review-change refusal's shape, so a chat job's Start
+        // offers reduced assurance.
+        if (err instanceof NoIndependentReviewer) {
+          return reply.code(409).send({ code: err.code, error: `the review could not be prepared: ${err.message}`, excluded: err.excluded, retryWith: { reducedAssurance: true } });
+        }
         return reply.code(409).send({ error: `the review could not be prepared: ${message(err)}` });
       }
     }
@@ -4482,10 +4553,8 @@ export function registerRoutes(
    */
   proposalLaunchers.register('job', {
     find: async (identity) => (await adapter.sessions()).includes(identity.runId),
-    live: async (runId) => {
-      const v = await adapter.runView(runId);
-      return v !== undefined && !['completed', 'cancelled', 'failed'].includes(String(v.session.status));
-    },
+    // crew#1779: read off the check's one run list, never one engine read per job.
+    live: liveInRuns,
     launch: async (d) => {
       const p = d.resolution;
       if (p.shape === undefined || p.catalogRev === undefined) throw new Error('this proposal has no shape to launch');
@@ -4535,6 +4604,8 @@ export function registerRoutes(
             ...(p.relaunch?.deliver !== undefined ? { deliver: p.relaunch.deliver } : {}),
             ...(p.relaunch?.deliverGate !== undefined && p.relaunch.deliver !== 'none' ? { deliverGate: p.relaunch.deliverGate } : {}),
             ...(p.relaunch?.revisesPr !== undefined && p.relaunch.deliver === 'pr' && p.repoRefs?.[0] !== undefined ? { revisesPr: p.relaunch.revisesPr } : {}),
+            // (crew#1840) A job asked to change a pull request this chat delivered updates it: no second PR.
+            ...jobRevisionLaunch(p),
           },
           { ...ctx, fromProposal: d.pid, ...(d.power === true ? { powerRequired: true } : {}) },
         );
@@ -5064,7 +5135,7 @@ export function registerRoutes(
               const again =
                 revisedRoot === undefined
                   ? ({ ok: false, error: `repo ${repoRef} is no longer registered — cannot re-check pull request #${revising.number}` } as const)
-                  : await resolvePullRequest(revisedRoot, revising.number);
+                  : await resolvePullRequest(revisedRoot, revising.number, repoRef);
               if (!again.ok) {
                 revisionRefused = again.error;
                 return;
@@ -5880,7 +5951,7 @@ export function registerRoutes(
     // studio#1094: the person route owns admission; the open's resolver validates their first repo pick.
     pickFirstRepo: async (chatId, repoRef, actor, pid) => {
       const previous = chatScopes.get(chatId);
-      if (previous === undefined) return { ok: false, status: 409, error: `chat ${chatId} has ended; start a new one` };
+      if (previous === undefined) return { ok: false, status: 409, error: CHAT_ENDED };
       if (previous.repos.length > 0) return { ok: false, status: 409, error: `chat ${chatId} already has a repository in scope` };
       if (previous.kind === 'everything') return { ok: false, status: 409, error: `chat ${chatId} already reads every registered repository` };
       const request: ChatScopeRequest = {
@@ -5989,7 +6060,7 @@ export function registerRoutes(
       const root = await repoRootOf(repoRef);
       if (root === undefined) return null;
       const ex = await reviewChangeExclusion(words, reviewChangeDeps(repoRef, root));
-      return ex.ok ? ex.excludeSeats : null;
+      return ex.ok ? { seats: ex.excludeSeats, ...(ex.provenance === 'unknown' && ex.why !== undefined ? { unknown: ex.why } : {}) } : null;
     },
     powerPresets: async (projectId) => {
       if (!powerSupported() || ((await adapter.getSettings()).powerModeDefault ?? true) === false || typeof adapter.listPresets !== 'function') return null;
@@ -6000,7 +6071,6 @@ export function registerRoutes(
     acceptsOnboard: (chatId) => chatAcceptsOnboard.get(chatId) === true,
     onboard: {
       ...onboardReads,
-      projects: async () => (await adapter.projectList()).filter((p) => p.id !== DEFAULT_PROJECT_ID && p.status !== 'archived').map((p) => ({ id: p.id, name: p.name })),
       originOf,
       probe: (url) => probeGitUrl(url),
       // POST /repos's own intake refusal (no garden, an old one, the state home): the card says it before anyone presses.
@@ -8122,7 +8192,11 @@ export function registerRoutes(
         throw err;
       }
       if (token !== null) voiceInputs.settle(id);
-      audit.record('run.injected', actorOf(req), { runId: id, detail: { target: parsed.data.target, ...(spoken ? { input: 'voice' } : {}) } });
+      // (crew#1392) The words too, capped: the run's context document shows a person's steer under Decisions.
+      audit.record('run.injected', actorOf(req), {
+        runId: id,
+        detail: { target: parsed.data.target, words: injectWords(parsed.data.message), ...(spoken ? { input: 'voice' } : {}) },
+      });
       // DC-S4a host: the operator's mid-run steering text (review S9).
       if (decisions !== null) {
         decisions.track(ingestDecision(decisions, {
@@ -8207,7 +8281,27 @@ export function registerRoutes(
   const textOrNull = (v: string | null | undefined): string | null => (v === undefined || v === null || v.trim() === '' ? null : v.trim());
   const PowerToggleSchema = z.strictObject({ on: z.boolean(), reason: z.string().trim().max(2000).nullish() });
   const RigorRaiseSchema = z.strictObject({ atLeast: z.enum(RIGORS), reason: z.string().trim().min(1).max(2000) });
-  const PowerPauseSchema = z.strictObject({ decision: z.enum(['continue_high', 'continue', 'switch_phased', 'stop']), note: z.string().trim().max(8000).nullish() });
+  const PowerPauseSchema = z.strictObject({
+    decision: z.enum(['continue_high', 'continue', 'switch_phased', 'stop']),
+    note: z.string().trim().max(8000).nullish(),
+    // (crew#1739) The pause the person answered, as the card showed it (`PowerPause.checkpoint` / `.at`).
+    checkpoint: z.number().int().positive().optional(),
+    at: z.number().int().nonnegative().optional(),
+  });
+  /** (crew#1739) Each run's pause answers, one at a time (`onePauseAnswer`). */
+  const pauseAnswers = new Map<string, Promise<unknown>>();
+  const onePauseAnswer = <T>(runId: string, op: () => Promise<T>): Promise<T> => {
+    const next = (pauseAnswers.get(runId) ?? Promise.resolve()).then(op, op);
+    const settled = next.then(() => undefined, () => undefined);
+    pauseAnswers.set(runId, settled);
+    void settled.then(() => { if (pauseAnswers.get(runId) === settled) pauseAnswers.delete(runId); });
+    return next;
+  };
+  /** A power pause's identity: its checkpoint and when it opened (`PowerPause`), or null when none is open. */
+  const pauseIdentity = (view: Record<string, unknown> | null): { checkpoint: number; at: number } | null => {
+    const pause = view?.['pause'] as { checkpoint?: unknown; at?: unknown } | null | undefined;
+    return pause && typeof pause.checkpoint === 'number' && typeof pause.at === 'number' ? { checkpoint: pause.checkpoint, at: pause.at } : null;
+  };
   /** An engine refusal as HTTP: `not_found:` 404, `conflict:` 409, `refused:` / `bad_request:` 409 / 400. */
   const powerError = (reply: FastifyReply, err: unknown) => {
     const msg = message(err);
@@ -8277,20 +8371,40 @@ export function registerRoutes(
     const actor = actorOf(req);
     if (!isHumanOperator(actor)) return reply.code(403).send({ error: 'Only a person can answer a power-mode pause' });
     if (!powerSupported()) return reply.code(501).send({ error: 'This engine has no power mode' });
-    try {
-      const note = textOrNull(parsed.data.note);
-      const st = await adapter.answerPowerPause(id, parsed.data.decision, note, actor.id);
-      audit.record('run.power_mode.paused', actor, { runId: id, detail: { decision: parsed.data.decision } });
-      if (decisions !== null && note !== null) {
-        decisions.track(ingestDecision(decisions, {
-          host: 'inject', actor, words: note, projectId: projects.index.projectOf(id) ?? null, runId: id,
-        }));
+    // (crew#1739) One answer per run at a time: the read of the open pause and the engine's answer are one step, so a
+    // second answer reads what the first left (a newer pause, or none) and is refused if it named the old one. Every
+    // pause answer goes through this route.
+    return onePauseAnswer(id, async () => {
+      try {
+        // (crew#1739) Which pause this answer is for. One that names a pause no longer open is refused, so a queued
+        // answer (studio's undo window) never lands on a newer pause the person never saw.
+        const view = await powerView(id);
+        const open = pauseIdentity(view);
+        const { checkpoint, at } = parsed.data;
+        if (view !== null && (checkpoint !== undefined || at !== undefined) &&
+            (open === null || (checkpoint !== undefined && checkpoint !== open.checkpoint) || (at !== undefined && at !== open.at))) {
+          return reply.code(409).send({
+            error: 'Pause changed',
+            reason: open === null
+              ? 'This pause was already answered, and the run is not paused now. Nothing was changed.'
+              : `This answer was for an earlier pause; the run is now paused at checkpoint ${open.checkpoint}. Read the pause again. Nothing was changed.`,
+            open,
+          });
+        }
+        const note = textOrNull(parsed.data.note);
+        const st = await adapter.answerPowerPause(id, parsed.data.decision, note, actor.id);
+        audit.record('run.power_mode.paused', actor, { runId: id, detail: { decision: parsed.data.decision } });
+        if (decisions !== null && note !== null) {
+          decisions.track(ingestDecision(decisions, {
+            host: 'inject', actor, words: note, projectId: projects.index.projectOf(id) ?? null, runId: id,
+          }));
+        }
+        return reply.send({ runId: id, ...st, answered: open });
+      } catch (err) {
+        if (err instanceof MaintenanceDrainError) return reply.code(503).send(maintenanceDrainBody(err));
+        return powerError(reply, err);
       }
-      return reply.send({ runId: id, ...st });
-    } catch (err) {
-      if (err instanceof MaintenanceDrainError) return reply.code(503).send(maintenanceDrainBody(err));
-      return powerError(reply, err);
-    }
+    });
   });
 
   /** The run's `wicked.run.*` bus mirror after a cursor (`RunBusPage`). Read through the engine's own bus
@@ -8585,11 +8699,11 @@ export function registerRoutes(
   // read it. A restart is routine: deploy, crash, laptop sleep.
   app.get(`${V}/runs/:id/gate`, async (req, reply) => {
     const { id } = req.params as { id: string };
-    // F35: this run's view only, never every run's (studio polls this route for every parked run, from
-    // every open tab). Each read is a copy of one run from the shared snapshot, so a read after an
-    // await sees a change the adapter learned of during it (a frame, or a write it made); any other
-    // change is at most the snapshot's age bound old.
-    const runOf = (): Promise<SessionView | undefined> => adapter.runView(id);
+    // F35, crew#1775: this run's view only, never every run's (studio reads this route for parked runs,
+    // from every open tab): one engine read of this run, off the actor, as the store is when it starts.
+    // Read once per request: the cached-but-not-servable path and the miss path share it (coord review C6).
+    let viewRead: Promise<SessionView | undefined> | undefined;
+    const runOf = (): Promise<SessionView | undefined> => (viewRead ??= adapter.runView(id));
     // (rejudge, api-types 0.134.0) A gate whose unit no judge could rule on says whether its judge
     // can be re-run now, and from which seats — the engine's own selection, read each time (a seat
     // signed in since the pause counts). Absent on every other gate and on an addon without the read.
@@ -8692,12 +8806,13 @@ export function registerRoutes(
     }
     const cached = gateCache.get(id);
     if (cached) {
+      const run = await runOf();
       const servable =
         recorded === null
         || (recorded.state === 'open' && cached.ord === recorded.ord)
-        || (recorded.state === 'none' && (await runOf())?.session.status === 'awaiting_human');
+        || (recorded.state === 'none' && run?.session.status === 'awaiting_human');
       if (servable) {
-        const offers = await offersAt(cached.ord, await runOf());
+        const offers = await offersAt(cached.ord, run);
         if (offers === null) return unavailable503();
         return { runId: id, ...cached, ...offers };
       }
@@ -8713,13 +8828,9 @@ export function registerRoutes(
     // cut of this assumed: it trades one read of the run's view for replaying an entire event history,
     // and it was that skipped check which made a completed run answer 503 on any build without the
     // binding (CI caught it) — an error where the honest, knowable answer was "no gate".
-    let run = await runOf();
-    // F35: the engine's gate record was read before the view and outranks it. A record showing a gate
-    // open beside no view of the run, or a view of it still moving, means the shared snapshot predates
-    // the pause (its frame has not landed yet): read the run from a fold that starts now.
-    if (recorded?.state === 'open' && run?.session.status !== 'awaiting_human') {
-      run = await adapter.runView(id, { fresh: true });
-    }
+    // The view is read after the record, from the store as it is now (crew#1775), so a gate row the
+    // record shows open is never beside an older view of its run: the engine writes both in one commit.
+    const run = await runOf();
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     if (run.session.status !== 'awaiting_human') {
       return reply.code(404).send({ error: 'No open gate for this run' });
@@ -8782,7 +8893,10 @@ export function registerRoutes(
 
   // ── Elicitation (DES-002) ────────────────────────────────────────────────────
   //
-  // GET returns the current pending elicitation prompt for a run (display-store read).
+  // GET returns the current pending elicitation prompt for a run (display-store read), or `null`
+  // (a 200) when the run exists and has none open: "nothing open" is the normal answer for every
+  // parked run a client polls, not an error (studio#984 logged one 404 per parked run per page load).
+  // 404 stays for a run that does not exist. Every studio already reads "nothing open" as `null`.
   // POST resolves it: the body carries the elicitationId to guard against stale tabs,
   // the action (accept|decline|cancel), and — for accept — the operator's response.
 
@@ -8792,7 +8906,7 @@ export function registerRoutes(
     // `entry` already carries `runId`; return it directly to avoid TS2783
     // ("runId is specified more than once") from a redundant spread.
     if (entry) return entry;
-    // Cache miss: check existence before returning 404.
+    // Cache miss: check existence first — an unknown run is the only 404.
     // Use sessions() (IDs only) — cheaper than sessionsDetail() on this read path.
     const ids = await adapter.sessions();
     if (!ids.includes(id)) return reply.code(404).send({ error: 'Run not found' });
@@ -8818,7 +8932,7 @@ export function registerRoutes(
         receivedAt: new Date(pending.created_at).toISOString(),
       };
     }
-    return reply.code(404).send({ error: 'No pending elicitation for this run' });
+    return reply.code(200).type('application/json').send('null');
   });
 
   const ElicitationRespondSchema = z.strictObject({
@@ -9852,6 +9966,41 @@ export function registerRoutes(
     return { requirement: detail };
   });
 
+  // wicked-core#1698: retire a requirement whose code was deleted (the engine flags it `unindexed`), so a re-map
+  // stops listing it. The engine's own command does the write; the id is never reused.
+  app.post(`${V}/repos/:id/requirements/:key/retire`, async (req, reply) => {
+    const { id, key } = req.params as { id: string; key: string };
+    const repos = await adapter.listRepos();
+    const repo = repos.find((r) => r.id === id);
+    if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+    let decodedKey: string;
+    try {
+      decodedKey = decodeURIComponent(key);
+    } catch {
+      return reply.code(400).send({ error: 'Malformed requirement key encoding' });
+    }
+    let outcome: Awaited<ReturnType<typeof retireRequirement>>;
+    try {
+      outcome = await retireRequirement(repo, decodedKey, adapter);
+    } catch (err) {
+      const status = codeGraphErrorStatus(err);
+      if (status !== null) return reply.code(status).send({ error: message(err) });
+      return reply.code(500).send({ error: `${decodedKey} could not be retired: ${message(err)}` });
+    }
+    if (outcome === 'not_found') return reply.code(404).send({ error: 'Requirement not found' });
+    if (outcome === 'not_unindexed') {
+      return reply.code(409).send({
+        error: `${decodedKey} is not listed as no longer in the code, so it cannot be retired. Only a requirement whose code was deleted can be. If its code was deleted, map ${repo.name} again, then retire it.`,
+      });
+    }
+    if (outcome === 'engine_too_old') {
+      return reply.code(409).send({
+        error: 'The installed wicked-core cannot retire requirements yet. Update wicked-core, then try again.',
+      });
+    }
+    return { retired: decodedKey };
+  });
+
   app.get(
     `${V}/repos/:id/graph`,
     { config: { manifest: { responseType: 'RepoGraphResponse', statusCodes: [200, 404, 409, 500, 503] } } },
@@ -10187,6 +10336,12 @@ export function registerRoutes(
   // additive `path` (api-types 0.38.0 `SettingsResponse.path?`; adjudicated §4.6 — `path`, not
   // `settings_path`).
   app.get(`${V}/settings`, async () => ({ settings: await adapter.getSettings(), path: settingsFilePath() }));
+  // studio#1324: whether this daemon's port starts at login (`serve --install-service`), for Settings' status row. The
+  // port is the one this daemon listens on (the default when it is not listening, as under inject).
+  app.get(`${V}/settings/start-on-login`, { config: { manifest: { responseType: 'StartOnLoginStatus', statusCodes: [200] } } }, async () => {
+    const bound = app.server.address();
+    return startOnLoginStatus(bound !== null && typeof bound === 'object' ? bound.port : DEFAULT_DAEMON_PORT, runtime.startOnLogin?.platform, runtime.startOnLogin?.home);
+  });
 
   // The demo video's palette from the studio skin (operator 2026-10-14): read-only, derived from `studio.appearance`;
   // garden's demo stage and interactive's re-cuts read it as their default colours.
@@ -10557,11 +10712,22 @@ export function registerRoutes(
     const args: Record<string, unknown> = {};
     if (kindType !== undefined) args.kind_type = kindType;
     if (state !== undefined) args.state = state;
+    let listed: ListProposalsResponse;
     try {
-      return (await estateTool('proposal.list', args)) as ListProposalsResponse;
+      listed = (await estateTool('proposal.list', args)) as ListProposalsResponse;
     } catch (err) {
       return estateUpstreamError(reply, err);
     }
+    // crew#1261: a rejected row says who rejected it and why, when crew made that decision.
+    const decided = await proposalDecisions.decisions();
+    if (decided.size === 0 || !Array.isArray(listed?.proposals)) return listed;
+    return {
+      ...listed,
+      proposals: listed.proposals.map((p) => {
+        const decision = p.state === 'rejected' ? decided.get(p.id) : undefined;
+        return decision !== undefined ? { ...p, decision } : p;
+      }),
+    } satisfies ListProposalsResponse;
   });
 
   // POST /proposals {content, project?, source?} → proposal.submit → 201 { id } (api-types 0.54.0).
@@ -10688,7 +10854,9 @@ export function registerRoutes(
     }
     if (policyReach === undefined && (edit.data.content !== undefined || edit.data.reach !== undefined)) {
       try {
-        const done = await approveEdited(editTool, id, edit.data, (runId) => projects.index.projectOf(runId));
+        const done = await approveEdited(editTool, id, edit.data, (runId) => projects.index.projectOf(runId),
+          // crew#1261: the original replaced by the copy, or a copy withdrawn, is crew's decision on the person's behalf.
+          (pid, reason, copy) => recordProposalDecision(audit, actorOf(req), pid, reason, copy));
         return reply.code(done.status).send(done.body);
       } catch (err) {
         return estateUpstreamError(reply, err);
@@ -10711,7 +10879,10 @@ export function registerRoutes(
     // crew#1546: an edited learning's replacement whose learning is gone is stale: refused and rejected, never approved,
     // so no crash window can bring retired words back (accept-with-edit checks the same in `approveEdited`).
     try {
-      const stale = row?.kind_type === 'memory' ? await refuseStaleReplacement(estateTool, id, row.payload) : null;
+      const stale =
+        row?.kind_type === 'memory'
+          ? await refuseStaleReplacement(estateTool, id, row.payload, (pid) => recordProposalDecision(audit, actorOf(req), pid, 'stale'))
+          : null;
       if (stale !== null) return reply.code(409).send({ error: stale, code: 'stale_replacement' });
     } catch (err) {
       return reply.code(502).send({ error: `checking whether proposal ${id} is a stale replacement failed (${message(err)}); nothing was approved` });
@@ -10793,15 +10964,22 @@ export function registerRoutes(
           `installed engine would silently drop the rule's steering fields; upgrade wicked-core-ts (>= 0.7.5)`,
       );
     }
-    // A proposal with no `project` facet keeps the project of the run that filed it.
+    // A proposal's `project` facet resolves to a known project (crew#1774); one that names none keeps the project of
+    // the run that filed it.
     const runId = policyRow.provenance?.['run_id'];
     const runProject = typeof runId === 'string' && runId !== '' ? projects.index.projectOf(runId) : undefined;
+    let knownProjects: Awaited<ReturnType<typeof adapter.projectList>>;
+    try {
+      knownProjects = await adapter.projectList();
+    } catch (err) {
+      return landFailed(`the projects could not be read to resolve the rule's project (${message(err)})`);
+    }
     const built = policyProposalToRule(
       id,
       policyRow.kind_type,
       policyRow.payload,
       isStringRecord(policyRow.facets) ? policyRow.facets : undefined,
-      { ...(runProject !== undefined ? { runProject } : {}), ...(policyReach !== undefined ? { reach: policyReach } : {}) },
+      { ...(runProject !== undefined ? { runProject } : {}), ...(policyReach !== undefined ? { reach: policyReach } : {}), projects: knownProjects },
     );
     if ('error' in built) {
       return landFailed(built.error);
@@ -10865,6 +11043,8 @@ export function registerRoutes(
     } catch (err) {
       return estateUpstreamError(reply, err);
     }
+    // crew#1261: turned down by this caller (a person's rejection when it is a person).
+    recordProposalDecision(audit, actorOf(req), id.trim(), 'rejected');
     // A policy proposal's rule lands before its approval, so a still-pending proposal may already
     // have a live rule (a crash or an unconfirmed approve in between): rejecting it withdraws it.
     const withdrawn = await withdrawLandedRule(adapter, id.trim());
@@ -10893,14 +11073,17 @@ export function registerRoutes(
   //   • RETIRE comes in two widths. `POST /memory/retire { scope_prefix }` is SUBTREE-scoped:
   //     `memory.erase {scope_prefix}` hard-deletes EVERY memory whose scope equals or descends from
   //     the prefix, and refuses an empty prefix (a total-wipe guard) — the UI must show the operator
-  //     the subtree. `POST /memory/retire-item { memory_id }` (studio#206) removes exactly ONE memory
-  //     through `memory.erase {id}` (wicked-estate#188); an older estate refuses that call without
-  //     deleting anything, and the route answers 501 naming the upgrade — never a subtree fallback.
+  //     the subtree. `POST /memory/retire-item { memory_id }` (studio#206) SOFT-retires exactly ONE
+  //     memory through `memory.retire {id}` (crew#1697, wicked-estate#552): hidden from recall and the
+  //     browse, kept with its id, listed by `GET /memory?retired=1`, restored by `POST /memory/unretire`.
+  //     `POST /memory/erase-item { memory_id }` deletes one for good (`memory.erase {id}`,
+  //     wicked-estate#188), the right-to-erasure path. An estate without the tool refuses the call
+  //     without changing anything, and the route answers 501 naming the upgrade — never a fallback.
 
   // GET /memory?query=&scope_prefix=&facets=<json>&limit= → memory.list + post-filter → { memories }.
   app.get(
     `${V}/memory`,
-    { config: { manifest: { responseType: 'ListMemoriesResponse', statusCodes: [200, 400, 502] } } },
+    { config: { manifest: { responseType: 'ListMemoriesResponse', statusCodes: [200, 400, 501, 502] } } },
     async (req, reply) => {
       const q = req.query as {
         query?: string | string[];
@@ -10909,6 +11092,7 @@ export function registerRoutes(
         limit?: string | string[];
         since?: string | string[];
         until?: string | string[];
+        retired?: string | string[];
       };
       // `scope_prefix` is the ONLY estate-side argument to memory.list (a subtree filter; blank /
       // omitted = every memory). Forward verbatim WHEN PRESENT — a blank value is meaningful
@@ -10916,6 +11100,13 @@ export function registerRoutes(
       const args: Record<string, unknown> = {};
       const scopePrefix = firstQueryValue(q.scope_prefix);
       if (scopePrefix !== undefined) args.scope_prefix = scopePrefix;
+      // crew#1697: `retired=1` lists the soft-retired memories (`memory.list {retired: true}`) instead.
+      const rawRetired = firstQueryValue(q.retired)?.trim().toLowerCase();
+      if (rawRetired !== undefined && !['1', 'true', '0', 'false'].includes(rawRetired)) {
+        return reply.code(400).send({ error: '`retired` must be 1, true, 0 or false' });
+      }
+      const retired = rawRetired === '1' || rawRetired === 'true';
+      if (retired) args.retired = true;
       // `facets` narrows the COMPLETE list crew-side (after the estate fetch) to memories carrying
       // every given axis:value (a management filter, NOT a recall intent). Present-but-blank is a
       // client error
@@ -10976,6 +11167,14 @@ export function registerRoutes(
           throw new EstateMcpError('memory.list returned an unexpected shape');
         }
         let memories = items.map(shapeMemoryItem);
+        // An estate before wicked-estate#552 ignores `retired` and lists the LIVE memories: a row without
+        // `retired_at` in a retired list is that, never shown as retired.
+        if (retired && memories.some((m) => m.retired_at === undefined)) {
+          return reply.code(501).send({
+            error: 'this wicked-estate cannot list retired memories (it needs wicked-estate#552); upgrade wicked-estate-mcp',
+            code: 'estate_upgrade_required',
+          });
+        }
         if (query !== '') memories = memories.filter((m) => m.content.toLowerCase().includes(query));
         if (facetFilter !== undefined) {
           const pairs = Object.entries(facetFilter);
@@ -10989,6 +11188,9 @@ export function registerRoutes(
         const body: ListMemoriesResponse = { memories, store: memoryStoreInfo() };
         return body;
       } catch (err) {
+        if (retired && estateLacksTool(err)) {
+          return reply.code(501).send(estateUpgrade('cannot list retired memories', '#552', 'nothing was changed'));
+        }
         return estateUpstreamError(reply, err);
       }
     },
@@ -11052,17 +11254,17 @@ export function registerRoutes(
     },
   );
 
-  // POST /memory/retire-item { memory_id } → memory.erase { id } → { erased: 1 } (studio#206). Removes
-  // exactly ONE memory: the id is the only target sent, so no reading of it can widen to a subtree.
-  // 404 when estate holds no memory with that id (it erased 0). 501 when the estate predates
-  // wicked-estate#188: it refuses an id-only erase for want of `scope_prefix`, deleting nothing.
+  // POST /memory/retire-item { memory_id } → memory.retire { id } → { retired: 1 } (studio#206; soft since
+  // crew#1697). Hides exactly ONE memory, kept with its id: the id is the only target sent, so no reading of it can
+  // widen to a subtree. 404 when estate holds no live memory with that id (it retired 0). 501 when the estate
+  // predates soft retire (wicked-estate#552): it refuses the unknown tool, changing nothing — never an erase instead.
   app.post(
     `${V}/memory/retire-item`,
     {
       config: {
         manifest: {
           requestType: 'RetireMemoryItemBody',
-          responseType: 'RetireMemoryResponse',
+          responseType: 'RetireMemoryItemResponse',
           statusCodes: [200, 400, 404, 501, 502],
         },
       },
@@ -11074,27 +11276,134 @@ export function registerRoutes(
       }
       const memoryId = parsed.data.memory_id.trim();
       if (memoryId === '') return reply.code(400).send({ error: '`memory_id` must not be empty' });
+      // An edit in flight ends by erasing the memory it replaces (retired or not), so a retire that slipped in
+      // between would be erased for good: the two take turns on one memory (codex review).
+      if (memoryEditsInFlight.has(memoryId)) {
+        return reply.code(409).send({ error: `memory ${memoryId} is being edited; retire it once the edit is done` });
+      }
+      memoryEditsInFlight.add(memoryId);
       try {
-        const raw = await estateTool('memory.erase', { id: memoryId });
-        const deleted =
-          typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['deleted_count'] : undefined;
-        if (typeof deleted !== 'number') {
-          throw new EstateMcpError('memory.erase returned an unexpected shape');
-        }
-        if (deleted === 0) return reply.code(404).send({ error: `no memory ${memoryId}` });
-        if (deleted !== 1) {
-          // An id names one memory; any other count is estate misbehaving, and it is reported as such.
-          return reply.code(502).send({ error: `memory.erase {id} removed ${deleted} memories, expected 1` });
-        }
+        const count = oneMemoryCount(await estateTool('memory.retire', { id: memoryId }), 'memory.retire', 'retired_count');
+        if (count === 0) return reply.code(404).send({ error: `no live memory ${memoryId}` });
+        const body: RetireMemoryItemResponse = { retired: 1 };
+        return body;
+      } catch (err) {
+        if (estateLacksTool(err)) return reply.code(501).send(estateUpgrade('cannot retire a memory and restore it later', '#552', 'nothing was changed'));
+        return estateUpstreamError(reply, err);
+      } finally {
+        memoryEditsInFlight.delete(memoryId);
+      }
+    },
+  );
+
+  // POST /memory/unretire { memory_id } → memory.unretire { id } → { restored: 1 } (crew#1697). Restores ONE
+  // retired memory with the same id. 404 when no retired memory has that id; 501 on an estate before #552.
+  app.post(
+    `${V}/memory/unretire`,
+    {
+      config: {
+        manifest: {
+          requestType: 'UnretireMemoryBody',
+          responseType: 'UnretireMemoryResponse',
+          statusCodes: [200, 400, 404, 501, 502],
+        },
+      },
+    },
+    async (req, reply) => {
+      const parsed = RetireMemoryItemSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send(invalidBody(parsed.error, 'Invalid restore request'));
+      }
+      const memoryId = parsed.data.memory_id.trim();
+      if (memoryId === '') return reply.code(400).send({ error: '`memory_id` must not be empty' });
+      try {
+        const count = oneMemoryCount(await estateTool('memory.unretire', { id: memoryId }), 'memory.unretire', 'restored_count');
+        if (count === 0) return reply.code(404).send({ error: `no retired memory ${memoryId}` });
+        const body: UnretireMemoryResponse = { restored: 1 };
+        return body;
+      } catch (err) {
+        if (estateLacksTool(err)) return reply.code(501).send(estateUpgrade('cannot restore a retired memory', '#552', 'nothing was changed'));
+        return estateUpstreamError(reply, err);
+      }
+    },
+  );
+
+  // POST /memory/erase-item { memory_id } → memory.erase { id } → { erased: 1 } (crew#1697; the hard delete
+  // `retire-item` was before it went soft). Deletes ONE memory for good, live or retired. 404 when estate holds no
+  // memory with that id; 501 when the estate predates wicked-estate#188 (it refuses an id-only erase, deleting nothing).
+  app.post(
+    `${V}/memory/erase-item`,
+    {
+      config: {
+        manifest: {
+          requestType: 'EraseMemoryItemBody',
+          responseType: 'RetireMemoryResponse',
+          statusCodes: [200, 400, 404, 501, 502],
+        },
+      },
+    },
+    async (req, reply) => {
+      const parsed = RetireMemoryItemSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send(invalidBody(parsed.error, 'Invalid erase request'));
+      }
+      const memoryId = parsed.data.memory_id.trim();
+      if (memoryId === '') return reply.code(400).send({ error: '`memory_id` must not be empty' });
+      try {
+        const count = oneMemoryCount(await estateTool('memory.erase', { id: memoryId }), 'memory.erase', 'deleted_count');
+        if (count === 0) return reply.code(404).send({ error: `no memory ${memoryId}` });
         const body: RetireMemoryResponse = { erased: 1 };
         return body;
       } catch (err) {
         if (err instanceof EstateMcpError && err.code === -32602 && ESTATE_NO_ERASE_BY_ID.test(err.message)) {
-          return reply.code(501).send({
-            error:
-              'this wicked-estate cannot erase one memory by id (it needs wicked-estate#188); upgrade wicked-estate-mcp — nothing was deleted',
-            code: 'estate_upgrade_required',
-          });
+          return reply.code(501).send(estateUpgrade('cannot erase one memory by id', '#188', 'nothing was deleted'));
+        }
+        return estateUpstreamError(reply, err);
+      }
+    },
+  );
+
+  // POST /knowledge/forget { id | source | scope_prefix, confirm_erase_all? } → knowledge.forget →
+  // { forgotten, skipped_live_source } (crew#1697, wicked-estate#553). Hard-deletes document knowledge only. Exactly
+  // one target, checked here (400 before any spawn); estate's own -32602 is a 400 too. A live source's structure
+  // named by id is refused by estate (409: it is refreshed through its source); an estate before #553 is a 501.
+  app.post(
+    `${V}/knowledge/forget`,
+    {
+      config: {
+        manifest: {
+          requestType: 'ForgetKnowledgeBody',
+          responseType: 'ForgetKnowledgeResponse',
+          statusCodes: [200, 400, 409, 501, 502],
+        },
+      },
+    },
+    async (req, reply) => {
+      const parsed = ForgetKnowledgeSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send(invalidBody(parsed.error, 'Invalid forget request'));
+      }
+      const { confirm_erase_all: confirm, ...targets } = parsed.data;
+      const named = Object.entries(targets).filter(([, v]) => v !== undefined) as Array<[string, string]>;
+      if (named.length !== 1) {
+        return reply.code(400).send({ error: 'give exactly one of `id`, `source` or `scope_prefix`' });
+      }
+      const [field, value] = named[0]!;
+      if (value.trim() === '' && !(field === 'scope_prefix' && value === '' && confirm === true)) {
+        return reply.code(400).send({ error: `\`${field}\` must not be empty (forgetting everything is \`scope_prefix: ""\` with \`confirm_erase_all: true\`)` });
+      }
+      try {
+        const raw = await estateTool('knowledge.forget', { [field]: value, ...(confirm !== undefined ? { confirm_erase_all: confirm } : {}) });
+        const r = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
+        if (typeof r['forgotten'] !== 'number' || typeof r['skipped_live_source'] !== 'number') {
+          throw new EstateMcpError('knowledge.forget returned an unexpected shape');
+        }
+        const body: ForgetKnowledgeResponse = { forgotten: r['forgotten'], skipped_live_source: r['skipped_live_source'] };
+        return body;
+      } catch (err) {
+        if (estateLacksTool(err)) return reply.code(501).send(estateUpgrade('cannot forget knowledge', '#553', 'nothing was deleted'));
+        if (err instanceof EstateMcpError && ESTATE_FORGET_REFUSED.test(err.message)) {
+          return reply.code(409).send({ error: err.message });
         }
         return estateUpstreamError(reply, err);
       }
@@ -11130,7 +11439,7 @@ export function registerRoutes(
       if (memoryId === '') return reply.code(400).send({ error: '`memory_id` must not be empty' });
       if (content === '') return reply.code(400).send({ error: '`content` must not be empty' });
       if (memoryEditsInFlight.has(memoryId)) {
-        return reply.code(409).send({ error: `memory ${memoryId} is already being edited` });
+        return reply.code(409).send({ error: `memory ${memoryId} is already being edited or retired` });
       }
       memoryEditsInFlight.add(memoryId);
       // Every estate call here is crew's own (no client argument reaches estate unchecked), so an
@@ -11166,9 +11475,13 @@ export function registerRoutes(
             : [];
         });
       };
-      /** Reject these proposals; true only when the queue is read back with none of them pending. */
-      const withdraw = async (ids: string[]): Promise<boolean> => {
-        for (const id of ids) await estateTool('proposal.reject', { id }).catch(() => undefined);
+      /** Reject these proposals; true only when the queue is read back with none of them pending. Each rejection
+       *  that happened is recorded as crew's (crew#1261): `stale` for a superseded replacement, `withdrawn` for one
+       *  this edit filed itself and is taking back. */
+      const withdraw = async (ids: string[], reason: 'stale' | 'withdrawn' = 'withdrawn'): Promise<boolean> => {
+        for (const id of ids) {
+          if (await estateTool('proposal.reject', { id }).then(() => true, () => false)) recordProposalDecision(audit, actorOf(req), id, reason);
+        }
         try {
           const still = new Set((await pendingMemoryProposals()).map((q) => q.id));
           return ids.every((id) => !still.has(id));
@@ -11215,7 +11528,7 @@ export function registerRoutes(
         } catch (err) {
           return { status: 502, error: `reading the approve queue failed (${message(err)}); nothing changed` };
         }
-        if (superseded.length > 0 && !(await withdraw(superseded))) {
+        if (superseded.length > 0 && !(await withdraw(superseded, 'stale'))) {
           return { status: 502, error: `an earlier replacement of ${old.id} (${superseded.join(', ')}) is still pending and could not be rejected; reject it on the approve page first. Nothing changed` };
         }
         let pid: string | null = null;
@@ -11819,7 +12132,7 @@ export function registerRoutes(
       // Bounded by what is left of the snapshot's budget too (a slow start must not push it past 8 s):
       // the assembly after the infra probes keeps about 1.5 s.
       const clusterP = (containerFloor ? clusterReader.read(Math.min(CLUSTER_TIMEOUT_MS, left() - 1_500)) : Promise.resolve(null))
-        .then((read) => clusterRows(read, containerFloor, clusterStarted));
+        .then((read) => clusterRows(read, containerFloor, clusterStarted, clusterReader.engine()));
       const infraP = Promise.all([
         clusterP.then((rows) => rows.gateway),
         brokerP,
@@ -12040,6 +12353,7 @@ export function registerRoutes(
         gaps,
         infraHoldsLive: (key) => (key === 'gateway' || key === 'broker' || key === 'cluster' ? containerFloor : key === 'skills' || key === 'state_home' || key === 'disk' || key === 'daemon'),
         costOf: (id) => runCosts.get(id),
+        engine: clusterReader.engine(),
       });
       if (typeof adapter.runEvents === 'function' && first.unresolved.length > 0) {
         const byId = new Map(allViews.map((v) => [v.session.id, v]));
@@ -12064,6 +12378,7 @@ export function registerRoutes(
         gaps,
         infraHoldsLive: (key) => (key === 'gateway' || key === 'broker' || key === 'cluster' ? containerFloor : key === 'skills' || key === 'state_home' || key === 'disk' || key === 'daemon'),
         costOf: (id) => runCosts.get(id),
+        engine: clusterReader.engine(),
       });
       const toReview = await toReviewP;
       // A run list that could not be read never reads green: the daemon row (degraded, "did not list
@@ -12256,7 +12571,8 @@ export function registerRoutes(
     sessionsDetail: () => adapter.sessionsDetail(),
     workOutput: (unitId) => adapter.workOutput(unitId),
     projectList: () => adapter.projectList(),
-    listRepos: () => adapter.listRepos(),
+    // crew#1744: the repo search indexes each repo's remote, so it reads the same `git_url` GET /repos shows.
+    listRepos: () => repoOrigins.list(() => adapter.listRepos()),
     listRules: () => adapter.listConformanceRules(),
     projectOf: (id) => projects.index.projectOf(id),
     runFacts: runTimingIndex,

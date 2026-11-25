@@ -12,6 +12,7 @@ import { execCapped } from '../core/exec.js';
 import type { Actor, ArtifactProposal, ProposalOnboard, RepoEntry } from '../core/types.js';
 import type { ProposalDispatch, ProposalDispatcher } from './chat-proposals.js';
 import { coreRepoSlug } from '../projects/repo-guard.js';
+import { CreateProjectSchema } from '../projects/routes.js';
 
 /** A registry name: what `POST /repos` accepts. */
 export const SAFE_REPO_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
@@ -226,6 +227,87 @@ export interface OnboardTurn {
   seat: string;
   /** The chat's own project (`null`: none, or Unfiled): the default when the words name none. */
   chatProjectId: string | null;
+  /** (crew#1694) The person's own words up to this turn: a project the card creates is one they named. */
+  words?: string;
+}
+
+/** Characters an address, a path or a credential carries: a name holding one is never repeated, and a word holding one
+ *  is never where a project name comes from. */
+const ADDRESS_CHARS = /[@:/\\?#&=]/u;
+
+/** A quoted string to its closing quote (or the end of the line when it has none); a backslash escapes the next char. */
+const QUOTED = String.raw`(?:"(?:[^"\\\n]|\\.)*"?|'(?:[^'\\\n]|\\.)*'?|“[^”\n]*”?)`;
+/** A credential's value: a quoted string or one word. */
+const SECRET_VALUE = String.raw`(?:${QUOTED}|\S+)`;
+/** One `key=value` parameter of an Authorization header (`username="Alice Smith"`, `nonce = abc`). */
+const AUTH_PARAM = String.raw`[\w-]+[ \t]*=[ \t]*(?:${QUOTED}|[^\s,]+)`;
+
+/**
+ * (crew#1790) Spans of the person's words that carry a credential even though no single word in them holds an address
+ * character. Each is set aside whole before the name is looked for: an `Authorization:` header's value (one token, or
+ * its whole parameter list), a `Bearer` value, a named secret and its value (`token: x`, `"password": "x y"`,
+ * `password = 'x y'`), and a word shaped like a known token. Every pattern is anchored on a keyword or a prefix and has no
+ * nested open-ended repetition, so a long paste costs linear time.
+ */
+const CREDENTIAL_SPANS: readonly RegExp[] = [
+  new RegExp(String.raw`\bauthorization\b["']?\s*:\s*(?:(?:bearer|basic|digest|token|negotiate|ntlm|aws4-hmac-sha256)\s+)?(?:${AUTH_PARAM}(?:\s*,\s*${AUTH_PARAM})*|${SECRET_VALUE})`, 'giu'),
+  new RegExp(String.raw`\bbearer\s+${SECRET_VALUE}`, 'giu'),
+  new RegExp(String.raw`\b(?:access[ _-]?token|auth[ _-]?token|token|api[ _-]?key|apikey|password|passwd|pwd|passphrase|secret|client[ _-]?secret|credentials?)\b["']?\s*[:=]\s*${SECRET_VALUE}`, 'giu'),
+  /(?<![\p{L}\p{N}_])(?:gh[pousr]_|github_pat_|glpat-|xox[abeprs]-|sk-|sk_live_|rk_live_|AKIA|ASIA|AIza|eyJ)[\p{L}\p{N}_.-]*/gu,
+];
+
+const QUOTES: ReadonlyArray<readonly [string, string]> = [['"', '"'], ["'", "'"], ['“', '”'], ['‘', '’'], ['`', '`']];
+const WORD_CHAR = /[\p{L}\p{N}]/u;
+
+/**
+ * (crew#1790) The person's words with every quoted string that holds a path separator (a path with spaces) set aside
+ * whole. A quote opens only where no word char precedes it and closes only where none follows it, so an apostrophe
+ * (`Mike's`, `don’t`, `‘/a/Mike’s Files/x’`) neither opens nor closes one. One pass per quote kind, linear in the text:
+ * an opening quote pairs with the first valid closing quote after it.
+ */
+function withoutQuotedPaths(words: string): string {
+  const cut: Array<[number, number]> = [];
+  const isWord = (i: number): boolean => i >= 0 && i < words.length && WORD_CHAR.test(words[i]!);
+  for (const [open, close] of QUOTES) {
+    const closes: number[] = [];
+    for (let i = 0; i < words.length; i++) if (words[i] === close && !isWord(i + 1)) closes.push(i);
+    let c = 0;
+    for (let i = 0; i < words.length; i++) {
+      if (words[i] !== open || isWord(i - 1)) continue;
+      while (c < closes.length && closes[c]! <= i) c++;
+      if (c === closes.length) break;
+      const end = closes[c]!;
+      if (/[/\\]/u.test(words.slice(i + 1, end))) cut.push([i, end]);
+      i = end;
+    }
+  }
+  if (cut.length === 0) return words;
+  cut.sort((a, b) => a[0] - b[0]);
+  let out = '';
+  let at = 0;
+  for (const [from, to] of cut) {
+    if (to < at) continue;
+    out += `${words.slice(at, Math.max(from, at))} \u0000 `;
+    at = to + 1;
+  }
+  return out + words.slice(at);
+}
+
+/**
+ * (crew#1694) The name a card may create a project under: one the person's own words say as whole words (ignoring case
+ * and spacing), outside any address, path or credential they wrote; that `POST /projects` would take; and that holds
+ * none of those characters itself (it is repeated on the card). `null` when it is none of these.
+ */
+export function creatableName(name: string, words: string): string | null {
+  if (!CreateProjectSchema.shape.name.safeParse(name).success || ADDRESS_CHARS.test(name)) return null;
+  // crew#1790: a credential or a quoted path pasted as several words is set aside whole first.
+  // Quoted paths first, on the words as written, so a credential keyword inside a path cannot eat its closing quote.
+  const said = CREDENTIAL_SPANS.reduce((text, span) => text.replace(span, ' \u0000 '), withoutQuotedPaths(words));
+  // xreview r1: a token inside an address the person pasted (`https://u:TOKEN@host/acme/x`) is not a name they said.
+  // A word's own sentence punctuation (`Team?`, `Team:`) does not make it one.
+  const plain = said.split(/\s+/u).map((w) => (ADDRESS_CHARS.test(w.replace(/[?:.,;!)"'’”]+$/u, '')) ? '\u0000' : w)).join(' ');
+  const escaped = norm(name).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  return new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, 'u').test(norm(plain)) ? name : null;
 }
 
 /** A stored address's identity: its credentials (if any) set aside first, so a registered origin that carries a token
@@ -277,16 +359,22 @@ export async function resolveOnboard(block: OnboardBlockBody, turn: OnboardTurn,
 
   const projects = await deps.projects();
   let project: { id: string; name: string } | null = null;
+  let createProject: { name: string } | null = null;
   const words = block.onboard.project?.trim() ?? '';
   if (words !== '') {
     const m = matchProject(projects, words);
     if ('one' in m) project = m.one;
     else if ('many' in m) blocked.push(`more than one project has the name given (${m.many.map((p) => `${p.name}, ${p.id}`).join('; ')}): say which`);
     else {
-      // The seat's words are not repeated (they could carry anything); the projects that exist are.
-      const names = projects.map((p) => p.name);
-      blocked.push(`no project has the name given${names.length > 0 ? ` (projects here: ${names.join(', ')})` : ' (there are no projects yet)'}. `
-        + 'Create it on Projects → New project, or name one of these, then ask again');
+      // crew#1694: a name no project has is the project Go creates first, when the person said it and POST /projects
+      // would take it. Anything else is not repeated (the seat's words could carry anything); the projects that exist are.
+      const name = creatableName(words, turn.words ?? '');
+      if (name !== null) createProject = { name };
+      else {
+        const names = projects.map((p) => p.name);
+        blocked.push(`no project has the name given${names.length > 0 ? ` (projects here: ${names.join(', ')})` : ' (there are no projects yet)'}. `
+          + 'Name one of these, or say the new project\'s name (at most 120 characters), then ask again');
+      }
     }
   } else if (turn.chatProjectId !== null) {
     project = projects.find((p) => p.id === turn.chatProjectId) ?? null;
@@ -304,8 +392,8 @@ export async function resolveOnboard(block: OnboardBlockBody, turn: OnboardTurn,
     const same = await registeredAs(read.key, repos, deps.originOf);
     if (same !== null) {
       existing = { id: same.id, name: same.name };
-      if (project === null) blocked.push(`${same.name} is already registered; name the project to add it to`);
-      else if ((await deps.projectRepoRefs(project.id)).some((ref) => ref === same.id || ref === same.name)) {
+      if (project === null && createProject === null) blocked.push(`${same.name} is already registered; name the project to add it to`);
+      else if (project !== null && (await deps.projectRepoRefs(project.id)).some((ref) => ref === same.id || ref === same.name)) {
         blocked.push(`${same.name} is already in ${project.name}; nothing to add`);
       }
     } else if (name === '') {
@@ -330,8 +418,10 @@ export async function resolveOnboard(block: OnboardBlockBody, turn: OnboardTurn,
     projectId: project?.id ?? null,
     projectName: project?.name ?? null,
     existing,
+    ...(createProject !== null ? { createProject } : {}),
   };
-  const into = project !== null ? `, added to ${project.name}` : '';
+  const target = project?.name ?? (createProject !== null ? `the new project ${createProject.name}` : null);
+  const into = target !== null ? `, added to ${target}` : '';
   return {
     pid: turn.pid,
     chatId: turn.chatId,
@@ -339,7 +429,7 @@ export async function resolveOnboard(block: OnboardBlockBody, turn: OnboardTurn,
     kind: 'onboard',
     seat: turn.seat,
     what: existing !== null
-      ? { entry: null, title: existing.name, label: `Add to a project · ${existing.name}`, outcome: `Adds the registered ${existing.name} to ${project?.name ?? 'a project'}. Nothing is cloned and no onboarding starts.` }
+      ? { entry: null, title: existing.name, label: `Add to a project · ${existing.name}`, outcome: `Adds the registered ${existing.name} to ${target ?? 'a project'}. Nothing is cloned and no onboarding starts.` }
       : { entry: null, title: name || 'repository', label: `Add a repository · ${name || 'repository'}`, outcome: `Cloned to this computer, registered${into}, and onboarded: its code map is built so jobs and chats can read it.` },
     brief: null,
     // The seat's one line, unless it holds anything that could be a credential (an address with an `@`, a query).
@@ -349,7 +439,7 @@ export async function resolveOnboard(block: OnboardBlockBody, turn: OnboardTurn,
     helpers: null,
     time: null,
     stops: null,
-    filedIn: { projectId: project?.id ?? null, label: project?.name ?? 'Not in a project' },
+    filedIn: { projectId: project?.id ?? null, label: project?.name ?? (createProject !== null ? `Creates the project ${createProject.name}` : 'Not in a project') },
     onboard,
     blocked: blocked.length > 0 ? blocked[0]! : null,
   };
@@ -374,6 +464,9 @@ export interface OnboardLauncherDeps {
   attach(projectId: string, repoId: string, actor: Actor): Promise<void>;
   /** File the onboarding run in the project (`crew.run`, idempotent): what `recordOnboardingLaunch` does. */
   fileRun(projectId: string, runId: string, actor: Actor): Promise<void>;
+  /** (crew#1694) The projects that exist now, and the one project create (`createProjectRecorded`, as `POST /projects`). */
+  projects(): Promise<Array<{ id: string; name: string }>>;
+  createProject(name: string, actor: Actor): Promise<{ id: string; name: string }>;
 }
 
 /**
@@ -383,6 +476,12 @@ export interface OnboardLauncherDeps {
  * run alone (crew-0182 review).
  */
 export class OnboardLauncher implements ProposalDispatcher {
+  /** (crew#1694) The project each card's Go created or adopted, by the card's run identity: a Go again resumes it by id. */
+  private readonly madeFor = new Map<string, string>();
+  /** (crew#1694) One lookup-then-create at a time per name as {@link matchProject} compares names (case and spacing
+   *  aside): two cards naming `Docs Team` and `docs  team` make one project. */
+  private readonly creating = new Map<string, Promise<unknown>>();
+
   constructor(private readonly deps: OnboardLauncherDeps) {}
 
   private async repoOf(name: string): Promise<RepoEntry | undefined> {
@@ -401,8 +500,9 @@ export class OnboardLauncher implements ProposalDispatcher {
   }
 
   async launch(d: ProposalDispatch): Promise<void> {
-    const o = d.resolution.onboard;
-    if (d.kind !== 'onboard' || o === undefined) throw new Error(`the onboard launcher takes only an onboard proposal (got ${d.kind})`);
+    const card = d.resolution.onboard;
+    if (d.kind !== 'onboard' || card === undefined) throw new Error(`the onboard launcher takes only an onboard proposal (got ${d.kind})`);
+    const o = await this.projectFor(card, d.identity.runId, d.actor);
     if (o.existing !== null) {
       if (o.projectId === null) throw new Error(`${o.existing.name} is already registered and no project was named`);
       await this.deps.attach(o.projectId, o.existing.id, d.actor);
@@ -441,6 +541,52 @@ export class OnboardLauncher implements ProposalDispatcher {
     }
     // Attached, but its run's filing failed: filed now (the run is this proposal's).
     if (o.projectId !== null && typeof out.body['projectAttachError'] === 'string') await this.deps.fileRun(o.projectId, d.identity.runId, d.actor);
+  }
+
+  /**
+   * (crew#1694) The card's project, created first when the card says so. A Go again resumes the project this card's Go
+   * made, by id (renamed since or not); one archived or deleted since is refused, never made twice. After a restart it is
+   * found by its name, as the card matched it. A create that loses to another card's create of the same name (the
+   * engine keeps names unique) adopts that one.
+   */
+  private async projectFor(o: NonNullable<ArtifactProposal['onboard']>, key: string, actor: Actor): Promise<NonNullable<ArtifactProposal['onboard']>> {
+    const want = o.createProject ?? null;
+    if (want === null) return o;
+    const known = this.madeFor.get(key);
+    const pick = async (): Promise<{ id: string; name: string } | null> => {
+      const projects = await this.deps.projects();
+      if (known !== undefined) {
+        const p = projects.find((x) => x.id === known);
+        if (p === undefined) throw new Error(`the project this card created (${want.name}) is archived or gone now; ask again`);
+        return p;
+      }
+      const m = matchProject(projects, want.name);
+      if ('many' in m) throw new Error(`more than one project is named ${want.name} now; ask again and say which`);
+      return 'one' in m ? m.one : null;
+    };
+    const lockKey = norm(want.name);
+    const before = this.creating.get(lockKey) ?? Promise.resolve();
+    const run = before.catch(() => undefined).then(async () => {
+      const found = await pick();
+      if (found !== null) return found;
+      try {
+        return await this.deps.createProject(want.name, actor);
+      } catch (err) {
+        // Another daemon's create (or one this process did not see) won the name: adopt it.
+        const again = await pick();
+        if (again === null) throw err;
+        return again;
+      }
+    });
+    this.creating.set(lockKey, run);
+    let project: { id: string; name: string };
+    try {
+      project = await run;
+    } finally {
+      if (this.creating.get(lockKey) === run) this.creating.delete(lockKey);
+    }
+    this.madeFor.set(key, project.id);
+    return { ...o, projectId: project.id, projectName: project.name, createProject: null };
   }
 
   /** The run exists: the repository joins the project and the run is filed there (each idempotent; the run by its own

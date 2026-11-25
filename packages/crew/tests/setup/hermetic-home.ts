@@ -96,6 +96,12 @@ process.env['WICKED_WALKTHROUGH_DIR'] = join(base, 'walkthroughs');
 // The in-flight check's records (src/inspect): un-armed, a test boot's `recover()` would read and settle the operator's
 // real `~/.wicked/inspections`.
 process.env['WICKED_CREW_INSPECTIONS_DIR'] = join(base, 'inspections');
+// crew#1763: a fresh memory store picks the Model2Vec embedder, which the engine fetches from Hugging Face
+// (minishlab/potion-base-8M, ~30 MB) into `$HOME/.cache/huggingface` on the actor's boot path. A test that boots an
+// engine under its own fresh HOME (tests/setup/temp-home.ts) re-downloads it per test, and every route that waits on
+// the actor waits on that download: `/health` (its chat-workflow read) timed out at 30 s in the v0.18.20 Release. The
+// lexical embedder is the engine's offline choice for a fresh store; no test reads semantic recall.
+process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 // The daemon STATE HOME itself (crew#353's seam): every durable store without a per-store override
 // — and the skills root, which has NO override by design (skills keystone, codex round 5: the root
 // is `<state home>/skills`, full stop; `WICKED_CREW_SKILLS_ROOT` is retired) — resolves under

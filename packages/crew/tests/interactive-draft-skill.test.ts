@@ -21,9 +21,13 @@ import {
   draftSkillArmLine,
   pageBudgetFor,
   runDraftFloor,
+  DRAFT_PAGE_COUNTER_SCRIPT,
   DRAFT_RENDER_PROFILE,
   latestDraftRender,
   reusablePageCount,
+  versionLine,
+  withoutCarriedClaims,
+  type ClaimFinding,
   type PageBudget,
 } from '../src/interactive/draft-skill.js';
 import { createHash } from 'node:crypto';
@@ -461,8 +465,15 @@ describe('G12 — with a renderer crew provisioned, the floor measures the page 
 describe('G12 (crew half) — the floor reuses the run\'s own draft_render count on the same bytes and profile', () => {
   const BYTES = Buffer.from('<html><body>two pages</body></html>');
   const SHA = createHash('sha256').update(BYTES).digest('hex');
+  // (crew#1750) The floor's own counter and browser: the record must name the same ones.
+  const COUNTER = Buffer.from('# page_count.py of this garden root\n');
+  const COUNTER_SHA = createHash('sha256').update(COUNTER).digest('hex');
+  const VERSION = 'Google Chrome for Testing 141.0.7390.54';
+  const readBytes = (path: string): Buffer => (path === join('/garden', DRAFT_PAGE_COUNTER_SCRIPT) ? COUNTER : BYTES);
+  const IDENTITY = { counterSha256: COUNTER_SHA, rendererVersion: VERSION };
+  // The engine's `draft_render` record as wicked-core serializes `DraftRender` (src/draft_render.rs, core#1337 fields).
   const measured = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
-    outcome: 'measured', pages: 2, sha256: SHA, profile: DRAFT_RENDER_PROFILE, renderer: '/x/chrome-headless-shell', jail: 'sandbox-exec', attempt: 0, ...over,
+    outcome: 'measured', pages: 2, sha256: SHA, profile: DRAFT_RENDER_PROFILE, renderer: '/x/chrome-headless-shell', counter: '/garden', counter_sha256: COUNTER_SHA, renderer_version: VERSION, jail: 'sandbox-exec', attempt: 0, ...over,
   });
   /** `self_check.py` without `--render` on an exact budget of 2: the estimate (1) is below it, so its own verdict is FAIL. */
   const unrendered = (): unknown => {
@@ -475,7 +486,11 @@ describe('G12 (crew half) — the floor reuses the run\'s own draft_render count
     const v = await runDraftFloor('/out/doc.html', budget, [], { runId: 'run-1' }, {
       gardenRoot: () => '/garden',
       chrome: () => '/cache/chrome-headless-shell',
-      readBytes: () => BYTES,
+      readBytes,
+      rendererVersion: async (chrome) => {
+        expect(chrome).toBe('/cache/chrome-headless-shell');
+        return `\n  ${VERSION}  \n`.trim();
+      },
       engineRender: async (runId) => {
         seen.asked += 1;
         expect(runId).toBe('run-1');
@@ -515,6 +530,10 @@ describe('G12 (crew half) — the floor reuses the run\'s own draft_render count
     ['a count that is not a whole page', measured({ pages: 1.5 })],
     ['no record at all', null],
     ['a read that failed', new Error('store busy')],
+    // crew#1750: printed by another counter or browser build at the same path, or by an engine that names neither.
+    ['another counter (page_count.py bytes differ)', measured({ counter_sha256: 'e'.repeat(64) })],
+    ['another browser build', measured({ renderer_version: 'Google Chrome for Testing 140.0.7339.80' })],
+    ['an older engine that names no counter or browser', measured({ counter_sha256: undefined, renderer_version: undefined })],
   ])('%s: the floor prints the draft itself, as before', async (_name, record) => {
     const { v, seen } = await floor(record as Record<string, unknown> | null | Error);
     expect(seen.argv).toContain('--render');
@@ -528,8 +547,9 @@ describe('G12 (crew half) — the floor reuses the run\'s own draft_render count
       const base = unrendered() as Record<string, unknown>;
       const v = await runDraftFloor('/out/doc.html', EXACT_2, [], { runId: 'run-1' }, {
         gardenRoot: () => '/garden',
-        chrome: () => null,
-        readBytes: () => BYTES,
+        chrome: () => '/cache/chrome-headless-shell',
+        rendererVersion: async () => VERSION,
+        readBytes,
         engineRender: async () => measured(),
         run: async (argv) => {
           seen.argv = argv;
@@ -579,8 +599,33 @@ describe('G12 (crew half) — the floor reuses the run\'s own draft_render count
     // The latest render unit with no record yet (re-planned, pending): nothing to reuse, never the older count.
     expect(latestDraftRender([...units, { ord: 6, catalog: 'draft_render' }])).toBeNull();
     expect(latestDraftRender(undefined)).toBeNull();
-    expect(reusablePageCount(measured(), SHA)).toBe(2);
-    expect(reusablePageCount(measured(), null)).toBeNull();
+    expect(reusablePageCount(measured(), SHA, IDENTITY)).toBe(2);
+    expect(reusablePageCount(measured(), null, IDENTITY)).toBeNull();
+    // crew#1750: a floor that cannot name its counter or its browser reuses nothing.
+    expect(reusablePageCount(measured(), SHA, { ...IDENTITY, rendererVersion: null })).toBeNull();
+    expect(reusablePageCount(measured(), SHA, { ...IDENTITY, counterSha256: null })).toBeNull();
+  });
+
+  it('a floor with no browser of its own reuses nothing (it cannot name the renderer) (crew#1750)', async () => {
+    let asked = 0;
+    const v = await runDraftFloor('/out/doc.html', EXACT_2, [], { runId: 'run-1' }, {
+      gardenRoot: () => '/garden',
+      chrome: () => null,
+      readBytes,
+      engineRender: async () => {
+        asked += 1;
+        return measured();
+      },
+      run: async () => ({ stdout: JSON.stringify(unrendered()), code: 1 }),
+    });
+    expect(asked).toBe(0);
+    expect(v.pages?.measured).toBe(false);
+  });
+
+  it('the --version answer is read as core reads it: the first non-empty line, trimmed, at most 200 characters', () => {
+    expect(versionLine(`\n\n  ${VERSION}  \nsecond line\n`)).toBe(VERSION);
+    expect(versionLine('   \n')).toBeNull();
+    expect(versionLine('x'.repeat(300))).toHaveLength(200);
   });
 });
 
@@ -623,5 +668,66 @@ describe('runDraftFloor — never throws, and a floor that cannot run says so', 
     expect(v.verdict).toBe('fail');
     expect(v.breaches[0]).toContain('1 placeholder');
     expect(seen[0]?.join(' ')).toContain('--repo /snap');
+  });
+});
+
+describe('coord r2 on crew#1853 — a refine judges only the citations it adds or changes', () => {
+  // The report's shape as garden's self_check.py `run` writes it (claims from claims_scan.run: ok, by_kind, findings
+  // of Finding.as_dict {kind, path, text, detail}).
+  const offLine: ClaimFinding = { kind: 'cite-off', text: 'The API serves 450 requests per second.', detail: 'docs/perf.md:3 reads "Measured on the staging cluster."' };
+  const gone: ClaimFinding = { kind: 'dangling-source', text: 'docs/uptime.md:1', detail: 'data-source names a path that does not exist under --repo' };
+  const report = (findings: ClaimFinding[], extra: { failed?: string[] } = {}) => {
+    const byKind: Record<string, number> = {};
+    for (const f of findings) byKind[f.kind] = (byKind[f.kind] ?? 0) + 1;
+    const failed = extra.failed ?? (findings.length > 0 ? ['claims'] : []);
+    return {
+      check: 'draft-self-check', verdict: failed.length > 0 ? 'FAIL' : 'PASS', ok: failed.length === 0, failed, unverified: [],
+      checks: {
+        contrast: { ok: true, contrast_failures: 0, size_failures: 0, summary: 'contrast: clean' },
+        claims: { ok: findings.length === 0, by_kind: byKind, findings: findings.map((f) => ({ ...f, path: 'html > body > p' })), summary: 'claims' },
+        leaks: { ok: true, by_kind: {}, summary: 'leaks: clean' },
+        notes: { ok: true, findings: [], summary: 'notes: ok' },
+      },
+    };
+  };
+  const budget: PageBudget = { pages: null, exact: false, source: 'unknown' };
+
+  it('sets aside the repository-dependent findings the base already had, counted, and keeps the rest', () => {
+    const added: ClaimFinding = { ...offLine, text: 'Throughput is 900 rps.' };
+    const uncited: ClaimFinding = { kind: 'uncited-number', text: 'Uptime 99%', detail: 'number(s) 99' };
+    // Everything the base had: gone, the base passes.
+    const all = withoutCarriedClaims(report([offLine, gone]), [offLine, gone]);
+    expect(all.dropped).toBe(2);
+    expect(draftFloorVerdict(all.report, budget, { notes: true }).verdict).toBe('pass');
+    // A new citation, a duplicate of a carried one, and a document-only kind the base also had all stay judged.
+    const some = withoutCarriedClaims(report([offLine, offLine, added, uncited]), [offLine, uncited]);
+    expect(some.dropped).toBe(1);
+    const v = draftFloorVerdict(some.report, budget, { notes: true });
+    expect(v.verdict).toBe('fail');
+    expect(v.breaches.join(' ')).toMatch(/2 cite-off, 1 uncited-number/);
+    // Another check's failure stays a FAIL after the claims pass.
+    const other = withoutCarriedClaims(report([gone], { failed: ['claims', 'contrast'] }), [gone]);
+    expect((other.report as { verdict: string; failed: string[] }).verdict).toBe('FAIL');
+    expect((other.report as { failed: string[] }).failed).toEqual(['contrast']);
+  });
+
+  it('runDraftFloor asks for the base only when the claims fail, and discloses what it set aside', async () => {
+    let asked = 0;
+    const carried = async () => {
+      asked += 1;
+      return [offLine];
+    };
+    const io = (findings: ClaimFinding[]) => ({ gardenRoot: () => '/garden', run: async () => ({ stdout: JSON.stringify(report(findings)), code: 1 }) });
+    const clean = await runDraftFloor('/x/revised.html', budget, [], { notes: '/x/n.json', carried }, io([]));
+    expect(clean.verdict).toBe('pass');
+    expect(asked).toBe(0);
+    const carriedOnly = await runDraftFloor('/x/revised.html', budget, [], { notes: '/x/n.json', carried }, io([offLine]));
+    expect(asked).toBe(1);
+    expect(carriedOnly.verdict).toBe('pass');
+    expect(carriedOnly.summary).toContain('carried over unchanged');
+    expect(carriedOnly.claimFindings).toEqual([offLine]);
+    // The base cannot be read: nothing is set aside, the refusal stands.
+    const unknown = await runDraftFloor('/x/revised.html', budget, [], { notes: '/x/n.json', carried: async () => null }, io([offLine]));
+    expect(unknown.verdict).toBe('fail');
   });
 });

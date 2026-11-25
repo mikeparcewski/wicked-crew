@@ -133,7 +133,7 @@ export function qeTestsGroupLabel(repoName: string | null | undefined): string {
 }
 
 export interface RegisterTestSetDeps {
-  adapter: Pick<CoreAdapter, 'sessionsDetail' | 'workOutput' | 'listRepos'>;
+  adapter: Pick<CoreAdapter, 'runView' | 'workOutput' | 'listRepos'>;
   audit: AuditLog;
   index: TestSetIndex;
   /** The delivered PR URL for a run, when one is recorded (`DeliveryIndex.urlFor`). */
@@ -197,8 +197,8 @@ export function buildTestSet(
  */
 export async function registerTestSetForRun(deps: RegisterTestSetDeps, runId: string): Promise<TestSet | null> {
   if (deps.index.forRun(runId) !== undefined) return deps.index.forRun(runId) ?? null;
-  const views = await deps.adapter.sessionsDetail();
-  const view = views.find((v) => v.session.id === runId);
+  // crew#1775: at every run's end; it reads that run alone, never a fold of the store.
+  const view = await deps.adapter.runView(runId);
   if (view === undefined) return null;
   if (!isQeAuthorRun(view)) return null;
   const verify = view.units.find((u) => u.id.endsWith(`:${QE_VERIFY_PHASE_ID}`));
