@@ -21,7 +21,7 @@
  * it is from after, with both used in the same governed run (the engine plans, the CLI runs the
  * gate hook). Nothing reported the one-merge gap, because nothing had anything to report it with.
  *
- * So before copying anything, this script now derives three facts and dies loudly if any fails:
+ * So before copying anything, this script now derives two facts and dies loudly if either fails:
  *
  *   1. IDENTITY  — the `.node` in the package dir is byte-identical to the cargo artifact
  *                  (`target/<profile>/libwicked_core_ts.*`). `napi build --platform` copies the
@@ -31,12 +31,11 @@
  *                  names every `.rs` and `include_str!` asset across wicked-core, wicked-council,
  *                  wicked-apps-core, wicked-governance and wicked-estate-core — the cross-repo
  *                  surface a hand-maintained list here would silently drift from.
- *   3. PIN       — the addon's bytes carry the COVERAGE_VALIDATOR_PIN that the checkout's
- *                  `src/domain_extraction.rs` declares, exactly the constant `install-local.py`
- *                  verifies for the CLI. This is the skew that kills governed runs (FINDING-081):
- *                  an engine planning with one pin while the gate resolves another.
  *
- * All three run BEFORE the copy: a failed verification must never leave a bad addon installed.
+ * (J6 M1) A third check, a coverage validator pin carried by the addon, went with wicked-core#1922: a
+ * domain model run has no validator, so there is no pin to carry.
+ *
+ * Both run BEFORE the copy: a failed verification must never leave a bad addon installed.
  *
  * # Why a script rather than `npm install <path>`
  *
@@ -252,55 +251,11 @@ if (missingInputs.length > 0 || newerInputs.length > 0) {
   );
 }
 
-// (3) PIN — the semantic cross-artifact contract. The engine seeds the coverage validator pin the
-// gate later resolves; `install-local.py` proves the CLI's copy, this proves the addon's. The
-// expected value is read out of core's source, never restated here, and the addon is asked
-// directly: the &str constant survives into the cdylib's bytes (verified against a release build
-// with lto=true, strip="symbols").
-const coreRepo = resolve(srcDir, '..', '..');
-// (J6 K1) From wicked-core#1922 on, `domain-extraction` runs no coverage validator: its steps are two host tools
-// (garden's domain-run, then core's domain-graph), no plan seeds or resolves the pin, and the built addon no longer
-// carries the constant (crew#1909 CI, macOS). An engine of that line says so in its core-ts source
-// (`supports_domain_scope`); for it the pin check has no subject and IDENTITY + FRESHNESS above are the skew guard.
-const coreTsLib = join(srcDir, 'src', 'lib.rs');
-const pinRetired = existsSync(coreTsLib) && /pub fn supports_domain_scope\(/.test(readFileSync(coreTsLib, 'utf8'));
-let pin = null;
-if (!pinRetired) {
-  const pinSource = join(coreRepo, 'src', 'domain_extraction.rs');
-  if (!existsSync(pinSource)) {
-    die(
-      `cannot verify ${addonName}: ${pinSource} not found above the package dir.\n` +
-        `  The pin constant moved, or WICKED_CORE_TS_DIR points outside a wicked-core checkout.\n` +
-        `  Update this check rather than deleting it (FINDING-090; same constant install-local.py reads).`,
-    );
-  }
-  const pinMatch = /COVERAGE_VALIDATOR_PIN:\s*&str\s*=\s*"([0-9a-f]+)"/.exec(
-    readFileSync(pinSource, 'utf8'),
-  );
-  if (pinMatch === null) {
-    die(
-      `no COVERAGE_VALIDATOR_PIN in ${pinSource} — the constant moved or was renamed.\n` +
-        `  Update this check rather than deleting it (install-local.py reads the same constant).`,
-    );
-  }
-  pin = pinMatch[1];
-  if (!addonBytes.includes(pin)) {
-    die(
-      `PIN SKEW: the checkout declares coverage validator pin ${pin} but ${addonName} does not\n` +
-        `  carry it — the addon was built from a different revision than this checkout.\n` +
-        `  A daemon on this engine plans with a pin the gate hook will refuse to resolve, and every\n` +
-        `  domain-extraction run fails closed (FINDING-081/-090).\n` +
-        `  Fix: cd ${srcDir} && npm run build   (then re-run this script)`,
-    );
-  }
-}
-const pinSaid = pin === null ? 'no coverage validator pin (the engine runs none)' : `pin ${pin}`;
 
 if (checkOnly) {
   // Verify the LINKED addon too — `--check` answers "is the platform current?", and the linked
   // copy is the artifact that actually loads. Byte-equality with the source is not usable here:
-  // the copy is re-signed on macOS, which rewrites its bytes. The pin is the contract that must
-  // hold, so the pin is what is checked — same acceptance install-local.py applies to the CLI.
+  // the copy is re-signed on macOS, which rewrites its bytes, so what is checked is that it exists.
   const linked = join(destDir, addonName);
   if (!existsSync(linked)) {
     die(
@@ -309,15 +264,8 @@ if (checkOnly) {
         `  Fix: node scripts/use-local-core-ts.mjs   (without --check)`,
     );
   }
-  if (pin !== null && !readFileSync(linked).includes(pin)) {
-    die(
-      `PIN SKEW: the LINKED addon at ${linked} does not carry pin ${pin} declared by the\n` +
-        `  checkout — it was linked from an older build (FINDING-090).\n` +
-        `  Fix: node scripts/use-local-core-ts.mjs   (without --check)`,
-    );
-  }
   console.log(
-    `use-local-core-ts: verified — build current (${artifact}), ${pinSaid}${pin === null ? '' : ' carried by source and linked addon'}.`,
+    `use-local-core-ts: verified — build current (${artifact}), linked.`,
   );
   process.exit(0);
 }
@@ -347,21 +295,11 @@ if (process.platform === 'darwin') {
   }
 }
 
-// The artifact that will actually load, asked directly. The copy and the re-sign both just ran, so
-// this can only fail if one of them corrupted the file — in which case exit 1 is the difference
-// between a diagnosis here and a SIGKILL three commands later.
-if (pin !== null && !readFileSync(join(destDir, addonName)).includes(pin)) {
-  die(
-    `the copied addon at ${join(destDir, addonName)} lost pin ${pin} between source and\n` +
-      `  destination — the copy or the re-sign corrupted it. Do not use this install.`,
-  );
-}
-
 const size = statSync(join(destDir, addonName)).size;
 console.log(
   `use-local-core-ts: ${srcDir}\n` +
     `  -> ${destDir}\n` +
     `  ${files.join(', ')} (${(size / 1024 / 1024).toFixed(1)} MiB addon)` +
     (process.platform === 'darwin' ? ', re-signed ad-hoc' : '') +
-    `\n  verified: addon is the current build (${artifact}), ${pin === null ? pinSaid : `carries pin ${pin}`}`,
+    `\n  verified: addon is the current build (${artifact})`,
 );

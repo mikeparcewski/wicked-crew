@@ -5,8 +5,8 @@
 // happened, by accident, while remediating FINDING-081, and nothing reported the one-merge gap.
 //
 // The script now verifies before copying: identity (the .node is byte-identical to the cargo
-// artifact), freshness (no dep-info-listed input is newer than the artifact), and the coverage
-// validator pin (read out of core's `src/domain_extraction.rs`, present in the addon's bytes).
+// artifact) and freshness (no dep-info-listed input is newer than the artifact). (J6 M1: a third
+// check, a coverage validator pin, went with wicked-core#1922; a domain model run has no validator.)
 //
 // # What this guard proves, and how it avoids proving less
 //
@@ -17,7 +17,7 @@
 // is exactly the invocation CI and developers use: if verification were ever wired into `--check`
 // only, those cases would observe the unguarded copy and fail.
 //
-// Assertions name the substance (the offending file, both hashes, the pin value) rather than just
+// Assertions name the substance (the offending file, both hashes) rather than just
 // the exit code — on macOS a fixture addon that survives verification dies later at `codesign`,
 // which also exits 1, and an exit-code-only assertion would pass with verification deleted.
 
@@ -45,9 +45,6 @@ const CDYLIB =
 const DEP_INFO = CDYLIB.replace(/\.[^.]+$/, '.d');
 const ADDON = 'wicked-core-ts.testfixture.node';
 
-const PIN_A = '0123456789abcdef';
-const PIN_B = 'fedcba9876543210';
-
 /** Timestamps, in seconds: inputs older than the artifact is the healthy state. */
 const T_INPUTS = 1_000_000_000;
 const T_BUILT = 1_500_000_000;
@@ -69,10 +66,9 @@ interface Fixture {
   depWithSpace: string;
 }
 
-/** A coherent fake wicked-core checkout: addon == artifact bytes, both carrying PIN_A, all
- *  dep-info inputs and manifests older than the artifact, pin source declaring PIN_A. Every test
- *  starts from this healthy state and breaks exactly one thing. */
-function makeFixture(pinInAddon: string = PIN_A, pinDeclared: string = PIN_A): Fixture {
+/** A coherent fake wicked-core checkout: addon == artifact bytes, all dep-info inputs and manifests
+ *  older than the artifact. Every test starts from this healthy state and breaks exactly one thing. */
+function makeFixture(): Fixture {
   const root = mkdtempSync(join(tmpdir(), 'engine-link-verification-'));
   // Deliberately NOT named after the real sibling checkout: this is a fabricated layout the
   // script is pointed at via WICKED_CORE_TS_DIR, not a resolution of the real one — and the
@@ -84,13 +80,9 @@ function makeFixture(pinInAddon: string = PIN_A, pinDeclared: string = PIN_A): F
   const release = join(pkg, 'target', 'release');
   const inputsDir = join(pkg, 'inputs');
   const dest = join(root, 'dest');
-  for (const d of [release, inputsDir, join(core, 'src')]) mkdirSync(d, { recursive: true });
+  for (const d of [release, inputsDir]) mkdirSync(d, { recursive: true });
 
-  const addonBytes = Buffer.concat([
-    Buffer.from('not a real addon, but it carries the pin: '),
-    Buffer.from(pinInAddon),
-    Buffer.from('\n'),
-  ]);
+  const addonBytes = Buffer.from('not a real addon\n');
   const addonPath = join(pkg, ADDON);
   const artifactPath = join(release, CDYLIB);
   writeFileSync(addonPath, addonBytes);
@@ -109,10 +101,6 @@ function makeFixture(pinInAddon: string = PIN_A, pinDeclared: string = PIN_A): F
   writeFileSync(join(pkg, 'index.d.ts'), 'export {};\n');
   writeFileSync(join(pkg, 'Cargo.toml'), '[package]\nname = "wicked-core-ts"\n');
   writeFileSync(join(pkg, 'Cargo.lock'), '# lock\n');
-  writeFileSync(
-    join(core, 'src', 'domain_extraction.rs'),
-    `pub const COVERAGE_VALIDATOR_PIN: &str = "${pinDeclared}";\n`,
-  );
 
   for (const p of [dep, depWithSpace, join(pkg, 'Cargo.toml'), join(pkg, 'Cargo.lock')]) {
     utimesSync(p, T_INPUTS, T_INPUTS);
@@ -146,7 +134,7 @@ function run(
 }
 
 describe('use-local-core-ts verifies the addon against the source build (FINDING-090)', () => {
-  it('passes --check on a coherent build, naming the pin it verified', () => {
+  it('passes --check on a coherent build', () => {
     const fx = makeFixture();
     mkdirSync(fx.dest, { recursive: true });
     writeFileSync(join(fx.dest, ADDON), readFileSync(fx.addonPath));
@@ -154,7 +142,6 @@ describe('use-local-core-ts verifies the addon against the source build (FINDING
     expect(r.err).toBe('');
     expect(r.status).toBe(0);
     expect(r.out).toContain('verified');
-    expect(r.out).toContain(`pin ${PIN_A}`);
     // --check must not write: the fixture never gains index.js at the destination.
     expect(existsSync(join(fx.dest, 'index.js'))).toBe(false);
   });
@@ -195,32 +182,16 @@ describe('use-local-core-ts verifies the addon against the source build (FINDING
     expect(existsSync(join(fx.dest, ADDON))).toBe(false);
   });
 
-  it('(J6 K1) an engine that runs no coverage validator (its core-ts has supports_domain_scope) is not asked for the pin', () => {
-    // wicked-core#1922: domain-extraction is two host tool steps; no plan seeds the pin, and the addon does not carry it.
-    const fx = makeFixture('no pin here', PIN_A);
-    mkdirSync(join(fx.pkg, 'src'), { recursive: true });
-    writeFileSync(join(fx.pkg, 'src', 'lib.rs'), '#[napi]\npub fn supports_domain_scope() -> bool {\n    true\n}\n');
+  it('(J6 M1) asks no addon for a coverage validator pin: a domain model run has none', () => {
+    // wicked-core#1922 on: the addon carries no pin, and the checkout declares none.
+    const fx = makeFixture();
     mkdirSync(fx.dest, { recursive: true });
     writeFileSync(join(fx.dest, ADDON), readFileSync(fx.addonPath));
     const checked = run(fx, ['--check']);
     expect(checked.err).toBe('');
     expect(checked.status).toBe(0);
-    expect(checked.out).toContain('no coverage validator pin (the engine runs none)');
-    // Without that marker the same addon is the skew the check exists for.
-    const older = makeFixture('no pin here', PIN_A);
-    const refused = run(older);
-    expect(refused.status).toBe(1);
-    expect(refused.err).toContain('PIN SKEW');
-  });
-
-  it('refuses an addon that does not carry the pin the checkout declares', () => {
-    // Identity and freshness are coherent — the build is simply from a revision with another pin.
-    const fx = makeFixture(PIN_A, PIN_B);
-    const r = run(fx);
-    expect(r.status).toBe(1);
-    expect(r.err).toContain('PIN SKEW');
-    expect(r.err).toContain(PIN_B);
-    expect(existsSync(join(fx.dest, ADDON))).toBe(false);
+    expect(checked.out).toContain('verified');
+    expect(checked.out).not.toMatch(/pin/i);
   });
 
   it('fails closed when there is no cargo artifact to verify against', () => {
@@ -247,18 +218,6 @@ describe('use-local-core-ts verifies the addon against the source build (FINDING
     const r = run(fx, ['--check']);
     expect(r.status).toBe(1);
     expect(r.err).toContain('nothing is linked');
-  });
-
-  it('--check refuses a linked addon that predates the declared pin', () => {
-    const fx = makeFixture();
-    mkdirSync(fx.dest, { recursive: true });
-    // Linked from an older build: carries some other pin, not the one the checkout declares.
-    writeFileSync(join(fx.dest, ADDON), `an older addon carrying ${PIN_B}\n`);
-    const r = run(fx, ['--check']);
-    expect(r.status).toBe(1);
-    expect(r.err).toContain('PIN SKEW');
-    expect(r.err).toContain('LINKED');
-    expect(r.err).toContain(PIN_A);
   });
 
   it('resolves the DEFAULT destination (node_modules/wicked-core-ts) when the override is unset', () => {
