@@ -80,7 +80,7 @@ export class RunFactsFile {
   private kept: Map<string, KeptFacts> | null = null;
   /** Lines waiting for the next flush (one append per batch, not one write per run). */
   private pending: string[] = [];
-  /** The write chain: one append at a time, each draining every line pending when it starts. */
+  /** The append in flight (one at a time; each writes every line pending when it starts). */
   private writing: Promise<void> | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   /** Set when the file could not be written: memory only for this process. */
@@ -110,43 +110,49 @@ export class RunFactsFile {
     if (this.off) return;
     this.pending.push(JSON.stringify({ v: 1, run: runId, ...kept }) + '\n');
     // Batched by time, not by turn: a first list derives runs as their reads land, spread over seconds.
-    if (this.timer === null) {
-      this.timer = setTimeout(() => {
-        this.timer = null;
-        void this.flush();
-      }, FLUSH_DELAY_MS);
-      this.timer.unref?.();
-    }
+    this.arm();
   }
 
-  /** Write every pending line, after any write in flight. Never throws: a failed write turns the file off for this
-   *  process (memory only) and costs one re-read per run on the next start. */
-  flush(): Promise<void> {
+  /** Write everything pending now and wait for it (tests; `close`). Never throws: a failed write turns the file off
+   *  for this process (memory only) and costs one re-read per run on the next start. */
+  async flush(): Promise<void> {
+    while (this.writing !== null || (this.pending.length > 0 && !this.off && this.bound)) await this.writeOnce();
+  }
+
+  /** At most one append per FLUSH_DELAY_MS: lines kept meanwhile wait for the next window. */
+  private arm(): void {
+    if (this.timer !== null || this.writing !== null) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      void this.writeOnce();
+    }, FLUSH_DELAY_MS);
+    this.timer.unref?.();
+  }
+
+  /** One append of every pending line; one in flight at a time (a caller meanwhile waits for it). */
+  private writeOnce(): Promise<void> {
     if (this.timer !== null) {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    const run = (this.writing ?? Promise.resolve()).then(() => this.drain());
-    this.writing = run;
-    void run.finally(() => {
-      if (this.writing === run) this.writing = null;
-    });
-    return run;
-  }
-
-  private async drain(): Promise<void> {
-    while (this.pending.length > 0 && !this.off) {
-      if (!this.bound) return; // load() binds the file before any line is kept; `off` covers a failed bind
-      const lines = (this.torn ? '\n' : '') + this.pending.join('');
-      this.pending = [];
-      this.torn = false;
-      try {
-        await appendFile(this.path, lines);
-      } catch {
+    if (this.writing !== null) return this.writing;
+    if (this.pending.length === 0 || this.off || !this.bound) return Promise.resolve();
+    const lines = (this.torn ? '\n' : '') + this.pending.join('');
+    this.pending = [];
+    this.torn = false;
+    const run = appendFile(this.path, lines).then(
+      () => undefined,
+      () => {
         this.off = true;
         this.pending = [];
-      }
-    }
+      },
+    );
+    this.writing = run;
+    void run.then(() => {
+      this.writing = null;
+      if (this.pending.length > 0 && !this.off) this.arm();
+    });
+    return run;
   }
 
   /** Start the file over for this store (its header first). */
@@ -226,7 +232,9 @@ export class RunFactsFile {
       writeFileSync(this.path, out.join('\n') + '\n');
       this.torn = false;
     } catch {
-      // Left as it was: the next start reads the longer file.
+      // A rewrite that failed part-way may have left a partial row: memory only for this process (the next start
+      // reads what is there, skipping a torn row).
+      this.off = true;
     }
   }
 }

@@ -64,7 +64,7 @@ function newAdapter(): CoreAdapter {
   return a;
 }
 
-async function list(a: CoreAdapter): Promise<Array<Record<string, unknown>>> {
+async function list(a: CoreAdapter, flush = true): Promise<Array<Record<string, unknown>>> {
   const app = Fastify({ logger: false });
   registerRoutes(app, a, new GateCache(), new ElicitationCache(), undefined, {
     audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog,
@@ -74,7 +74,7 @@ async function list(a: CoreAdapter): Promise<Array<Record<string, unknown>>> {
   apps.push(app);
   const res = await app.inject({ method: 'GET', url: '/api/v1/runs?include=archived' });
   expect(res.statusCode, res.body).toBe(200);
-  await a.flushRunFacts?.();
+  if (flush) await a.flushRunFacts();
   // The run DTO: `{ session, units }`; the fields under test are the session's.
   return (res.json() as { runs: Array<{ session: Record<string, unknown> }> }).runs.map((r) => r.session);
 }
@@ -238,6 +238,20 @@ describe('crew#1880: a terminal run log is read once, and never again after a re
     reads.clear();
     await expect(a.launchedWorkflowOfRun('nolaunch')).resolves.toBeUndefined();
     await expect(a.launchedWorkflowOfRun('done')).resolves.toBe('feature');
+    expect(totalReads()).toBe(0);
+  });
+
+  it('kept facts are written on their own within the batch window (no explicit flush), in one batch', async () => {
+    for (let i = 0; i < 40; i++) {
+      store.push(run(`many-${i}`, 'completed'));
+      logs.set(`many-${i}`, log(`many-${i}`, 'feature', T0 + i + 1));
+    }
+    await list(newAdapter(), false);
+    await new Promise((r) => setTimeout(r, 1_200));
+    const lines = readFileSync(factsPath(), 'utf8').split('\n').filter((l) => l !== '');
+    expect(lines.length).toBe(1 + 43);
+    reads.clear();
+    await list(newAdapter());
     expect(totalReads()).toBe(0);
   });
 
