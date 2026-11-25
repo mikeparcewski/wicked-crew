@@ -656,6 +656,8 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
     expect(chatScopes.engineOf('dynamic')?.readRoots).toEqual(['/srv/repos/alpha']);
     expect(launched[0]).toMatchObject({ projectId: 'p-live' });
     for (const field of ['cwd', 'readRoots', 'codeGraphDb']) expect(launched[0]).not.toHaveProperty(field);
+    // wicked-core#1463: a project scope names what the person asked about: its repositories stay required.
+    expect(launched[0]).not.toHaveProperty('optionalReadRoots');
     // crew#1034: the repository is the run's read root whether or not the project graph is built —
     // and (DES-SYSTEM-CHAT) the chat's attachments directory, from launch; the compared roots stay the scope's.
     expect(launched[0]?.extraReadRoots).toEqual(['/srv/repos/alpha', join(cwd, 'attachments'), realpathSync(join(cwd, 'open')), realpathSync(join(cwd, 'context')), realpathSync(join(cwd, 'requirements'))]);
@@ -676,7 +678,8 @@ describe('POST /chats/:id/messages — refresh dynamic scopes', () => {
       const all = launched.at(-1)!;
       // Only the scope's repositories, each one of the run's read roots: never the chat's own dirs.
       expect(all.optionalReadRoots).toEqual(['/srv/repos/alpha']);
-      expect(all.extraReadRoots).toEqual(expect.arrayContaining(['/srv/repos/alpha']));
+      // The engine refuses an optional root not spelled exactly as one of the read roots.
+      for (const r of all.optionalReadRoots!) expect(all.extraReadRoots).toContain(r);
       expect((await open({ chatId: 'one-opt', clis: ['claude'], scopeKind: 'repo', repoRefs: ['alpha'] })).statusCode).toBe(201);
       expect((await send('one-opt')).statusCode).toBe(202);
       expect(launched.at(-1)).not.toHaveProperty('optionalReadRoots');

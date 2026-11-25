@@ -1,0 +1,465 @@
+{
+ "_source": "Written by wicked-interactive 0.17.0-pre (PR #351 head 580bc4e) through its own routes: createMultiServer, the import crew makeDemoDocument drives (recording.ts: POST /api/docs, PUT import/<key>, POST import), then GET /d/<doc>/api/demo/cut and POST /d/<doc>/api/demo/recut (src/service/server.js), with real ffmpeg testsrc2 takes. Each entry is {method, path, body, status, answer} exactly as the route answered. The demo doc name is the one the run made.",
+ "durations": {
+  "before": 17,
+  "after": 14
+ },
+ "import": {
+  "method": "POST",
+  "path": "/d/demo-8e0ffbece431/api/demo/import",
+  "body": {
+   "title": "Demo of http://127.0.0.1:5173/",
+   "url": "http://127.0.0.1:5173/",
+   "chapters": [
+    {
+     "id": "welcome",
+     "title": "Welcome",
+     "say": "This is the home page you land on after you sign in."
+    },
+    {
+     "id": "setup",
+     "title": "Setup",
+     "say": "First we set up the project."
+    },
+    {
+     "id": "sign-in",
+     "title": "Sign in",
+     "say": "Then you sign in with your work account."
+    }
+   ]
+  },
+  "status": 200,
+  "answer": {
+   "rev": 1,
+   "version": 1
+  }
+ },
+ "cut-v1": {
+  "method": "GET",
+  "path": "/d/demo-8e0ffbece431/api/demo/cut",
+  "status": 200,
+  "answer": {
+   "rev": 1,
+   "version": 1,
+   "chapters": [
+    {
+     "id": "welcome",
+     "title": "Welcome",
+     "say": "This is the home page you land on after you sign in.",
+     "take": "_take-welcome-1.mp4",
+     "inSec": 0,
+     "outSec": 4,
+     "startSec": 2.5,
+     "durationSec": 4
+    },
+    {
+     "id": "setup",
+     "title": "Setup",
+     "say": "First we set up the project.",
+     "take": "_take-setup-1.mp4",
+     "inSec": 0,
+     "outSec": 3,
+     "startSec": 6.5,
+     "durationSec": 3
+    },
+    {
+     "id": "sign-in",
+     "title": "Sign in",
+     "say": "Then you sign in with your work account.",
+     "take": "_take-sign-in-1.mp4",
+     "inSec": 0,
+     "outSec": 5,
+     "startSec": 9.5,
+     "durationSec": 5
+    }
+   ],
+   "takes": {
+    "welcome": [
+     {
+      "file": "_take-welcome-1.mp4",
+      "durationSec": 4,
+      "at": "2026-11-25T00:41:04.086Z"
+     }
+    ],
+    "setup": [
+     {
+      "file": "_take-setup-1.mp4",
+      "durationSec": 3,
+      "at": "2026-11-25T00:41:04.086Z"
+     }
+    ],
+    "sign-in": [
+     {
+      "file": "_take-sign-in-1.mp4",
+      "durationSec": 5,
+      "at": "2026-11-25T00:41:04.087Z"
+     }
+    ]
+   },
+   "style": {
+    "theme": {
+     "titleCard": {
+      "on": true,
+      "title": "Demo of http://127.0.0.1:5173/",
+      "subtitle": "",
+      "seconds": 2.5
+     },
+     "endCard": {
+      "on": true,
+      "title": "Thanks for watching",
+      "subtitle": "",
+      "seconds": 2.5
+     },
+     "palette": "skin",
+     "background": "#16181d",
+     "foreground": "#f5f6f8",
+     "accent": "#b8bec9",
+     "font": "system-ui"
+    },
+    "captions": {
+     "on": true,
+     "burnIn": true,
+     "position": "bottom",
+     "size": 36,
+     "maxLines": 2,
+     "wrapChars": 42,
+     "style": "bar"
+    }
+   },
+   "url": "http://127.0.0.1:5173/",
+   "head": 1,
+   "render": {
+    "mp4": "_v1.mp4",
+    "vtt": "_v1.vtt",
+    "ass": "_v1.ass",
+    "burnIn": "unavailable",
+    "cardText": "unavailable",
+    "palette": {
+     "source": "fallback",
+     "theme": null,
+     "background": "#16181d",
+     "foreground": "#f5f6f8",
+     "accent": "#b8bec9",
+     "font": "system-ui"
+    }
+   },
+   "ffmpeg": {
+    "ok": true,
+    "burnIn": false
+   },
+   "skin": {
+    "source": "fallback",
+    "theme": null,
+    "palette": {
+     "canvas": "#16181d",
+     "surface": "#22252c",
+     "ink": "#f5f6f8",
+     "ink2": "#d4d7dd",
+     "muted": "#a2a7b1",
+     "line": "#33373f",
+     "accent": "#b8bec9",
+     "font": "system-ui",
+     "scheme": "dark"
+    }
+   },
+   "resolvedTheme": {
+    "titleCard": {
+     "on": true,
+     "title": "Demo of http://127.0.0.1:5173/",
+     "subtitle": "",
+     "seconds": 2.5
+    },
+    "endCard": {
+     "on": true,
+     "title": "Thanks for watching",
+     "subtitle": "",
+     "seconds": 2.5
+    },
+    "palette": "skin",
+    "background": "#16181d",
+    "foreground": "#f5f6f8",
+    "accent": "#b8bec9",
+    "font": "system-ui"
+   }
+  }
+ },
+ "find-before": {
+  "method": "GET",
+  "path": "/d/demo-8e0ffbece431/api/demo/cut?request_id=6f1c2a4e-8b0d-5e7a-9c3f-2d1b0a9e8f7c",
+  "status": 404,
+  "answer": {
+   "error": "not_found"
+  }
+ },
+ "refused-dropped": {
+  "method": "POST",
+  "path": "/d/demo-8e0ffbece431/api/demo/recut",
+  "body": {
+   "expect_head": 1,
+   "ops": [
+    {
+     "op": "chapter-drop",
+     "chapter": "setup"
+    },
+    {
+     "op": "chapter-move",
+     "chapter": "welcome",
+     "after": "setup"
+    }
+   ]
+  },
+  "status": 400,
+  "answer": {
+   "error": "invalid_body",
+   "field": "ops.1.after",
+   "reason": "dropped"
+  }
+ },
+ "refused-trim": {
+  "method": "POST",
+  "path": "/d/demo-8e0ffbece431/api/demo/recut",
+  "body": {
+   "expect_head": 1,
+   "ops": [
+    {
+     "op": "chapter-trim",
+     "chapter": "welcome",
+     "inSec": 0,
+     "outSec": 40
+    }
+   ]
+  },
+  "status": 400,
+  "answer": {
+   "error": "invalid_body",
+   "field": "ops.0.outSec",
+   "reason": "out_of_take"
+  }
+ },
+ "recut": {
+  "method": "POST",
+  "path": "/d/demo-8e0ffbece431/api/demo/recut",
+  "body": {
+   "expect_head": 1,
+   "ops": [
+    {
+     "op": "chapter-drop",
+     "chapter": "setup"
+    },
+    {
+     "op": "chapter-move",
+     "chapter": "sign-in",
+     "after": null
+    },
+    {
+     "op": "chapter-say",
+     "chapter": "sign-in",
+     "say": "You sign in with your work account, and that's all the setup there is."
+    }
+   ],
+   "request_id": "6f1c2a4e-8b0d-5e7a-9c3f-2d1b0a9e8f7c"
+  },
+  "status": 200,
+  "answer": {
+   "rev": 2,
+   "version": 2
+  }
+ },
+ "replay": {
+  "method": "POST",
+  "path": "/d/demo-8e0ffbece431/api/demo/recut",
+  "body": {
+   "expect_head": 1,
+   "ops": [
+    {
+     "op": "chapter-drop",
+     "chapter": "setup"
+    },
+    {
+     "op": "chapter-move",
+     "chapter": "sign-in",
+     "after": null
+    },
+    {
+     "op": "chapter-say",
+     "chapter": "sign-in",
+     "say": "You sign in with your work account, and that's all the setup there is."
+    }
+   ],
+   "request_id": "6f1c2a4e-8b0d-5e7a-9c3f-2d1b0a9e8f7c"
+  },
+  "status": 200,
+  "answer": {
+   "rev": 2,
+   "version": 2,
+   "replayed": true
+  }
+ },
+ "find-after": {
+  "method": "GET",
+  "path": "/d/demo-8e0ffbece431/api/demo/cut?request_id=6f1c2a4e-8b0d-5e7a-9c3f-2d1b0a9e8f7c",
+  "status": 200,
+  "answer": {
+   "request_id": "6f1c2a4e-8b0d-5e7a-9c3f-2d1b0a9e8f7c",
+   "version": 2
+  }
+ },
+ "stale": {
+  "method": "POST",
+  "path": "/d/demo-8e0ffbece431/api/demo/recut",
+  "body": {
+   "expect_head": 1,
+   "ops": [
+    {
+     "op": "chapter-rename",
+     "chapter": "welcome",
+     "title": "Hi"
+    }
+   ]
+  },
+  "status": 409,
+  "answer": {
+   "error": "head_moved",
+   "head": 2
+  }
+ },
+ "cut-v2": {
+  "method": "GET",
+  "path": "/d/demo-8e0ffbece431/api/demo/cut",
+  "status": 200,
+  "answer": {
+   "rev": 2,
+   "version": 2,
+   "chapters": [
+    {
+     "id": "sign-in",
+     "title": "Sign in",
+     "say": "You sign in with your work account, and that's all the setup there is.",
+     "take": "_take-sign-in-1.mp4",
+     "inSec": 0,
+     "outSec": 5,
+     "startSec": 2.5,
+     "durationSec": 5
+    },
+    {
+     "id": "welcome",
+     "title": "Welcome",
+     "say": "This is the home page you land on after you sign in.",
+     "take": "_take-welcome-1.mp4",
+     "inSec": 0,
+     "outSec": 4,
+     "startSec": 7.5,
+     "durationSec": 4
+    }
+   ],
+   "takes": {
+    "welcome": [
+     {
+      "file": "_take-welcome-1.mp4",
+      "durationSec": 4,
+      "at": "2026-11-25T00:41:04.086Z"
+     }
+    ],
+    "setup": [
+     {
+      "file": "_take-setup-1.mp4",
+      "durationSec": 3,
+      "at": "2026-11-25T00:41:04.086Z"
+     }
+    ],
+    "sign-in": [
+     {
+      "file": "_take-sign-in-1.mp4",
+      "durationSec": 5,
+      "at": "2026-11-25T00:41:04.087Z"
+     }
+    ]
+   },
+   "style": {
+    "theme": {
+     "titleCard": {
+      "on": true,
+      "title": "Demo of http://127.0.0.1:5173/",
+      "subtitle": "",
+      "seconds": 2.5
+     },
+     "endCard": {
+      "on": true,
+      "title": "Thanks for watching",
+      "subtitle": "",
+      "seconds": 2.5
+     },
+     "palette": "skin",
+     "background": "#16181d",
+     "foreground": "#f5f6f8",
+     "accent": "#b8bec9",
+     "font": "system-ui"
+    },
+    "captions": {
+     "on": true,
+     "burnIn": true,
+     "position": "bottom",
+     "size": 36,
+     "maxLines": 2,
+     "wrapChars": 42,
+     "style": "bar"
+    }
+   },
+   "url": "http://127.0.0.1:5173/",
+   "head": 2,
+   "render": {
+    "mp4": "_v2.mp4",
+    "vtt": "_v2.vtt",
+    "ass": "_v2.ass",
+    "burnIn": "unavailable",
+    "cardText": "unavailable",
+    "palette": {
+     "source": "fallback",
+     "theme": null,
+     "background": "#16181d",
+     "foreground": "#f5f6f8",
+     "accent": "#b8bec9",
+     "font": "system-ui"
+    }
+   },
+   "ffmpeg": {
+    "ok": true,
+    "burnIn": false
+   },
+   "skin": {
+    "source": "fallback",
+    "theme": null,
+    "palette": {
+     "canvas": "#16181d",
+     "surface": "#22252c",
+     "ink": "#f5f6f8",
+     "ink2": "#d4d7dd",
+     "muted": "#a2a7b1",
+     "line": "#33373f",
+     "accent": "#b8bec9",
+     "font": "system-ui",
+     "scheme": "dark"
+    }
+   },
+   "resolvedTheme": {
+    "titleCard": {
+     "on": true,
+     "title": "Demo of http://127.0.0.1:5173/",
+     "subtitle": "",
+     "seconds": 2.5
+    },
+    "endCard": {
+     "on": true,
+     "title": "Thanks for watching",
+     "subtitle": "",
+     "seconds": 2.5
+    },
+    "palette": "skin",
+    "background": "#16181d",
+    "foreground": "#f5f6f8",
+    "accent": "#b8bec9",
+    "font": "system-ui"
+   }
+  }
+ }
+}

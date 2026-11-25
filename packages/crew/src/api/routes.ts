@@ -210,7 +210,7 @@ import type { DefaultEvalStore } from '../evals/store.js';
 import type { DecisionLike, EventLike, RunLike } from '../evals/capture.js';
 import { gardenRootFor } from '../learn/scheduler.js';
 import { agentMay } from '../knowledge/gate/access.js';
-import { DEMO_PRESETS, demoLaunch, demoLaunchRoots, registerDemoDocumentRoute, registerDemoRoutes, registerWalkthroughRoutes, walkthroughAcceptance, type BridgeCall, type DemoRouteDeps } from './recording.js';
+import { DEMO_PRESETS, demoLaunch, demoLaunchRoots, registerDemoDocumentRoute, registerDemoRoutes, registerWalkthroughRoutes, walkthroughAcceptance, type DemoRouteDeps } from './recording.js';
 import { projectDocsRoot } from '../interactive/project-root.js';
 import { registerSkillsRoutes } from './skills.js';
 import type { SkillUsageRecorder } from '../skills/usage.js';
@@ -313,6 +313,8 @@ import { createDocInProcess, registerInteractiveProxy } from '../interactive/pro
 import { CreateLauncher } from '../interactive/proposal-create.js';
 import { ThemeLauncher } from './proposal-theme.js';
 import { CHAT_GIT_PROTOCOLS, OnboardLauncher, probeGitUrl, withoutCredentials } from './proposal-onboard.js';
+import { CutLauncher } from './proposal-cut.js';
+import type { CutBridgeCall } from './cut-read.js';
 import { RefineLauncher } from '../interactive/proposal-refine.js';
 import { lineageSteps, protectedEdits } from '../interactive/protected-edits.js';
 import type { DocBindingStore } from '../interactive/doc-binding.js';
@@ -1810,7 +1812,7 @@ export const ChatOpenSchema = z.strictObject({
   }).optional(),
   requestId: z.string().trim().min(1).max(128).optional(),
   /** (api-types 0.192.0) What the client renders (`['job']`). */
-  accepts: z.array(z.enum(['job', 'onboard'])).max(4).optional(),
+  accepts: z.array(z.enum(['job', 'onboard', 'cut'])).max(4).optional(),
 }).refine((b) => b.seed === undefined || (b.requestId !== undefined && b.chatId === undefined), {
   path: ['seed'],
   error: 'seed needs requestId and no chatId: the chat id derives from you and the request',
@@ -2020,10 +2022,13 @@ export function registerRoutes(
     'demo',
   ];
   const chatArtifactFlags: import('../core/types.js').ChatArtifactsCapabilities = chatArtifactsStub
-    ? { context: true, instructions: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps, onboard: true, cutInView: true }
-    : { context: true, instructions: true, proposals: true, create: realCreate, refine: realRefine, theme: true, demo: false, onboard: true, cutInView: true };
+    ? { context: true, instructions: true, proposals: true, create: true, refine: true, theme: true, demo: true, stub: true, stubOps, onboard: true, cutInView: true, cut: true }
+    : { context: true, instructions: true, proposals: true, create: realCreate, refine: realRefine, theme: true, demo: false, onboard: true, cutInView: true, cut: true };
   const proposalLaunchers = new LaunchOnceRegistry();
   proposalLaunchers.register('theme', new ThemeLauncher());
+  // studio#1140 (a): Go on a cut card posts its frozen ops to the video tool's recut (real in the test configuration
+  // too: it starts no run, and the video tool is the authority on every change).
+  proposalLaunchers.register('cut', new CutLauncher({ bridgeFor: (projectId) => cutBridgeFor(projectId) }));
   // crew-0182: what an onboard card is resolved and its Go is checked against (one set of reads for both).
   // crew#1744: the one `git_url` reader (GET /repos, the repo search; the daemon hands the review service the same).
   const repoOrigins = runtime.repoOrigins ?? new RepoOrigins();
@@ -5336,8 +5341,10 @@ export function registerRoutes(
   const chatAccepts = new Map<string, boolean>();
   /** (crew-0182) Chats whose client draws onboard cards (`accepts: ['onboard']`), by its newest declaration. */
   const chatAcceptsOnboard = new Map<string, boolean>();
+  /** (studio#1140 (a)) Chats whose client draws cut cards (`accepts: ['cut']`), by its newest declaration. */
+  const chatAcceptsCut = new Map<string, boolean>();
   /** (crew-0182) What a chat seat is told exists here: every project with its repositories, every registered repository. */
-  const readDaemonGrounding = async (chatId: string, accepts: ReadonlyArray<'job' | 'onboard'> | undefined): Promise<DaemonGrounding | undefined> => {
+  const readDaemonGrounding = async (chatId: string, accepts: ReadonlyArray<'job' | 'onboard' | 'cut'> | undefined): Promise<DaemonGrounding | undefined> => {
     try {
       // A read that fails names nothing (never "none yet"): the whole section is left out.
       const [projectRows, repoRows] = await Promise.all([adapter.projectList(), adapter.listRepos()]);
@@ -5579,6 +5586,7 @@ export function registerRoutes(
       // A refused open (409 above) never touched the live chat's (codex r3).
       chatAccepts.set(chatId, openAccepts);
       chatAcceptsOnboard.set(chatId, b.accepts?.includes('onboard') === true);
+      chatAcceptsCut.set(chatId, b.accepts?.includes('cut') === true);
       // DC-S7: the in-force rules the statement lists; recorded as "told" only once the open succeeds.
       let inForceAtOpen: ConformanceRule[] = [];
       // Everything below either ends in `chatScopes.set(chatId, …, token)` or releases the reservation.
@@ -5868,7 +5876,7 @@ export function registerRoutes(
     /** (api-types 0.169.0, DES-CHAT-ARTIFACTS-001 §5.1) What studio shows beside the message. */
     context: ChatMessageContextSchema.optional(),
     /** (api-types 0.192.0, DES-CATALOG-002 §4.6) What the client renders (`['job']`): the newest declaration wins. */
-    accepts: z.array(z.enum(['job', 'onboard'])).max(4).optional(),
+    accepts: z.array(z.enum(['job', 'onboard', 'cut'])).max(4).optional(),
   });
   // DES-CHAT-ARTIFACTS-001 §5.1 (A1): what a turn's block reads — the docs roots, the decorated runs (project,
   // document and chat ids), unit outputs and the acceptance line. One set of deps, so the block and the run pages
@@ -5882,6 +5890,7 @@ export function registerRoutes(
       const g = readGroundingBeneath(root, doc);
       return g !== null && 'style' in g ? g.style : undefined;
     },
+    cutBridge: (projectId) => cutBridgeFor(projectId),
   };
   // DES-CHAT-ARTIFACTS-001 §4 (A2): proposals. Resolved from crew's own records (the same reads the turn block uses);
   // records go to the live transcript, or the kept history copy once the chat has ended.
@@ -6081,6 +6090,8 @@ export function registerRoutes(
     },
     acceptsJobs: (chatId) => chatAccepts.get(chatId) === true,
     acceptsOnboard: (chatId) => chatAcceptsOnboard.get(chatId) === true,
+    acceptsCut: (chatId) => chatArtifactFlags.cut === true && chatAcceptsCut.get(chatId) === true,
+    cut: { bridgeFor: (projectId) => cutBridgeFor(projectId) },
     onboard: {
       ...onboardReads,
       originOf,
@@ -6211,6 +6222,7 @@ export function registerRoutes(
         if (parsed.data.accepts !== undefined) {
           chatAccepts.set(id, parsed.data.accepts.includes('job'));
           chatAcceptsOnboard.set(id, parsed.data.accepts.includes('onboard'));
+          chatAcceptsCut.set(id, parsed.data.accepts.includes('cut'));
         }
         after();
         if (preface !== null) chatTranscripts?.appendSystem(id, turnId, preface);
@@ -6325,7 +6337,7 @@ export function registerRoutes(
       // A7: a seat is told it can propose a studio theme only when this message carried the tab's appearance (a client
       // that can preview and apply one sends it).
       // crew-0182: this message's own onboard declaration (the chat's stored one changes once the message is accepted).
-      const themeClient = { appearance: msgContext?.appearance !== undefined, onboard: parsed.data.accepts !== undefined ? parsed.data.accepts.includes('onboard') : chatAcceptsOnboard.get(id) === true };
+      const themeClient = { appearance: msgContext?.appearance !== undefined, onboard: parsed.data.accepts !== undefined ? parsed.data.accepts.includes('onboard') : chatAcceptsOnboard.get(id) === true, cut: parsed.data.accepts !== undefined ? parsed.data.accepts.includes('cut') : chatAcceptsCut.get(id) === true };
       // DES-CATALOG-002 §2.3, §4.6: the per-message job lines (the chat catalog digest, the open proposal, the held plan),
       // read here, before the last check (no await after it). Never in an analysis.
       // The declaration this message's instructions are written for: its own, else the chat's (applied to the chat only
@@ -6348,6 +6360,8 @@ export function registerRoutes(
               context: msgContext,
               records: chatTranscripts?.read(id) ?? [],
               attachmentIds: chatAttachments.list(id).map((a) => a.id),
+              // This message's own declaration, else the chat's (the reply to this turn is resolved the same way).
+              acceptsCut: chatArtifactFlags.cut === true && (parsed.data.accepts !== undefined ? parsed.data.accepts.includes('cut') : chatAcceptsCut.get(id) === true),
             },
             chatContextDeps,
           );
@@ -12007,6 +12021,41 @@ export function registerRoutes(
   // origin, one auth hook, and one CORS posture — the whole point of slice 1.
   // ONE pool, shared with the governed doc-delete route below: two pools over one root would
   // race each other into starting duplicate bridges.
+  /** The project's video and document tool (its interactive bridge, reuse-or-start) as a caller of its HTTP surface;
+   *  `null` = no such project. One caller for the run's "Edit the cut" import and the chat's cut changes. */
+  type BridgeHttp = (method: 'GET' | 'POST' | 'PUT', path: string, body?: Buffer | Record<string, unknown>, opts?: { timeoutMs?: number }) => Promise<{ status: number; body: Record<string, unknown> }>;
+  const bridgeCallFor = async (projectId: string): Promise<BridgeHttp | null> => {
+    const root = await projectDocsRoot(adapter, projectSettings, projectId);
+    if (root === null) return null;
+    const bridge = await interactiveBridges.ensure(root);
+    return async (method, path, body, opts) => {
+      const raw = Buffer.isBuffer(body);
+      const res = await fetch(`http://${bridge.host}:${bridge.port}${path}`, {
+        method,
+        ...(body === undefined ? {} : {
+          headers: { 'content-type': raw ? 'application/octet-stream' : 'application/json' },
+          body: raw ? new Uint8Array(body) : JSON.stringify(body),
+        }),
+        // A segment upload or a render (ffmpeg) can take minutes on a loaded host.
+        signal: AbortSignal.timeout(opts?.timeoutMs ?? 600_000),
+      });
+      let parsed: Record<string, unknown> = {};
+      try {
+        const j: unknown = await res.json();
+        if (j !== null && typeof j === 'object' && !Array.isArray(j)) parsed = j as Record<string, unknown>;
+      } catch {
+        parsed = {};
+      }
+      return { status: res.status, body: parsed };
+    };
+  };
+  /** (studio#1140 (a)) The video tool as the chat's cut reads and Go call it: a read is quick, a recut renders (up to
+   *  two ffmpeg passes of 180 s each, plus the probe and writes). */
+  const cutBridgeFor = async (projectId: string): Promise<CutBridgeCall | null> => {
+    const call = await bridgeCallFor(projectId);
+    if (call === null) return null;
+    return (method, path, body) => call(method, path, body, { timeoutMs: method === 'GET' ? 30_000 : 900_000 });
+  };
   const interactiveBridges =
     runtime.interactiveBridges ??
     new InteractiveBridgePool({
@@ -12553,31 +12602,7 @@ export function registerRoutes(
   });
 
   // ── A demo run's video as an editable document (the video editor re-cuts it through E1's per-doc API) ──
-  registerDemoDocumentRoute(app, adapter, {
-    bridgeFor: async (projectId): Promise<BridgeCall | null> => {
-      const root = await projectDocsRoot(adapter, projectSettings, projectId);
-      if (root === null) return null;
-      const bridge = await interactiveBridges.ensure(root);
-      return async (method, path, body) => {
-        const raw = Buffer.isBuffer(body);
-        const res = await fetch(`http://${bridge.host}:${bridge.port}${path}`, {
-          method,
-          headers: { 'content-type': raw ? 'application/octet-stream' : 'application/json' },
-          body: raw ? new Uint8Array(body) : JSON.stringify(body),
-          // A segment upload or the import's render (ffmpeg) can take minutes on a loaded host.
-          signal: AbortSignal.timeout(600_000),
-        });
-        let parsed: Record<string, unknown> = {};
-        try {
-          const j: unknown = await res.json();
-          if (j !== null && typeof j === 'object' && !Array.isArray(j)) parsed = j as Record<string, unknown>;
-        } catch {
-          parsed = {};
-        }
-        return { status: res.status, body: parsed };
-      };
-    },
-  });
+  registerDemoDocumentRoute(app, adapter, { bridgeFor: bridgeCallFor });
 
   // ── Project-attributed docs list (crew#472) ──
   // `GET /projects/:id/interactive/api/docs` relays the bridge's list and stamps each row with
