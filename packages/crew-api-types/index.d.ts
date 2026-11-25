@@ -1859,19 +1859,19 @@ export interface RepoEntry {
    */
   findings?: RepoFinding[];
   /**
-   * (api-types 0.232.0, wicked-core#1043) The toolchain layers this repo's seats get, for the repo card: the layers the
+   * (api-types next, wicked-core#1043) The toolchain layers this repo's seats get, for the repo card: the layers the
    * engine detected in the checkout, in catalog order, each with whether it is on and what turned it off. Derived on
    * the reads a person sees (`GET /repos`, `POST /repos`, `PUT /repos/:id/seat-layers`); absent from an engine before it.
    */
   seat_layers?: RepoSeatLayer[];
   /**
-   * (api-types 0.232.0, wicked-core#1043) The layer ids a person turned off for this repo
+   * (api-types next, wicked-core#1043) The layer ids a person turned off for this repo
    * (`PUT /repos/:id/seat-layers`), sorted. Absent when none are.
    */
   seat_layers_off?: string[];
 }
 
-/** (api-types 0.232.0, wicked-core#1043) One toolchain layer of a repo's seats ({@link RepoEntry.seat_layers}). */
+/** (api-types next, wicked-core#1043) One toolchain layer of a repo's seats ({@link RepoEntry.seat_layers}). */
 export interface RepoSeatLayer {
   /** The layer id: today `go`, `java`, `node`, `python` or `rust`. */
   id: string;
@@ -1886,7 +1886,7 @@ export interface RepoSeatLayer {
 }
 
 /**
- * (api-types 0.232.0, wicked-core#1043) `PUT /repos/:id/seat-layers`: the full list of layer ids this repo turns off,
+ * (api-types next, wicked-core#1043) `PUT /repos/:id/seat-layers`: the full list of layer ids this repo turns off,
  * at most 32, each a layer id. `[]` clears this repo's switch only: a layer the daemon turned off (`off_by` `daemon`
  * or `operator_base`) stays off. A person's choice: any other actor is refused 403 before anything is read, with
  * `human_operator_only` (an observer token is refused by the daemon's trust check first, without that code). 200

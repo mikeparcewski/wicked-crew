@@ -799,7 +799,7 @@ const SAFE_REPO_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 /** `PUT /repos/:id/requirements/minimum` (api-types 0.197.0 `RequirementsMinimumBody`): `null` clears. */
 export const ReqMinimumSchema = z.strictObject({ minPct: z.number().int().min(1).max(100).nullable() });
 
-/** `PUT /repos/:id/seat-layers` (api-types 0.232.0 `PutRepoSeatLayersBody`): each id one layer id, as core checks it. */
+/** `PUT /repos/:id/seat-layers` (api-types next `PutRepoSeatLayersBody`): each id one layer id, as core checks it. */
 export const RepoSeatLayersSchema = z.strictObject({
   off: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/u, 'a layer id: lower-case letters, digits, - or _')).max(32),
 });

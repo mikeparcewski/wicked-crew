@@ -1048,7 +1048,7 @@ respondsWith<Wire.RequirementsMinimum, RequirementsMinimum>();
 respondsWith<Wire.RequirementsMinimumResponse, { minimum: RequirementsMinimum | null }>();
 accepts<z.input<typeof ReqMinimumSchema>, Wire.RequirementsMinimumBody>();
 respondsWith<Wire.RequirementsCodeDrift, RequirementsCodeDrift>();
-// PUT /repos/:id/seat-layers (0.232.0, wicked-core#1043): the full off list in, the repo's row out.
+// PUT /repos/:id/seat-layers (api-types next, wicked-core#1043): the full off list in, the repo's row out.
 accepts<z.input<typeof RepoSeatLayersSchema>, Wire.PutRepoSeatLayersBody>();
 respondsWith<Wire.RepoEntry, Awaited<ReturnType<CoreAdapter['setRepoSeatLayersOff']>>>();
 
