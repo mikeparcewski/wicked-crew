@@ -999,7 +999,7 @@ export const LaunchSchema = z.strictObject({
    *  "full assurance", the same as omitting it: the launcher never chooses for the caller, and a
    *  full-assurance launch on a one-CLI roster is answered with `assuranceNotice` (`core/assurance.ts`). */
   reducedAssurance: z.boolean().optional(),
-  /** (api-types 0.228.0, DES-STANDIN-001 §4) A PERSON's consent to stand-in checks for this job: the answer to a
+  /** (api-types 0.230.0, DES-STANDIN-001 §4) A PERSON's consent to stand-in checks for this job: the answer to a
    *  `409 stand_in_choice` (its `retryWith`). A worker's bearer gets 403; never with `reducedAssurance`. */
   standIns: z.literal(true).optional(),
   /** (api-types 0.149.0, program DES-POWER-MODE) Power mode for this launch. Omitted: the daemon's
@@ -1131,7 +1131,7 @@ export const GateSchema = z.strictObject({
     ])
     .optional(),
   amendScope: z.enum(['cursor', 'creator']).optional(),
-  /** (api-types 0.228.0, DES-STANDIN-001 §3.10) With `action: 'use_stand_ins'`: this job only, or every job (also
+  /** (api-types 0.230.0, DES-STANDIN-001 §3.10) With `action: 'use_stand_ins'`: this job only, or every job (also
    *  saves the `standInReview: 'always'` setting). */
   scope: z.enum(['job', 'always']).optional(),
   /** DES-TEAMING-002 T3 — approve a `plan_approval` gate WITH AN EDIT (`GateDecision.plan`). */
@@ -1139,7 +1139,7 @@ export const GateSchema = z.strictObject({
   /** api-types 0.44.0 — the gate this decision answers (its unit `ord`). A mismatch with the run's
    *  open gate is a 409 `gate_changed`: the decision was made on a gate that is no longer open. */
   ord: z.int().nonnegative().optional(),
-  /** (crew#1698, api-types 0.228.0) The OPENING of the gate this decision answers (`awaitingHuman.gateSeq`): a gate that
+  /** (crew#1698, api-types 0.230.0) The OPENING of the gate this decision answers (`awaitingHuman.gateSeq`): a gate that
    *  closed and re-opened since, at the same ord too, is a 409 `gate_changed`. */
   gateSeq: z.int().positive().optional(),
   /** (api-types 0.192.0, DES-CATALOG-002 §4.6) At a `plan_approval` gate: the plan revision this answer was made on.
@@ -1259,7 +1259,7 @@ export function injectWords(message: string): string {
   return message.slice(0, end);
 }
 
-/** (crew#1698, api-types 0.228.0) `gateSeq`: which OPENING of the gate an answer was made on (`awaitingHuman.gateSeq`,
+/** (crew#1698, api-types 0.230.0) `gateSeq`: which OPENING of the gate an answer was made on (`awaitingHuman.gateSeq`,
  *  `GET /runs/:id/gate`'s `gateSeq`). A gate that closed and re-opened since, at the same ord too, is another opening:
  *  409 `gate_changed`. Optional; the ord check stands as before without it. */
 const GateSeqSchema = z.int().positive().optional();
