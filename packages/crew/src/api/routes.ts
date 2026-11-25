@@ -360,6 +360,7 @@ import {
   readStudioBundleVersion,
   type ErrorRing,
 } from './diagnostics.js';
+import { DiskStoreCache, readDiskStores } from './disk-stores.js';
 import { GovernanceDiagnostics } from './governance-health.js';
 import { ATTACHMENT_LIMITS, ATTACHMENT_MAX_MESSAGE_BYTES, AttachmentError, ChatAttachmentStore, attachmentWire, attachmentsBlock, boundaryOf, parseMultipart, stageForSeat } from './chat-attachments.js';
 import { CHAT_HISTORY_MAX_LIMIT, ChatHistoryStore, SeedRequestStore, decodeCursor } from './chat-history.js';
@@ -2774,6 +2775,10 @@ export function registerRoutes(
   const acpFoldCache = new AcpFoldCache();
   const engineVersionCache = new EngineVersionCache();
   const floorCacheCache = new FloorCacheCache();
+  // crew#1126: what wicked holds on the state-home volume, read only when the disk row is low (60 s cache).
+  const diskStoresCache = new DiskStoreCache(async (volumePath, deadline) =>
+    readDiskStores({ volumePath, deadline, floorCache: () => floorCacheCache.getRaw(), repos: await adapter.listRepos() }),
+  );
   // The governance block (crew#495): the store the engine's emit seam writes to (as the adapter
   // exported it — `null` on a boot that resolved none), its record count through the engine
   // binding when the addon has one, and the dead-letter outbox folded on change. Built at boot so
@@ -12150,7 +12155,7 @@ export function registerRoutes(
           tailLagMs: watchHealth?.tail_lag_ms ?? null,
         }),
         probeVault({ vault: adapter.vaultBin != null ? vaultDiagnostics(adapter.vaultBin) : null, exec: systemExec }),
-        diskRow(stateHome),
+        diskRow(stateHome, undefined, undefined, undefined, stateHome === null ? null : (deadline) => diskStoresCache.get(stateHome, deadline)),
         probeSeatImages({
           containerFloor,
           clis: rosterSeatClis(),
