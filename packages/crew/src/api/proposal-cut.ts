@@ -167,7 +167,13 @@ export class CutLauncher implements ProposalDispatcher {
   private async callFor(ref: string): Promise<{ call: CutBridgeCall; doc: string }> {
     const r = parseArtifactRef(ref);
     if (r === null) throw new LaunchRefusal(409, { code: 'cut_gone', error: 'This video is no longer on this daemon.' });
-    const call = await this.deps.bridgeFor(r.projectId);
+    let call: CutBridgeCall | null;
+    try {
+      call = await this.deps.bridgeFor(r.projectId);
+    } catch (err) {
+      if (err instanceof LaunchRefusal) throw err;
+      throw new Error(`The video tool isn't running here: ${err instanceof Error ? err.message : String(err)}`);
+    }
     if (call === null) throw new LaunchRefusal(409, { code: 'cut_gone', error: 'This video is no longer on this daemon.' });
     return { call, doc: r.doc };
   }
@@ -184,7 +190,7 @@ export class CutLauncher implements ProposalDispatcher {
     // An older video tool ignores the query and answers the whole cut: never read as found (R7, F14).
     if (res.status === 200 && res.body['request_id'] === identity.runId && Number.isInteger(res.body['version'])) return { version: res.body['version'] as number };
     if (res.status === 200) throw new Error(CUT_OLD_TOOL);
-    throw new Error(`the video tool couldn't say whether the change was made (${res.status})`);
+    throw new Error(`The video tool couldn't say whether the change was made (it answered ${res.status}).`);
   }
 
   async launch(d: ProposalDispatch): Promise<{ version: number }> {
@@ -210,15 +216,29 @@ export class CutLauncher implements ProposalDispatcher {
       throw new LaunchRefusal(422, { code: 'cut_refused', error: refusalWords(b['field'], typeof b['reason'] === 'string' ? b['reason'] : undefined, card.ops, card.changes) });
     }
     if (res.status === 400 && b['error'] === 'ffmpeg_missing') {
-      throw new Error(`The new version couldn't be made: ffmpeg isn't installed. ${typeof b['hint'] === 'string' ? b['hint'] : 'Install ffmpeg.'} Nothing changed`);
+      throw new Error(`The new version couldn't be made: ffmpeg isn't installed. ${typeof b['hint'] === 'string' ? b['hint'] : 'Install ffmpeg.'} Nothing changed.`);
     }
     if (res.status === 400 && b['error'] === 'ffmpeg_failed') {
-      const detail = typeof b['detail'] === 'string' ? b['detail'].trim().split('\n').pop()!.slice(0, 200) : 'the encoder failed';
-      throw new Error(`The new version couldn't be made: ${detail}. Nothing changed`);
+      // The tool's last stderr line, without its own end mark: the sentence ends once (R2 C1).
+      const detail = typeof b['detail'] === 'string' ? unended(b['detail'].trim().split('\n').pop()!.slice(0, 200)) || 'the encoder failed' : 'the encoder failed';
+      throw new Error(`The new version couldn't be made: ${detail}. Nothing changed.`);
     }
     if ((res.status === 409 && (b['error'] === 'cut_unverified' || b['error'] === 'cut_document')) || (res.status === 404 && b['error'] === 'no_cut')) {
       throw new LaunchRefusal(409, { code: 'cut_refused', error: typeof b['message'] === 'string' ? b['message'] : "This video can't be changed here." });
     }
-    throw new Error(`The new version couldn't be made (the video tool answered ${res.status}${typeof b['error'] === 'string' ? `: ${b['error']}` : ''}). Nothing changed`);
+    throw new Error(`The new version couldn't be made (the video tool answered ${res.status}${typeof b['error'] === 'string' ? `: ${unended(b['error'])}` : ''}). Nothing changed.`);
   }
 }
+
+/**
+ * The words a cut Go that didn't finish ends on (crew#1814 R2 C1): crew's own sentence as written, ended, then what Go
+ * again does, unless the sentence already says it. Never a run's words ("start it", "the same job") on a video card.
+ */
+export function cutInterruptedWords(msg: string): string {
+  const s = msg.trim();
+  const said = /[.!?]$/u.test(s) ? s : `${s}.`;
+  return /\b(Go again|try again|Ask again)\b/u.test(said) ? said : `${said} Go again to try once more.`;
+}
+
+/** A quoted fragment without its own trailing end marks, so crew's sentence around it ends once. */
+const unended = (s: string): string => s.trim().replace(/[.!?]+$/u, '');

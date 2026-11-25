@@ -51,8 +51,10 @@ class FakeVideoTool {
   calls: Array<{ method: string; path: string; body?: Record<string, unknown> }> = [];
   made = new Map<string, number>();
   pending = new Set<string>();
-  next: Answer | 'lose' | 'hold' | null = null;
+  next: Answer | 'lose' | 'hold' | 'drop' | null = null;
   old = false;
+  /** The video was deleted: every route answers 410, as interactive does for a deleted document. */
+  gone = false;
   /** An older tool that ignores `?request_id` and answers the whole cut (only the request read). */
   oldFind = false;
   /** A render that was submitted and has not committed: lands when {@link commitHeld} runs. */
@@ -67,6 +69,7 @@ class FakeVideoTool {
   }
   call: CutBridgeCall = async (method, path, body) => {
     this.calls.push({ method, path, ...(body !== undefined ? { body } : {}) });
+    if (this.gone) return { status: 410, body: { error: 'gone' } };
     const base = `/d/${DOC}/api/demo`;
     if (method === 'GET' && path === `${base}/cut`) {
       const a = this.head === 1 ? ROUTES['cut-v1']! : ROUTES['cut-v2']!;
@@ -88,6 +91,10 @@ class FakeVideoTool {
         // Submitted, still rendering, and the caller's connection is lost before the answer.
         this.held = String(body!['request_id']);
         this.pending.add(this.held);
+        throw new Error('fetch failed');
+      }
+      if (next === 'drop') {
+        // The connection drops before the tool took the request: nothing was made.
         throw new Error('fetch failed');
       }
       if (next === 'lose') {
@@ -402,5 +409,103 @@ describe('cut proposals (crew#1814)', () => {
       expect(words(reason)).toContain(said);
     }
     expect(refusalWords('ops', 'format', ops, [])).toMatch(/^A change can't be made/u);
+  });
+});
+
+describe('cut proposals: round-2 folds (crew#1814 R2 C1, C2)', () => {
+  const plain = (e: unknown): void => {
+    const said = String(e);
+    expect(said).not.toMatch(/\.\./u);
+    expect(said).not.toMatch(/start it|the same job/u);
+  };
+
+  it('C1: an interrupted Go says crew\'s own sentence once, ended, and what Go again does', async () => {
+    let broken = false;
+    let rr: Rig | null = null;
+    const r = rr = rig({ bridge: async () => { if (broken) throw new Error('the bridge on port 4100 is 0.16.2'); return rr!.tool.call; } });
+    const cases: Array<[Answer | 'lose' | 'drop' | 'old' | 'broken', string]> = [
+      ['lose', 'I lost track of the new version while it was being made (fetch failed). Go again checks whether it finished.'],
+      [{ method: 'POST', path: '', status: 400, answer: { error: 'ffmpeg_failed', detail: 'frame 1\nError opening output file' } }, "The new version couldn't be made: Error opening output file. Nothing changed. Go again to try once more."],
+      [{ method: 'POST', path: '', status: 400, answer: { error: 'ffmpeg_failed', detail: 'frame 1\nConversion failed!' } }, "The new version couldn't be made: Conversion failed. Nothing changed. Go again to try once more."],
+      [{ method: 'POST', path: '', status: 400, answer: { error: 'ffmpeg_missing' } }, "The new version couldn't be made: ffmpeg isn't installed. Install ffmpeg. Nothing changed. Go again to try once more."],
+      [{ method: 'POST', path: '', status: 500, answer: { error: 'internal' } }, "The new version couldn't be made (the video tool answered 500: internal). Nothing changed. Go again to try once more."],
+      ['old', CUT_OLD_TOOL],
+      ['broken', "The video tool isn't running here: the bridge on port 4100 is 0.16.2. Go again to try once more."],
+    ];
+    for (const [i, [next, want]] of cases.entries()) {
+      const chat = `c${i}`;
+      const p = (await propose(r, chat, turn(r, chat), block()))!;
+      expect(p.blocked).toBeNull();
+      broken = next === 'broken';
+      r.tool.oldFind = next === 'old';
+      if (next !== 'broken' && next !== 'old') r.tool.next = next;
+      const go = await r.svc.decide(chat, p.pid, { decision: 'go' }, ME, 'i1');
+      expect(go.code, JSON.stringify(go.body)).toBe(502);
+      expect(go.body).toMatchObject({ code: 'launch_failed', error: want });
+      plain((go.body as { error: string }).error);
+      broken = false;
+      r.tool.oldFind = false;
+      r.tool.next = null;
+      r.tool.head = 1;
+      r.tool.made.clear();
+      videoDoc(1);
+    }
+  });
+
+  it('C2 (DES R3): Not now on an interrupted cut asks the tool first: made → decided with it, rendering → pending, not made → declined', async () => {
+    const r = rig();
+    // Made: the answer was lost, the version exists. Not now can't take it back; it says so and the card shows it.
+    let p = (await propose(r, 'made', turn(r, 'made'), block()))!;
+    r.tool.next = 'lose';
+    expect((await r.svc.decide('made', p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(502);
+    const made = await r.svc.decide('made', p.pid, { decision: 'not_now' }, ME, 'i1');
+    expect(made.code).toBe(409);
+    expect(made.body).toMatchObject({ code: 'proposal_decided', error: "The new version was already made (version 2), so it stays. Undo in the video's editor brings back the one before.", view: { state: 'decided', decision: 'go', result: { version: 2, adopted: true } } });
+    // Rendering: nothing is declined while the tool is still making it.
+    r.tool.head = 1; r.tool.made.clear(); videoDoc(1);
+    p = (await propose(r, 'busy', turn(r, 'busy'), block()))!;
+    r.tool.next = 'hold';
+    expect((await r.svc.decide('busy', p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(502);
+    const busy = await r.svc.decide('busy', p.pid, { decision: 'not_now' }, ME, 'i1');
+    expect(busy.code).toBe(409);
+    expect(busy.body).toMatchObject({ code: 'cut_pending' });
+    expect(kinds(r, 'busy')).toStrictEqual(['proposal', 'proposal_accepting']);
+    r.tool.commitHeld();
+    // Not made: the request never reached the tool. Not now declines, and nothing is posted again.
+    r.tool.head = 1; r.tool.made.clear(); videoDoc(1);
+    p = (await propose(r, 'none', turn(r, 'none'), block()))!;
+    r.tool.next = 'drop';
+    expect((await r.svc.decide('none', p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(502);
+    const posted = r.tool.recuts.length;
+    const none = await r.svc.decide('none', p.pid, { decision: 'not_now' }, ME, 'i1');
+    expect(none.code, JSON.stringify(none.body)).toBe(200);
+    expect(none.body).toMatchObject({ view: { state: 'decided', decision: 'not_now' } });
+    expect(r.tool.recuts).toHaveLength(posted);
+  });
+
+  it('C2 (DES S5): a video deleted in the tool (410) blocks the card at each of the three reads', async () => {
+    // 1. The card's own read (resolve): blocked with crew's words, no Go.
+    const a = rig();
+    a.tool.gone = true;
+    const blocked = (await propose(a, 'c1', turn(a, 'c1'), block()))!;
+    expect(blocked.blocked).toBe('This video was deleted.');
+    // 2. The request read on Go again (find): the interrupted Go blocks, nothing posted again.
+    const b = rig();
+    const p = (await propose(b, 'c1', turn(b, 'c1'), block()))!;
+    b.tool.next = 'drop';
+    expect((await b.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1')).code).toBe(502);
+    b.tool.gone = true;
+    const again = await b.svc.decide('c1', p.pid, { decision: 'go' }, ME, 'i1');
+    expect(again.code, JSON.stringify(again.body)).toBe(409);
+    expect(again.body).toMatchObject({ code: 'cut_gone', error: 'This video was deleted.' });
+    expect(b.tool.recuts).toHaveLength(1);
+    // 3. The recut itself (launch): the tool answers 410 to the post.
+    const c = rig();
+    const q = (await propose(c, 'c1', turn(c, 'c1'), block()))!;
+    c.tool.next = { method: 'POST', path: '', status: 410, answer: { error: 'gone' } };
+    const go = await c.svc.decide('c1', q.pid, { decision: 'go' }, ME, 'i1');
+    expect(go.code, JSON.stringify(go.body)).toBe(409);
+    expect(go.body).toMatchObject({ code: 'cut_gone', error: 'This video was deleted.' });
+    expect(c.tool.recuts).toHaveLength(1);
   });
 });

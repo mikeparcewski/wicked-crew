@@ -121,7 +121,7 @@ import { tornTailPrefix } from './chat-transcripts.js';
 import type { JobTurnContext, MakeDigest } from './chat-scope.js';
 import { catalogDigest, detect, detectable } from '../workflow-catalog/detect.js';
 import { OnboardBlock, resolveOnboard, type OnboardBlockBody, type OnboardResolveDeps } from './proposal-onboard.js';
-import { CUT_BLOCKING, CutBlock, resolveCut, type CutBlockBody, type CutResolveDeps } from './proposal-cut.js';
+import { CUT_BLOCKING, CutBlock, cutInterruptedWords, resolveCut, type CutBlockBody, type CutResolveDeps } from './proposal-cut.js';
 
 // ── the block ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -1652,7 +1652,7 @@ export class ChatProposals {
           return this.blockCut(chatId, folded, acc.resolution, instance, err.body['code'], err.message);
         }
         if (kind !== 'cut') throw err;
-        return { code: 502, body: { code: 'launch_failed', error: err instanceof Error ? err.message : String(err), view: viewOf(folded) } };
+        return { code: 502, body: { code: 'launch_failed', error: cutInterruptedWords(err instanceof Error ? err.message : String(err)), view: viewOf(folded) } };
       }
       if (found !== null) {
         // Its run exists: adopt it and decide (a crash after the launch, or a lost response).
@@ -1660,7 +1660,7 @@ export class ChatProposals {
         if (!this.decided(chatId, folded.turnId, pid, actor, 'go', result, acc.resolution, acc.edits, instance)) return this.gone(chatId);
         const after = reread();
         if (body.decision === 'go') return ok(after);
-        return { code: 409, body: { code: 'proposal_decided', error: 'this proposal had already started', view: viewOf(after) } };
+        return { code: 409, body: { code: 'proposal_decided', error: kind === 'cut' ? `The new version was already made${found.version !== undefined ? ` (version ${found.version})` : ''}, so it stays. Undo in the video's editor brings back the one before.` : 'this proposal had already started', view: viewOf(after) } };
       }
       if (body.decision === 'not_now') {
         if (!this.decided(chatId, folded.turnId, pid, actor, 'not_now', null, acc.resolution, acc.edits, instance)) return this.gone(chatId);
@@ -1933,7 +1933,9 @@ export class ChatProposals {
       const msg = err instanceof Error ? err.message : String(err);
       this.deps.audit('chat.proposal.launch_failed', actor, { chatId, pid, error: msg, ...(power !== undefined ? { power } : {}) });
       const after = foldProposals(this.deps.records(chatId)).get(pid);
-      return { code: 502, body: { code: 'launch_failed', error: `could not start it: ${msg}. Go again resumes the same job.`, acceptingAt: accepting.at, ...(after !== undefined ? { view: viewOf(after) } : {}) } };
+      // A cut starts no run: its card says crew's own sentence and what Go again does (R2 C1).
+      const said = resolution.kind === 'cut' ? cutInterruptedWords(msg) : `could not start it: ${msg}. Go again resumes the same job.`;
+      return { code: 502, body: { code: 'launch_failed', error: said, acceptingAt: accepting.at, ...(after !== undefined ? { view: viewOf(after) } : {}) } };
     }
     if (!this.decided(chatId, folded.turnId, pid, actor, 'go', result, resolution, edits, instance, power)) return this.gone(chatId, accepting.at);
     const after = foldProposals(this.deps.records(chatId)).get(pid) ?? folded;
