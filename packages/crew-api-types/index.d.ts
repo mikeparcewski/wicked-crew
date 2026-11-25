@@ -7627,6 +7627,15 @@ export interface SystemSettings {
    */
   standInReview?: 'ask' | 'always' | undefined;
   /**
+   * (api-types next, wicked-core#1930 F6) Who turned `standInReview` to `always`, and when: the consent a launch under
+   * the setting records (`RunAssurance.standIn`, `via: 'setting'`), so a workload token's launch names the person and
+   * not itself. The daemon writes it from the person's own request (`PUT /settings`, or a `use_stand_ins` answer with
+   * `scope: 'always'`); a body that sends it has it dropped (named in the audit entry's `ignored`). Saving `always` again keeps it;
+   * saving `ask` clears it. ABSENT on a setting saved before crew recorded its author: a launch then records
+   * `by: 'the standInReview setting (saved before its author was recorded)'`.
+   */
+  standInConsent?: StandInConsent | undefined;
+  /**
    * (api-types 0.214.0; F1/F2, B7) "Use <seat> for new work": the seats new chats and jobs are drawn from (roster keys). ABSENT or `null`
    * = the default rule (every seat that can work, opt-in seats left out). A seat named on a job is still used.
    * Human actors only.

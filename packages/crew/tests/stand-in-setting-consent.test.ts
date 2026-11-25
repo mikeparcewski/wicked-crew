@@ -136,13 +136,17 @@ describe("a launch under standInReview 'always' records the person who saved it 
     expect(stored()['standInConsent']).toMatchObject({ by: 'omar (human)' });
   });
 
-  it('a body cannot write the consent: it is dropped, named in ignored, and the stored one stays', async () => {
+  it('a body cannot write the consent: it is dropped and the stored one stays', async () => {
     await put({ standInReview: 'always' });
     const first = stored()['standInConsent'];
     const res = await put({ standInConsent: { scope: 'always', by: 'mallory (human)', at: 1, via: 'setting' } }, 'omar/human/admin');
     expect(res.statusCode).toBe(200);
-    expect(res.json().ignored).toContain('standInConsent');
+    expect(res.json().settings.standInConsent).toEqual(first);
     expect(stored()['standInConsent']).toEqual(first);
+    // Not even beside a save of the setting itself.
+    await put({ standInReview: 'ask' }, 'omar/human/admin');
+    await put({ standInReview: 'always', standInConsent: { scope: 'always', by: 'mallory (human)', at: 1, via: 'setting' } }, 'omar/human/admin');
+    expect(stored()['standInConsent']).toMatchObject({ by: 'omar (human)' });
   });
 
   it('a setting saved before its author was recorded says so, and a malformed record reads as that', async () => {

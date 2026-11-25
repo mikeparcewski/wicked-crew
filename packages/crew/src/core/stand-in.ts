@@ -33,19 +33,37 @@ export const STAND_IN_NEEDED_GATE = 'stand_in_needed' as const;
 export const STAND_IN_SCOPES = ['job', 'always'] as const;
 export type StandInScope = (typeof STAND_IN_SCOPES)[number];
 
+/** `by` on a launch under the `always` setting when the setting carries no author: it was saved before crew recorded
+ *  one (wicked-core#1930 F6), or the record was hand-edited out of shape. */
+export const STAND_IN_SETTING_UNRECORDED = 'the standInReview setting (saved before its author was recorded)';
+
+/** The consent the `always` setting stores (`SystemSettings.standInConsent`): the person who saved it, and when. */
+export function settingConsent(who: string, now: number = Date.now()): StandInConsent {
+  return { scope: 'always', by: who, at: now, via: 'setting' };
+}
+
+/** Whether a stored `standInConsent` has the shape `settingConsent` writes (a hand edit may not). */
+export function isSettingConsent(v: unknown): v is StandInConsent {
+  if (typeof v !== 'object' || v === null) return false;
+  const c = v as Record<string, unknown>;
+  return c['scope'] === 'always' && c['via'] === 'setting' && typeof c['by'] === 'string' && c['by'] !== '' && Number.isFinite(c['at']);
+}
+
 /**
  * The consent a launch carries, or `null` (DES §4 `consentFor`). `humanFlag` is the launch body's
  * `standIns: true`, already checked to come from a person (a worker's bearer gets 403 before this).
- * `who` is the server's name for the launcher (`<id> (<kind>)`).
+ * `who` is the server's name for the launcher (`<id> (<kind>)`). Under the `always` setting the consent is the
+ * person's who saved it (`saved`, wicked-core#1930 F6), never the launcher's: a workload token only inherits it.
  */
 export function consentFor(
   humanFlag: boolean,
   setting: StandInReview | undefined,
   who: string,
   now: number = Date.now(),
+  saved?: StandInConsent,
 ): StandInConsent | null {
   if (humanFlag) return { scope: 'job', by: who, at: now, via: 'launch' };
-  if (setting === 'always') return { scope: 'always', by: who, at: now, via: 'setting' };
+  if (setting === 'always') return isSettingConsent(saved) ? { ...saved } : settingConsent(STAND_IN_SETTING_UNRECORDED, now);
   return null;
 }
 

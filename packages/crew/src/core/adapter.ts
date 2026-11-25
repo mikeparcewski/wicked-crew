@@ -91,6 +91,7 @@ import { QE_OFF_REASON, launchRequiresQe, qeAcceptanceMode, qeSettingSkipReason 
 import { applyVaultBinEnv, BOOT_VAULT_BIN, resolveShippedVaultBin, type VaultBinInputs, type VaultBinPosture } from './vault-bin.js';
 import { withFolderFindings } from './repoPaths.js';
 import { NEW_WORK_SEATS_FIX, NewWorkSeatsRefusal, isSeatKeyList } from './job-seats.js';
+import { isSettingConsent } from './stand-in.js';
 
 /**
  * Parse a JSON string a napi binding returned. The bindings type their return loosely (`unknown`
@@ -4610,6 +4611,9 @@ export class CoreAdapter {
       if ('powerModeDefault' in parsed && typeof parsed.powerModeDefault !== 'boolean') delete parsed.powerModeDefault;
       // standInReview (DES-STANDIN-001 §4): 'ask' | 'always' only; anything else reads as unset ('ask', asked each time).
       if ('standInReview' in parsed && parsed.standInReview !== 'ask' && parsed.standInReview !== 'always') delete parsed.standInReview;
+      // standInConsent (wicked-core#1930 F6): the shape the daemon writes, or nothing (a launch then says the setting's
+      // author was not recorded rather than trusting a hand edit).
+      if ('standInConsent' in parsed && !isSettingConsent(parsed.standInConsent)) delete parsed.standInConsent;
       // newWorkSeats (F1/F2): a list of seat keys, or null. An invalid value is left out of the settings served (they
       // keep the API's type) but KEPT for the next write (`kept`): new work reads it strictly (`readNewWorkSeats`) and
       // refuses it, and an unrelated write that erased it would quietly widen the pool to every seat.

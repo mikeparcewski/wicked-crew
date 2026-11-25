@@ -13,7 +13,7 @@ import type { AuditLog } from '../src/api/audit.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { Actor, LaunchRunInput } from '../src/core/types.js';
 import { registerAuthHooks } from '../src/api/auth.js';
-import { consentFor, preflightRefusal, readPreflight } from '../src/core/stand-in.js';
+import { STAND_IN_SETTING_UNRECORDED, consentFor, preflightRefusal, readPreflight } from '../src/core/stand-in.js';
 import { withRunViews } from './support/run-views.js';
 
 /** The engine's own preflight for a one-CLI roster: `Core.independencePreflight`'s JSON as wicked-core serializes it
@@ -32,7 +32,11 @@ const withActor = (app: FastifyInstance) => app.addHook('onRequest', async (req)
 describe('stand-in consent and refusal bodies (pure)', () => {
   it('a person\'s flag is this job; the setting is every job; neither is no consent', () => {
     expect(consentFor(true, undefined, 'ann (human)', 7)).toEqual({ scope: 'job', by: 'ann (human)', at: 7, via: 'launch' });
-    expect(consentFor(false, 'always', 'ann (human)', 7)).toEqual({ scope: 'always', by: 'ann (human)', at: 7, via: 'setting' });
+    // Under the setting the consent is the saved author's, never the launcher's (wicked-core#1930 F6).
+    const saved = { scope: 'always', by: 'priya (human)', at: 3, via: 'setting' };
+    expect(consentFor(false, 'always', 'ci-bot (agent)', 7, saved)).toEqual(saved);
+    expect(consentFor(false, 'always', 'ci-bot (agent)', 7)).toEqual({ scope: 'always', by: STAND_IN_SETTING_UNRECORDED, at: 7, via: 'setting' });
+    expect(consentFor(false, 'always', 'ci-bot (agent)', 7, { ...saved, scope: 'job' })?.by).toBe(STAND_IN_SETTING_UNRECORDED);
     expect(consentFor(true, 'always', 'ann (human)', 7)?.scope).toBe('job');
     expect(consentFor(false, 'ask', 'ann (human)')).toBeNull();
     expect(consentFor(false, undefined, 'ann (human)')).toBeNull();
@@ -352,7 +356,7 @@ describe('POST /runs/:id/gate use_stand_ins → grantStandIns (crew#1856)', () =
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json()).toMatchObject({ status: 'executing', standInReview: 'saved' });
     expect(grants).toEqual([['run-s', 'always', 3, 'test-human (human)', 4]]);
-    expect(saved).toEqual([{ standInReview: 'always' }]);
+    expect(saved).toEqual([{ standInReview: 'always', standInConsent: { scope: 'always', by: 'test-human (human)', at: expect.any(Number), via: 'setting' } }]);
   });
 
   // codex delta on b7-standin: the gate consent behind crew's REAL auth hooks (required mode), each actor by its bearer.
@@ -379,7 +383,7 @@ describe('POST /runs/:id/gate use_stand_ins → grantStandIns (crew#1856)', () =
       const res = await answer('human');
       expect(res.statusCode, res.body).toBe(200);
       expect(grants).toEqual([['run-s', 'always', 3, 'priya (human)', 4]]);
-      expect(saved).toEqual([{ standInReview: 'always' }]);
+      expect(saved).toEqual([{ standInReview: 'always', standInConsent: { scope: 'always', by: 'priya (human)', at: expect.any(Number), via: 'setting' } }]);
     } finally {
       await authed.close();
     }
