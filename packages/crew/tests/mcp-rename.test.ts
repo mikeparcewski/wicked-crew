@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { AuditLog } from '../src/api/audit.js';
+import { lookupSource } from '../src/apps/exec/sources.js';
 import { agentAuditKeys } from '../src/api/audit-view.js';
 import { LOCAL_ACTOR } from '../src/api/auth.js';
 import { registerMcpRoutes } from '../src/api/mcp.js';
@@ -577,26 +578,50 @@ describe('rename: rules whose trigger can match a name (crew#1905)', () => {
 
   // Core builds the result context in one place; this holds that place to the derivation above (as the route test holds
   // the call context to the engine's own preview). The engine judges a result only for a token bound to a running unit.
-  it.skipIf(SKIP_CORE_CHECKS)("core's result gate judges context() with args removed and raw added, nothing else (src/mcp_gate/output.rs)", { tags: ['cross-repo'] }, () => {
-    const src = readFileSync(join(requireCoreDir(), 'src', 'mcp_gate', 'output.rs'), 'utf8');
+  /**
+   * What is wrong with core's `evaluate_output` for the result context crew spells (none = it builds exactly that):
+   * context(), then args removed and raw set, nothing else. Whitespace-blind outside string literals only (a rewrap is
+   * not a change, coord's W2 on #1910; a space inside `"raw "` is, codex delta on #1906).
+   */
+  function resultGateDrift(src: string): string[] {
     const body = /pub\(crate\) fn evaluate_output\([\s\S]*?\n\}\n/.exec(src)?.[0];
-    expect(body, "core's src/mcp_gate/output.rs no longer declares evaluate_output").toBeDefined();
+    if (body === undefined) return ['no evaluate_output'];
     // The whole function was read (its last answer is in it), with its comments taken out.
-    expect(body).toMatch(/claim_id:\s*Some\(\s*verdict\.claim_id\s*\)/);
-    const code = (body as string).replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
-    // Whitespace-blind (a rewrap of core's source is not a change of the context): coord's W2 on #1910. The context is
-    // built and changed in exactly these three statements, in this order; crew#1906 r1 pins the region whole rather
-    // than listing the writes it knows (a `ctx["server"].take()` would have passed a list).
-    const flat = code.replace(/\s+/g, '');
+    if (!/claim_id:\s*Some\(\s*verdict\.claim_id\s*\)/.test(body)) return ['evaluate_output was not read whole'];
+    const code = body.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+    const flat = code.split(/("(?:\\.|[^"\\])*")/).map((part, i) => (i % 2 === 1 ? part : part.replace(/\s+/g, ''))).join('');
+    // The context is built and changed in exactly these three statements, in this order (crew#1906 r1 pins the region
+    // whole rather than listing the writes it knows: a `ctx["server"].take()` would have passed a list).
     const region = 'letmutctx=context(unit,call,class);ifletSome(obj)=ctx.as_object_mut(){obj.remove("args");}ctx["raw"]=serde_json::Value::String(raw.to_string());';
-    expect(flat.split(region), 'the context is built differently').toHaveLength(2);
-    const [before, after] = flat.split(region) as [string, string];
+    const parts = flat.split(region);
+    if (parts.length !== 2) return ['the context is built differently'];
+    const [before, after] = parts as [string, string];
+    const out: string[] = [];
     // Nothing names ctx before it is built, and afterwards it is only ever lent, read-only, to a call: no method,
     // index, field, assignment, move or mutable borrow, so the rules see exactly the region's value.
-    expect(before).not.toContain('ctx');
-    expect([...after.matchAll(/(.)ctx\b(.)/g)].map((m) => `${m[1]}ctx${m[2]}`).filter((x) => x !== '&ctx)' && x !== '&ctx,')).toEqual([]);
+    if (before.includes('ctx')) out.push('ctx is named before it is built');
+    for (const m of after.matchAll(/(.)ctx\b(.)/g)) if (`${m[1]}ctx${m[2]}` !== '&ctx)' && `${m[1]}ctx${m[2]}` !== '&ctx,') out.push(`ctx used as ${m[1]}ctx${m[2]}`);
     // The rules are judged on that ctx.
-    expect(flat).toContain('select_any(store,&unit.scope,&phases,&ctx)');
+    if (!flat.includes('select_any(store,&unit.scope,&phases,&ctx)')) out.push('the rules are not judged on ctx');
+    return out;
+  }
+
+  it.skipIf(SKIP_CORE_CHECKS)("core's result gate judges context() with args removed and raw added, nothing else (src/mcp_gate/output.rs)", { tags: ['cross-repo'] }, () => {
+    const src = readFileSync(join(requireCoreDir(), 'src', 'mcp_gate', 'output.rs'), 'utf8');
+    expect(resultGateDrift(src)).toEqual([]);
+    // The check itself, on core's own text: a rewrap passes, and each real change of the context is caught.
+    const changed = (from: RegExp, to: string): string => {
+      const out = src.replace(from, to);
+      expect(out, `core's text moved: ${from} no longer matches`).not.toBe(src);
+      return out;
+    };
+    const raw = /(serde_json::Value::String\(\s*raw\s*\.\s*to_string\(\s*\)\s*\)\s*;)/;
+    expect(resultGateDrift(changed(/ctx\s*\.\s*as_object_mut/, 'ctx\n        .as_object_mut'))).toEqual([]);
+    expect(resultGateDrift(changed(/ctx\s*\[\s*"raw"/, 'ctx["raw "'))).not.toEqual([]);
+    expect(resultGateDrift(changed(/remove\(\s*"args"/, 'remove("args "'))).not.toEqual([]);
+    expect(resultGateDrift(changed(raw, '$1\n    let _ = ctx["server"].take();'))).not.toEqual([]);
+    expect(resultGateDrift(changed(raw, '$1\n    let ctx = serde_json::json!({});'))).not.toEqual([]);
+    expect(resultGateDrift(changed(raw, '$1\n    let copy = ctx.clone();'))).not.toEqual([]);
     // serde_json keeps an object's keys sorted unless its preserve_order feature (indexmap) is on anywhere in core.
     const lock = readFileSync(join(requireCoreDir(), 'Cargo.lock'), 'utf8');
     const serdeJson = /\[\[package\]\]\nname = "serde_json"\n[\s\S]*?(?=\n\[\[package\]\]|\n*$)/.exec(lock)?.[0];
@@ -673,7 +698,14 @@ describe('rename follow-ups (crew#1906)', () => {
     const res = await call('POST', '/mcp/servers/fx/rename', { to: 'gx' });
     expect(res.statusCode, res.body).toBe(409);
     expect(res.json().code).toBe('rules_differ');
-    expect(withdrawn.filter((w) => w.startsWith('fx:'))).toEqual([]);
+    // (delta) Not the new name's leftovers either: a refused rename changes no grant.
+    expect(withdrawn).toEqual([]);
+  });
+
+  it("every 404 the rename route answers names its code (studio tells it from a crew with no rename route)", async () => {
+    const res = await call('POST', '/mcp/servers/nope/rename', { to: 'gx' });
+    expect(res.statusCode, res.body).toBe(404);
+    expect(res.json()).toMatchObject({ code: 'unknown_server' });
   });
 
   it('a name a source takes loses the row-write grants an earlier holder left on it, before the rename lands', async () => {
@@ -704,6 +736,8 @@ describe('rename follow-ups (crew#1906)', () => {
     expect(res.statusCode, res.body).toBe(200);
     await audit.flush();
     expect((await audit.read({ action: 'mcp.server.renamed' }))[0]!.detail).toMatchObject({ from: 'fx', to: 'gx', withdrawFailed: true });
+    // The grants left name no source: the write path finds none under fx, so it refuses them (write-path.ts resolve).
+    expect(await lookupSource(registry, 'fx')).toBeNull();
     failWithdraw.clear();
     withdrawn = [];
     namesAtWithdrawal = [];
