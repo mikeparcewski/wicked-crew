@@ -108,7 +108,7 @@ function editManifest(root: string, change: (m: Record<string, unknown>) => Reco
 }
 
 /** The skills port over the real store, with chosen store methods wrapped (a seam for a failure or a busy publish). */
-function wrappedPort(base: PackSkillsPort, wrap: Partial<Record<'add' | 'replace' | 'isPublishing', (...a: never[]) => unknown>>): PackSkillsPort {
+function wrappedPort(base: PackSkillsPort, wrap: Partial<Record<'add' | 'replace' | 'isPublishing' | 'listFiles' | 'manifest', (...a: never[]) => unknown>>): PackSkillsPort {
   const store = new Proxy(base.store, {
     get(target, prop, recv) {
       const own = (wrap as Record<string | symbol, unknown>)[prop];
@@ -491,5 +491,84 @@ describe('crew#1703: an editor pack with skills and a block', () => {
     expect(res.skillsError).toBeUndefined();
     expect(seen).toEqual([false, false]);
     expect(r.sc.store.currentSnapshotSkills()?.skills).toEqual(expect.arrayContaining(['wicked-garden-acme-terms', 'wicked-garden-acme-terms-checker']));
+  });
+
+  it('review r3: a registered workflow name is held even against a preset the pack already owns', async () => {
+    const r = rig();
+    const root = pack(['critique']);
+    const ok = await approvalFor(root, r.deps);
+    await installPack(root, undefined, r.deps, ok);
+    const deps = { ...r.deps, presets: { ...r.presets, listWorkflows: () => [{ id: 'acme-terms-review' }] } };
+    const err = await installPack(root, undefined, deps, ok).catch((e: unknown) => e);
+    expect((err as PackInstallError).status).toBe(409);
+    expect((err as PackInstallError).message).toMatch(/registered workflow/);
+  });
+
+  it('review r3: an editor-only update of a pack that shipped skills never waits on or reads the skills root', async () => {
+    const r = rig();
+    const root = pack(['critique']);
+    await installPack(root, undefined, r.deps, await approvalFor(root, r.deps));
+    const editorOnly = pack(['critique']);
+    editManifest(editorOnly, (m) => ({ ...m, skills_dir: 'none', blocks: [] }));
+    let touched = 0;
+    const port = { ...wrappedPort(r.deps.skills, { manifest: (() => { touched++; throw new Error('skills root still seeding'); }) as never }), ready: async () => { touched++; } };
+    const res = await installPack(editorOnly, undefined, { ...r.deps, skills: port });
+    expect(res.installed).toBe(true);
+    expect(touched).toBe(0);
+    // The earlier skills stay the pack's own.
+    expect(res.skills?.map((k) => k.key)).toEqual(['wicked-garden-acme-terms', 'wicked-garden-acme-terms-checker']);
+  });
+
+  it('review r3: a second preset write that fails puts the first back, and says so when that fails too', async () => {
+    const r = rig();
+    const root = pack(['critique']);
+    writeFileSync(join(root, 'presets', 'second.json'), JSON.stringify({ id: 'acme-terms-second', label: 'Second', phases: ['review'] }));
+    editManifest(root, (m) => ({ ...m, blocks: [...(m['blocks'] as Array<Record<string, unknown>>), { id: 'acme-terms-second', label: 'Second', preset: 'presets/second.json', produces_kind: 'document', skills: ['acme-terms-checker'] }] }));
+    const ok = await approvalFor(root, r.deps);
+    const realPut = r.presets.putPreset;
+    const failing = {
+      ...r.presets,
+      putPreset: async (name: string, steps: PresetStep[], projectId?: string, createdBy?: string) => {
+        if (name === 'acme-terms-second') throw new Error('engine store unavailable');
+        return realPut(name, steps, projectId, createdBy);
+      },
+      deletePreset: async () => { throw new Error('engine store unavailable'); },
+    };
+    await expect(installPack(root, undefined, { ...r.deps, presets: failing }, ok)).rejects.toThrow(/putting the presets back also failed: acme-terms-review/);
+    expect(r.registry.get('acme-terms')).toBeNull();
+    expect(keys(r.sc)).toEqual([]);
+  });
+
+  it('review r3: an update whose current skill cannot be copied whole changes no skill', async () => {
+    const r = rig();
+    const first = pack(['critique']);
+    await installPack(first, undefined, r.deps, await approvalFor(first, r.deps));
+    const v1 = (await r.sc.store.readFile('wicked-garden-acme-terms-checker', 'SKILL.md')).content;
+    const again = pack(['critique']);
+    for (const dir of APPROVE.skills) writeFileSync(join(again, 'skills', dir, 'SKILL.md'), readFileSync(join(again, 'skills', dir, 'SKILL.md'), 'utf8') + '\nVersion two.\n');
+    const ok = await approvalFor(again, r.deps);
+    const port = wrappedPort(r.deps.skills, { listFiles: (() => { throw new Error('EACCES'); }) as never });
+    const res = await installPack(again, undefined, { ...r.deps, skills: port }, ok);
+    expect(res.skillsError).toMatch(/could not be copied whole/);
+    expect((await r.sc.store.readFile('wicked-garden-acme-terms-checker', 'SKILL.md')).content).toBe(v1);
+  });
+
+  it('review r3: a put-back the store refuses is named, not reported as done', async () => {
+    const r = rig();
+    const first = pack(['critique']);
+    await installPack(first, undefined, r.deps, await approvalFor(first, r.deps));
+    const again = pack(['critique']);
+    for (const dir of APPROVE.skills) writeFileSync(join(again, 'skills', dir, 'SKILL.md'), readFileSync(join(again, 'skills', dir, 'SKILL.md'), 'utf8') + '\nVersion two.\n');
+    const ok = await approvalFor(again, r.deps);
+    const realReplace = r.sc.store.replace.bind(r.sc.store);
+    const port = wrappedPort(r.deps.skills, {
+      replace: ((name: string, files: Record<string, string>, rev: number) => {
+        if (name === 'wicked-garden-acme-terms-checker') throw new Error('disk full');
+        if (!files['SKILL.md']?.includes('Version two.')) return { verdict: 'blocked', findings: [] };
+        return realReplace(name, files, rev);
+      }) as never,
+    });
+    const res = await installPack(again, undefined, { ...r.deps, skills: port }, ok);
+    expect(res.skillsError).toMatch(/could not put back wicked-garden-acme-terms-checker, wicked-garden-acme-terms; install the pack again/);
   });
 });

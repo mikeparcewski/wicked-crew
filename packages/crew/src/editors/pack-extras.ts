@@ -329,8 +329,8 @@ export async function planExtras(input: {
       if (FENCED_WORKFLOWS.has(id) || (row !== undefined && !own)) {
         throw new PackExtrasRefusal(409, 'pack_name_taken', `the block ${id} would be saved as the preset ${id}, and a preset of that name already exists that this pack did not add; nothing was installed`);
       }
-      // A preset of a workflow's name would be launched in its place.
-      if (row === undefined && workflows.has(id)) {
+      // A preset of a workflow's name would be launched in its place (an owned one too: the workflow may be newer).
+      if (workflows.has(id)) {
         throw new PackExtrasRefusal(409, 'pack_name_taken', `the block ${id} would be saved as the preset ${id}, which is the name of a registered workflow; nothing was installed`);
       }
       const at = containedPath(input.root, str(b['preset']), 'file');
@@ -399,7 +399,8 @@ export async function writePresets(plan: ExtrasPlan, presets: PackPresetsPort | 
       written.push(b);
     }
   } catch (err) {
-    await undo();
+    const left = await undo();
+    if (left.length > 0 && err instanceof Error) err.message = `${err.message} (putting the presets back also failed: ${left.join('; ')}; installing the pack again replaces them)`;
     throw err;
   }
   return { undo };
@@ -407,12 +408,14 @@ export async function writePresets(plan: ExtrasPlan, presets: PackPresetsPort | 
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-/** A skill's files and switch as they are now, to put back if the pass fails. `null` when it cannot be read. */
+/** A skill's files and switch as they are now, to put back if the pass fails. `null` when they cannot be kept whole:
+ *  a file that does not read, or one that is not UTF-8 text (the store writes text, so it could not be put back). */
 function preImage(store: PackSkillsPort['store'], key: string): { files: Record<string, string>; enabled: boolean } | null {
   try {
     const tree = store.listFiles(key);
     const files: Record<string, string> = Object.create(null) as Record<string, string>;
-    for (const f of tree.files) files[f.path] = readFileSync(store.resolveSkillFile(key, f.path).abs, 'utf8');
+    const utf8 = new TextDecoder('utf-8', { fatal: true });
+    for (const f of tree.files) files[f.path] = utf8.decode(readFileSync(store.resolveSkillFile(key, f.path).abs));
     return { files, enabled: tree.enabled };
   } catch {
     return null;
@@ -434,26 +437,34 @@ export async function writeSkills(plan: ExtrasPlan, port: PackSkillsPort | null,
     if (Date.now() > deadline) return 'installed, but the skills root was busy publishing, so the pack’s skills were not added; install the pack again';
     await sleep(100);
   }
+  // A copy of every skill this pass replaces, taken before the first write: without a whole copy, nothing is written.
+  const replaced: Array<{ key: string; before: { files: Record<string, string>; enabled: boolean } }> = [];
+  for (const s of plan.skills.filter((x) => x.own)) {
+    const before = preImage(store, s.key);
+    if (before === null) return `installed, but the skill ${s.key} could not be copied whole before it was replaced (a file that does not read, or is not text), so the pack’s skills were not changed`;
+    replaced.push({ key: s.key, before });
+  }
   const added: string[] = [];
-  const replaced: Array<{ key: string; before: { files: Record<string, string>; enabled: boolean } | null }> = [];
+  const done = new Set<string>();
+  const blocked = (r: { verdict?: string }): boolean => r.verdict === 'blocked';
   const putBack = (): string[] => {
     const left: string[] = [];
     for (const key of added) {
       try {
-        if (store.manifest().skills[key]?.enabled === true) store.disable(key, store.revision());
+        if (store.manifest().skills[key]?.enabled === true && blocked(store.disable(key, store.revision()))) left.push(key);
       } catch {
         left.push(key);
       }
     }
-    for (const { key, before } of replaced.reverse()) {
-      if (before === null) {
-        left.push(key);
-        continue;
-      }
+    for (const { key, before } of [...replaced].reverse()) {
+      if (!done.has(key)) continue;
       try {
-        store.replace(key, before.files, store.revision());
+        if (blocked(store.replace(key, before.files, store.revision()))) {
+          left.push(key);
+          continue;
+        }
         const on = store.manifest().skills[key]?.enabled === true;
-        if (on !== before.enabled) (before.enabled ? store.enable : store.disable).call(store, key, store.revision());
+        if (on !== before.enabled && blocked((before.enabled ? store.enable : store.disable).call(store, key, store.revision()))) left.push(key);
       } catch {
         left.push(key);
       }
@@ -464,7 +475,8 @@ export async function writeSkills(plan: ExtrasPlan, port: PackSkillsPort | null,
   for (const s of plan.skills) {
     let why: string | null = null;
     try {
-      if (s.own) replaced.push({ key: s.key, before: preImage(store, s.key) });
+      // Marked before the call: a write that fails partway may have changed the skill, and its copy is put back.
+      if (s.own) done.add(s.key);
       const r = s.own ? store.replace(s.key, s.files, store.revision()) : store.add(s.key, s.files, store.revision());
       if (r.verdict === 'blocked') why = r.findings.filter((f) => f.severity === 'blocking').map((f) => f.evidence).join('; ');
       else {

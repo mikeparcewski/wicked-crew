@@ -451,19 +451,9 @@ export async function installPack(
     );
   }
   const now = new Date().toISOString();
-  // The record keeps what this pack added earlier and no longer ships (it stays installed, and stays its own). The
-  // skills root is read only when there is such a skill to look for, so an editor-only install never depends on it.
-  const leftover = earlier.skills.filter((k) => !plan.skills.some((s) => s.key === k.key));
-  let keptSkills = leftover;
-  if (leftover.length > 0 && deps.skills) {
-    try {
-      await deps.skills.ready?.();
-      const held = deps.skills.store.manifest().skills;
-      keptSkills = leftover.filter((k) => Object.hasOwn(held, k.key));
-    } catch {
-      // unreadable now: keep the claim, so a later install still knows the skills are this pack's
-    }
-  }
+  // The record keeps what this pack added earlier and no longer ships: it stays installed (the skills root has no
+  // removal) and stays its own. Kept from the record alone, so an install never waits on the skills root for it.
+  const keptSkills = earlier.skills.filter((k) => !plan.skills.some((s) => s.key === k.key));
   const keptPresets = [...owned.presets].filter((id) => !plan.blocks.some((b) => b.id === id));
   const packSkills = [...plan.skills.map((k) => ({ name: k.name, key: k.key })), ...keptSkills.filter((k, i, a) => a.findIndex((x) => x.key === k.key) === i)];
   const packPresets = [...plan.blocks.map((b) => b.id), ...keptPresets];
