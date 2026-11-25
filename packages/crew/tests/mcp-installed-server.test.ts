@@ -238,6 +238,8 @@ describe('crew#1155: the floating chat uses the installed MCP server', () => {
       chatClose: async () => undefined,
       chatList: async () => [],
       onboardedRepoOf: () => undefined,
+      // A new registration reads the approval ledgers (crew#1514: it inherits no token left under its name).
+      listConformanceRules: async () => [],
     } as unknown as CoreAdapter;
     chatApp = await createServer(withRunViews(adapter), {
       auth: { mode: 'off' },
