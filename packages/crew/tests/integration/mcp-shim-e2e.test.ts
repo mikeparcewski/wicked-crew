@@ -253,6 +253,11 @@ beforeAll(async () => {
     workflow: WORKFLOW_ID,
     entityMode: 'shared',
     clisJson: JSON.stringify([seat(WRAPPED_SEAT), seat(EVALUATOR_SEAT)]),
+    // Every fake seat runs one binary (`node`), so they are one identity and a full-assurance launch has no
+    // independent judge: it would be refused 409 stand_in_choice (DES-STANDIN-001 §4), and a stand-in of a
+    // fake CLI is refused on the host floor. This file's subject is not the judge, so it takes reduced
+    // assurance: the judge may be an author, disclosed, which is the path these runs took before the choice.
+    reducedAssurance: true,
   });
   expect(launch.status, JSON.stringify(launch.body)).toBe(201);
 

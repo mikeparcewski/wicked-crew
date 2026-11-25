@@ -4002,7 +4002,9 @@ export function registerRoutes(
           // The engine refuses the shape as the launch would: the launch's own refusal, before anything is written.
           return reply.code(400).send({ error: `the launch was refused: ${message(err)}` });
         }
-        const refusal = preflight === null ? null : preflightRefusal(preflight);
+        // No helper signed in at all: the engine's own launch refusal (`no_eligible_seat`) names each benched seat, its
+        // cause and the remedy; there is nothing a stand-in could stand in from.
+        const refusal = preflight === null || preflight.signedIn.length === 0 ? null : preflightRefusal(preflight);
         if (refusal !== null && (consent === null || refusal.code === 'no_usable_helper')) return reply.code(409).send(refusal);
       }
       if (consent !== null) {

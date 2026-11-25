@@ -151,6 +151,16 @@ describe('POST /runs asks the stand-in question (T-K1, T-K2)', () => {
     expect(launched).toEqual([]);
   });
 
+  it('with no helper signed in at all the engine answers (its no_eligible_seat names each bench), not the choice', async () => {
+    const p = JSON.parse(ONE_HELPER);
+    p.signedIn = [];
+    p.roles[0].canStandIn = false; p.roles[0].standInFrom = null;
+    preflight = JSON.stringify(p);
+    const res = await post({});
+    expect(res.statusCode, res.body).toBe(201);
+    expect(launched).toHaveLength(1);
+  });
+
   it('an engine without stand-ins keeps today\'s launch, and refuses standIns (501)', async () => {
     supports = false;
     expect((await post({})).statusCode).toBe(201);

@@ -57,7 +57,7 @@ async function seed(base: string): Promise<void> {
   await adapter.registerWorkflow(def as unknown as Parameters<typeof adapter.registerWorkflow>[0]);
   const seats = JSON.stringify([{ key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' }]);
   for (const humanConfirm of ['none', 'all']) {
-    const launch = await inject('POST', '/runs', { problem: `template (${humanConfirm})`, clisJson: seats, workflow: def.id, repoRef, humanConfirm });
+    const launch = await inject('POST', '/runs', { problem: `template (${humanConfirm})`, clisJson: seats, standIns: true, workflow: def.id, repoRef, humanConfirm });
     if (launch.status !== 201) throw new Error(`launch refused: ${JSON.stringify(launch.body)}`);
   }
   const deadline = Date.now() + 60_000;
