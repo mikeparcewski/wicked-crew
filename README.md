@@ -347,7 +347,8 @@ product code, or no longer indexed), and `corroboration` (validated by independe
 unconfirmed and why; `null` on an uncounted row or a graph built before the field); the page's
 `uncounted` totals say why the list holds more rows than the header. The list opens on real
 requirements, then placeholders, then uncounted rows, then config and data. A repository with no
-graph yet answers a typed 404 (`code: "notGenerated"`) that names the workflow to run.
+graph yet answers a 200 with `code: "notGenerated"` in place of the page (older daemons sent it as a 404),
+naming the workflow to run; a 404 means only that the repository is not registered.
 
 **Every run proposes what it learned.** At its checkpoints, a test that failed and then passed on
 its identical retry, or a check its sandbox could not start, is proposed at once, worded from the

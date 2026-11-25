@@ -9868,7 +9868,10 @@ export function registerRoutes(
       // Not generated yet is a state, typed by `code`, not a refusal (lane repo-page). It says how
       // far the repository is ("23% real requirements · 4397 placeholders · target 80%";
       // wicked-core#1233), from the very engine read the page used, when it has a store to count.
-      return reply.code(404).send({
+      // A 200, not a 404 (studio#986): a repository nobody has generated requirements for is a normal
+      // answer, and studio reads it for every such repository on each page. `code` is the discriminator;
+      // the 404 stays only for a repository that is not registered (no `code`).
+      return reply.code(200).send({
         ...REQUIREMENTS_NOT_GENERATED,
         ...(coverage === null ? {} : { coverage }),
         ...(minimum === null ? {} : { minimum }),

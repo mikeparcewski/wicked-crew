@@ -13,12 +13,97 @@ mentioned only where a daemon release depends on them.
 ### Added
 
 - feat(chat): a chat changes the demo video open in it (crew#1814, studio#1140 option (a)). A client that sends `accepts: ['cut']` gets crew's note on the video and its chapter list (ids, titles, timings; no caption words) in the turn's context. The seat's `wicked-make` `{"cut":{"ref","ops"}}` block becomes a `cut` card: the ops frozen, crew's words for each change, and the head the seat read. Go posts the ops to wicked-interactive's recut once, with `expect_head` and the Go's id as `request_id`. Go again reads that request first, so it never posts twice, and answers 409 `cut_pending` while the video is still rendering. A moved, deleted or refused video blocks the card with words saying which change failed and why. `chatArtifacts.cut` advertises it.
-- api-types: `ArtifactProposalKind` `cut`, `CutOp`, `ProposalCut`, `ArtifactProposal.cut`, `ProposalResult.version`, `ChatArtifactsCapabilities.cut`, and `accepts` takes `'cut'`.
+- api-types 0.225.0: `ArtifactProposalKind` `cut`, `CutOp`, `ProposalCut`, `ArtifactProposal.cut`, `ProposalResult.version`, `ChatArtifactsCapabilities.cut`, and `accepts` takes `'cut'`.
 
 ### Changed
 
 - The interactive default range is `^0.17.0` (the chapter ops, the request read and `head` on `GET cut`, wicked-interactive#351). A 0.16.x override is flagged as below the floor.
 - A document is a demo cut when it has interactive's `demo-cut.json` marker (the video tool's own rule). A recorder storyboard from before cuts (manifest kind `demo`, no marker) is a page again.
+
+## [0.18.21] — 2026-11-24
+
+Patch release on the train-13 cut 811252b0, carrying 70 PRs since 0.18.20: #1733, #1734, #1735, #1749, #1746, #1748, #1755, #1757, #1759, #1747, #1756, #1758, #1711, #1754, #1765, #1770, #1769, #1772, #1768, #1773, #1771, #1776, #1778, #1777, #1785, #1783, #1789, #1784, #1786, #1781, #1782, #1799, #1796, #1798. wicked-crew-api-types 0.224.0 releases with it: 0.223.0 plus the type changes from #1758, #1765, #1773, #1776, #1778, #1782, #1783, #1784, #1789, #1796 and #1798 (it stays a workspace link in this repository), #1809, #1801, #1811, #1805, #1808, #1810, #1807, #1806, #1817, #1816, #1815, #1821, #1820, #1824, #1830, #1827, #1829, #1826, #1828, #1825, #1831, #1833, #1834, #1836, #1841, #1850, #1847, #1848, #1849, #1852, #1853, #1858, #1859, #1861, #1860, #1866.
+
+Known limitation (domain mapping accuracy): `/analyze domain` keeps its current mapping loop (wicked-garden 12.68.6). On the train-12 certification an independent codex judge read 30 of its statements against the CardDemo source: 21 accurate, 9 overreached (the statement claims more than the code shows, most often by dropping a guarding condition; wicked-garden#1544) and 0 wrong. Its coverage figure (80.6% on CardDemo) counts the behaviours that were given a statement, not whether each statement is accurate. A redesigned mapping, measured at 2 of 30 overreached on the same judge, replaces this loop in a later release.
+
+### Added
+
+- ToolActivity names its launch's seat as cli (core#1786) (#1778)
+- A card creates the project the person named when none matches (crew#1694) (#1789)
+- Page GET /apps with limit and cursor (#1809)
+- A team plan step carries its controls (wicked-core#1259) (#1811)
+- The launch card names a seat seen sharing a provider (#1821)
+- A pause answer names the pause it answers (#1820)
+- GET /settings/start-on-login reads whether this daemon starts at login (studio#1324) (#1829)
+- Retire a requirement whose code was deleted (wicked-core#1698) (#1858)
+
+### Changed
+
+- The event-loop bound counts the main thread's work, not the runner's scheduling (#1770)
+- The four timing-shaped CI flakes assert on events or a documented margin (#1810)
+- Measure a cold GET /runs on the long-lived home (#1824)
+- Mark the made-up password fixture as ggignore (#1830)
+
+### Fixed
+
+- Keep a JSON text block valid through the scrub; record what the release withheld (crew-C11 A) (#1733)
+- A run's addresses and source pick live on its launch record (crew-C11 B) (#1734)
+- Erase a removed source from estate across a restart; project an over-limit source; keep acks (crew-C11 C) (#1735)
+- Interactive-draft-sourced is a system workflow (wicked-core#1357) (#1749)
+- Cost routing consults the seat (#1746)
+- Card-scoped run-evals; a refused review launch is resumable (#1375, partial) (#1748)
+- A refused turn names the steering rules it broke (#1755)
+- An ambiguous case's ask is scored on its choices (#1757)
+- A refused scheduled launch is on the activity trail (#1759)
+- A saved shadow keeps the built-in's checks or its card turns off (#1747)
+- A private-network sign-in issuer is refused with why and the range that allows it (#1756)
+- The governance evals get the memory store, and import takes memory samples (#1758)
+- **Editor install:** the install-time conformance run now goes through the engine's one-port OS jail (`Core.runEditorConformance`, garden `--engine`) instead of an unjailed child pointed at the daemon. A host that cannot jail it, or an engine without the binding, refuses the install (#1389). (#1711)
+- A refused turn's reason is the reviewer's findings, never its bookkeeping (#1347, #1540) (#1754)
+- A known run with no open question answers 200 null, not 404 (studio#984) (#1765)
+- Every test file runs with the lexical memory embedder, no model download on engine boot (#1769)
+- Dock steers under Decisions, zoned times, journaled writes, the person's context in run learnings (crew-C17 A) (#1772)
+- StopAll waits for every adapter to exit and remove its run directory (#1768)
+- An auto capture never asks the person; a rejected proposal says who and why (crew-C17 B) (#1773)
+- The publication lock is published whole, so a refusal always names its holder (#1771)
+- An open demo cut is a video the chat can't change; a refine of one is blocked (studio#1140) (#1776)
+- A request about one run reads that run alone, never a fold of the store (#1777)
+- A policy rule lands on a real project id, inert ones are migrated; review and search read git_url (#1774, #1744) (#1785)
+- Soft retire with restore, knowledge forget; every crew rejection records why (#1697, #1261) (#1783)
+- Named helpers, kept writer, owned titles, refusals that name their Go (wave 1) (#1784)
+- A refine reads the chat up to its own turn, checks records/ citations; floor reuse needs the same counter and browser (wave 1) (#1786)
+- A tombstone drop keeps no restore point; kept acks are provisional and durable (#1781)
+- Accept a SQLite upload with a full-text index; sweep stale upload temps; mirror core's state-home fixture (#1782)
+- Open core.db with defensive mode off in the long-lived home clone (estate 0.35 FTS guard trigger) (#1799)
+- Graph answers relay via rows and link state; freshness counts current members only (#1796)
+- Carry core's typed satisfied_by links and the product-only marker (#1798)
+- /health never waits on the actor for chat workflows; frame-started run reads queue behind requests (#1767, #1779) (#1801)
+- Read PRs as the deliver identity; branch punctuation; commit authors from known runs only (#1805)
+- The learnings dir follows WICKED_HOME (#1808)
+- A job runs on the repository the words name; every scope repo is pickable; chat seats stay out of cd (#1807)
+- TTS hardening from the #1548 review, items 2, 3, 6 and 7 (#1806)
+- Host-floor answer-only turns pick a claude or pi seat (crew#1704) (#1817)
+- A read acceptance binds to the schema seen; credentials never name a project; uploads keep no free pages (crew#1788, crew#1790, crew#1787) (#1816)
+- Every default dir follows WICKED_HOME; tests settle audit appends before cleanup (crew#1802, crew#1813) (#1815)
+- A retry card in a chat that has ended offers no Try again it can't keep (crew#1745) (#1827)
+- A policy-silenced claude on the host floor is told its own reason (crew#1818) (#1826)
+- Work roots follow WICKED_HOME; tts install, status and WAV tail (crew#1823, crew#1559) (#1828)
+- Name the seats left off; pin the branch/commit fetch and redeliver's PR read (crew#1803, crew#1804) (#1825)
+- A capture whose review failed is ended with what its review said (core#1799 cert) (#1831)
+- The review seat ran none of the work it reviews; run-cost facts scoped to the run's project (#1833)
+- A named-source knowledge recall requires the source before estate ranks (crew#1362 item 4) (#1834)
+- A person's profile writes its data shapes into knowledge, and a re-profile replaces them (crew#1625) (#1836)
+- Read AB# work items at launch, clone ADO URLs with the daemon's credential, revise a delivered PR from chat (crew#1838, crew#1839, crew#1840) (#1841)
+- A gateway that never serves and a failing credential refresh are needs, not "All clear" (crew#1845) (#1850)
+- A drafted rule never replaces one in force; a one-seat review schedule takes reduced assurance (crew#1846, crew#1837) (#1847)
+- A shipped process rule (RVWL-*) is only reported, never fails review (core#1316) (#1848)
+- The stay-in-place line says only what the engine refuses; pin the run-tree sweep for trees beside the checkout (#1849)
+- A pack editor's description and card images reach GET /editors (crew#1702) (#1852)
+- A chat refine's landing check verifies its citations against the records and the document's repositories (#1853)
+- A cluster never set up reads its own reason, and every engine hint is a command that runs (crew#1844) (#1859)
+- A blast-radius page whose stale evidence was budgeted out marks its total partial (crew#1797) (#1861)
+- Every crew git runs without the Azure DevOps token and with fsmonitor off; From a URL on Azure DevOps fetches Git LFS files (crew#1843, crew#1842) (#1860)
+- Deliver/redeliver script gits drop the Azure DevOps token and run with fsmonitor off; LFS clone pointer check and git-lfs probe (crew#1862, crew#1863, crew#1864) (#1866)
 
 ## [0.18.20] — 2026-11-22
 

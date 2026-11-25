@@ -475,7 +475,7 @@ export interface ChatArtifactsCapabilities {
    */
   cutInView?: boolean;
   /**
-   * (api-types 0.224.0, studio#1140 option (a), crew#1814) A seat may propose a change to the demo video open in the
+   * (api-types 0.225.0, studio#1140 option (a), crew#1814) A seat may propose a change to the demo video open in the
    * chat (`cut` proposals): drop, move, rename or trim chapters and set a chapter's caption words. A client that draws
    * those cards declares `accepts: ['cut']` on the chat's open and each message; crew tells the seat about them only
    * then (else the seat says this chat can't change the video, as with {@link cutInView} alone). Go posts the card's
@@ -7882,10 +7882,13 @@ export interface RequirementsPage {
 }
 
 /**
- * `GET /repos/:id/requirements` 404 when the repository's `requirements_graph.json` has not been
+ * `GET /repos/:id/requirements` answer when the repository's `requirements_graph.json` has not been
  * generated (0.154.0). A state, not a refusal: `code` is the discriminator a client matches on, and
  * `workflow` names the preset that generates the graph (its last step runs `wicked-core domain-graph`).
- * Any other 404 on the route (an unknown repo) carries no `code`.
+ * Sent with status 200 after crew 0.18.20 (studio#986), so the route's 200 body is
+ * `RequirementsPage | RequirementsNotGenerated`, told apart by `code === 'notGenerated'`; an older daemon
+ * sends this body with a 404. `error` stays for those older readers. A 404 on the route now means only an
+ * unknown repository, and carries no `code`.
  */
 export interface RequirementsNotGenerated {
   error: string;
@@ -10082,7 +10085,7 @@ export interface ChatSeed {
 export type ArtifactProposalKind = 'create' | 'refine' | 'theme' | 'demo' | 'job' | 'onboard' | 'cut';
 
 /**
- * (api-types 0.224.0) One change a `cut` card makes to a demo video, as the video tool's recut takes it. Ids are the
+ * (api-types 0.225.0) One change a `cut` card makes to a demo video, as the video tool's recut takes it. Ids are the
  * cut's chapter ids. `chapter-trim` is seconds of the chapter's own recording; `chapter-say` is the chapter's caption
  * words (one line, at most 2,000 characters; `""` = no caption); `chapter-drop` takes the chapter out of the video (its
  * recording is kept, so Undo brings it back). A take swap stays a hand edit.
@@ -10094,7 +10097,7 @@ export type CutOp =
   | { op: 'chapter-say'; chapter: string; say: string }
   | { op: 'chapter-drop'; chapter: string };
 
-/** (api-types 0.224.0) A `cut` proposal's changes: the ops Go posts exactly, and crew's words for each, in order. */
+/** (api-types 0.225.0) A `cut` proposal's changes: the ops Go posts exactly, and crew's words for each, in order. */
 export interface ProposalCut {
   /** 1 to 20, frozen with the card. */
   ops: CutOp[];
@@ -10207,7 +10210,7 @@ export interface ArtifactProposal {
   powerChoice?: boolean;
   /** The project the result is filed in; `label` is the project's name or "Not in a project · this chat". */
   filedIn: { projectId: string | null; label: string };
-  /** refine (and, api-types 0.224.0, cut): the document (`<mount>/<doc>`), its title, and the head it was proposed on. */
+  /** refine (and, api-types 0.225.0, cut): the document (`<mount>/<doc>`), its title, and the head it was proposed on. */
   target?: { ref: string; title: string; base: number };
   /** refine: the parts the seat pointed at (`data-wid`s); hand edits are kept unless the person says otherwise. */
   touches?: string[];
@@ -10229,7 +10232,7 @@ export interface ArtifactProposal {
   demo?: { url: string; audience: string | null; show: string | null };
   /** (api-types 0.200.0) onboard: the repository, where it goes and the project it joins. */
   onboard?: ProposalOnboard;
-  /** (api-types 0.224.0) cut: the changes to the video `target` names, proposed on `target.base` (the video's head the
+  /** (api-types 0.225.0) cut: the changes to the video `target` names, proposed on `target.base` (the video's head the
    *  seat read). Go makes one new version from exactly these ops, or none: a video changed since blocks the card. */
   cut?: ProposalCut;
   /** Go is refused with this reason ("Needs a second helper to check it"); the card shows it. `null` = Go is open. */
@@ -10350,7 +10353,7 @@ export interface ProposalResult {
   adopted: boolean;
   /** The test configuration's recording stub took it: nothing was started. */
   stub: boolean;
-  /** (api-types 0.224.0) cut: the video's version Go made (or a retry found it had made). ABSENT for every other kind;
+  /** (api-types 0.225.0) cut: the video's version Go made (or a retry found it had made). ABSENT for every other kind;
    *  `runId` is then only the Go's identity (a cut starts no run). */
   version?: number;
 }
@@ -10609,7 +10612,7 @@ export interface ChatMessageBody {
   /** (api-types 0.192.0, DES-CATALOG-002 §4.6) What this client renders: `['job']` once it draws job proposals. Crew makes
    *  job proposals only for a chat whose newest declaration accepts them. Send only where `chatJobProposals` is true.
    *  (api-types 0.200.0) `'onboard'`: it draws onboard proposals; send only where `chatArtifacts.onboard` is true.
-   *  (api-types 0.224.0) `'cut'`: it draws cut proposals; send only where `chatArtifacts.cut` is true. */
+   *  (api-types 0.225.0) `'cut'`: it draws cut proposals; send only where `chatArtifacts.cut` is true. */
   accepts?: Array<'job' | 'onboard' | 'cut'>;
 }
 
