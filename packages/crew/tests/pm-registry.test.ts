@@ -90,12 +90,17 @@ describe('a PM entry under the source safeguards', () => {
   });
 
   it('renaming a PM entry tells the tracker projector at once: its projection names the source (crew#1906)', async () => {
-    await save(config(['b']));
+    await save({ ...config(['r']), name: 'jira-r' });
     let told = 0;
     registry.onTrackersChanged = () => void told++;
-    await registry.rename('jira', 'jira-work');
-    expect((await registry.get('jira-work')).pm).toMatchObject({ system: 'jira' });
-    expect(told).toBe(1);
+    try {
+      await registry.rename('jira-r', 'jira-work');
+      expect((await registry.get('jira-work')).pm).toMatchObject({ system: 'jira' });
+      expect(told).toBe(1);
+    } finally {
+      registry.onTrackersChanged = null;
+      await registry.remove('jira-work').catch(() => undefined);
+    }
   });
 
   it('a restore brings the links back with query off, and tells the projector', async () => {

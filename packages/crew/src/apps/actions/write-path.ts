@@ -244,10 +244,13 @@ export class AppWritePath {
     return this.deps.actions.grant(app, id);
   }
 
-  /** K1's Allow writes switch: off withdraws every row-write grant on the source (under the store's lock). */
-  async withdrawForSource(source: string): Promise<number> {
+  /**
+   * K1's Allow writes switch: off withdraws every row-write grant on the source (under the store's lock). A rename
+   * withdraws the old name's too (crew#1906): an app that names the old source needs a new grant.
+   */
+  async withdrawForSource(source: string, why: 'allow_writes_off' | 'source_renamed' = 'allow_writes_off'): Promise<number> {
     const gone = await this.deps.actions.locked((tx) => tx.dropRowWriteGrants(source));
-    for (const g of gone) this.audited('apps.action.revoked', CREW, { app: g.app, action: g.action, reason: 'allow_writes_off' });
+    for (const g of gone) this.audited('apps.action.revoked', CREW, { app: g.app, action: g.action, reason: why });
     return gone.length;
   }
 

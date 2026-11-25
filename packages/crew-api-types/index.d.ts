@@ -15299,13 +15299,15 @@ export interface PatchMcpServerBody {
 /**
  * (api-types 0.227.0, wicked-crew#1514) `POST /mcp/servers/:name/rename`: a human operator's only. Answers the renamed
  * {@link McpServer}. The entry keeps its id, secret reference, tools, switches, grants, agents and links; its old name
- * is retired (in `formerNames`) while it exists. Refusals (409, `{error, code, ...}`): `apps_bound` with
+ * is retired (in `formerNames`) while it exists. Apps' row-write grants on the old name are withdrawn (an app that names
+ * it needs a new grant; wicked-crew#1906), and removing the entry later withdraws every name's approvals. Refusals (409, `{error, code, ...}`): `apps_bound` with
  * `apps: Array<{slug, name}>` (the apps that use the source; send the same slugs in `apps` to rename anyway),
  * `name_taken`, `name_retired`, `name_unchanged`, `reserved_name`, `not_renamable`, and `rules_differ` with
  * `subjects: string[]` (tools the engine would judge more loosely under the new name) and/or `rules: string[]`
  * (rules whose `trigger.contains` may tell the two names apart: some match of it can take in a character of either name
  * where an MCP call's or result's context carries it; the error says which name each can match, or that crew could not
- * judge the trigger, and names the rules to change first when one matches the current name; wicked-crew#1905). 403
+ * judge the trigger, and names the rules to change first when one matches the current name, or says the name stays
+ * when that rule ships with crew; wicked-crew#1905, #1906). 403
  * `rename_human_only` for any other actor;
  * 500 `rules_unrestored` with `rules` when a refused rename's copied rules could not be put back (they still name the new
  * name); 501 `mcp_preview_unsupported` when the engine cannot judge the rules; 502 `preview_failed` when it answered no
