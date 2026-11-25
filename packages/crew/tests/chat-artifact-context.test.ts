@@ -14,6 +14,9 @@ import { buildRunBrief, cutAtParagraph, fenceFor } from '../src/api/run-brief.js
 import type { ChatTranscriptRecord, SessionView } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
 
+/** A demo cut's `demo-cut.json` marker exactly as wicked-interactive's import and recut write it (routes-0.17.0.json `_source`). */
+const CUT_MARKER = readFileSync(new URL('./fixtures/demo-cut/demo-cut.json', import.meta.url), 'utf8');
+
 const slide = (i: number, id: string, h: string, body: string, notes?: string): string =>
   `<section class="wi-slide" data-wid="section-${i}" data-slide-id="${id}"><h2 data-wid="slide-${i}-heading-1">${h}</h2>` +
   `<p data-wid="slide-${i}-paragraph-1">${body}</p>${notes !== undefined ? `<aside class="notes" data-notes-for="${id}" hidden>${notes}</aside>` : ''}</section>`;
@@ -404,6 +407,7 @@ describe('buildTurnContext', () => {
   it('studio#1140: an open demo cut is named as a video the chat cannot change, pointing to the editor\'s own controls', async () => {
     const page = '<!doctype html><html><head><title>Sign-in demo</title></head><body><h1>Sign-in demo</h1><ol><li>Open the page</li><li>Sign in</li></ol></body></html>';
     writeDoc('mikes', 'demo-8e0ffbece431', { 2: page }, { head: 2, kind: 'demo', versions: [{ version: 2, kind: 'demo' }] });
+    writeFileSync(join(docs.mikes!, 'demo-8e0ffbece431', 'demo-cut.json'), CUT_MARKER);
     const ctx = await built({ text: 'change only the chapter caption to read exactly: Welcome', context: { artifact: { ref: 'mikes/demo-8e0ffbece431', version: 2 } } });
     expect(ctx.binding?.refused).toEqual([]);
     expect(ctx.binding?.artifact).toMatchObject({ ref: 'mikes/demo-8e0ffbece431', kind: 'demo video', viewed: 2, head: 2 });
@@ -437,11 +441,12 @@ describe('buildTurnContext', () => {
     expect(plain.block).not.toContain("Crew's note");
   });
 
-  it('studio#1140: the cut a run\'s "Edit the cut" makes (no top-level kind; its renders are kind demo) is a video too', async () => {
+  it('studio#1140: the cut a run\'s "Edit the cut" makes (no top-level kind; its marker) is a video too', async () => {
     // The real shape: crew's POST /runs/:id/demo/document creates the document with no kind (interactive's initManifest
     // omits it), and interactive's import records each render as { kind: "demo" }.
     const real = { head: 1, versions: [{ version: 0, parent: null, feedback_file: null, html_file: '_v0.html' }, { version: 1, parent: 0, kind: 'demo' }] };
     writeDoc('mikes', 'demo-8e0ffbece431', { 0: '<p>Importing the demo cut…</p>', 1: '<!doctype html><html><head><title>Sign-in demo</title></head><body><h1>Sign-in demo</h1></body></html>' }, real);
+    writeFileSync(join(docs.mikes!, 'demo-8e0ffbece431', 'demo-cut.json'), CUT_MARKER);
     const ctx = await built({ text: 'change only the chapter caption to read exactly: Welcome', context: { artifact: { ref: 'mikes/demo-8e0ffbece431', version: 1 } } });
     expect(ctx.binding?.artifact).toMatchObject({ ref: 'mikes/demo-8e0ffbece431', kind: 'demo video', viewed: 1, head: 1 });
     const note = ctx.block.indexOf("## Crew's note on the video they have open");
@@ -456,11 +461,73 @@ describe('buildTurnContext', () => {
     // A page whose versions carry other kinds is no cut.
     writeDoc('mikes', 'themed-page', { 0: '<h1>P</h1>', 1: '<h1>P</h1>' }, { head: 1, versions: [{ version: 0 }, { version: 1, parent: 0, kind: 'theme' }] });
     expect((await built({ context: { artifact: { ref: 'mikes/themed-page', version: 1 } } })).block).not.toContain("Crew's note");
+    // One rule, the video tool's (its marker): a recorder storyboard from before cuts (kind demo, no marker) is a page.
+    writeDoc('mikes', 'old-storyboard', { 1: '<h1>Tour</h1>' }, { head: 1, kind: 'demo', versions: [{ version: 1, kind: 'demo' }] });
+    const storyboard = await built({ context: { artifact: { ref: 'mikes/old-storyboard', version: 1 } } });
+    expect(storyboard.block).not.toContain("Crew's note");
+    expect(storyboard.binding?.artifact?.kind).toBe('document');
+    expect(storyboard.block).not.toContain('demo video');
     // A malformed entry (no, a string or a negative version) marked demo never makes a page a cut.
     writeDoc('mikes', 'odd-page', { 1: '<h1>P</h1>' }, { head: 1, kind: 'doc', versions: [{ version: 1, kind: 'theme' }, { kind: 'demo' }, { version: '2', kind: 'demo' }, { version: -1, kind: 'demo' }] });
     const odd = await built({ context: { artifact: { ref: 'mikes/odd-page', version: 1 } } });
     expect(odd.binding?.artifact?.kind).toBe('document');
     expect(odd.block).not.toContain("Crew's note");
+  });
+
+  it('crew#1814: a client that draws cut cards gets the change note and the chapters, as the video tool reads them', async () => {
+    // GET /d/<doc>/api/demo/cut exactly as wicked-interactive answered it (tests/fixtures/demo-cut/routes-0.17.0.json).
+    const routes = JSON.parse(readFileSync(new URL('./fixtures/demo-cut/routes-0.17.0.json', import.meta.url), 'utf8')) as Record<string, { status: number; answer: Record<string, unknown> }>;
+    const v1 = routes['cut-v1']!;
+    writeDoc('mikes', 'demo-8e0ffbece431', { 0: '<p>Importing…</p>', 1: '<h1>Demo</h1>' }, { head: 1, versions: [{ version: 0 }, { version: 1, parent: 0, kind: 'demo' }] });
+    writeFileSync(join(docs.mikes!, 'demo-8e0ffbece431', 'demo-cut.json'), CUT_MARKER);
+    let answer: { status: number; body: Record<string, unknown> } = { status: v1.status, body: v1.answer };
+    const asked: string[] = [];
+    deps = { ...deps, cutBridge: async (projectId) => (projectId === 'mikes' ? async (method, path) => { asked.push(`${method} ${path}`); return answer; } : null) };
+    const at = { context: { artifact: { ref: 'mikes/demo-8e0ffbece431', version: 1 } } };
+    const ctx = await built({ ...at, acceptsCut: true });
+    expect(asked).toEqual(['GET /d/demo-8e0ffbece431/api/demo/cut']);
+    const note = ctx.block.indexOf("## Crew's note on the video they have open");
+    const data = ctx.block.indexOf('## What studio and crew give you for this turn');
+    const said = ctx.block.slice(note, data);
+    expect(said).toContain('`mikes/demo-8e0ffbece431` is a demo video at version 1. This chat can change it, but only through a card the person approves');
+    expect(said).toContain('{"cut":{"ref":"mikes/demo-8e0ffbece431","ops":[{"op":"chapter-drop","chapter":"<id>"}]},"reason":"<one line>"}');
+    expect(said).toContain("You can't see the current caption words.");
+    expect(said).toContain('the way a person talks while showing a screen');
+    expect(said).not.toContain("This chat can't change this video");
+    // The chapters are data: in the data section, fenced, with no caption words.
+    const chapters = ctx.block.indexOf("### The video's chapters, version 1");
+    expect(chapters).toBeGreaterThan(data);
+    expect(ctx.block).toContain('1. id `welcome` · “Welcome” · at 2.5 s for 4.0 s · uses 0.0-4.0 s of its recording (4.0 s long)');
+    expect(ctx.block).toContain('2. id `setup` · “Setup”');
+    expect(ctx.block).not.toContain('This is the home page you land on');
+    // A client that does not draw the card gets the old note, and the video tool is not asked.
+    asked.length = 0;
+    const old = await built(at);
+    expect(asked).toEqual([]);
+    expect(old.block).toContain("This chat can't change this video");
+    // Looking at an earlier version: no change, no chapters.
+    writeDoc('mikes', 'demo-8e0ffbece431', { 0: '<p>Importing…</p>', 1: '<h1>Demo</h1>', 2: '<h1>Demo 2</h1>' }, { head: 2, versions: [{ version: 0 }, { version: 1, parent: 0, kind: 'demo' }, { version: 2, parent: 1, kind: 'demo' }] });
+    const earlier = await built({ ...at, acceptsCut: true });
+    expect(earlier.block).toContain('They are looking at version 1; only the latest (version 2) can be changed.');
+    expect(earlier.block).not.toContain("### The video's chapters");
+    // An older video tool (no head on GET cut): the seat is told why, and proposes nothing.
+    answer = { status: 200, body: { ...v1.answer, head: undefined, version: 2 } };
+    const older = await built({ context: { artifact: { ref: 'mikes/demo-8e0ffbece431', version: 2 } }, acceptsCut: true });
+    expect(older.block).toContain("this chat can't change it now: This computer's video tool is older than this studio needs.");
+    // The video moved between the message and the read.
+    answer = { status: 200, body: { ...v1.answer, head: 3, version: 3 } };
+    const moved = await built({ context: { artifact: { ref: 'mikes/demo-8e0ffbece431', version: 2 } }, acceptsCut: true });
+    expect(moved.block).toContain('It changed while this message was being sent (now version 3).');
+    // The latest version is not a cut (a page version landed on it by an older tool).
+    answer = { status: 200, body: { ...v1.answer, head: 2, version: 1 } };
+    expect((await built({ context: { artifact: { ref: 'mikes/demo-8e0ffbece431', version: 2 } }, acceptsCut: true })).block).toContain("The latest version of this video isn't a cut");
+    // A video tool that won't start (or is too old to adopt): the seat is told why; the message still goes.
+    deps = { ...deps, cutBridge: async () => { throw new Error('the bridge on port 4100 is 0.16.2'); } };
+    expect((await built({ context: { artifact: { ref: 'mikes/demo-8e0ffbece431', version: 2 } }, acceptsCut: true })).block).toContain("this chat can't change it now: The video tool isn't running here: the bridge on port 4100 is 0.16.2.");
+    deps = { ...deps, cutBridge: async () => async () => answer };
+    // Deleted, or history from before kept cuts.
+    answer = { status: 409, body: { error: 'cut_unverified' } };
+    expect((await built({ context: { artifact: { ref: 'mikes/demo-8e0ffbece431', version: 2 } }, acceptsCut: true })).block).toContain("history predates kept cuts");
   });
 
   it.skipIf(process.platform === 'win32')('never blocks on a FIFO where a manifest or a version should be', async () => {

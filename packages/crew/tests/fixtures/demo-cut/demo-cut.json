@@ -1,0 +1,76 @@
+{
+  "rev": 2,
+  "version": 2,
+  "chapters": [
+    {
+      "id": "sign-in",
+      "title": "Sign in",
+      "say": "You sign in with your work account, and that's all the setup there is.",
+      "take": "_take-sign-in-1.mp4",
+      "inSec": 0,
+      "outSec": 5
+    },
+    {
+      "id": "welcome",
+      "title": "Welcome",
+      "say": "This is the home page you land on after you sign in.",
+      "take": "_take-welcome-1.mp4",
+      "inSec": 0,
+      "outSec": 4
+    }
+  ],
+  "takes": {
+    "welcome": [
+      {
+        "file": "_take-welcome-1.mp4",
+        "durationSec": 4,
+        "at": "2026-11-25T00:41:04.086Z"
+      }
+    ],
+    "setup": [
+      {
+        "file": "_take-setup-1.mp4",
+        "durationSec": 3,
+        "at": "2026-11-25T00:41:04.086Z"
+      }
+    ],
+    "sign-in": [
+      {
+        "file": "_take-sign-in-1.mp4",
+        "durationSec": 5,
+        "at": "2026-11-25T00:41:04.087Z"
+      }
+    ]
+  },
+  "style": {
+    "theme": {
+      "titleCard": {
+        "on": true,
+        "title": "Demo of http://127.0.0.1:5173/",
+        "subtitle": "",
+        "seconds": 2.5
+      },
+      "endCard": {
+        "on": true,
+        "title": "Thanks for watching",
+        "subtitle": "",
+        "seconds": 2.5
+      },
+      "palette": "skin",
+      "background": "#16181d",
+      "foreground": "#f5f6f8",
+      "accent": "#b8bec9",
+      "font": "system-ui"
+    },
+    "captions": {
+      "on": true,
+      "burnIn": true,
+      "position": "bottom",
+      "size": 36,
+      "maxLines": 2,
+      "wrapChars": 42,
+      "style": "bar"
+    }
+  },
+  "url": "http://127.0.0.1:5173/"
+}

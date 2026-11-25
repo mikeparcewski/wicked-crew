@@ -783,6 +783,9 @@ export interface MakeDigest {
   jobs?: 'cards' | 'prose';
   /** (crew-0182) The chat's client draws onboard cards and crew advertises them: the `onboard` block is allowed. */
   onboard?: boolean;
+  /** (crew#1814) The chat's client draws cut cards and crew advertises them: the `cut` block is allowed, for the demo
+   *  video open in the turn only (crew's note on it says when). */
+  cut?: boolean;
 }
 
 /** Whether a digest turns anything on. */
@@ -1033,12 +1036,13 @@ export function chatMakeLines(make: MakeDigest): string[] {
     // DES-CATALOG-002 §2.3: the job block, the revision and the plan edit are "Starting work"'s (chatJobLines).
     lines.push(
       `One block at most per reply. A \`refine\`${make.onboard === true ? ', `theme` or `onboard`' : ' or `theme`'} block only for what it says; everything to make or do`,
+      ...(make.cut === true ? ['(A `cut` block only for a change to the demo video open in the turn, as crew\'s note on it says.)'] : []),
       'is routed as "Starting work" says. A question ABOUT an artifact or a run is answered, with no block.',
     );
     return lines;
   }
   lines.push(
-    `One block at most per reply, with exactly one of \`entry\`, \`refine\`${make.onboard === true ? ', `theme` and `onboard`' : ' and `theme`'}. No block when:`,
+    `One block at most per reply, with exactly one of \`entry\`, \`refine\`${make.onboard === true ? ', `theme` and `onboard`' : ' and `theme`'}${make.cut === true ? ' (or `cut`, only for a change to the demo video open in the turn, as crew\'s note on it says)' : ''}. No block when:`,
     '- the message asks ABOUT an artifact or a run (what it says, whether it is right): answer it;',
     '- it is ambiguous ("make this better", "do something with this"): ask ONE question whose three',
     '  choices are Revise it, Make something new, and Just tell me;',
@@ -1057,7 +1061,7 @@ export function chatMakeLines(make: MakeDigest): string[] {
  */
 export function chatMakeDigest(make: MakeDigest | undefined): string {
   if (make === undefined) return '';
-  const artifacts = make.create || make.refine || make.theme || make.demo || make.onboard === true;
+  const artifacts = make.create || make.refine || make.theme || make.demo || make.onboard === true || make.cut === true;
   if (!artifacts && make.jobs !== 'cards') return '';
   // DES-CATALOG-002 §2.3: with job cards on, the job lines (`chatJobTurnLines`) carry what the chat can start. An older
   // client (`prose`) keeps today's artifact digest.
@@ -1066,6 +1070,7 @@ export function chatMakeDigest(make: MakeDigest | undefined): string {
     if (make.refine) extra.push('a change to a document that is open or named in this chat (the `refine` block: a change keeps that document, never a new one)');
     if (make.theme) extra.push('a studio theme (the `theme` block)');
     if (make.onboard === true) extra.push('adding a git repository to a project (the `onboard` block, as "Adding a repository" says)');
+    if (make.cut === true) extra.push('a change to the demo video open here (the `cut` block, as crew\'s note on the video says)');
     return [
       '### What this chat can start now (crew)',
       '',
@@ -1079,6 +1084,7 @@ export function chatMakeDigest(make: MakeDigest | undefined): string {
   if (make.refine) can.push('a change to a document that is open or named in this chat (a `refine` of it, never a new document)');
   if (make.theme) can.push('a studio theme');
   if (make.onboard === true) can.push('a git repository added to a project (the `onboard` block, as "Adding a repository" says)');
+  if (make.cut === true) can.push('a change to the demo video open here (the `cut` block, as crew\'s note on the video says)');
   return [
     '### What this chat can make now (crew)',
     '',

@@ -158,6 +158,15 @@ export interface LaunchRunInput {
    */
   extraReadRoots?: string[];
   /**
+   * wicked-core#1463: the entries of `extraReadRoots` the run can do without. On the container
+   * floor, one that does not fit a unit's copy-in caps (512 MiB) is left out of that unit's copy
+   * (its directory holds only a note saying so) instead of refusing the unit. It grants no read:
+   * the engine refuses the launch if an entry is not in `extraReadRoots`. A chat over every
+   * registered repository ("All repos") sets its repositories here; a repo or project scope keeps
+   * them required.
+   */
+  optionalReadRoots?: string[];
+  /**
    * The PROJECT's co-located code graph this run's governed workers should query instead of the
    * run repo's own — resolved by `projects/graph.ts::resolveProjectGraphBinding`, which is the ONE
    * thing that knows where a project graph lives and what each repo is labelled inside it.

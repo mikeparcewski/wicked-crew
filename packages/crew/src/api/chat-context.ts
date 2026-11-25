@@ -42,6 +42,7 @@ import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import { anchorTexts, outlineOf } from './artifact-outline.js';
 import { buildRunBrief, fenced } from './run-brief.js';
 import { BeneathError, beneathMode, createBeneath, mkdirBeneath, readBeneath, statBeneath } from './beneath.js';
+import { cutChangeNote, cutDataLines, headProblem, readCut, toolNotRunning, type CutBridgeCall } from './cut-read.js';
 
 /** The Unfiled mount in an artifact ref (studio's mount alias `default` is read as it). */
 export const UNFILED_MOUNT = '_unfiled';
@@ -163,6 +164,8 @@ export interface ChatContextDeps {
   acceptanceLine?(view: SessionView): Promise<string | null>;
   /** The style recorded when the document was created (`ppt`, `web`, …), when there is one. */
   docStyle?(docsRoot: string, doc: string): string | undefined;
+  /** (studio#1140 (a)) The project's video tool, for a cut the chat may change; absent = no cut is changed here. */
+  cutBridge?(projectId: string): Promise<CutBridgeCall | null>;
 }
 
 export interface TurnContextInput {
@@ -178,6 +181,8 @@ export interface TurnContextInput {
   records: readonly ChatTranscriptRecord[];
   /** This chat's attachment ids. */
   attachmentIds: readonly string[];
+  /** (studio#1140 (a)) This message's client draws cut cards and the daemon advertises them (`accepts: ['cut']`). */
+  acceptsCut?: boolean;
 }
 
 export interface TurnContext {
@@ -315,13 +320,20 @@ function publishWrites(scratchRoot: string, writes: readonly PendingWrite[]): vo
 interface Manifest {
   head: number;
   kind: string;
-  /**
-   * studio#1140: a demo video's cut. Interactive's "New demo" writes a top-level `kind: "demo"`; the cut a run's
-   * "Edit the cut" makes (crew's `POST /runs/:id/demo/document`, then interactive's import) has no top-level kind, and
-   * each rendered version is recorded with `kind: "demo"`. Either makes it a cut.
-   */
-  cut: boolean;
   files: Map<number, string>;
+}
+
+/**
+ * studio#1140: whether the document is a demo video's cut. One rule, the video tool's own (interactive `isCut`): its
+ * `demo-cut.json` marker exists, read beneath the docs root with no link followed. A recorder storyboard from before
+ * cuts (kind `demo`, no marker) is a page, as the video tool treats it.
+ */
+function markerIsCut(rootReal: string, doc: string): boolean {
+  try {
+    return statBeneath(rootReal, `${doc}/demo-cut.json`)?.isFile() === true;
+  } catch {
+    return false;
+  }
 }
 
 /** The document's `versions.json`, read beneath the docs root. A document at version 0 is a document (crew#1273). */
@@ -337,13 +349,10 @@ function readManifest(rootReal: string, doc: string): Manifest {
   const m = parsed as { head?: unknown; kind?: unknown; versions?: unknown };
   if (typeof m.head !== 'number' || !Number.isInteger(m.head) || m.head < 0) throw new ContextRefusal('its versions.json names no version');
   const files = new Map<number, string>();
-  let cutVersion = false;
   for (const v of Array.isArray(m.versions) ? (m.versions as unknown[]) : []) {
     if (typeof v !== 'object' || v === null) continue;
     const e = v as { version?: unknown; html_file?: unknown; kind?: unknown };
     if (typeof e.version !== 'number' || !Number.isInteger(e.version) || e.version < 0) continue;
-    // Only a real version entry classifies the document (a malformed one is skipped like the rest of it).
-    if (e.kind === 'demo') cutVersion = true;
     if (e.html_file === undefined || e.html_file === null || e.html_file === '') {
       files.set(e.version, `_v${e.version}.html`);
       continue;
@@ -354,7 +363,7 @@ function readManifest(rootReal: string, doc: string): Manifest {
   }
   if (!files.has(m.head)) files.set(m.head, `_v${m.head}.html`);
   const kind = typeof m.kind === 'string' && Object.hasOwn(KIND_WORDS, m.kind) ? m.kind : 'doc';
-  return { head: m.head, kind, cut: kind === 'demo' || cutVersion, files };
+  return { head: m.head, kind, files };
 }
 
 /** The docs root as its real path, after proving the document is a real directory beneath it (no link in its path).
@@ -402,7 +411,7 @@ async function readArtifact(
   const docsReal = realDocsRoot(root, ref.doc);
   const manifest = readManifest(docsReal, ref.doc);
   // Known before any copy: a cut whose storyboard can't be copied is still a video this chat can't change.
-  seen.cut = manifest.cut;
+  seen.cut = markerIsCut(docsReal, ref.doc);
   const scratchReal = realScratchRoot(input.scratchRoot);
   const seatOpenDir = join(seatPathOf(input.scratchRoot), 'open');
   const unusable = dirUnusable(scratchReal, 'open');
@@ -448,11 +457,12 @@ async function readArtifact(
   const outline = outlineOf(shownHtml);
   const style = deps.docStyle?.(root, ref.doc);
   // studio#1140: a demo cut is a video whatever its storyboard page or a sidecar says, and no chat writer changes one.
+  // A recorder storyboard from before cuts (manifest kind `demo`, no marker) is a page, as the video tool treats it.
   const cut = seen.cut;
   const kind = cut
     ? KIND_WORDS.demo!
     : (style !== undefined && Object.hasOwn(STYLE_WORDS, style) ? STYLE_WORDS[style] : undefined)
-      ?? (outline.items[0]?.unit === 'slide' ? 'slides' : KIND_WORDS[manifest.kind]!);
+      ?? (outline.items[0]?.unit === 'slide' ? 'slides' : KIND_WORDS[manifest.kind === 'demo' ? 'doc' : manifest.kind]!);
   const title = outline.title ?? ref.doc;
   const lines: string[] = [
     '### The artifact the person has open',
@@ -467,7 +477,7 @@ async function readArtifact(
     lines.push(`- They are looking at version ${viewed}; the latest is version ${manifest.head}. Answer about version ${viewed} unless they ask about the latest, and say which version you read.`);
   } else lines.push('- Say which version you read.');
   lines.push(...notes.map((n) => `- ${n}`));
-  if (cut) lines.push("- It is a demo video's cut (crew's note above says what this chat can do with it). The copy is its storyboard page, for reading only.");
+  if (cut) lines.push("- It is a demo video's cut (crew's note above says what this chat can do with it). The copy is its storyboard page, for reading only; its chapters are listed below when this chat can change it.");
   if (viewedHtml !== null) lines.push(`- Version ${viewed}: ${join(seatOpenDir, nameOf(viewed))}`);
   if (headHtml !== null && (viewedHtml === null || viewed !== manifest.head)) lines.push(`- Version ${manifest.head} (latest): ${join(seatOpenDir, nameOf(manifest.head))}`);
   lines.push('');
@@ -633,6 +643,8 @@ export async function buildTurnContext(input: TurnContextInput, deps: ChatContex
   let artifact: ChatContextBinding['artifact'];
   /** studio#1140: the open artifact is a demo cut (crew's note on it rides outside the data section). */
   let openCut: string | null = null;
+  /** studio#1140 (a): crew's note on a cut this message's client can change (else the older `cutNote`). */
+  let cutNoteLines: string[] | null = null;
   if (ctx?.artifact !== undefined) {
     const ref = parseArtifactRef(ctx.artifact.ref);
     if (ref === null) {
@@ -651,6 +663,23 @@ export async function buildTurnContext(input: TurnContextInput, deps: ChatContex
         refuse(`doc:${ref.ref}`, why);
       }
       if (seen.cut) openCut = ref.ref;
+      if (seen.cut && artifact !== undefined && input.acceptsCut === true && deps.cutBridge !== undefined) {
+        if (artifact.viewed !== artifact.head) cutNoteLines = cutChangeNote(ref.ref, { viewed: artifact.viewed, head: artifact.head });
+        else {
+          // The video tool not starting (or too old to adopt) is an answer for the seat, never a send that fails.
+          const call = await deps.cutBridge(ref.projectId).catch((err: unknown) => new Error(err instanceof Error ? err.message : String(err)));
+          const got = call instanceof Error ? { state: 'unavailable' as const, why: toolNotRunning(call) }
+            : call === null ? { state: 'unavailable' as const, why: 'This video is no longer on this daemon.' } : await readCut(call, ref.doc);
+          if ('state' in got) cutNoteLines = cutChangeNote(ref.ref, { why: got.why });
+          else if (got.head !== artifact.head) cutNoteLines = cutChangeNote(ref.ref, { why: `It changed while this message was being sent (now version ${got.head}). Ask them to send it again.` });
+          else if (headProblem(got) !== null) cutNoteLines = cutChangeNote(ref.ref, { why: headProblem(got)! });
+          else {
+            cutNoteLines = cutChangeNote(ref.ref, { viewed: artifact.viewed, head: artifact.head });
+            // The chapter titles are the person's (or a recorder's) words: data, fenced, in the data section.
+            sections.push(`### The video's chapters, version ${got.head} (in order; chapter ids for the ops)`, '', fenced(cutDataLines(got).join('\n')), '');
+          }
+        }
+      }
     }
   }
 
@@ -804,7 +833,7 @@ export async function buildTurnContext(input: TurnContextInput, deps: ChatContex
       '',
     );
   }
-  if (openCut !== null) out.push(...cutNote(openCut));
+  if (openCut !== null) out.push(...(cutNoteLines ?? cutNote(openCut)));
   out.push(
     '## What studio and crew give you for this turn',
     '',
@@ -885,13 +914,13 @@ export function artifactHead(docsRoot: string, doc: string): number | null {
 }
 
 /**
- * studio#1140: whether `<docsRoot>/<doc>` is a demo video's cut (its manifest's kind, or any version's, is `demo`), read the way
+ * studio#1140: whether `<docsRoot>/<doc>` is a demo video's cut (its `demo-cut.json` marker, the video tool's rule), read the way
  * {@link artifactHead} reads it. A chat never changes a cut: a refine of one is blocked.
  */
 export function artifactIsCut(docsRoot: string, doc: string): boolean {
   if (!artifactExists(docsRoot, doc)) return false;
   try {
-    return readManifest(realDocsRoot(docsRoot, doc), doc).cut;
+    return markerIsCut(realDocsRoot(docsRoot, doc), doc);
   } catch {
     return false;
   }
