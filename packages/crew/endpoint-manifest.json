@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.228.0",
+  "apiTypesVersion": "0.229.0",
   "endpoints": [
     {
       "method": "GET",
@@ -2191,6 +2191,21 @@
         409,
         500,
         503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/repos/:id/requirements/rulings",
+      "requestType": "DomainRulingBody",
+      "responseType": "DomainRulingResponse",
+      "statusCodes": [
+        200,
+        400,
+        403,
+        404,
+        409,
+        500,
+        501
       ]
     },
     {

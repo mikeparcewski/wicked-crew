@@ -20,7 +20,10 @@ import {
   retireRequirement,
   readRequirementsGraph,
   REQUIREMENTS_NOT_GENERATED,
+  forgetRequirementsReads,
 } from './requirements.js';
+import { DOMAIN_EXTRACTION_WORKFLOW, domainScopeJsonOf, rulingAnswerOf, rulingRequestOf } from './domain-model.js';
+import { scopeCardFor } from './domain-scope.js';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { readFileSync, existsSync, mkdirSync, realpathSync } from 'node:fs';
@@ -28,7 +31,7 @@ import { promises as fsp } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { videoPalette } from '../appearance/video-palette.js';
-import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, MaintenanceDrainError, RepoUnregisterUnsupportedError, TERMINAL_RUN_STATUSES, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, readNewWorkSeats, settingsFilePath, type RunViewsSnapshot } from '../core/adapter.js';
+import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, DomainRulingUnsupportedError, MaintenanceDrainError, RepoUnregisterUnsupportedError, TERMINAL_RUN_STATUSES, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsDomainScope, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, readNewWorkSeats, settingsFilePath, type RunViewsSnapshot } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, repoFolderMissing, repoFolderMissingBody } from '../core/repoPaths.js';
 import type {
   ConformanceRule,
@@ -198,7 +201,7 @@ import {
 } from './governance-steering.js';
 import { atProposeGate, draftedSteeringRules, isSteeringAuthorRun, landSteeringProposal, type SteeringProposalSnapshot } from './steering-landing.js';
 import { inventoryComplete, parseInventoryClaims, type InventoryClaim } from '../core/inventory-claim.js';
-import type { GateAction, LaunchPreviewPosture, LaunchPreviewResponse, MaintenanceRequest, RejudgeOffer, RunInventoryResponse, RunLearningsResponse, SeatRecordResponse, SkipQeOffer, UnregisterRepoResponse } from 'wicked-crew-api-types';
+import type { DomainRulingBody, DomainScopeCard, GateAction, LaunchPreviewPosture, LaunchPreviewResponse, MaintenanceRequest, RejudgeOffer, RunInventoryResponse, RunLearningsResponse, SeatRecordResponse, SkipQeOffer, UnregisterRepoResponse } from 'wicked-crew-api-types';
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
 import { registerDefaultEvalRoutes, runAndRecord, type DefaultEvalDeps } from '../evals/routes.js';
@@ -919,6 +922,14 @@ export function primaryRefusal(primary: string, clisJson: string): string | null
   return null;
 }
 
+/** (api-types 0.229.0, J6 K1) {@link DomainScope}: what a domain model run covers. */
+const DomainScopeSchema = z.strictObject({
+  intent: z.string().trim().min(1).max(2000),
+  phrases: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
+  scopeHash: z.string().regex(/^[0-9a-f]{64}$/u, 'scopeHash is the 64-hex hash the scope card gave').optional(),
+  description: z.string().trim().min(1).max(200).optional(),
+});
+
 export const LaunchSchema = z.strictObject({
   problem: z.string().min(1),
   sessionId: z.string().min(1).optional(),
@@ -1010,6 +1021,14 @@ export const LaunchSchema = z.strictObject({
   documents: z.array(z.string().trim().min(1).max(300)).max(RUN_DOCS_TOKENS_MAX).optional(),
   /** (DES-CATALOG-002 §2.d piece 4, CS4) The run's source pick (registered source names); `[]` = none. */
   sources: z.array(z.string().trim().min(1).max(100)).max(RUN_SOURCES_MAX).optional(),
+  /** (api-types 0.229.0, J6 K1) A domain-extraction launch's scope: required on that workflow, refused on any other. */
+  domainScope: DomainScopeSchema.optional(),
+}).refine((b) => b.domainScope === undefined || b.workflow === DOMAIN_EXTRACTION_WORKFLOW, {
+  path: ['domainScope'],
+  error: 'domainScope is the scope of a domain-extraction launch; this launch names another workflow',
+}).refine((b) => b.workflow !== DOMAIN_EXTRACTION_WORKFLOW || b.domainScope !== undefined, {
+  path: ['domainScope'],
+  error: 'a domain model run needs its scope: say what the model should cover (domainScope.intent)',
 }).refine((b) => b.documents === undefined || b.documents.length === 0 || b.chatId !== undefined, {
   path: ['documents'],
   error: 'documents are chat tokens: send the chatId they were named in',
@@ -3898,6 +3917,14 @@ export function registerRoutes(
     // when sent, never inferred.
     if (b.skipQeAcceptance !== undefined) input.skipQeAcceptanceReason = b.skipQeAcceptance.reason;
     else if (settingSkip !== undefined) input.skipQeAcceptanceReason = settingSkip;
+    if (b.domainScope !== undefined) {
+      // (J6 K1) The scope rides to the run's domain-run step through the engine (core writes it to the step's
+      // private channel); an addon that would drop it is refused by name, before anything launches.
+      if (!addonSupportsDomainScope()) {
+        return reply.code(409).send({ code: 'engine_too_old', error: 'this engine cannot carry a domain model run\'s scope; upgrade wicked-crew so its pinned wicked-core-ts is used' });
+      }
+      input.domainScopeJson = domainScopeJsonOf(b.domainScope);
+    }
     if (b.forceQeAcceptance === true) input.forceQeAcceptance = true;
     let reviewChange: { target: unknown; provenance: string; runs: string[]; excluded: string[]; headSha: string | null } | undefined;
     if (b.workflow === REVIEW_CHANGE_WORKFLOW) {
@@ -4506,13 +4533,30 @@ export function registerRoutes(
     humanConfirm: z.string().min(1).optional(),
     deliver: z.enum(['pr', 'none']).optional(),
     deliverGate: z.enum(['human', 'auto']).optional(),
+    domainScope: DomainScopeSchema.optional(),
   }).refine((b) => b.plan === undefined || b.workflow === undefined, {
     path: ['plan'],
     error: 'plan and workflow are mutually exclusive',
   }).refine((b) => b.deliverGate === undefined || b.deliver !== 'none', {
     path: ['deliverGate'],
     error: 'deliverGate has no meaning with deliver: "none" — there is no deliver phase to gate',
+  }).refine((b) => b.domainScope === undefined || b.workflow === DOMAIN_EXTRACTION_WORKFLOW, {
+    path: ['domainScope'],
+    error: 'domainScope is the scope of a domain-extraction launch; this preview names another workflow',
   });
+  /** (J6 K1) The scope card of a domain-extraction preview with a repository, or why there is none. */
+  const domainScopeCard = async (repoRef: string, scope: { intent: string; phrases?: string[] | undefined }): Promise<{ card: DomainScopeCard } | { error: string }> => {
+    const repo = (await adapter.listRepos()).find((r) => r.id === repoRef);
+    if (repo === undefined) return { error: `repository ${repoRef} is not registered` };
+    if (typeof repo.root_path !== 'string' || repo.root_path === '') return { error: `repository ${repoRef} has no checkout on this machine` };
+    let db: string;
+    try {
+      db = codeGraphDb(repo);
+    } catch (err) {
+      return { error: message(err) };
+    }
+    return scopeCardFor({ root: repo.root_path, db, gardenRoot: gardenRootFor(process.env), scope });
+  };
   app.post(
     `${V}/runs/preview`,
     { config: { manifest: { requestType: 'LaunchPreviewBody', responseType: 'LaunchPreviewResponse', statusCodes: [200, 400] } } },
@@ -4528,7 +4572,12 @@ export function registerRoutes(
         ...(p.powerNotice !== null ? { powerNotice: p.powerNotice } : {}),
         ...(p.humanConfirmNotice !== null ? { humanConfirmNotice: p.humanConfirmNotice } : {}),
       };
-      return { posture } satisfies LaunchPreviewResponse;
+      const scope = parsed.data.domainScope;
+      if (scope === undefined) return { posture } satisfies LaunchPreviewResponse;
+      const card = parsed.data.repoRef === undefined
+        ? { error: 'name the repository the model covers to see its scope' }
+        : await domainScopeCard(parsed.data.repoRef, scope);
+      return ('card' in card ? { posture, scopeCard: card.card } : { posture, scopeError: card.error }) satisfies LaunchPreviewResponse;
     },
   );
 
@@ -8255,6 +8304,22 @@ export function registerRoutes(
     }
   }
 
+  /** (J6 K1) Whether `workflow` names a preset whose every step runs as a host tool (`executor.type: "tool"`), so it
+   *  has no agent session to lead in power mode. A read that fails answers `false`. Hoisted. */
+  async function presetIsToolOnly(workflow: string, projectId: string | undefined): Promise<boolean> {
+    if (typeof adapter.listPresets !== 'function') return false;
+    try {
+      const preset = (await adapter.listPresets(projectId)).find((p) => p.name === workflow);
+      const steps = preset?.steps ?? [];
+      return steps.length > 0 && steps.every((s) => {
+        const ex = s['executor'];
+        return typeof ex === 'object' && ex !== null && (ex as { type?: unknown }).type === 'tool';
+      });
+    } catch {
+      return false;
+    }
+  }
+
   /** The linked engine runs power mode (an adapter double without the method does not). Hoisted. */
   function powerSupported(): boolean {
     return typeof adapter.supportsPowerMode === 'function' && adapter.supportsPowerMode();
@@ -8270,6 +8335,7 @@ export function registerRoutes(
     powerModeDefault: async () => (await adapter.getSettings()).powerModeDefault ?? true,
     namesPreset,
     powerSupported,
+    toolOnly: presetIsToolOnly,
       // The delivery contract (crew#393): a completed code run must end with a reviewable
       // deliverable, or an explicit, recorded decision not to. So the deliver option is resolved
       // HERE, at the boundary, for every launch:
@@ -9868,6 +9934,59 @@ export function registerRoutes(
     offset: z.coerce.number().int().min(0).prefault(0),
     limit: z.coerce.number().int().min(1).max(200).prefault(50),
   }).strict();
+  // (J6 K1) A person's Confirm or Reject on the 1.2.0 domain model: core writes the ruling and rebuilds the model
+  // (`Core.domainRuling`), so the next read shows it. The engine refuses by name (a stale statement, one that changed
+  // since it was shown, one already settled), and nothing is written then.
+  const DomainRulingSchema = z.strictObject({
+    statement: z.string().trim().min(1).max(500).optional(),
+    target: z.string().trim().min(1).max(1000).optional(),
+    expect: z.string().trim().min(1).max(200).optional(),
+    expectTarget: z.string().trim().min(1).max(200),
+    action: z.enum(['confirm', 'reject']),
+    note: z.string().trim().min(1).max(2000).optional(),
+  }).refine((b) => (b.statement === undefined) !== (b.target === undefined), {
+    path: ['statement'],
+    error: 'name one statement or one target',
+  }).refine((b) => b.statement === undefined || b.expect !== undefined, {
+    path: ['expect'],
+    error: 'a statement ruling carries the statement key it was shown (expect)',
+  }).refine((b) => b.target === undefined || b.action === 'confirm', {
+    path: ['action'],
+    error: 'a target is confirmed (its lines make no business decision); a statement is what gets rejected',
+  }).refine((b) => b.action !== 'reject' || b.note !== undefined, {
+    path: ['note'],
+    error: 'say why the statement is wrong (note)',
+  });
+  app.post(
+    `${V}/repos/:id/requirements/rulings`,
+    { config: { manifest: { requestType: 'DomainRulingBody', responseType: 'DomainRulingResponse', statusCodes: [200, 400, 403, 404, 409, 500, 501] } } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const actor = actorOf(req as { actor?: import('../core/types.js').Actor });
+      if (!isHumanOperator(actor)) {
+        return reply.code(403).send({ code: 'ruling_refused', error: `a ruling on the domain model is a person's call (you are ${actor.kind}/${actor.trust}); nothing was written` });
+      }
+      const repo = (await adapter.listRepos()).find((r) => r.id === id);
+      if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+      const parsed = DomainRulingSchema.safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid ruling'));
+      let raw: string;
+      try {
+        raw = await adapter.domainRuling(repo.id, rulingRequestOf(parsed.data as DomainRulingBody, actor.id));
+      } catch (err) {
+        const msg = message(err);
+        if (err instanceof DomainRulingUnsupportedError) return reply.code(501).send({ code: 'engine_too_old', error: msg });
+        return reply.code(500).send({ code: 'engine', error: msg });
+      } finally {
+        // The ruling may have been written even when the answer did not arrive: the next read rebuilds its index.
+        forgetRequirementsReads(repo);
+      }
+      const answer = rulingAnswerOf(raw);
+      if (answer.status === 200) audit.record('requirements.ruling', actor, { detail: { repoId: repo.id, subject: answer.body.ruling.subject, id: answer.body.ruling.id, action: answer.body.ruling.action } });
+      return reply.code(answer.status).send(answer.body);
+    },
+  );
+
   app.get(`${V}/repos/:id/requirements`, async (req, reply) => {
     const { id } = req.params as { id: string };
     const repos = await adapter.listRepos();

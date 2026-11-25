@@ -6733,6 +6733,10 @@ export interface LaunchRunBody {
   /** (api-types 0.192.0, DES-CATALOG-002 §4.4) What this launch is the shape of ({@link LaunchShape}). Send only where
    *  `GET /health.capabilities.launchShape` is true. */
   shape?: LaunchShape;
+  /** (api-types 0.229.0, J6 K1) What a `domain-extraction` launch maps ({@link DomainScope}): REQUIRED on that
+   *  workflow (400 without it), refused on any other. Start sends the scope card's `scopeHash`, so a run whose code
+   *  changed since the preview refuses before any model call. */
+  domainScope?: DomainScope;
 }
 
 /** `POST /linked-issues/preview` (crew#825): what a workflow launch of `problem` WOULD append. */
@@ -6837,6 +6841,43 @@ export interface LaunchPreviewBody {
   humanConfirm?: string;
   deliver?: 'pr' | 'none';
   deliverGate?: 'human' | 'auto';
+  /** (api-types 0.229.0, J6 K1) On a `domain-extraction` body with a `repoRef`: the scope to preview; the answer
+   *  then carries its {@link DomainScopeCard}. */
+  domainScope?: DomainScope;
+}
+
+/** (api-types 0.229.0, J6 K1) What a domain model run covers: the person's words, and the phrases they kept. */
+export interface DomainScope {
+  /** "What should the model cover?" (1–2000 chars). */
+  intent: string;
+  /** Phrases of the intent the person kept or typed (each 1–200 chars, at most 50). */
+  phrases?: string[];
+  /** The {@link DomainScopeCard.scopeHash} the person saw (launch only). */
+  scopeHash?: string;
+  /** A short name for the model's sentences (e.g. "payroll"). */
+  description?: string;
+}
+
+/**
+ * (api-types 0.229.0, J6 K1) The scope card of a `domain-extraction` preview: what the intent matched in the code,
+ * computed by garden's `scripts/domain/scope.py` over the repository's checkout and estate store (no model call).
+ */
+export interface DomainScopeCard {
+  /** The hash Start sends back as {@link DomainScope.scopeHash}. */
+  scopeHash: string;
+  /** Phrase → the code names it matched. */
+  phrases: Record<string, string[]>;
+  /** Phrases that matched no code: name a file, function or program instead, or drop them. */
+  unmatchedPhrases: string[];
+  /** Files whose code is in scope, repository-relative. */
+  files: string[];
+  /** How many targets (units and line ranges) the run states rules for. */
+  targets: number;
+  /** "Reached from": the first callers by hop count, and how many more. */
+  reachedFrom: string[];
+  reachedMore: number;
+  /** Questions the scope could not settle by itself (e.g. which of two programs). */
+  questions: string[];
 }
 
 /**
@@ -6862,6 +6903,12 @@ export interface LaunchPreviewPosture {
 /** (api-types 0.212.0) `POST /runs/preview`'s answer. */
 export interface LaunchPreviewResponse {
   posture: LaunchPreviewPosture;
+  /** (api-types 0.229.0, J6 K1) On a `domain-extraction` body with a repository and a scope: its card. Absent
+   *  otherwise. */
+  scopeCard?: DomainScopeCard;
+  /** (api-types 0.229.0) Why no card could be computed (no checkout, no code graph, the scope failed), when one was
+   *  asked for. */
+  scopeError?: string;
 }
 
 /**
@@ -7881,6 +7928,162 @@ export interface RequirementsPage {
   /** (0.197.0) Rows of the whole corpus whose code does not meet them (`?mismatch=yes` lists them). ABSENT from an
    *  older daemon. */
   mismatches?: number;
+  /** (api-types 0.229.0, J6 K1) The domain model (schema 1.2.0) the rows come from: its statements, rule groups,
+   *  follow-ups and targets. Present only when the repository's model is a 1.2.0 one. */
+  model?: DomainModel;
+}
+
+/** (api-types 0.229.0, J6 K1) Lines a claim cites: inclusive, 1-based. */
+export interface DomainRange {
+  file: string;
+  from: number;
+  to: number;
+}
+
+/** (api-types 0.229.0) A person's ruling, as the model shows it while it applies. */
+export interface DomainRuling {
+  action: 'confirm' | 'reject';
+  by: string;
+  /** Unix seconds. */
+  at: number;
+  note?: string;
+}
+
+/** (api-types 0.229.0) One claim of a statement. `when` / `unless` name the condition claims (by `i`) it depends on. */
+export interface DomainClaim {
+  i: number;
+  type: string;
+  text: string;
+  when?: number[];
+  unless?: number[];
+  of?: number | null;
+  ranges: DomainRange[];
+  guardRanges?: DomainRange[];
+}
+
+/**
+ * (api-types 0.229.0) One stated decision. `status`: `Checked` (a second seat confirmed it against the code), `open`
+ * (not confirmed: see its follow-up), `confirmed` (a person confirmed it) or `stale` (the code changed since; the next
+ * run checks it again). A rejected statement is not here: it is under its target's `rejected`.
+ */
+export interface DomainStatement {
+  id: string;
+  /** What a ruling names ({@link DomainRulingBody.expect}). */
+  key: string;
+  /** The requirement the statement is a rule of (`<domain>::<reqId>`, the list's `key`). */
+  requirementKey: string;
+  status: 'Checked' | 'open' | 'confirmed' | 'stale';
+  text: string;
+  /** Its anchor and every claim cite valid lines. */
+  located: boolean;
+  target: string;
+  /** `file#La-Lb` of its anchor, or null. */
+  sourceRef: string | null;
+  claims: DomainClaim[];
+  checkedBy: 'codex' | 'you' | null;
+  ruling: DomainRuling | null;
+}
+
+/** (api-types 0.229.0) A sentence of a rule group, citing the statements it rests on (by id). */
+export interface DomainGroupSentence {
+  id: string;
+  text: string;
+  cites: string[];
+}
+
+/** (api-types 0.229.0) A sentence the check could not support: kept out of the group, with why. */
+export interface DomainWithheldSentence extends DomainGroupSentence {
+  reason: string;
+}
+
+/** (api-types 0.229.0) Plain-words sentences over Checked statements. Business groups first, housekeeping last. */
+export interface DomainRuleGroup {
+  id: string;
+  title: string;
+  /** The program, job or module it is about. */
+  area: string;
+  kind: 'business' | 'housekeeping' | string;
+  rule: DomainGroupSentence | null;
+  details: DomainGroupSentence[];
+  withheld: DomainWithheldSentence[];
+  /** A statement it cites went stale. */
+  stale: boolean;
+}
+
+/** (api-types 0.229.0) What a person should look at, with the action that settles it. */
+export interface DomainFollowup {
+  id: string;
+  n: number;
+  /** `flagged` / `open` (a statement: Confirm or Reject), `refused` (an unaccounted target: Confirm its lines make no
+   *  business decision), `scope` (a phrase that matched nothing). */
+  kind: string;
+  statement: string | null;
+  target: string | null;
+  where: { file: string; lines: [number, number] } | null;
+  /** What is not known. */
+  unknown: string;
+  /** What to check. */
+  check: string;
+  ruling: DomainRuling | null;
+}
+
+/** (api-types 0.229.0) A statement a person rejected: out of the model, kept here so the reject can be undone. */
+export interface DomainRejectedStatement {
+  id: string;
+  key: string;
+  text: string;
+  ruling: DomainRuling;
+}
+
+/** (api-types 0.229.0) A unit or line range in scope, and whether its lines are accounted for. */
+export interface DomainTarget {
+  id: string;
+  file: string;
+  lines: [number, number];
+  /** What a ruling names ({@link DomainRulingBody.expectTarget}). */
+  targetHash: string;
+  accounted: boolean;
+  stale: boolean;
+  statements: string[];
+  rejected: DomainRejectedStatement[];
+  /** Why the writer left its lines unaccounted. */
+  unaccountedReasons: string[];
+  ruling: DomainRuling | null;
+}
+
+/** (api-types 0.229.0, J6 K1) The domain model of a repository (schema 1.2.0), read from its estate store. */
+export interface DomainModel {
+  schemaVersion: string;
+  /** `open` counts open and rejected statements (a reject waits for the next run). */
+  accounting: { targets: number; accounted: number; open: number; stale: number };
+  statements: DomainStatement[];
+  ruleGroups: DomainRuleGroup[];
+  followups: DomainFollowup[];
+  targets: DomainTarget[];
+  /** Unix seconds; null when the build did not say. */
+  builtAt: number | null;
+}
+
+/**
+ * (api-types 0.229.0, J6 K1) Body for `POST /repos/:id/requirements/rulings`: a person's Confirm or Reject on an open
+ * statement (`statement` + `expect`), or Confirm on an unaccounted target (`target`). `expectTarget` is the target's
+ * `targetHash` as read; a reject needs a `note` (what is wrong, 1–2000 chars).
+ */
+export interface DomainRulingBody {
+  statement?: string;
+  target?: string;
+  /** The statement's `key`. */
+  expect?: string;
+  expectTarget: string;
+  action: 'confirm' | 'reject';
+  note?: string;
+}
+
+/** (api-types 0.229.0) `POST /repos/:id/requirements/rulings`'s 200: saved, and the model rebuilt. */
+export interface DomainRulingResponse {
+  ruling: DomainRuling & { subject: 'statement' | 'target'; id: string };
+  /** The rebuilt model's counts; `rebuilt: false` with `error` when the ruling was saved but the rebuild failed. */
+  build: { rebuilt: true; accounting: DomainModel['accounting'] } | { rebuilt: false; error: string };
 }
 
 /**
