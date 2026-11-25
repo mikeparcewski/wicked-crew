@@ -206,14 +206,26 @@ jobs:
       # links core main over it. A user's `npm ci` gets the published package, not core main. #1893
       # used a field only core main had (TS2339 against the lockfile's 0.15.49), and crew main stopped
       # compiling for 1h25m while every check here stayed green. The core-main typecheck below stays
-      # as the seam check. This runs inside the required check, so it blocks a merge with no ruleset
-      # change. To use an engine field that is not published yet, widen the type locally (see
-      # LaunchOptions in src/core/adapter.ts) until the lockfile moves.
+      # as the seam check. This runs inside the required ubuntu check, so it blocks a merge with no
+      # ruleset change; the macOS leg skips it, as it skips the other static checks. The first line
+      # fails the step unless node_modules holds the lockfile's own version as a real install, not a
+      # link, so a reordered job cannot turn this into a core-main typecheck. To use an engine field
+      # that is not published yet, widen the type locally (see LaunchOptions in
+      # src/core/adapter.ts) until the lockfile moves.
       - name: Typecheck against the lockfile's published wicked-core-ts (no core-main override)
         if: runner.os == 'Linux'
         working-directory: wicked-crew
         run: |
-          echo "wicked-core-ts from the lockfile: $(node -p 'require("./node_modules/wicked-core-ts/package.json").version')"
+          node -e '
+            const want = require("./package-lock.json").packages["node_modules/wicked-core-ts"].version;
+            const got = require("./node_modules/wicked-core-ts/package.json").version;
+            const linked = require("fs").lstatSync("node_modules/wicked-core-ts").isSymbolicLink();
+            if (linked || got !== want) {
+              console.error(`::error::node_modules/wicked-core-ts is ${got}${linked ? " (a link)" : ""}, not the lockfile version ${want} from npm`);
+              process.exit(1);
+            }
+            console.log(`wicked-core-ts ${got}, the version the lockfile pins`);
+          '
           npm run -w packages/crew typecheck
 
       # Overwrites node_modules/wicked-core-ts with the build above. Same script developers run
