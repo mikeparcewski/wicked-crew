@@ -17257,7 +17257,9 @@ export interface ProductPublishCard {
  * before it was sent); `unsure` (crew cannot tell whether GitHub created it: resolve it); `absent` (a person said it was
  * not created); `missing` (planned, never sent). `readBack` (created items only): `ok` = the issue's title and body as
  * GitHub's MCP server shows them are the approved ones; `differs`; `unreadable` (the read failed, a deleted issue
- * included). An edit made only of characters that server strips is invisible to it.
+ * included). An edit made only of characters that server strips is invisible to it. (wicked-crew#1911) The send reads each
+ * issue back right after creating it; a later read-back that was `ok` stands for up to 60 s, and while a send or resolve of
+ * the publication is in flight the GET answers from the send's own read-backs, so an edit on GitHub can take that long to show.
  */
 export interface PublicationItemState {
   key: string;
@@ -17288,7 +17290,7 @@ export type ProductPublishResponse =
 /**
  * `GET /projects/:id/product/publish/:runId` (a person at operator trust): whether the run can be published now
  * (`publishable.ok: false` carries the same `code` and plain-words `error` a POST would answer, so a client shows it
- * before the click; a tracker registry that cannot be read is 503 `registry_unavailable`, never an empty `targets`), the project's own GitHub repositories, and every publication of the run, each read back now.
+ * before the click; a tracker registry that cannot be read is 503 `registry_unavailable`, never an empty `targets`), the project's own GitHub repositories, and every publication of the run, each read back as `PublicationItemState` says.
  */
 export interface ProductPublicationsResponse {
   runId: string;
