@@ -10,6 +10,16 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+
+- feat(chat): a chat changes the demo video open in it (crew#1814, studio#1140 option (a)). A client that sends `accepts: ['cut']` gets crew's note on the video and its chapter list (ids, titles, timings; no caption words) in the turn's context. The seat's `wicked-make` `{"cut":{"ref","ops"}}` block becomes a `cut` card: the ops frozen, crew's words for each change, and the head the seat read. Go posts the ops to wicked-interactive's recut once, with `expect_head` and the Go's id as `request_id`. Go again reads that request first, so it never posts twice, and answers 409 `cut_pending` while the video is still rendering. A moved, deleted or refused video blocks the card with words saying which change failed and why. `chatArtifacts.cut` advertises it.
+- api-types: `ArtifactProposalKind` `cut`, `CutOp`, `ProposalCut`, `ArtifactProposal.cut`, `ProposalResult.version`, `ChatArtifactsCapabilities.cut`, and `accepts` takes `'cut'`.
+
+### Changed
+
+- The interactive default range is `^0.17.0` (the chapter ops, the request read and `head` on `GET cut`, wicked-interactive#351). A 0.16.x override is flagged as below the floor.
+- A document is a demo cut when it has interactive's `demo-cut.json` marker (the video tool's own rule). A recorder storyboard from before cuts (manifest kind `demo`, no marker) is a page again.
+
 ## [0.18.20] — 2026-11-22
 
 Patch release on the train-11 cut 34beb673, carrying 48 PRs since 0.18.19: #1653, #1654, #1655, #1657, #1659, #1661, #1662, #1664, #1665, #1666, #1668, #1670, #1671, #1672, #1674, #1675, #1676, #1677, #1679, #1680, #1681, #1684, #1686, #1687, #1688, #1689, #1690, #1691, #1693, #1700, #1701, #1708, #1709, #1710, #1712, #1715, #1717, #1718, #1719, #1720, #1721, #1723, #1729, #1730, #1732, #1736, #1738, #1743. wicked-crew-api-types 0.223.0 releases with it: 0.216.0 plus the type changes from #1676, #1677, #1693, #1701, #1712, #1720 and #1723 (it stays a workspace link in this repository).

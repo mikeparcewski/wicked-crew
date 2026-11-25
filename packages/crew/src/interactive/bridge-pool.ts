@@ -202,8 +202,11 @@ const INTERACTIVE_PACKAGE = 'wicked-interactive';
  * dot directory, which crew's default docs root (`~/.wicked-crew`) is; 0.16.1 refused the dot segment, so an edited cut
  * stopped playing. The floor follows so neither the npx spawn nor a PATH binary resolves to 0.16.1; as before, a 0.16.1
  * bridge that is adopted keeps serving until it restarts (crew#1288).
+ * 0.17.0 (wicked-interactive#351, studio#1140 (a)): the recut takes chapter ops with `expect_head` and `request_id`,
+ * answers a request's version (or that it is still rendering), and `GET cut` says the document's head: what a chat's
+ * cut card needs. An older bridge this daemon owns is recycled to it; one nobody recorded is told apart by its answers.
  */
-export const INTERACTIVE_DEFAULT_RANGE = '^0.16.2';
+export const INTERACTIVE_DEFAULT_RANGE = '^0.17.0';
 /** The env override of the RANGE (not the package). */
 export const INTERACTIVE_SPEC_ENV = 'WICKED_INTERACTIVE_SPEC';
 /** The default spec — what the daemon spawns with no override. */
