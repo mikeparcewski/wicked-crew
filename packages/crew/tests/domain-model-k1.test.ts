@@ -182,6 +182,15 @@ describe('scope card: garden scope.py output', () => {
       writeFileSync(args[args.indexOf('--out') + 1]!, '{');
       return { outcome: 'exit', code: 0, stderr: '' };
     })).toEqual({ error: 'the scope wrote a card that is not JSON' });
+    // A card over the size bound is refused by its size, before it is read.
+    const big = await scopeCardFor({
+      root: '/r', db: '/d', gardenRoot: null, scope: { intent: 'x' }, maxCardBytes: 100,
+      exec: async (_c, args) => {
+        writeFileSync(args[args.indexOf('--out') + 1]!, readFileSync(join(FIX, 'scope-mini-cobol.json')));
+        return { outcome: 'exit', code: 0, stderr: '' };
+      },
+    });
+    expect(big).toEqual({ error: 'the scope is too large to show (0 MB); narrow it to fewer files or phrases' });
     // A scratch directory that cannot be made is said too (the daemon's TMPDIR points nowhere).
     vi.stubEnv('TMPDIR', join(tmpdir(), 'k1-no-such-dir', 'x'));
     expect(await said(async () => ({ outcome: 'exit', code: 0, stderr: '' }))).toEqual({ error: expect.stringMatching(/^the scope could not start: /u) });
@@ -203,6 +212,13 @@ describe('scope card: garden scope.py output', () => {
     await new Promise((res) => setTimeout(res, 1300));
     expect(existsSync(late)).toBe(false);
     expect(await execScope(join(dir, 'missing'), [], { env: process.env, timeoutMs: 1000 })).toMatchObject({ outcome: 'spawn' });
+    // Past the stderr cap, the last line is the one kept.
+    const noisy = join(dir, 'noisy.sh');
+    writeFileSync(noisy, `#!/bin/sh\nhead -c 70000 /dev/zero | tr '\\0' x >&2\necho >&2\necho FINAL_REASON >&2\nexit 3\n`);
+    chmodSync(noisy, 0o755);
+    const r3 = await execScope(noisy, [], { env: process.env, timeoutMs: 5000 });
+    expect(r3).toMatchObject({ outcome: 'exit', code: 3 });
+    expect(r3.outcome === 'exit' && r3.stderr.trimEnd().endsWith('FINAL_REASON')).toBe(true);
   });
 
   it('a phrase is kept as its own key whatever it says (a phrase "__proto__" included)', () => {

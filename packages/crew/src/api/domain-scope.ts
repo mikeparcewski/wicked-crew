@@ -45,13 +45,19 @@ export const execScope: ScopeExec = (cmd, args, opts) =>
       timedOut = true;
       try {
         if (group && child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
-        else child.kill('SIGKILL');
+        else if (child.pid !== undefined) {
+          // Windows has no process groups: taskkill ends the tree, and the limit answers when it is done, whether or
+          // not a descendant still holds stderr.
+          spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' }).on('close', () => done({ outcome: 'timeout', stderr }));
+        }
       } catch {
         // already gone
       }
     }, opts.timeoutMs);
+    // The last 64 KiB: the failure line a script prints last is the one the preview shows.
     child.stderr?.on('data', (b: Buffer) => {
-      if (stderr.length < STDERR_CAP) stderr += b.toString('utf8').slice(0, STDERR_CAP - stderr.length);
+      stderr += b.toString('utf8');
+      if (stderr.length > STDERR_CAP) stderr = stderr.slice(-STDERR_CAP);
     });
     child.on('error', (err) => done({ outcome: 'spawn', error: err.message }));
     child.on('close', (code) => done(timedOut ? { outcome: 'timeout', stderr } : { outcome: 'exit', code: code ?? 1, stderr }));
@@ -118,6 +124,7 @@ export async function scopeCardFor(opts: {
   exec?: ScopeExec;
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
+  maxCardBytes?: number;
 }): Promise<{ card: DomainScopeCard } | { error: string }> {
   let dir: string;
   try {
@@ -130,6 +137,7 @@ export async function scopeCardFor(opts: {
   } catch (err) {
     return { error: `the scope could not be read: ${(err as Error).message}` };
   } finally {
+    // A scratch directory left behind does not unmake the card the person asked for; the OS temp dir clears it.
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
@@ -154,7 +162,7 @@ async function runScope(dir: string, opts: Parameters<typeof scopeCardFor>[0]): 
   } catch {
     return { error: 'the scope wrote no card' };
   }
-  if (size > SCOPE_FILE_MAX_BYTES) {
+  if (size > (opts.maxCardBytes ?? SCOPE_FILE_MAX_BYTES)) {
     return { error: `the scope is too large to show (${Math.round(size / 2 ** 20)} MB); narrow it to fewer files or phrases` };
   }
   let raw: unknown;
