@@ -7020,7 +7020,9 @@ export interface CoverageReport {
   unaccounted_nodes: UnaccountedNode[];
 }
 
-/** One entry of a repo's code-graph summary — a node kind and how many the graph holds (#122). */
+/** One entry of a repo's code-graph summary — a node kind and how many the graph holds (#122). The summary route
+ *  (`GET /governance/graph?repo=`) answers `{ kinds: GraphKind[] }`; for a registered repo with no code graph yet it is
+ *  `{ kinds: [], code: 'not_indexed', error }` with status 200 (studio#1402, a 404 before); an unknown repo is a 404. */
 export interface GraphKind {
   kind: string;
   count: number;
@@ -7873,10 +7875,13 @@ export interface RequirementsPage {
 }
 
 /**
- * `GET /repos/:id/requirements` 404 when the repository's `requirements_graph.json` has not been
+ * `GET /repos/:id/requirements` answer when the repository's `requirements_graph.json` has not been
  * generated (0.154.0). A state, not a refusal: `code` is the discriminator a client matches on, and
  * `workflow` names the preset that generates the graph (its last step runs `wicked-core domain-graph`).
- * Any other 404 on the route (an unknown repo) carries no `code`.
+ * Sent with status 200 after crew 0.18.20 (studio#986), so the route's 200 body is
+ * `RequirementsPage | RequirementsNotGenerated`, told apart by `code === 'notGenerated'`; an older daemon
+ * sends this body with a 404. `error` stays for those older readers. A 404 on the route now means only an
+ * unknown repository, and carries no `code`.
  */
 export interface RequirementsNotGenerated {
   error: string;
@@ -12695,16 +12700,16 @@ export interface FileProposalBody {
   content: string;
   /** Becomes the `project` facet, so the preference is recalled on that project only. */
   project?: string;
-  /** (api-types 0.228.0, studio#1095) Becomes the `repo` facet: recalled on that repository only (1–256 chars). */
+  /** (api-types 0.227.0, studio#1095) Becomes the `repo` facet: recalled on that repository only (1–256 chars). */
   repo?: string;
-  /** (api-types 0.228.0, studio#1095) The memory tier: a fact (`semantic`, the default), a how-to (`procedural`) or
+  /** (api-types 0.227.0, studio#1095) The memory tier: a fact (`semantic`, the default), a how-to (`procedural`) or
    *  something that happened (`episodic`). Any other value is a 400. */
   tier?: FileProposalTier;
   /** Where the pick was made, e.g. `doc:<docId>@v3` (kept on the payload). */
   source?: string;
 }
 
-/** (api-types 0.228.0) The tiers `POST /proposals` files into. */
+/** (api-types 0.227.0) The tiers `POST /proposals` files into. */
 export type FileProposalTier = 'semantic' | 'procedural' | 'episodic';
 
 /** `POST /proposals` → 201: the pending proposal's id. */
@@ -17906,11 +17911,54 @@ export interface VoiceTtsStatus {
   /** This machine can install it: macOS or Linux (WSL2 counts), arm64 or x86_64, CPython 3.9 to 3.14. `reason` is the plain refusal or the one-line remedy (no Python); `null` when ok. */
   supported: { ok: boolean; reason: string | null };
   python: { found: boolean; path: string | null; version: string | null };
-  engine: { found: boolean; version: string | null };
+  /** `bytes` (crew#1563): about what installing the engine downloads on this machine, from the committed lock for
+   *  its (OS, arch, CPython): the total of the PyPI wheels pip picks there. `null` on an unsupported machine. */
+  engine: { found: boolean; version: string | null; bytes: number | null };
   /** Keyed by voice id (`en_US-joe-medium`, `en_GB-cori-high`). */
   voices: Record<string, { installed: boolean; name: string; accent: string; licence: string; bytes: number; source: string }>;
   /** An install in progress (`step` is `engine` or `voice:<id>`), or the last one's failure; `null` when none. */
   install: { state: 'running' | 'failed'; step: string; error: string | null } | null;
+}
+
+/**
+ * Snooze a Needs-you item (crew#1124, DES-desk-v2 §6 item 6). `GET /desk/snoozes` → {@link DeskSnoozesResponse};
+ * `PUT /desk/snoozes/:key` {@link PutDeskSnoozeBody} → {@link DeskSnooze} (audited `desk.need.snoozed`; 400
+ * `desk_snooze_invalid` for a time not in the future, more than 7 days ahead, or a key over 200 characters);
+ * `DELETE /desk/snoozes/:key` → {@link DeskSnoozeWakeResponse} (audited `desk.need.woken`). Both are on disk before
+ * the answer (500 `desk_snooze_unsaved` when the trail could not take them; nothing changed). Setting or ending one
+ * is a human operator's (403 `human_operator_only`; an observer token gets the auth boundary's own trust 403). A snooze only defers the item on the Desk: it stays in
+ * `/system.attention[]`, and the skin brings it back when `until` passes or its rank rises above `severity`.
+ */
+export interface DeskSnooze {
+  /** The skin's own id for the item (`run:<id>`, `infra:disk`, a need-row key); opaque to the daemon. */
+  key: string;
+  /** ISO-8601: when the snooze ends by itself. */
+  until: string;
+  /** The skin's own rank of the item when it was snoozed (higher is worse), so it can bring the item back when it
+   *  gets worse; `null` when not said. */
+  severity: number | null;
+  /** ISO-8601: when it was snoozed. */
+  at: string;
+  /** The actor id that snoozed it. */
+  by: string;
+}
+
+export interface DeskSnoozesResponse {
+  /** The snoozes still in force, soonest to end first. */
+  snoozes: DeskSnooze[];
+}
+
+export interface PutDeskSnoozeBody {
+  /** ISO-8601 with an offset; in the future, at most 7 days ahead. */
+  until: string;
+  /** A whole number 0-1000: the skin's rank of the item, higher is worse. */
+  severity?: number;
+}
+
+export interface DeskSnoozeWakeResponse {
+  key: string;
+  /** `false` when no snooze was in force for the key. */
+  woken: boolean;
 }
 
 /** `POST /voice/tts`: the person's consent and the voices to install (202 = started, with the engine first when missing;

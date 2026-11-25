@@ -956,9 +956,9 @@ export interface RequirementsPage {
 }
 
 /**
- * The answer for a repository whose `requirements_graph.json` has not been generated: a 404 with a
- * typed `code`, never a bare sentence a client can only show as a refusal. It is a state, not an
- * error. `workflow` names the preset whose last step (`wicked-core domain-graph`) writes the graph,
+ * The answer for a repository whose `requirements_graph.json` has not been generated: a 200 (a 404
+ * before studio#986) with a typed `code`, never a bare sentence a client can only show as a refusal.
+ * It is a state, not an error. `workflow` names the preset whose last step (`wicked-core domain-graph`) writes the graph,
  * so a client can offer to start it. Wire shape: `RequirementsNotGenerated` (api-types 0.154.0).
  */
 export const REQUIREMENTS_NOT_GENERATED = {

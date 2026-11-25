@@ -360,6 +360,7 @@ import {
   readStudioBundleVersion,
   type ErrorRing,
 } from './diagnostics.js';
+import { DiskStoreCache, readDiskStores } from './disk-stores.js';
 import { GovernanceDiagnostics } from './governance-health.js';
 import { ATTACHMENT_LIMITS, ATTACHMENT_MAX_MESSAGE_BYTES, AttachmentError, ChatAttachmentStore, attachmentWire, attachmentsBlock, boundaryOf, parseMultipart, stageForSeat } from './chat-attachments.js';
 import { CHAT_HISTORY_MAX_LIMIT, ChatHistoryStore, SeedRequestStore, decodeCursor } from './chat-history.js';
@@ -418,6 +419,7 @@ import { VoiceService, defaultVoiceDir } from '../voice/service.js';
 import { TtsService } from '../voice/tts.js';
 import { VoiceDashboardStore } from '../voice/dashboard.js';
 import { registerVoiceRoutes } from '../voice/routes.js';
+import { DeskSnoozes, registerDeskSnoozeRoutes } from './desk-snoozes.js';
 import { VoiceInjectInputs } from '../voice/inject-input.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
@@ -1975,6 +1977,7 @@ export function registerRoutes(
     service: new VoiceService({ dir: defaultVoiceDir() }),
     dashboard: (() => { try { return VoiceDashboardStore.under(crewStateHome()); } catch { return null; } })(),
   };
+  registerDeskSnoozeRoutes(app, { snoozes: new DeskSnoozes(audit) });
   registerVoiceRoutes(app, { voice: voice.service, tts: voice.tts ?? new TtsService({ dir: defaultVoiceDir() }), dashboard: voice.dashboard, audit });
   const voiceInputs = runtime.voiceInputs ?? new VoiceInjectInputs();
   const openWithOs = runtime.openWithOs ?? openWithSystemDefault;
@@ -2774,6 +2777,10 @@ export function registerRoutes(
   const acpFoldCache = new AcpFoldCache();
   const engineVersionCache = new EngineVersionCache();
   const floorCacheCache = new FloorCacheCache();
+  // crew#1126: what wicked holds on the state-home volume, read only when the disk row is low (60 s cache).
+  const diskStoresCache = new DiskStoreCache(async (volumePath, deadline) =>
+    readDiskStores({ volumePath, deadline, floorCache: () => floorCacheCache.getRaw(), repos: await adapter.listRepos() }),
+  );
   // The governance block (crew#495): the store the engine's emit seam writes to (as the adapter
   // exported it — `null` on a boot that resolved none), its record count through the engine
   // binding when the addon has one, and the dead-letter outbox folded on change. Built at boot so
@@ -6456,6 +6463,11 @@ export function registerRoutes(
               ],
             }
             : {}),
+          // wicked-core#1463: an "All repos" chat reads every registered repository; a unit whose
+          // repositories pass the container copy-in's cap leaves out those that do not fit (each
+          // with a note in its place) instead of failing every turn. A repo or project scope names
+          // what the person asked about, so its repositories stay required.
+          ...(scope?.kind === 'everything' && readRoots.length > 0 ? { optionalReadRoots: [...readRoots] } : {}),
         };
         const runId = await adapter.launchRun(input);
         // The scope's roots (not the attachments directory) are what a later turn compares against.
@@ -9336,13 +9348,16 @@ export function registerRoutes(
       return (err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
     }
   };
+  const NOT_INDEXED = { error: 'this repository has no code graph yet: index it first', code: 'not_indexed' } as const;
+  // studio#1402 (codex r1): "not indexed" needs BOTH the engine's own open failure (it reads `open graph <db>: open
+  // estate store read-only at "<db>": storage error: unable to open database file: <db>`) and a confirmed missing graph
+  // file. Any other failure on such a repo (a binding drift, a bad answer) stays a server error, never "not indexed".
+  const notIndexedFailure = async (repo: string, msg: string): Promise<boolean> =>
+    repoReadStatus(msg) === 500 && /unable to open database file/i.test(msg) && (await repoNotIndexed(repo));
   const repoReadFailure = async (reply: FastifyReply, repo: string, err: unknown) => {
     const msg = message(err);
-    const status = repoReadStatus(msg);
-    if (status === 500 && (await repoNotIndexed(repo))) {
-      return reply.code(404).send({ error: 'this repository has no code graph yet: index it first', code: 'not_indexed' });
-    }
-    return reply.code(status).send({ error: msg });
+    if (await notIndexedFailure(repo, msg)) return reply.code(404).send(NOT_INDEXED);
+    return reply.code(repoReadStatus(msg)).send({ error: msg });
   };
 
   app.get(`${V}/governance/coverage`, async (req, reply) => {
@@ -9365,8 +9380,8 @@ export function registerRoutes(
   app.get(`${V}/governance/graph`, async (req, reply) => {
     // #122: node-count-by-kind summary of a repo's OWN code graph. Repo-scoped ONLY — there is no
     // meaningful daemon-wide graph view (the daemon store holds run/governance nodes, not a repo's
-    // code graph), so a missing `?repo=` is a 400, an unknown repo a 404, and an engine/binding
-    // failure a 500 (not masked as 404).
+    // code graph), so a missing `?repo=` is a 400, an unknown repo a 404, a repo not indexed yet a 200 with no
+    // kinds (studio#1402), and an engine/binding failure a 500 (not masked as 404).
     const repo = repoParam(req);
     if (!repo) {
       return reply.code(400).send({ error: 'governance/graph requires a ?repo=<ref>' });
@@ -9375,6 +9390,10 @@ export function registerRoutes(
       const kinds = await adapter.getGraphKindsForRepo(repo);
       return { kinds };
     } catch (err) {
+      // studio#1402: a known repo with no code graph yet is a state, not an error. The summary answers 200 with no
+      // kinds and the reason (`code: 'not_indexed'`), so Repositories, Understand and a repository's page make no 404
+      // per repo not indexed yet; every reader of `{ kinds }` draws "not built". An unknown id stays a plain 404.
+      if (await notIndexedFailure(repo, message(err))) return { kinds: [], ...NOT_INDEXED };
       return repoReadFailure(reply, repo, err);
     }
   });
@@ -9854,7 +9873,10 @@ export function registerRoutes(
       // Not generated yet is a state, typed by `code`, not a refusal (lane repo-page). It says how
       // far the repository is ("23% real requirements · 4397 placeholders · target 80%";
       // wicked-core#1233), from the very engine read the page used, when it has a store to count.
-      return reply.code(404).send({
+      // A 200, not a 404 (studio#986): a repository nobody has generated requirements for is a normal
+      // answer, and studio reads it for every such repository on each page. `code` is the discriminator;
+      // the 404 stays only for a repository that is not registered (no `code`).
+      return reply.code(200).send({
         ...REQUIREMENTS_NOT_GENERATED,
         ...(coverage === null ? {} : { coverage }),
         ...(minimum === null ? {} : { minimum }),
@@ -12147,7 +12169,7 @@ export function registerRoutes(
           tailLagMs: watchHealth?.tail_lag_ms ?? null,
         }),
         probeVault({ vault: adapter.vaultBin != null ? vaultDiagnostics(adapter.vaultBin) : null, exec: systemExec }),
-        diskRow(stateHome),
+        diskRow(stateHome, undefined, undefined, undefined, stateHome === null ? null : (deadline) => diskStoresCache.get(stateHome, deadline)),
         probeSeatImages({
           containerFloor,
           clis: rosterSeatClis(),
