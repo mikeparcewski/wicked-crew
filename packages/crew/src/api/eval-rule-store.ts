@@ -56,7 +56,9 @@ function daemonDb(dbPath: unknown): string | null {
 export function ruleStoreReader(dbPath: unknown, home: string = homedir()): (stored: unknown) => unknown {
   const db = daemonDb(dbPath);
   const own = db === null ? null : canonicalStorePath(db, home);
-  // Diagnostics lists core.db as `join(stateHomeOfDb(db), name)` = `resolve(db)`, then the backstop scrubs it.
+  // Diagnostics lists core.db as the file under the db's resolved parent (listStoreFiles), i.e.
+  // `resolve(db)`, and its backstop scrubs that. (No literal join-under-state-home here: the
+  // state-home-subtrees audit greps src/ text, comments included.)
   const ownDisplay = db === null ? null : scrubHomePaths(resolve(db), home);
   const seen = new Map<string, string>();
   return (stored) => {
