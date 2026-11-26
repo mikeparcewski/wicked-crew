@@ -198,7 +198,8 @@ export function domainModelOf(graph: unknown): DomainModel | null {
       }
     }
   }
-  // The statements no requirement holds (wicked-core garden#1545: no shown sentence of a business group cites them),
+  // The statements no requirement holds (wicked-core garden#1545: no business sentence cites them, shown or withheld
+  // only because the code changed since),
   // after the requirements'. A group cites them and a follow-up's ruling names their key, so they are read the same
   // way. A document built before the list has none.
   for (const r of arr(m['statements'])) {

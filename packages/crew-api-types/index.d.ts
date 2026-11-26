@@ -8188,9 +8188,9 @@ export interface DomainStatement {
   /** What a ruling names ({@link DomainRulingBody.expect}). */
   key: string;
   /** The requirement the statement is a rule of (`<domain>::<reqId>`, the list's `key`). (api-types 0.234.0,
-   *  garden#1545) `null` when no requirement holds it: no shown sentence of a business group cites it (a
-   *  housekeeping group does, only a withheld sentence does, or none does). It is still a statement: a group cites
-   *  it and a ruling names its key. */
+   *  garden#1545) `null` when no requirement holds it: no sentence of a business group cites it, shown or withheld
+   *  only because the code changed since (a housekeeping group does, only a sentence the writer's check withheld
+   *  does, or none does). It is still a statement: a group cites it and a ruling names its key. */
   requirementKey: string | null;
   status: 'Checked' | 'open' | 'confirmed' | 'stale';
   text: string;
