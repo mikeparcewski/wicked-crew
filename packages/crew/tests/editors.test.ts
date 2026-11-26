@@ -814,6 +814,36 @@ describe('the routes', () => {
     expect(ledger.excludes).toHaveLength(0);
   });
 
+  it('crew#1890: under auth off, an install, a removal or an enable carrying a governed unit\'s token is 403 seat_token, and nothing changes', async () => {
+    const seen: string[] = [];
+    const h = await harness({ ledger: { excludes: [] }, isUnitToken: async (t) => { seen.push(t); return t === 'unit-tok-1' ? 'unit' : t === 'flaky' ? 'unknown' : 'not_unit'; } });
+    await installed(h);
+    const listed = async (): Promise<string[]> => ((await h.app.inject({ method: 'GET', url: '/api/v1/editors', headers: HUMAN })).json() as ListEditorsResponse).editors.map((e) => `${e.id}:${String(e.enabled)}`);
+    const before = await listed();
+    h.broadcast.mockClear();
+    // No x-actor header: the local human of auth=off, who SENT a governed unit's token.
+    const SEAT = { authorization: 'Bearer unit-tok-1' };
+    const install = await h.app.inject({ method: 'POST', url: '/api/v1/editors', headers: SEAT, payload: { packRoot: makePack({ id: 'acme-seat', name: 'acme-seat' }) } });
+    expect(install.statusCode, install.body).toBe(403);
+    expect(install.json()).toMatchObject({ code: 'seat_token' });
+    const removal = await h.app.inject({ method: 'DELETE', url: '/api/v1/editors/acme-check', headers: SEAT });
+    expect(removal.statusCode, removal.body).toBe(403);
+    expect(removal.json()).toMatchObject({ code: 'seat_token' });
+    const disable = await h.app.inject({ method: 'POST', url: '/api/v1/editors/acme-check/enabled', headers: SEAT, payload: { enabled: false } });
+    expect(disable.statusCode, disable.body).toBe(403);
+    expect(disable.json()).toMatchObject({ code: 'seat_token' });
+    // A verdict crew cannot reach fails closed, as the grant write does.
+    const unsure = await h.app.inject({ method: 'POST', url: '/api/v1/editors/acme-check/enabled', headers: { authorization: 'Bearer flaky' }, payload: { enabled: false } });
+    expect(unsure.statusCode, unsure.body).toBe(503);
+    expect(h.registry.get('acme-seat')).toBeNull();
+    expect(await listed()).toEqual(before);
+    expect(h.broadcast).not.toHaveBeenCalled();
+    expect(seen).toEqual(['unit-tok-1', 'unit-tok-1', 'unit-tok-1', 'flaky']);
+    // A bearer the engine says is no unit's token, and a local request with no bearer, go through.
+    expect((await h.app.inject({ method: 'POST', url: '/api/v1/editors/acme-check/enabled', headers: { authorization: 'Bearer person-tok' }, payload: { enabled: false } })).statusCode).toBe(200);
+    expect((await h.app.inject({ method: 'POST', url: '/api/v1/editors/acme-check/enabled', payload: { enabled: true } })).statusCode).toBe(200);
+  });
+
   it('F37: refusals: mcp.session is the install consent\'s (409), an undeclared or unknown permission or a bad body is 400, an unknown editor 404, no binding 501, no ledger 503', async () => {
     const ledger = { excludes: [] as string[] };
     const h = await harness({ ledger, ledgerDecides: true });
