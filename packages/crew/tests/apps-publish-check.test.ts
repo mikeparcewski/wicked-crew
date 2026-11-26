@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { actionHash, EMPTY_LOCK, type AppFiles, type CheckOutcome } from '../src/apps/check.js';
 import { pinOf } from '../src/apps/exec/sources.js';
-import { fixtureCardFor, publishCheck, consentCard, type PublishCheckDeps, type PublishRecord } from '../src/apps/publish/check.js';
+import { fixtureCardFor, MANIFEST_EVIDENCE_PATH, publishCheck, consentCard, type PublishCheckDeps, type PublishRecord } from '../src/apps/publish/check.js';
 import { buildManifest, type ManifestInput } from '../src/apps/publish/manifest.js';
 import { renderFixture, type RenderInput, type RenderResult } from '../src/apps/publish/render.js';
 import { evidenceTarget, materializeEvidence, PUBLISH_CHECK_TIMEOUT_MS, runAppsCheck, type AppsCheckIo } from '../src/cli/apps-check.js';
@@ -113,6 +113,10 @@ describe('the publish check guards the manifest', () => {
     expect(r.digest).toBe('a'.repeat(64));
     expect(r.report.rules.map((x) => x.rule)).toEqual(expect.arrayContaining(['turn_check', 'manifest_digest', 'action_cards', 'render']));
     expect(r.card).toContain('Publish Escalations v14');
+    // crew#1949: a signed-in app with an action: the manifest evidence names them (pi r1).
+    const doc = JSON.parse(Buffer.from(r.evidence.find((e) => e.path === 'manifest.json')!.base64, 'base64').toString('utf8')) as Record<string, unknown>;
+    expect(doc['publicApp']).toEqual({ public: false, actions: ['assign'], signedInQueries: ['open'] });
+    expect(doc['blockedSources']).toEqual({ studio: [], site: [] });
   });
 
   it('surfaces the turn check code (source_check_unavailable is never swallowed)', async () => {
@@ -161,6 +165,77 @@ describe('a public app with an action fails', () => {
     if (r.ok) return;
     expect(r.code).toBe('check_failed');
     expect(r.findings.map((f) => f.code)).toContain('public_has_actions');
+  });
+});
+
+// ── crew#1949: the QE reads the manifest from the evidence ───────────────────────────────────────────
+
+describe('crew#1949: the publish check\'s evidence holds the manifest the QE judges', () => {
+  it('a public app\'s check writes manifest.json beside the renders: targets, audience, each query\'s public flag, the blocked sources per target and the rules; the CLI materializes it', async () => {
+    // The row-16 shape, built by the product's own writer (buildManifest): a public app, read-only, its one query
+    // public, published to the standalone site (the studio target is always added).
+    const pg: McpUpstreamConfig = { name: 'support', kind: 'sql', command: null, args: [], url: null, auth: { ref: 'keychain:wicked-mcp/support' }, sql: { driver: 'postgres', host: 'db.support.internal', port: 5432, database: 'support', user: 'reader', tls: 'verify-full' }, address: { allow: ['10.0.0.0/8'], plaintext: false } };
+    const spec = specOf([]);
+    (spec.queries[0] as { public?: boolean }).public = true;
+    const files = filesOf(spec);
+    files.lock.sources['support'] = pinOf(pg);
+    const built = await buildManifest({
+      app: { slug: 'esc', name: 'Escalations', version: 14, tree: 't'.repeat(40), commit: 'c'.repeat(40) },
+      files,
+      body: { base: 14, targets: ['site'], site: { origin: 'https://escalations.example.com' }, identity: null, audience: { kind: 'public' } } as AppPublishBody,
+      registry: {
+        snapshot: async () => ({ config: pg, enabled: true }),
+        source: async () => ({ config: pg, allowWrites: false, description: null, descriptorHash: pinOf(pg).descriptorHash, enabled: true }),
+        appTool: async () => null,
+        callSecret: async () => ({ secret: 'x', missing: false }),
+      } as unknown as ManifestInput['registry'],
+      maySee: async () => true,
+      grantOf: () => null,
+      endpoints: null,
+    });
+    expect(built.ok, JSON.stringify(built)).toBe(true);
+    if (!built.ok) return;
+    const digest = built.digest;
+    const rec: PublishRecord = { runId: 'run-1', slug: 'esc', base: 14, tree: built.manifest.app.tree, commit: built.manifest.app.commit, manifest: built.manifest, digest, sources: built.sources };
+    const deps: PublishCheckDeps = {
+      ...depsFor({ actions: [], digest }),
+      publishOf: (runId) => (runId === rec.runId ? rec : null),
+      filesOf: async () => files,
+      recheck: async () => ({ ...await okRecheck(), lock: files.lock } as CheckOutcome),
+      rebuildManifest: async () => built,
+    };
+    const r = await publishCheck(deps, { slug: 'esc', runId: 'run-1' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const file = r.evidence.find((e) => e.path === MANIFEST_EVIDENCE_PATH && e.path === 'manifest.json');
+    expect(file, JSON.stringify(r.evidence.map((e) => e.path))).toBeDefined();
+    const doc = JSON.parse(Buffer.from(file!.base64, 'base64').toString('utf8')) as Record<string, unknown> & { manifest: AppPublishManifest };
+    expect(doc).toMatchObject({ tree: rec.tree, digest });
+    expect(doc.manifest.targets).toEqual(['studio', 'site']);
+    expect(doc.manifest.audience).toEqual({ kind: 'public' });
+    expect(doc.manifest.queries).toEqual([{ id: 'open', source: 'support', public: true }]);
+    expect(doc.manifest.actions).toEqual([]);
+    // Every target the manifest names, with the blocked sources the rebuilt manifest found for it: none.
+    expect(doc['blockedSources']).toEqual({ studio: [], site: [] });
+    expect(doc['publicApp']).toEqual({ public: true, actions: [], signedInQueries: [] });
+    expect((doc['rules'] as Array<{ rule: string; ok: boolean }>).map((x) => x.rule)).toEqual(expect.arrayContaining(['turn_check', 'manifest_digest', 'render']));
+    expect(doc['card']).toContain('open (support): public');
+    // The CLI writes it into the evidence directory the QE reads, beside the render's report.
+    const cwd = mkTmp();
+    const lines: string[] = [];
+    const code = await runAppsCheck(['--publish'], {
+      env: { WICKED_MCP_TOKEN: 'tok', WICKED_CREW_URL: 'http://127.0.0.1:1', WICKED_TREE: 'a'.repeat(40) },
+      cwd,
+      out: (l) => lines.push(l),
+      err: () => undefined,
+      fetch: (async () => ({ ok: true, status: 200, json: async () => r })) as unknown as typeof fetch,
+    });
+    expect(code).toBe(0);
+    const dir = join(cwd, '.wicked', 'publish-check', digest.slice(0, 12));
+    expect(JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8'))).toEqual(doc);
+    // The step's output, which the QE reads too, says where the manifest is.
+    expect(lines.some((l) => l.includes(join(dir, 'manifest.json')))).toBe(true);
+    expect(existsSync(join(dir, 'out', 'report.json'))).toBe(true);
   });
 });
 

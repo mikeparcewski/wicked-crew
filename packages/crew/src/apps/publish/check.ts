@@ -144,7 +144,36 @@ export async function publishCheck(deps: PublishCheckDeps, input: { slug: string
   if (changed !== null) return changed;
 
   const report: PublishReport = { tree: rec.tree, digest: rec.digest, rules, render: result.report };
-  return { ok: true, tree: rec.tree, digest: rec.digest, report, evidence: result.evidence, card: consentCard(rec.manifest, spec.actions, cards) };
+  const card = consentCard(rec.manifest, spec.actions, cards);
+  return { ok: true, tree: rec.tree, digest: rec.digest, report, evidence: [...result.evidence, manifestEvidence(rec, rules, card)], card };
+}
+
+/** (crew#1949) The evidence file the QE step reads the manifest from, beside the render's `out/report.json`. */
+export const MANIFEST_EVIDENCE_PATH = 'manifest.json';
+
+/**
+ * (crew#1949) The manifest as evidence. The QE step judges a publish from the check's evidence alone, and must confirm
+ * that a public app has no action and only public queries, and that no target the manifest names has a blocked source
+ * (garden's wicked-garden-apps qe action). Those facts were only in the card on the step's stdout, so no publish could
+ * pass QE. This file carries them: the persisted manifest this run publishes (bound by tree and digest; names, reach
+ * and descriptors, never a secret), the blocked sources per target, the public-app facts, the check's rules and the
+ * card text. Written only after the rebuilt manifest matched the launch digest, so `buildManifest`'s refusals
+ * (`blocked_source`, `public_has_actions`, `public_queries`) found nothing: every list here is the one it checked.
+ */
+function manifestEvidence(rec: PublishRecord, rules: readonly PublishRule[], card: string): { path: string; base64: string } {
+  const m = rec.manifest;
+  const isPublic = m.audience.kind === 'public';
+  const doc = {
+    schema: 'wicked.apps.publish-check-manifest/v1',
+    tree: rec.tree,
+    digest: rec.digest,
+    manifest: m,
+    blockedSources: Object.fromEntries(m.targets.map((t) => [t, [] as string[]])),
+    publicApp: { public: isPublic, actions: m.actions.map((a) => a.id), signedInQueries: m.queries.filter((q) => !q.public).map((q) => q.id) },
+    rules,
+    card,
+  };
+  return { path: MANIFEST_EVIDENCE_PATH, base64: Buffer.from(`${JSON.stringify(doc, null, 2)}\n`, 'utf8').toString('base64') };
 }
 
 /** Fixture identity goes through the same binding and validation rules as live prepareAction. */

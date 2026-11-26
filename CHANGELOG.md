@@ -10,6 +10,25 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-11-26
+
+Minor release on the train-16 cut e89f0613, carrying 5 PRs since 0.18.23: #1943, #1944, #1930, #1945, and #1951 (merged after the cut as a train-16 blocker fix). The minor bump is for #1930's breaking removals (the requirements minimum's route, api-types and Settings key).
+
+Ships with wicked-crew-api-types 0.233.0 (tag api-types-v0.233.0), pins wicked-core-ts ^0.16.0 and bundles wicked-studio 0.17.0. #1930 needs wicked-core's J6 C3 engine (core-ts 0.16.0); an older engine's `minPct` is still shown while it sends one.
+
+### Fixed
+
+- A pull request delivered from a card with a framing line (`/refactor polish`, `/refactor upgrade`, the Focus and Lens options, an Investigate depth) is titled from the person's ask. It was titled from crew's own line, for example `chore: Kind: polish`; that line is now skipped, as the `Repository:` routing line already was (crew#1938, #1943).
+- **An apps publish can pass its QE step** (crew#1949, #1951). The publish check now writes the manifest the QE judges, `manifest.json`, beside the render's report. It holds the targets, the audience, each query's public flag, the actions, the blocked sources per target, the check's rules and the card. Before, the manifest view was on the step's output only, so the QE refused every publish ("persisted manifest absent").
+
+### Changed
+
+- The self-test pins wicked-ci 3ca93005 (wicked-ci#91, crew#1944): the advisory S04 no longer fails a valid stand-in choice whose only unfillable rows are conditional.
+
+### Removed
+
+- feat(domain)!: the requirements minimum is gone (J6 M1, crew#1930; a domain model has no share to reach and no pages). Deleted: `PUT /repos/:id/requirements/minimum` and api-types `RequirementsMinimum`, `RequirementsMinimumBody`, `RequirementsMinimumResponse` and the `minimum` fields on the requirements answers; the Settings key `requirementsGraph` (the minimum and the page-loop knobs) and its exported engine variables (`WICKED_REQUIREMENTS_MIN_COVERAGE_PCT`, `WICKED_DOMAIN_MAX_PAGES`, `WICKED_DOMAIN_MAX_MINUTES`, `WICKED_DOMAIN_PAGE_SIZE`). A Settings save naming `requirementsGraph` keeps nothing (it is answered like any unknown key), and one left in settings.json is dropped on read. `RequirementsCoverage.minPct` is optional: shown only while an engine before wicked-core's J6 C3 still sends it. A `domain-extraction` schedule saved before such schedules were refused never fires: it is listed as skipped in the words a save is refused with. Scope cards (`POST /runs/preview` with a scope) are read at most two at once; an ask whose request ends while it waits (a person typing on) leaves the queue and never runs. `scripts/use-local-core-ts.mjs` no longer checks a coverage validator pin (wicked-core#1922 runs no validator; identity and freshness stay).
+
 ## [0.18.23] — 2026-11-26
 
 Patch release on the train-15 cut b74a39fc, carrying 8 PRs since 0.18.22: #1923, #1925, #1931, #1933, #1929, #1909, #1936, #1937.
@@ -18,7 +37,6 @@ Ships with wicked-crew-api-types 0.232.0 (tag api-types-v0.232.0, the first trai
 
 ### Fixed
 
-- A pull request delivered from a card with a framing line (`/refactor polish`, `/refactor upgrade`, the Focus and Lens options, an Investigate depth) is titled from the person's ask. It was titled from crew's own line, for example `chore: Kind: polish`; that line is now skipped, as the `Repository:` routing line already was (crew#1938).
 - Evaluate no longer says a run made on this daemon was judged against "a different rule store" (crew#1934). The run route recorded the store's absolute path, and `GET /diagnostics` shows it home-masked, so studio's comparison never matched on a daemon whose store lives under the home directory: every run was tagged "Another rule store" and Steering dropped its per-rule eval marks. `GET /testing/evals` and `GET /testing/evals/:id` now compare each run's store with the daemon's own as canonical paths (`~` expanded, resolved, symlinks followed) and only then mask for display: this daemon's store reads exactly as diagnostics lists `core.db`, and any other store reads home-masked. A different store whose masked path would read the same is marked `(a different store)`. History rows recorded before the fix read correctly too, and `rule_store` on these routes no longer carries the home directory.
 - A run launched under the `standInReview: 'always'` setting records the person who turned the setting on as its consent's `by`, not the launcher (wicked-core#1930 F6). A workload token's launch used to record itself. Saving `always` (in `PUT /settings`, or by answering a stand-in gate with every job) now stores `standInConsent` (`{ scope: 'always', by, at, via: 'setting' }`), the daemon's own record: a body that sends it has it dropped. A `PUT` of `always` when it is already `always` keeps the author, an every-job gate answer records its person afresh, and saving `ask` clears it. A setting with no author recorded (saved before this change, or turned on by hand) records `by: 'the standInReview setting (author not recorded)'`. `SystemSettings.standInConsent` is new in `wicked-crew-api-types` (api-types 0.232.0).
 - The launch asks the stand-in question only for a role a stand-in can fill and every run of its plan seats (a reviewer, a judge, a QE reviewer, or the party-excluded review); a plain job, a monitor-only plan and Learn my style launch without asking, and a single step is never asked (crew#1932). (#1936)
