@@ -12,13 +12,14 @@ mentioned only where a daemon release depends on them.
 
 ## [0.19.0] — 2026-11-26
 
-Minor release on the train-16 cut e89f0613, carrying 4 PRs since 0.18.23: #1943, #1944, #1930, #1945. The minor bump is for #1930's breaking removals (the requirements minimum's route, api-types and Settings key).
+Minor release on the train-16 cut e89f0613, carrying 5 PRs since 0.18.23: #1943, #1944, #1930, #1945, and #1951 (merged after the cut as a train-16 blocker fix). The minor bump is for #1930's breaking removals (the requirements minimum's route, api-types and Settings key).
 
 Ships with wicked-crew-api-types 0.233.0 (tag api-types-v0.233.0), pins wicked-core-ts ^0.16.0 and bundles wicked-studio 0.17.0. #1930 needs wicked-core's J6 C3 engine (core-ts 0.16.0); an older engine's `minPct` is still shown while it sends one.
 
 ### Fixed
 
 - A pull request delivered from a card with a framing line (`/refactor polish`, `/refactor upgrade`, the Focus and Lens options, an Investigate depth) is titled from the person's ask. It was titled from crew's own line, for example `chore: Kind: polish`; that line is now skipped, as the `Repository:` routing line already was (crew#1938, #1943).
+- **An apps publish can pass its QE step** (crew#1949, #1951). The publish check now writes the manifest the QE judges, `manifest.json`, beside the render's report. It holds the targets, the audience, each query's public flag, the actions, the blocked sources per target, the check's rules and the card. Before, the manifest view was on the step's output only, so the QE refused every publish ("persisted manifest absent").
 
 ### Changed
 
