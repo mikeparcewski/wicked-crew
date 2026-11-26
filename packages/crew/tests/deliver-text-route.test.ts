@@ -229,12 +229,30 @@ describe('POST /deliver/text (crew#1885)', () => {
     expect((await post(app, { run: encodeURIComponent(RUN_ID), nonce: NONCE.toUpperCase() })).statusCode).toBe(200);
   });
 
-  it('refuses another nonce and an unknown run alike (403, so it says nothing of which runs exist), and a bad body (400)', async () => {
-    const { app } = await buildApp([delivering(), { ...view(), session: { ...view().session, id: 'other-run' } }], [], REQUIRED);
-    for (const body of [{ run: RUN_ID, nonce: 'fedcba9876543210fedcba9876543210' }, { run: 'nope', nonce: NONCE }, { run: 'other-run', nonce: NONCE }]) {
+  it('refuses another nonce, another run\'s deliver nonce, a finished deliver unit and an unknown run alike (403, so it says nothing of which runs exist), and a bad body (400)', async () => {
+    const OTHER_NONCE = 'fedcba9876543210fedcba9876543210';
+    // Another run, delivering now, with its own deliver script and nonce.
+    const other = view();
+    other.session = { ...other.session, id: 'other-run' };
+    other.units = other.units.map((u) => (u.id.endsWith(':deliver')
+      ? { ...u, id: 'other-run:deliver', tool_cmd: ['bash', '-lc', deliverPrScript('other work', { runId: 'other-run', nonce: OTHER_NONCE, apiOrigin: 'http://127.0.0.1:7701' })] }
+      : u));
+    // A run whose deliver unit is done: its script printed the nonce in its exit sentinel, so the nonce reads nothing.
+    const finished = delivering();
+    finished.session = { ...finished.session, id: 'finished-run' };
+    finished.units = finished.units.map((u) => (u.id.endsWith(':deliver') ? { ...u, status: 'done' } : u));
+    const { app } = await buildApp([delivering(), other, finished], [], REQUIRED);
+    expect((await post(app, { run: 'other-run', nonce: OTHER_NONCE })).statusCode).toBe(200); // the other run's own script
+    for (const body of [
+      { run: RUN_ID, nonce: OTHER_NONCE }, // another run's deliver nonce
+      { run: 'other-run', nonce: NONCE }, // this run's nonce on another run
+      { run: 'finished-run', nonce: NONCE }, // a finished deliver unit
+      { run: 'nope', nonce: NONCE }, // an unknown run
+    ]) {
       const res = await post(app, body);
       expect(res.statusCode, JSON.stringify(body)).toBe(403);
-      expect(res.json()).toMatchObject({ code: 'not_the_deliver_script' });
+      expect(res.json()).toEqual({ code: 'not_the_deliver_script', error: "only this run's own deliver script can read its delivery text here" });
+      expect(res.body).not.toContain(body.nonce); // the refusal never echoes a nonce
     }
     for (const body of [{ run: RUN_ID }, { run: RUN_ID, nonce: 'not-hex-at-all-x' }, { run: RUN_ID, nonce: 'abc' }, { run: '', nonce: NONCE }, { run: RUN_ID, nonce: NONCE, extra: 1 }]) {
       expect((await post(app, body)).statusCode, JSON.stringify(body)).toBe(400);

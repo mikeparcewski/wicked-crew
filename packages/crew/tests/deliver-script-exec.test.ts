@@ -1654,8 +1654,8 @@ describe('deliver script — composed PR text (crew#524)', () => {
 
     expect(r.status).toBe(0);
     expect(r.lastLine).toBe('https://github.com/o/r/pull/7');
-    // The script asked THIS daemon for THIS run's text, exactly once, by the run id from the branch.
-    expect(daemon.requests).toEqual([`GET /api/v1/runs/${RUN_ID}/deliver-text`]);
+    // The script asked THIS daemon for THIS run's text, exactly once, with its own nonce (crew#1885).
+    expect(daemon.requests).toEqual(['POST /api/v1/deliver/text']);
     expect(r.output).toContain(`deliver: PR text composed from the run record (${daemon.origin})`);
     // …and opened the PR with it: title from line 1, body from line 3 on — the checks table included.
     expect(r.pr!.title).toBe('Archive/Restore reachable from the project shell');
@@ -1692,25 +1692,25 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(body).toContain('Fixes #214');
   }, 60_000);
 
-  it('falls back to the launch-time text — and SAYS so — when the daemon does not know the run', async () => {
+  // crew#1885: the launch-time text is used only when no daemon origin was known; a known daemon that does not answer
+  // refuses (below).
+  it('uses the launch-time text — and SAYS so — when no daemon origin was known, composed from the launch facts', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
-    const daemon = await fakeDaemon(() => null); // 404 for every run
-    daemons.push(daemon);
+    const runUrl = `https://wc.example.test/s/run%3A${RUN_ID}`;
     const facts = factsFromWorkflow({
       runId: RUN_ID,
       intent: INTENT,
       workflowId: 'bug',
       repoRef: 'wicked-studio',
       phases: [],
-      runUrl: `${daemon.origin}/s/run%3A${RUN_ID}`,
+      runUrl,
     });
 
-    const r = await runDeliver(fx, { intent: INTENT, script: { runId: RUN_ID, apiOrigin: daemon.origin, facts } });
+    const r = await runDeliver(fx, { intent: INTENT, script: { runId: RUN_ID, facts } });
 
     expect(r.status).toBe(0);
-    expect(daemon.requests).toHaveLength(1);
-    expect(r.output).toContain(`deliver: the daemon at ${daemon.origin} did not answer with the run record — using the launch-time PR text`);
+    expect(r.output).toContain('deliver: no daemon origin was known when this run launched — using the launch-time PR text');
     const expected = composeDeliverText(facts);
     expect(r.pr!.title).toBe(expected.title);
     // BC-72: the `bug` workflow's conventional prefix rides the fallback title too.
@@ -1722,7 +1722,7 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(r.pr!.body).toBe(`${expected.body}\n`);
     expect(r.pr!.body).toContain('Fixes #214');
     expect(r.pr!.body).toContain('Refs: #211'); // `wicked-studio#211` on a wicked-studio delivery (W3-K2)
-    expect(r.pr!.body).toContain(`- Run: [\`${RUN_ID}\`](${daemon.origin}/s/run%3A${RUN_ID})`);
+    expect(r.pr!.body).toContain(`- Run: [\`${RUN_ID}\`](${runUrl})`);
     expect(r.pr!.body).toContain('workflow `bug` · repo `wicked-studio`');
     expect(r.pr!.body).toContain('Not available at composition time');
     // The commit subject is the composed 72-column cut (word boundary, never `…aga`), the body the full title.
@@ -1733,21 +1733,26 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(git(fx.origin, 'log', '-1', '--format=%b', `wicked/${RUN_ID}`).split('\n')[0]).toBe(expected.title);
   }, 60_000);
 
-  it('REJECTS a 200 that is not framed as title / blank / body and falls back, saying so (Copilot on #525)', async () => {
-    for (const bogus of ['{"error":"stale endpoint"}\n', 'title only\n', 'title\nno blank line\nbody\n', 'title\n\n\n   \n']) {
+  it('REJECTS a 200 that is not framed as title / blank / body, and a run the daemon does not know, refusing the delivery and saying so (Copilot on #525, crew#1885)', async () => {
+    const answers: Array<{ status: number; body: string } | null> = [
+      ...['{"error":"stale endpoint"}\n', 'title only\n', 'title\nno blank line\nbody\n', 'title\n\n\n   \n'].map((body) => ({ status: 200, body })),
+      null, // 404: the daemon does not know the run
+    ];
+    for (const answer of answers) {
       const fx = fixture();
       writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
-      const daemon = await fakeDaemon(() => ({ status: 200, body: bogus }));
+      const daemon = await fakeDaemon(() => answer);
       daemons.push(daemon);
 
       const r = await runDeliver(fx, { intent: 'ship it', script: { runId: RUN_ID, apiOrigin: daemon.origin } });
 
-      expect(r.status).toBe(0);
+      expect(r.status, JSON.stringify(answer)).not.toBe(0);
+      expect(r.outcome).toBe('rejected');
       expect(daemon.requests).toHaveLength(1);
-      expect(r.output).toContain('did not answer with the run record — using the launch-time PR text');
-      expect(r.pr!.title).toBe('ship it'); // the embedded fallback, not the bogus answer
-      expect(r.pr!.body).not.toContain('stale endpoint');
-      expect(r.pr!.body).toContain(`- Run: \`${RUN_ID}\``);
+      expect(r.output).toContain(`deliver: the daemon at ${daemon.origin} did not answer with the run record, so the pull request could not say how this run was checked`);
+      expect(r.output).not.toContain('stale endpoint');
+      expect(r.pr).toBeNull(); // neither the bogus answer nor the launch-time text was opened as a PR
+      expect(originBranches(fx)).not.toContain(`wicked/${RUN_ID}`);
     }
   }, 120_000);
 
@@ -1762,7 +1767,8 @@ describe('deliver script — composed PR text (crew#524)', () => {
     const r = await runDeliver(fx, { intent: 'x', script: { runId: "odd/id#1?x='y'", apiOrigin: daemon.origin } });
 
     expect(r.status).toBe(0);
-    expect(daemon.requests).toEqual(["GET /api/v1/runs/odd%2Fid%231%3Fx%3D%27y%27/deliver-text"]);
+    // (crew#1885) Sent as one percent-encoded segment in the JSON body; the daemon decodes it to the launch id.
+    expect(daemon.requests).toEqual(['POST /api/v1/deliver/text']);
     expect(r.pr!.title).toBe('Odd id delivered');
   }, 60_000);
 

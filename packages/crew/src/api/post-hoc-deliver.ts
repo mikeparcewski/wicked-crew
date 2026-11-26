@@ -28,8 +28,10 @@ import {
   deliverAdoTarget,
   deliverChecksTimeoutSecs,
   deliverPrScript,
+  mintDeliverNonce,
   type DeliverScriptOptions,
 } from '../core/deliver.js';
+import { grantPostHocDeliverText } from '../core/deliver-grants.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { gitChildEnv, withAdoCredential } from '../core/exec.js';
 
@@ -194,10 +196,15 @@ export function runDeliverScript(
   // tracked files and deliver them (disclosed) instead of refusing as an engine-driven Tool unit
   // must (wicked-core#433 review addendum — there is no verified tree here to weaken).
   shellEnv[DELIVER_POSTHOC_ENV] = '1';
-  return new Promise((resolve) => {
+  // (crew#1885) No unit carries this script, so its nonce is registered for the run while it runs: it is the
+  // script's credential for its run's PR text (`POST /deliver/text`, `core/deliver-grants.ts`).
+  const nonce = opts?.nonce ?? mintDeliverNonce();
+  const runId = opts?.runId ?? opts?.facts?.runId ?? '';
+  const release = runId === '' ? () => {} : grantPostHocDeliverText(runId, nonce);
+  return new Promise<DeliverScriptResult>((resolve) => {
     execFile(
       'bash',
-      ['-lc', deliverPrScript(intent, opts)],
+      ['-lc', deliverPrScript(intent, { ...opts, nonce })],
       {
         cwd: workdir,
         env: shellEnv,
@@ -223,5 +230,5 @@ export function runDeliverScript(
         });
       },
     );
-  });
+  }).finally(release);
 }

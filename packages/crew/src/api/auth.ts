@@ -813,6 +813,8 @@ const UNIT_TOKEN_ROUTES: ReadonlySet<string> = new Set([
   `POST ${API_PREFIX}/apps/produce`,
   // DES-CATALOG-002 CS6: the `run-cost` facts Tool's route; the body's unit token is its credential (verified there).
   `POST ${API_PREFIX}/insights/facts`,
+  // (crew#1885) A deliver script's request for its run's PR text; the body's deliver nonce is its credential (verified there).
+  `POST ${API_PREFIX}/deliver/text`,
 ]);
 
 /** True for exactly the unit-token routes above (method and path both exact). */

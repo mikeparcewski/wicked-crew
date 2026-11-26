@@ -21,6 +21,8 @@
 
 import Fastify from 'fastify';
 import { execFileSync } from 'node:child_process';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,6 +34,7 @@ import { MembershipIndex } from '../src/projects/membership-index.js';
 import { DeliveryIndex } from '../src/api/delivery-index.js';
 import { AuditLog } from '../src/api/audit.js';
 import { runDeliverScript } from '../src/api/post-hoc-deliver.js';
+import { deliverTextAllowed } from '../src/core/deliver-grants.js';
 import { RetryIndex } from '../src/api/retry-index.js';
 import type { RuntimeDeps } from '../src/api/routes.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
@@ -548,7 +551,7 @@ describe('POST /runs/:id/deliver — a stranded REVISION re-pushes onto the PR b
     return { ...fx, prHead };
   }
 
-  function buildRevisionApp(fx: Fixture, resolve: NonNullable<RuntimeDeps['resolvePullRequest']>): FastifyInstance {
+  function buildRevisionApp(fx: Fixture, resolve: NonNullable<RuntimeDeps['resolvePullRequest']>, exec?: RuntimeDeps['deliverExec']): FastifyInstance {
     const retryIndex = new RetryIndex();
     retryIndex.setRevisesPr(RUN_ID, { number: 273, headRef: PR_BRANCH, url: PR_URL });
     const views = [view(RUN_ID, { repo_ref: 'repo-1', workdir: fx.workdir })];
@@ -578,11 +581,52 @@ describe('POST /runs/:id/deliver — a stranded REVISION re-pushes onto the PR b
         retryIndex,
         resolvePullRequest: resolve,
         // The revision target rides `opts` — this harness passes it through (the crew#393 one drops it).
-        deliverExec: (workdir, intent, opts) => runDeliverScript(workdir, intent, opts, fx.env),
+        deliverExec: exec ?? ((workdir, intent, opts) => runDeliverScript(workdir, intent, opts, fx.env)),
       },
     );
     return app;
   }
+
+  // crew#1885: no unit carries a post-hoc delivery's script, so its nonce is registered for the run while the daemon runs
+  // it: that is the script's credential for its run's PR text (`POST /deliver/text`), under required auth too.
+  it('crew#1885: the post-hoc script reads its run record with a nonce registered only while it runs', async () => {
+    const fx = revisionFixture();
+    const seen: Array<{ run: string; allowed: boolean }> = [];
+    const daemon = createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c: Buffer) => { raw += c.toString('utf8'); });
+      req.on('end', () => {
+        const body = JSON.parse(raw) as { run: string; nonce: string };
+        const run = decodeURIComponent(body.run);
+        // What crew's route asks: no unit of this run declares the nonce, so only the post-hoc grant can allow it.
+        const allowed = deliverTextAllowed(run, [], body.nonce);
+        seen.push({ run, allowed });
+        res.writeHead(allowed ? 200 : 403, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end(allowed ? 'fix: the title only the run record has\n\n## Intent\n\nfrom the record\n' : 'refused');
+      });
+    });
+    await new Promise<void>((r) => daemon.listen(0, '127.0.0.1', r));
+    const addr = daemon.address() as AddressInfo;
+    const origin = `http://127.0.0.1:${addr.port}`;
+    const nonce = 'abcdef0123456789abcdef0123456789';
+    try {
+      const app = buildRevisionApp(fx, async () => ({ ok: true, pr: { number: 273, headRef: PR_BRANCH, url: PR_URL, state: 'OPEN' } }), (workdir, intent, opts) =>
+        runDeliverScript(workdir, intent, { ...opts, apiOrigin: origin, nonce }, fx.env));
+      apps.push(app);
+      await app.ready();
+
+      const res = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN_ID}/deliver` });
+
+      expect(res.statusCode, res.body).toBe(200);
+      // The script asked once, for this run, and was allowed while it ran (the revision's work was committed by the
+      // run, so its commit keeps the run's own subject; the text rides the PR comment).
+      expect(seen).toEqual([{ run: RUN_ID, allowed: true }]);
+      // Released once the script exited: the same nonce no longer reads the text.
+      expect(deliverTextAllowed(RUN_ID, [], nonce)).toBe(false);
+    } finally {
+      await new Promise<void>((r) => daemon.close(() => r()));
+    }
+  }, 60_000);
 
   it('re-checks the PR is OPEN, pushes exactly the run’s commit onto its branch, answers the PR URL — no new PR', async () => {
     const fx = revisionFixture();

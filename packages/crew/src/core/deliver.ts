@@ -31,10 +31,12 @@
  *  (e) `gh pr create --head <branch> --title … --body-file …`, with gh's output and exit status
  *      captured SEPARATELY so a gh failure fails the phase carrying gh's own message. The title
  *      and body are COMPOSED FROM THE RUN (crew#524 / F-3R2-014, `core/deliver-text.ts`): the
- *      script asks the daemon that launched it (`GET /runs/:id/deliver-text`) for the text derived
- *      from the persisted run record — intent, `Fixes #N`, run link, phases + seats + gate
- *      outcomes, repo checks with exit codes, the evaluator verdict — and falls back to the same
- *      composer's launch-time text (embedded in the script) when the daemon cannot answer. The
+ *      script asks the daemon that launched it (`POST /deliver/text`, its own nonce as the
+ *      credential, crew#1885) for the text derived from the persisted run record — intent,
+ *      `Fixes #N`, run link, phases + seats + gate outcomes, repo checks with exit codes, the
+ *      evaluator verdict, the assurance lines — and refuses, nothing pushed, when that daemon
+ *      cannot answer; the same composer's launch-time text (embedded in the script) is used only
+ *      when no daemon origin was known. The
  *      commit the phase makes for uncommitted work carries that same text (`git commit -F`), so
  *      ITS subject is the PR title; a run that committed incrementally keeps its own commits;
  *  (f) the PR URL is the last line of the phase output.
@@ -1310,11 +1312,12 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     //
     // (c1-text) THE PR TITLE + BODY AND THE COMMIT MESSAGE (crew#524 / F-3R2-014). `--fill` gave
     // wicked-studio#249 a title cut mid-word and an EMPTY body. The text now comes from the run:
-    // the script asks the daemon that launched it for `GET /runs/<id>/deliver-text` — composed from
-    // the persisted run record (phases + seats + gate outcomes, repo checks with exit codes, the
-    // evaluator verdict, the run link) — and falls back to the launch-time composition embedded
-    // below (intent, `Fixes #N`, run id, phase list) when the daemon cannot answer: no origin
-    // known, no `curl`, an auth-required daemon (401), a daemon that went away. Either way the text
+    // the script asks the daemon that launched it for its text (`POST /deliver/text`, crew#1885),
+    // composed from the persisted run record (phases + seats + gate outcomes, repo checks with exit
+    // codes, the evaluator verdict, the run link). The launch-time composition embedded below
+    // (intent, `Fixes #N`, run id, phase list) is used only when no daemon origin was known (a
+    // CLI-driven launch); a known daemon that does not answer with the record refuses the delivery
+    // (crew#1885: the embedded text knows none of the run's assurance lines). Either way the text
     // is FRAMED the same (line 1 title, line 2 blank, then the body), it is the commit message
     // verbatim (`git commit -F`: git takes the first paragraph as the subject), and the PR is
     // opened with `--title` + `--body-file` from it. WHICH text was used is always said in the
@@ -1338,16 +1341,23 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // (e2e-1105 F4c) Set only when the text below is the run record: only that text may replace an
     // existing PR's description (the launch-time fallback knows no correction given since).
     "FROMRUN=''",
+    // (crew#1885) With a daemon known, the text MUST be the run record's: only it carries the run's assurance lines
+    // (stand-ins, reduced assurance, the QE decision, floor overrides), and the launch-time text cannot know them. So
+    // a record this script cannot read refuses here, before anything is staged, committed or pushed, as a refused
+    // push does (`rejected`, the work kept, approve to retry). The script asks with its own nonce
+    // (`POST /deliver/text`), which needs no operator bearer, so `auth: required` reads it too.
+    `_norecord() { VERDICT=rejected; : > ${DELIVER_STRANDED_SENTINEL} || true; echo "deliver: $1, so the pull request could not say how this run was checked (stand-ins, reduced assurance, the QE decision, floor overrides); a PR without that is not opened. Nothing was staged, committed or pushed and the work stays in the worktree; once the daemon at $API answers, approve to retry the deliver phase, or, if the run has already ended, deliver it again from its run page (a post-hoc delivery, which reads the record itself). ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1; }`,
     'if [ -z "$API" ]; then',
     '  echo "deliver: no daemon origin was known when this run launched — using the launch-time PR text"',
     'elif ! command -v curl >/dev/null 2>&1; then',
-    '  echo "deliver: curl is not available in this shell — using the launch-time PR text"',
-    // `--noproxy "*"`: the daemon is loopback; an operator shell's http_proxy must not swallow it.
-    'elif curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" "$API/api/v1/runs/$RUNID/deliver-text" -o "$TD/text" 2>/dev/null && _framed "$TD/text"; then',
+    '  _norecord "curl is not available in this shell to read the run record"',
+    // `--noproxy "*"`: the daemon is loopback; an operator shell's http_proxy must not swallow it. The body is JSON
+    // as written: RUNID is one percent-encoded segment (`[A-Za-z0-9._~%-]`) and the nonce is hex.
+    `elif curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" -H "Content-Type: application/json" --data-binary "{\\"run\\":\\"$RUNID\\",\\"nonce\\":\\"$${DELIVER_NONCE_VAR}\\"}" "$API/api/v1/deliver/text" -o "$TD/text" 2>/dev/null && _framed "$TD/text"; then`,
     '  echo "deliver: PR text composed from the run record ($API)"; FROMRUN=1',
     'else',
     '  rm -f "$TD/text"',
-    '  echo "deliver: the daemon at $API did not answer with the run record — using the launch-time PR text"',
+    '  _norecord "the daemon at $API did not answer with the run record"',
     'fi',
     'if [ ! -s "$TD/text" ]; then',
     // The delimiter is chosen so no line of the text equals it (heredocDelimiter) — the text,
