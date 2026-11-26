@@ -247,36 +247,68 @@ describe('crew#1703: an editor pack with skills and a block', () => {
     expect(r.presets.presets.get('acme-terms-review')?.steps).toEqual([{ catalog: 'critique', id: 'critique' }, { catalog: 'review', id: 'review' }, { catalog: 'critique', id: 'critique-2' }]);
   });
 
-  it('crew#1881: a pack skill\'s executable script stays executable in the skills root and the published generation, special bits never kept; an update that drops the bit drops it', async () => {
+  it('crew#1881: a pack skill\'s executable script stays executable in the skills root and the published generation; no special or group/other write bit lands; a mode-only update reaches the generation both ways', async () => {
+    const r = rig();
+    const key = 'wicked-garden-acme-terms-checker';
+    const SCRIPT = '#!/bin/sh\necho checked\n';
+    const NOTES = 'not a program\n';
+    /** A pack whose checker skill ships scripts/check.sh and scripts/notes.md with these modes (bytes always the same). */
+    const packWith = (scriptMode: number, notesMode: number): string => {
+      const root = pack(['critique']);
+      const scripts = join(root, 'skills', 'acme-terms-checker', 'scripts');
+      mkdirSync(scripts, { recursive: true });
+      writeFileSync(join(scripts, 'check.sh'), SCRIPT);
+      writeFileSync(join(scripts, 'notes.md'), NOTES);
+      chmodSync(join(scripts, 'check.sh'), scriptMode);
+      chmodSync(join(scripts, 'notes.md'), notesMode);
+      return root;
+    };
+    const modeOf = (abs: string): number => statSync(abs).mode & 0o7777;
+    const effective = (rel: string): string => r.sc.store.resolveSkillFile(key, rel).abs;
+    const published = (rel: string): string => join(r.sc.store.currentSnapshot()!.path, ...r.sc.store.manifest().skills[key]!.dir.split('/'), ...rel.split('/'));
+    /** Executable (owner execute; the umask may take the rest) with no special bit and no write bit for group or others. */
+    const runnable = (mode: number): boolean => (mode & 0o100) !== 0 && (mode & 0o7022) === 0;
+    const plain = (mode: number): boolean => (mode & 0o7133) === 0;
+
+    // A hostile pack: every bit on the script, every bit but execute on the notes.
+    const first = packWith(0o7777, 0o7666);
+    await installPack(first, undefined, r.deps, await approvalFor(first, r.deps));
+    expect(runnable(modeOf(effective('scripts/check.sh'))), modeOf(effective('scripts/check.sh')).toString(8)).toBe(true);
+    expect(plain(modeOf(effective('scripts/notes.md'))), modeOf(effective('scripts/notes.md')).toString(8)).toBe(true);
+    // The generation seats are handed: the script runs directly (`./scripts/check.sh`), not only through `sh`.
+    expect(runnable(modeOf(published('scripts/check.sh')))).toBe(true);
+    expect(plain(modeOf(published('scripts/notes.md')))).toBe(true);
+    const gen1 = r.sc.store.currentSnapshot()!.gen;
+
+    // The same bytes, the script no longer executable: the root and a NEW generation follow (not an unchanged publish).
+    const off = packWith(0o644, 0o644);
+    await installPack(off, undefined, r.deps, await approvalFor(off, r.deps));
+    expect(modeOf(effective('scripts/check.sh')) & 0o111).toBe(0);
+    expect(r.sc.store.currentSnapshot()!.gen).toBeGreaterThan(gen1);
+    expect(modeOf(published('scripts/check.sh')) & 0o111).toBe(0);
+    const gen2 = r.sc.store.currentSnapshot()!.gen;
+
+    // …and back on, with the same bytes again.
+    const on = packWith(0o755, 0o644);
+    await installPack(on, undefined, r.deps, await approvalFor(on, r.deps));
+    expect(runnable(modeOf(effective('scripts/check.sh')))).toBe(true);
+    expect(r.sc.store.currentSnapshot()!.gen).toBeGreaterThan(gen2);
+    expect(runnable(modeOf(published('scripts/check.sh')))).toBe(true);
+  });
+
+  it('crew#1881: which files are executable is part of the approval: a chmod after the person approved refuses the install (409)', async () => {
     const r = rig();
     const root = pack(['critique']);
     const scripts = join(root, 'skills', 'acme-terms-checker', 'scripts');
     mkdirSync(scripts, { recursive: true });
     writeFileSync(join(scripts, 'check.sh'), '#!/bin/sh\necho checked\n');
-    chmodSync(join(scripts, 'check.sh'), 0o4755); // setuid on the source: never carried
-    writeFileSync(join(scripts, 'notes.md'), 'not a program\n');
-    chmodSync(join(scripts, 'notes.md'), 0o644);
-    await installPack(root, undefined, r.deps, await approvalFor(root, r.deps));
-    const key = 'wicked-garden-acme-terms-checker';
-    const modeOf = (abs: string): number => statSync(abs).mode & 0o7777;
-    const effective = (rel: string): string => r.sc.store.resolveSkillFile(key, rel).abs;
-    expect(modeOf(effective('scripts/check.sh')) & 0o100).toBe(0o100); // owner execute (the umask may take the rest)
-    expect(modeOf(effective('scripts/check.sh')) & 0o7000).toBe(0);
-    expect(modeOf(effective('scripts/notes.md')) & 0o111).toBe(0);
-    // The generation seats are handed: the script runs directly (`./scripts/check.sh`), not only through `sh`.
-    const snap = r.sc.store.currentSnapshot()!;
-    const dir = r.sc.store.manifest().skills[key]!.dir;
-    const published = join(snap.path, ...dir.split('/'), 'scripts', 'check.sh');
-    expect(modeOf(published) & 0o100).toBe(0o100); // owner execute (the umask may take the rest)
-    expect(modeOf(published) & 0o7000).toBe(0);
-    expect(modeOf(join(snap.path, ...dir.split('/'), 'scripts', 'notes.md')) & 0o111).toBe(0);
-    // An update whose script is no longer executable: the root follows the pack.
-    const again = pack(['critique']);
-    mkdirSync(join(again, 'skills', 'acme-terms-checker', 'scripts'), { recursive: true });
-    writeFileSync(join(again, 'skills', 'acme-terms-checker', 'scripts', 'check.sh'), '#!/bin/sh\necho checked again\n');
-    chmodSync(join(again, 'skills', 'acme-terms-checker', 'scripts', 'check.sh'), 0o644);
-    await installPack(again, undefined, r.deps, await approvalFor(again, r.deps));
-    expect(modeOf(effective('scripts/check.sh')) & 0o111).toBe(0);
+    chmodSync(join(scripts, 'check.sh'), 0o644);
+    const approved = await approvalFor(root, r.deps);
+    chmodSync(join(scripts, 'check.sh'), 0o755); // same bytes, now a program
+    const err = await installPack(root, undefined, r.deps, approved).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PackInstallError);
+    expect((err as PackInstallError).status).toBe(409);
+    expect(keys(r.sc)).toEqual([]);
   });
 
   it("a skill or preset name another pack or the operator already holds is refused (409); nothing is written", async () => {
@@ -449,16 +481,21 @@ describe('crew#1703: an editor pack with skills and a block', () => {
     const again = pack(['critique']);
     for (const dir of APPROVE.skills) writeFileSync(join(again, 'skills', dir, 'SKILL.md'), readFileSync(join(again, 'skills', dir, 'SKILL.md'), 'utf8') + '\nVersion two.\n');
     const ok = await approvalFor(again, r.deps);
+    // crew#1881: the first skill's own mode, as the root holds it before the update (a narrower one than a pack sets).
+    chmodSync(r.sc.store.resolveSkillFile('wicked-garden-acme-terms', 'SKILL.md').abs, 0o600);
     const realReplace = r.sc.store.replace.bind(r.sc.store);
     const failing = wrappedPort(r.deps.skills, {
-      replace: ((name: string, files: Record<string, string>, rev: number) => {
+      replace: ((...args: Parameters<typeof realReplace>) => {
+        const [name, files] = args;
         if (name === 'wicked-garden-acme-terms-checker' && files['SKILL.md']?.includes('Version two.')) throw new Error('disk full');
-        return realReplace(name, files, rev);
+        return realReplace(...args);
       }) as never,
     });
     const res = await installPack(again, undefined, { ...r.deps, skills: failing }, ok);
     expect(res.skillsError).toMatch(/refused the skill acme-terms-checker .*disk full/);
     expect((await r.sc.store.readFile('wicked-garden-acme-terms', 'SKILL.md')).content).toBe(v1);
+    // The put-back restores the earlier mode exactly, not the pack's normalized one.
+    expect(statSync(r.sc.store.resolveSkillFile('wicked-garden-acme-terms', 'SKILL.md').abs).mode & 0o777).toBe(0o600);
     expect(r.sc.store.manifest().skills['wicked-garden-acme-terms']?.enabled).toBe(true);
     const published = await r.deps.skills.publish();
     expect(published.verdict).not.toBe('blocked');

@@ -28,7 +28,7 @@ import { SKILL_NAME_PREFIX } from '../skills/frontmatter.js';
 import { budgetPacer } from '../skills/tree.js';
 import { FENCED_WORKFLOWS } from '../mcp/run-fence.js';
 import type { SkillsRuntime } from '../skills/runtime.js';
-import { SkillsUnseededError, type SkillsStore } from '../skills/store.js';
+import { EXECUTABLE_FILE_MODE, PLAIN_FILE_MODE, SkillsUnseededError, type SkillsStore } from '../skills/store.js';
 
 /** What the person approved: the pack's skill directories and block ids, and the digest the refusal showed. */
 export interface PackApproval {
@@ -87,6 +87,8 @@ export class PackExtrasRefusal extends Error {
 
 export interface SkillPlan extends InstalledPackSkill {
   files: Record<string, string>;
+  /** (crew#1881) The files the pack holds executable (any execute bit), relative to the skill. */
+  executable: ReadonlySet<string>;
   /** This pack installed it before: an update replaces it in place. */
   own: boolean;
 }
@@ -225,9 +227,13 @@ function readNoFollowCapped(path: string, max: number): Buffer | null {
   }
 }
 
-/** Every regular file under `dir` (no links, bounded), as UTF-8 text keyed by its path relative to `dir`. */
-function readSkillFiles(dir: string, label: string): Record<string, string> {
+/**
+ * Every regular file under `dir` (no links, bounded), as UTF-8 text keyed by its path relative to `dir`, and (crew#1881)
+ * which of them the pack holds executable, so a script the skill runs directly stays runnable.
+ */
+function readSkillFiles(dir: string, label: string): { files: Record<string, string>; executable: Set<string> } {
   const files: Record<string, string> = Object.create(null) as Record<string, string>;
+  const executable = new Set<string>();
   let count = 0;
   let entries = 0;
   let bytes = 0;
@@ -249,6 +255,7 @@ function readSkillFiles(dir: string, label: string): Record<string, string> {
       const buf = readNoFollowCapped(abs, PACK_SKILL_MAX_BYTES - bytes);
       if (buf === null) throw unreadable(`the skill ${label} is over ${PACK_SKILL_MAX_BYTES / 1048576} MiB, or ${r} could not be read as a plain file`);
       bytes += buf.length;
+      if ((st.mode & 0o111) !== 0) executable.add(r);
       try {
         files[r] = decoder.decode(buf);
       } catch {
@@ -257,7 +264,7 @@ function readSkillFiles(dir: string, label: string): Record<string, string> {
     }
   };
   walk(dir, '', 0);
-  return files;
+  return { files, executable };
 }
 
 /** One step per phase; a phase named again gets its own step id (`review`, `review-2`, …). */
@@ -319,7 +326,7 @@ export async function planExtras(input: {
       }
       const base = containedPath(input.root, `${skillsDir}/${dir}`, 'dir');
       if (base === null) throw unreadable(`the skill ${dir} is not a folder inside the pack (a missing folder, or a link)`);
-      const files = readSkillFiles(base, dir);
+      const { files, executable } = readSkillFiles(base, dir);
       const md = files['SKILL.md'];
       if (md === undefined) throw unreadable(`the skill ${dir} has no SKILL.md`);
       try {
@@ -332,7 +339,7 @@ export async function planExtras(input: {
         throw new PackExtrasRefusal(422, 'pack_skill_refused', `the skills root would refuse the skill ${dir} (${key}): ${blocking.map((f) => f.evidence).join('; ')}; nothing was installed`);
       }
       if (own) replaces.push(key);
-      skills.push({ name: dir, key, files, own });
+      skills.push({ name: dir, key, files, executable, own });
     }
   }
   const blocks: BlockPlan[] = [];
@@ -388,7 +395,9 @@ export async function planExtras(input: {
     .update(
       JSON.stringify({
         manifest: input.manifestText,
-        skills: skills.map((s) => ({ key: s.key, files: Object.keys(s.files).sort().map((f) => [f, s.files[f]]) })),
+        // crew#1881: which files are executable is part of what the person approves (listed only when a pack has any,
+        // so the digest of a pack without one is unchanged).
+        skills: skills.map((s) => ({ key: s.key, files: Object.keys(s.files).sort().map((f) => [f, s.files[f]]), ...(s.executable.size > 0 ? { executable: [...s.executable].sort() } : {}) })),
         blocks: blocks.map((b) => ({ id: b.id, steps: b.steps })),
       }),
     )
@@ -434,15 +443,35 @@ export async function writePresets(plan: ExtrasPlan, presets: PackPresetsPort | 
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** A skill as it was before this pass replaced it: its files, each file's mode (crew#1881), and its switch. */
+interface PreImage {
+  files: Record<string, string>;
+  modes: Record<string, number>;
+  enabled: boolean;
+}
+
+/** (crew#1881) The modes a pack's skill files land with: executable in the pack (any execute bit) or not, nothing
+ *  else of the pack's modes (no write bit for others, no setuid, setgid or sticky bit). */
+function packModes(s: SkillPlan): Record<string, number> {
+  const modes: Record<string, number> = Object.create(null) as Record<string, number>;
+  for (const rel of Object.keys(s.files)) modes[rel] = s.executable.has(rel) ? EXECUTABLE_FILE_MODE : PLAIN_FILE_MODE;
+  return modes;
+}
+
 /** A skill's files and switch as they are now, to put back if the pass fails. `null` when they cannot be kept whole:
  *  a file that does not read, or one that is not UTF-8 text (the store writes text, so it could not be put back). */
-function preImage(store: PackSkillsPort['store'], key: string): { files: Record<string, string>; enabled: boolean } | null {
+function preImage(store: PackSkillsPort['store'], key: string): PreImage | null {
   try {
     const tree = store.listFiles(key);
     const files: Record<string, string> = Object.create(null) as Record<string, string>;
+    const modes: Record<string, number> = Object.create(null) as Record<string, number>;
     const utf8 = new TextDecoder('utf-8', { fatal: true });
-    for (const f of tree.files) files[f.path] = utf8.decode(readFileSync(store.resolveSkillFile(key, f.path).abs));
-    return { files, enabled: tree.enabled };
+    for (const f of tree.files) {
+      const abs = store.resolveSkillFile(key, f.path).abs;
+      files[f.path] = utf8.decode(readFileSync(abs));
+      modes[f.path] = lstatSync(abs).mode & 0o777; // crew#1881: a put-back restores each file's mode exactly
+    }
+    return { files, modes, enabled: tree.enabled };
   } catch {
     return null;
   }
@@ -464,7 +493,7 @@ export async function writeSkills(plan: ExtrasPlan, port: PackSkillsPort | null,
     await sleep(100);
   }
   // A copy of every skill this pass replaces, taken before the first write: without a whole copy, nothing is written.
-  const replaced: Array<{ key: string; before: { files: Record<string, string>; enabled: boolean } }> = [];
+  const replaced: Array<{ key: string; before: PreImage }> = [];
   for (const s of plan.skills.filter((x) => x.own)) {
     const before = preImage(store, s.key);
     if (before === null) return `installed, but the skill ${s.key} could not be copied whole before it was replaced (a file that does not read, or is not text), so the pack’s skills were not changed`;
@@ -485,7 +514,7 @@ export async function writeSkills(plan: ExtrasPlan, port: PackSkillsPort | null,
     for (const { key, before } of [...replaced].reverse()) {
       if (!done.has(key)) continue;
       try {
-        if (blocked(store.replace(key, before.files, store.revision()))) {
+        if (blocked(store.replace(key, before.files, store.revision(), { modes: before.modes }))) {
           left.push(key);
           continue;
         }
@@ -503,7 +532,9 @@ export async function writeSkills(plan: ExtrasPlan, port: PackSkillsPort | null,
     try {
       // Marked before the call: a write that fails partway may have changed the skill, and its copy is put back.
       if (s.own) done.add(s.key);
-      const r = s.own ? store.replace(s.key, s.files, store.revision()) : store.add(s.key, s.files, store.revision(), opts.origin !== undefined ? { origin: opts.origin } : {});
+      const r = s.own
+        ? store.replace(s.key, s.files, store.revision(), { modes: packModes(s) })
+        : store.add(s.key, s.files, store.revision(), { modes: packModes(s), ...(opts.origin !== undefined ? { origin: opts.origin } : {}) });
       if (r.verdict === 'blocked') why = r.findings.filter((f) => f.severity === 'blocking').map((f) => f.evidence).join('; ');
       else {
         if (!s.own) added.push(s.key);
