@@ -270,6 +270,11 @@ async function runPublishCheck(io: AppsCheckIo): Promise<number> {
   const pages = body.report?.render?.pages?.length ?? 0;
   io.out(`apps_check: publish check ok tree=${body.tree ?? tree} digest=${digest.slice(0, 12)} (${rules.length} rule${rules.length === 1 ? '' : 's'} checked, ${pages} page render${pages === 1 ? '' : 's'})`);
   io.out(`apps_check: evidence written to ${dir} (${evidence.length} file${evidence.length === 1 ? '' : 's'})`);
+  // crew#1949: the QE judges the manifest from the evidence; say where it is (`MANIFEST_EVIDENCE_PATH` in
+  // apps/publish/check.ts, spelled here so the CLI does not load the check; tests/apps-publish-check.test.ts pins both).
+  if (evidence.some((e) => e.path === 'manifest.json')) {
+    io.out(`apps_check: the manifest (targets, audience, each query public or not, actions, blocked sources per target, the rules) is ${join(dir, 'manifest.json')}`);
+  }
   if (typeof body.card === 'string' && body.card !== '') {
     io.out('apps_check: consent card:');
     for (const line of body.card.split('\n')) io.out(`  ${line}`);
