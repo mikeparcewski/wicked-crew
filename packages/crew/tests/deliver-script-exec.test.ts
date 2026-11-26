@@ -1665,11 +1665,11 @@ describe('deliver script — composed PR text (crew#524)', () => {
     const key = readDeliverKey(keyFile)!;
     const seen = join(fx.root, 'profile-seen');
     const trace = join(fx.root, 'xtrace');
-    // Tracing on, into a file the test reads (BASH_XTRACEFD), so every traced line is kept whatever the script does with
-    // its own stderr. A profile function shadows a builtin of the same name; these log every argument, then do the work.
+    // Tracing on, with the shell's whole stderr (the trace's own stream on every bash, 3.2 included: BASH_XTRACEFD is 4.1+)
+    // in a file the test reads, so every traced line is kept. A profile function shadows a builtin of the same name;
+    // these log every argument, then do the work.
     const profile = [
-      `exec 9>>'${trace}'`,
-      'BASH_XTRACEFD=9',
+      `exec 2>>'${trace}'`,
       'set -x',
       `printf() { echo "printf-fn $*" >> '${seen}'; command printf "$@"; }`,
       `read() { echo "read-fn $*" >> '${seen}'; command read "$@"; }`,
@@ -1678,11 +1678,12 @@ describe('deliver script — composed PR text (crew#524)', () => {
 
     const r = await runDeliver(fx, { intent: INTENT, profile, script: { runId: RUN_ID, apiOrigin: daemon.origin, keyFile } });
 
-    expect(r.status, r.output).toBe(0);
-    expect(daemon.requests).toEqual(['POST /api/v1/deliver/text']);
-    expect(r.output).toContain(`deliver: PR text composed from the run record (${daemon.origin})`);
-    // Neither the trace nor a profile function saw the key.
+    // The script's own stderr is in the trace file now: read the two together.
     const traced = readFileSync(trace, 'utf8');
+    expect(r.status, `${r.output}\n${traced}`).toBe(0);
+    expect(daemon.requests).toEqual(['POST /api/v1/deliver/text']);
+    expect(`${r.output}\n${traced}`).toContain(`deliver: PR text composed from the run record (${daemon.origin})`);
+    // Neither the trace nor a profile function saw the key.
     expect(traced).toContain('set -euo pipefail'); // tracing was on when the script began
     expect(traced).not.toContain(key);
     expect(r.output).not.toContain(key);
