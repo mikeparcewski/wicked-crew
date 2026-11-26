@@ -327,7 +327,7 @@ const BRIEF_COPY_MAX = 512 * 1024;
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
 import { crewStateHome, stateHomeOfDb, wickedWorkRoot } from '../projects/state-home.js';
-import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, jobLaunchRoster, jobRevisionLaunch, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
+import { chatStartAsksStandIns, demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, jobLaunchRoster, jobRevisionLaunch, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
 import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, removeStagedDocuments, stagedDocumentsRemoved, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
 import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks, webScopeReason } from './run-sources.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
@@ -443,6 +443,7 @@ import {
   type DeliveryResolver,
 } from './delivery-index.js';
 import { REVIEW_CHANGE_WORKFLOW, reviewChangeExclusion, type ReviewChangeDeps } from './review-change.js';
+import { noStandInsKind } from './stand-in-scope.js';
 import { rosterWithout } from '../interactive/review-events.js';
 import { DeliveryDerivationCache } from './delivery-cache.js';
 import {
@@ -4016,13 +4017,14 @@ export function registerRoutes(
     // the launcher's caller draws as the choice; with consent (the person's `standIns`, or the `standInReview:
     // 'always'` setting) the run launches stand-in-aware and fills a short role with a labelled stand-in. A review
     // (review-change, the prepared reviews, run-evals), a demo and a reduced launch keep today's path (K2a scope).
-    const standInEligible = b.reducedAssurance !== true && reviewChange === undefined
-      && !(b.workflow !== undefined && (reviewPrepared(b.workflow) || b.workflow === RUN_EVALS_WORKFLOW || DEMO_PRESETS.includes(b.workflow)));
+    // (crew#1884) One classifier with a schedule and a chat card (`stand-in-scope.ts`).
+    const noStandIns = noStandInsKind(b.workflow);
+    const standInEligible = b.reducedAssurance !== true && reviewChange === undefined && noStandIns === null;
     const standInsSupported = typeof adapter.supportsStandIns === 'function' && adapter.supportsStandIns();
     if (b.standIns === true && !standInEligible) {
-      // (crew#1884) Said why: a reduced launch skips the checks a stand-in would fill (the schema refuses it beside
-      // reducedAssurance before this), a review needs a reviewer who did none of the work, a demo keeps its own review.
-      const why = b.workflow !== undefined && DEMO_PRESETS.includes(b.workflow) ? noStandInsWhy('demo') : noStandInsWhy('review');
+      // (crew#1884) Said why: a review needs a reviewer who did none of the work, the evals are computed, a demo keeps
+      // its own review (a reduced launch beside standIns is the schema's 400, before this).
+      const why = noStandInsWhy(noStandIns ?? 'review');
       return reply.code(400).send({ code: 'stand_ins_refused', error: `This launch does not take stand-ins (standIns). ${why}` });
     }
     if (b.standIns === true && !standInsSupported) {
@@ -4788,8 +4790,9 @@ export function registerRoutes(
             ...jobRevisionLaunch(p),
           },
           // (crew#1884) A person's Start asks the stand-in choice, as studio's Start on POST /runs does: a short roster
-          // with no consent reopens the card with the stand_in question.
-          { ...ctx, fromProposal: d.pid, standInChoice: true, ...(d.power === true ? { powerRequired: true } : {}) },
+          // with no consent reopens the card with the stand_in question. A reshape does not ask: its Start rejects the
+          // held plan first, so the question would come after the plan it replaces was gone.
+          { ...ctx, fromProposal: d.pid, ...(chatStartAsksStandIns(p) ? { standInChoice: true } : {}), ...(d.power === true ? { powerRequired: true } : {}) },
         );
         if (out.statusCode !== 201) throw jobRefusal(out.statusCode, out.payload);
         return;
@@ -4801,6 +4804,8 @@ export function registerRoutes(
           fromProposal: d.pid,
           humanConfirm: 'before:1',
           common,
+          // (crew#1884) The card draws the stand-in question; a reshape does not ask (as above).
+          standInChoice: chatStartAsksStandIns(p),
         });
         if (out.code !== 202) throw jobRefusal(out.code, out.body);
         return;
@@ -6254,6 +6259,7 @@ export function registerRoutes(
       return new Set((await adapter.listPresets(projectId !== null && projectId !== DEFAULT_PROJECT_ID ? projectId : undefined)).map((p) => p.name));
     },
     acceptsJobs: (chatId) => chatAccepts.get(chatId) === true,
+    standInsFor: (workflow) => typeof adapter.supportsStandIns === 'function' && adapter.supportsStandIns() && noStandInsKind(workflow) === null,
     acceptsOnboard: (chatId) => chatAcceptsOnboard.get(chatId) === true,
     acceptsCut: (chatId) => chatArtifactFlags.cut === true && chatAcceptsCut.get(chatId) === true,
     cut: { bridgeFor: (projectId) => cutBridgeFor(projectId) },

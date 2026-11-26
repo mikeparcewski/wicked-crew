@@ -78,6 +78,8 @@ export interface ComposeLaunchExtra {
   fromProposal?: string;
   /** Hold the run at its plan (a chat launch always does). */
   humanConfirm?: string;
+  /** (crew#1884) The caller draws the stand-in choice (a chat card's question): the launch asks it. */
+  standInChoice?: boolean;
 }
 
 /** The shared launch function's shape here (DES-CHAT-FIRST-001 C3): the routes module passes its own. */
@@ -269,9 +271,10 @@ export async function composeLaunch(
             ],
           },
         },
-        // (crew#1884) A person starts every compose (the route, a chat Backlog job's Go): its launch asks the stand-in
-        // choice, as `POST /runs` does; the route relays the 409 and a chat job reopens its card with the question.
-        { ...ctx, target: 'compose', standInChoice: true, compose: composeFactsOf(id, rows, level, draft, review), ...(extra.fromProposal !== undefined ? { fromProposal: extra.fromProposal } : {}) },
+        // (crew#1884) A chat Backlog job's Go asks the stand-in choice, as `POST /runs` does: its card reopens with the
+        // question. The route's own caller (studio's Draft) does not draw the choice yet, so the route takes `standIns`
+        // and the setting but does not ask (studio follow-up).
+        { ...ctx, target: 'compose', ...(extra.standInChoice === true ? { standInChoice: true } : {}), compose: composeFactsOf(id, rows, level, draft, review), ...(extra.fromProposal !== undefined ? { fromProposal: extra.fromProposal } : {}) },
       );
       // POST /runs' own refusal (no eligible seat, a busy engine, an archived project, …) is
       // relayed as it answered; its 201 `{runId}` becomes this route's 202.
@@ -285,7 +288,7 @@ export async function composeLaunch(
 export function registerProductRoutes(app: FastifyInstance, adapter: CoreAdapter, launchRun: ComposeLaunchRun): void {
   app.post(
     `${V}/projects/:id/product/compose`,
-    { config: { manifest: { requestType: 'ProductComposeBody', responseType: 'ProductComposeResponse', statusCodes: [202, 400, 404, 409, 422, 501, 503] } } },
+    { config: { manifest: { requestType: 'ProductComposeBody', responseType: 'ProductComposeResponse', statusCodes: [202, 400, 403, 404, 409, 422, 501, 503] } } },
     async (req: FastifyRequest & { actor?: Actor }, reply) => {
       const { id } = req.params as { id: string };
       const out = await composeLaunch(adapter, launchRun, id, req.body, { actor: req.actor ?? LOCAL_ACTOR, log: req.log });

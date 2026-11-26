@@ -7679,8 +7679,9 @@ export interface SystemSettings {
    * (api-types 0.231.0, DES-STANDIN-001 §4) Settings → Checks → "Stand-in review": `ask` (the default; a job that
    * can't be checked independently asks first, `409 stand_in_choice`) or `always` (use stand-ins whenever a helper
    * is missing; every stand-in is labelled). ABSENT = `ask`. Human actors only. Read by every launch through
-   * crew's launcher (studio's Start, the API, a chat proposal's Start, a recording, a product plan); a scheduled job
-   * does not read it yet.
+   * crew's launcher (studio's Start, the API, a chat proposal's Start, capture, a product plan) and (api-types next,
+   * crew#1884) by a scheduled launch, which records the setting's saved author as its consent. A review
+   * (review-change, review-recent-work), the evals, a demo and a reduced launch take no stand-ins either way.
    */
   standInReview?: 'ask' | 'always' | undefined;
   /**
@@ -10347,7 +10348,7 @@ export interface ProposalRevisionEdits {
    *  swap or suggestion naming what it drops (the ids its label names: check ids and seat rules). A loss beyond what the
    *  press was shown asks again. */
   confirmLoss?: true | string[];
-  /** (api-types 0.233.0, crew#1884) Only on the person route, and only as the choice of wicked's `stand_in` question:
+  /** (api-types next, crew#1884) Only on the person route, and only as the choice of wicked's `stand_in` question:
    *  this job may fill a role its helpers are short of with a labelled stand-in (consent for this job only). A seat's
    *  block, or the field on any other proposal, changes nothing (a note says so). */
   standIns?: true;
@@ -10415,7 +10416,7 @@ export interface ProposalSuggestion {
  * A question wicked asks instead of "Start?": a missing input (its choices fill it), or a revision that would lose a
  * check (`lost` names it; the lossy choice carries `confirmLoss`, which only the person route takes). `input`: the
  * answer is typed (a QE skip's reason), bound to the question by the client and sent as the choice's edit.
- * (api-types 0.233.0, crew#1884) `stand_in`: the job's Start was refused `409 stand_in_choice` (its helpers are short of
+ * (api-types next, crew#1884) `stand_in`: the job's Start was refused `409 stand_in_choice` (its helpers are short of
  * a role a check needs); the text is the refusal's own words, and the choice `{ standIns: true }` makes the job use
  * stand-ins (only the person's press takes it). Its other choice (`{}`) goes back to the job unchanged.
  */
@@ -10709,7 +10710,7 @@ export interface ArtifactProposal {
    *  held run had it (disclosed). */
   reshapes?: string;
   reducedAssurance?: true;
-  /** (api-types 0.233.0, crew#1884) The person chose stand-ins for this job (their press on the `stand_in` question):
+  /** (api-types next, crew#1884) The person chose stand-ins for this job (their press on the `stand_in` question):
    *  its Start launches with `standIns: true`. A later revision drops it (a changed job is asked again). */
   standIns?: true;
   /** (§2.5) The held run's plan was answered Reject for this reshape (a retry after that launches the replacement). */
@@ -13253,7 +13254,7 @@ export interface CaptureBody {
   files?: Array<CaptureTextFile | CaptureImageFile>;
   /** (crew ≥ 0.9.0) The explicit reduced-assurance opt-in, as `LaunchRunBody.reducedAssurance`. */
   reducedAssurance?: boolean;
-  /** (api-types 0.233.0, crew#1884) A person's stand-in choice for this capture, as `LaunchRunBody.standIns`: the
+  /** (api-types next, crew#1884) A person's stand-in choice for this capture, as `LaunchRunBody.standIns`: the
    *  answer to the launch's `409 stand_in_choice` (relayed from `POST /runs`, like its other refusals). */
   standIns?: true;
 }
@@ -17750,7 +17751,7 @@ export interface ProductComposeBody {
   /** (api-types 0.192.0) As {@link LaunchRunBody.shape}: must name a card option whose launch is `compose`; its compose
    *  level (`epics` · `stories` · `tasks`) decides how far down the draft goes. */
   shape?: LaunchShape;
-  /** (api-types 0.233.0, crew#1884) A person's stand-in choice for this draft, as `LaunchRunBody.standIns`. The compose
+  /** (api-types next, crew#1884) A person's stand-in choice for this draft, as `LaunchRunBody.standIns`. The compose
    *  is a person's start, so its launch asks the choice: a short roster with no consent is `409 stand_in_choice`
    *  (relayed), answered by sending the body again with `standIns: true`. */
   standIns?: true;

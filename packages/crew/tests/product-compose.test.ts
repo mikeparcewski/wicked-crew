@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CoreAdapter } from '../src/core/adapter.js';
-import { COMPOSE_MAX_REQUIREMENTS, ComposeSelectionTooLargeError, composeInstructions, composePreflight, registerProductRoutes, reviewInstructions } from '../src/api/product.js';
+import { COMPOSE_MAX_REQUIREMENTS, ComposeSelectionTooLargeError, composeInstructions, composeLaunch, composePreflight, registerProductRoutes, reviewInstructions } from '../src/api/product.js';
 
 describe('POST /projects/:id/product/compose (crew#372)', () => {
   let base: string;
@@ -79,19 +79,22 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
   const compose = (payload: unknown, headers: Record<string, string> = {}) =>
     app.inject({ method: 'POST', url: '/api/v1/projects/p1/product/compose', payload: payload as Record<string, unknown>, headers });
 
-  // crew#1884: a person starts the product plan, so its launch asks the stand-in choice (POST /runs' 409, relayed), and the
-  // person's answer (`standIns: true`) reaches the launch.
-  it('asks the stand-in choice and relays it; standIns: true reaches the launch (crew#1884)', async () => {
-    runsAnswer = { status: 409, body: { code: 'stand_in_choice', error: 'short', retryWith: { standIns: true } } };
-    const asked = await compose({ requirements: [{ repoId: 'alpha', key: 'billing::r1' }] });
-    expect(asked.statusCode, asked.body).toBe(409);
-    expect(asked.json()).toMatchObject({ code: 'stand_in_choice', retryWith: { standIns: true } });
-    expect(launched[0]!.standInChoice).toBe(true);
-    runsAnswer = { status: 201, body: { runId: 'run-compose-1' } };
+  // crew#1884: the person's answer (`standIns: true`) reaches the launch. The route's own caller (studio's Draft) does
+  // not draw the choice yet, so the route does not ask it (codex r1 C2); a chat Backlog job's Go does.
+  it('takes standIns to the launch; the route does not ask the choice, a chat job\'s compose does (crew#1884)', async () => {
     const res = await compose({ requirements: [{ repoId: 'alpha', key: 'billing::r1' }], standIns: true });
     expect(res.statusCode, res.body).toBe(202);
-    expect(launched[1]!.body['standIns']).toBe(true);
-    expect(launched[1]!.standInChoice).toBe(true);
+    expect(launched[0]!.body['standIns']).toBe(true);
+    expect(launched[0]!.standInChoice).toBeUndefined();
+    const plain = await compose({ requirements: [{ repoId: 'alpha', key: 'billing::r1' }] });
+    expect(plain.statusCode, plain.body).toBe(202);
+    expect(launched[1]!.standInChoice).toBeUndefined();
+    const chat = await composeLaunch(adapterRef, async (raw, ctx) => {
+      launched.push({ body: raw as Record<string, unknown>, auth: undefined, standInChoice: (ctx as { standInChoice?: boolean }).standInChoice });
+      return { statusCode: 201, payload: { runId: 'run-compose-2' } };
+    }, 'p1', { requirements: [{ repoId: 'alpha', key: 'billing::r1' }] }, { actor: { id: 'ann', kind: 'human', trust: 'operator' }, log: console }, { fromProposal: 'chat-1:p:x', standInChoice: true });
+    expect(chat.code).toBe(202);
+    expect(launched[2]!.standInChoice).toBe(true);
   });
 
   it('a requirement of a member with no repo-graph root answers 503 with the diagnosis, and nothing launches', async () => {

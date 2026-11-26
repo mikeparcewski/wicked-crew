@@ -203,7 +203,7 @@ import { latestDraftRender } from '../interactive/draft-skill.js';
 import { refreshProjectGraphsForRepo, sweepProjectGraphsForReaders } from '../projects/auto-refresh.js';
 import { RepoWatcher, repoWatchEnabledByEnv } from '../projects/repo-watch.js';
 import { registerRepoWatchRoutes } from '../projects/repo-watch-routes.js';
-import { DEMO_PRESETS } from './recording.js';
+import { noStandInsKind } from './stand-in-scope.js';
 import { consentFor } from '../core/stand-in.js';
 
 /** The daemon's own actor on the audit trail (`run.delivered`, `run.ended`, the onboarding `run.launched`). */
@@ -1673,8 +1673,9 @@ export async function createServer(
       if (row.repoRef !== null) input.repoRef = row.repoRef;
       // (crew#1884) A schedule has no one to ask: it takes stand-ins only on the consent a person already gave, the
       // `standInReview: 'always'` setting (its saved author's consent, wicked-core#1930 F6). Without it, today's launch.
-      // A review, the evals, a demo and a reduced schedule keep their own checks, as on POST /runs.
-      if (row.reducedAssurance !== true && !DEMO_PRESETS.includes(row.workflow) && typeof adapter.supportsStandIns === 'function' && adapter.supportsStandIns()) {
+      // A review (review-change included), the evals, a demo and a reduced schedule keep their own checks, by the
+      // classifier POST /runs uses.
+      if (row.reducedAssurance !== true && noStandInsKind(row.workflow) === null && typeof adapter.supportsStandIns === 'function' && adapter.supportsStandIns()) {
         const saved = await Promise.resolve().then(() => adapter.getSettings()).catch(() => undefined);
         const consent = consentFor(false, saved?.standInReview, `${SCHEDULE_ACTOR.id} (${SCHEDULE_ACTOR.kind})`, Date.now(), saved?.standInConsent);
         if (consent !== null) {

@@ -101,7 +101,7 @@ import {
   SEAT_WORDS,
   seatProtections,
   seatRemovalNote,
-  seatsNeeded,
+  seatsRequired,
   seatsShortLine,
   briefOf,
   inputLines,
@@ -122,6 +122,7 @@ import type { JobTurnContext, MakeDigest } from './chat-scope.js';
 import { catalogDigest, detect, detectable } from '../workflow-catalog/detect.js';
 import { OnboardBlock, resolveOnboard, type OnboardBlockBody, type OnboardResolveDeps } from './proposal-onboard.js';
 import { CUT_BLOCKING, CutBlock, cutInterruptedWords, resolveCut, type CutBlockBody, type CutResolveDeps } from './proposal-cut.js';
+import { STAND_IN_CARD_ASK, STAND_IN_CHOICE_ASK } from '../core/stand-in.js';
 
 // ── the block ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -752,6 +753,8 @@ export interface ChatProposalDeps {
   reviewAuthors?(repoRef: string, words: string): Promise<ReviewAuthors | null>;
   /** Whether the chat's client renders job proposals (`accepts: ['job']`, its newest declaration). Absent = no. */
   acceptsJobs?(chatId: string): boolean;
+  /** (crew#1884) Whether a job of this workflow can take stand-ins here (`JobContext.standInsFor`). Absent = none can. */
+  standInsFor?(workflow: string | null): boolean;
   /** (crew-0182) Whether the chat's client draws onboard cards (`accepts: ['onboard']`, its newest declaration). */
   acceptsOnboard?(chatId: string): boolean;
   /** (crew-0182) What an onboard block is resolved against. Absent = onboard cards are not made here. */
@@ -992,10 +995,25 @@ export interface DecideResult {
 /** (crew#1884) The label of the stand-in question's choice: the words studio's Start shows for `standIns` (this job). */
 export const STAND_IN_CHOICE_LABEL = 'Use stand-ins for this job';
 
-/** (crew#1884) The question a job's card asks when its Start was refused `409 stand_in_choice`: the refusal's own words,
- *  the choice that answers it for this job (`standIns`, taken only from the person's press), and the way back. */
+/** (crew#1884) The note a card carries once the person chose stand-ins for it. */
+export const STAND_IN_CONSENT_NOTE = 'Stand-ins for this job: a role its helpers are short of is filled by a labelled stand-in, not an independent review.';
+
+/** (crew#1884) The question a job's card asks when its Start was refused `409 stand_in_choice`: the refusal's own words
+ *  (ending in the ways this card offers: every job is a setting), the choice that answers it for this job (`standIns`,
+ *  taken only from the person's press), and the way back. */
 export function standInQuestion(refusal: string): ProposalQuestion {
-  return { kind: 'stand_in', text: refusal, choices: [{ label: STAND_IN_CHOICE_LABEL, edit: { standIns: true } }, { label: 'Back to the job', edit: {} }] };
+  return {
+    kind: 'stand_in',
+    text: refusal.replace(STAND_IN_CHOICE_ASK, STAND_IN_CARD_ASK),
+    choices: [{ label: STAND_IN_CHOICE_LABEL, edit: { standIns: true } }, { label: 'Back to the job', edit: {} }],
+  };
+}
+
+/** (crew#1884) A card without its stand-in choice. */
+function withoutStandIns(p: ArtifactProposal): ArtifactProposal {
+  const { standIns: _s, ...rest } = p;
+  void _s;
+  return rest;
 }
 
 /** A reshape's immutable context (the held run it replaces, its envelope, inherited reduced assurance) survives every
@@ -1706,7 +1724,9 @@ export class ChatProposals {
           throw err;
         }
       }
-      if (body.reducedAssurance === true) again = { ...again, reducedAssurance: true };
+      // (crew#1884) Reduced assurance skips the checks a stand-in would fill: the person's Go in reduced mode drops the
+      // card's stand-in choice (the two are exclusive on the launch).
+      if (body.reducedAssurance === true) again = withoutStandIns({ ...again, reducedAssurance: true });
       return this.go(chatId, folded, again, again === acc.resolution ? acc.edits : { ...(acc.edits ?? {}), ...body.edits }, acc.identity, actor, instance, body.power);
     }
     if (folded.state === 'superseded') {
@@ -1763,7 +1783,7 @@ export class ChatProposals {
     if (effective.blocked !== null) {
       return { code: 409, body: { code: 'proposal_blocked', error: effective.blocked, view: viewOf(folded) } };
     }
-    if (body.reducedAssurance === true) effective = { ...effective, reducedAssurance: true };
+    if (body.reducedAssurance === true) effective = withoutStandIns({ ...effective, reducedAssurance: true });
     return this.go(chatId, folded, effective, body.edits ?? null, this.identityOf(effective), actor, instance, body.power);
   }
 
@@ -2721,7 +2741,8 @@ export class ChatProposals {
     const qeOff = (await this.deps.qeOff?.().catch(() => false)) === true;
     const powerPresets = (await this.deps.powerPresets?.(chat.projectId).catch(() => null)) ?? null;
     const { eligible: roster, pool, refusal } = await this.seatPool();
-    return { chatId, pid, turnId, seat, chat, served, roster, pool, projectLabel, qeOff, powerPresets, ...(this.deps.coverage !== undefined ? { coverage: (keys: readonly string[], bound: boolean) => this.deps.coverage!(keys, bound) } : {}), ...extra, ...(refusal !== undefined ? { seatsUnread: true } : {}) };
+    const standInsFor = this.deps.standInsFor;
+    return { chatId, pid, turnId, seat, chat, served, roster, pool, projectLabel, qeOff, powerPresets, ...(standInsFor !== undefined ? { standInsFor: (w: string | null) => standInsFor(w) } : {}), ...(this.deps.coverage !== undefined ? { coverage: (keys: readonly string[], bound: boolean) => this.deps.coverage!(keys, bound) } : {}), ...extra, ...(refusal !== undefined ? { seatsUnread: true } : {}) };
   }
 
   /** (crew#1840) The pull requests this chat's runs delivered (a run record's `deliverUrl`), newest run last. A failed
@@ -3066,11 +3087,13 @@ export class ChatProposals {
     delete edits.confirmLoss;
     // (crew#1884) Stand-ins for this job are the person's own press on wicked's stand-in question (asked when the job's
     // Start was refused for want of a helper), never a seat's block or a field sent on another card.
-    const standIns = fromPerson && edits.standIns === true && parent.proposal.question?.kind === 'stand_in';
-    const standInNote = edits.standIns !== undefined && !standIns
+    // The press consents to exactly the job the question was asked on (codex r1 on crew#1884): nothing bundled with it.
+    const standInsAsked = edits.standIns !== undefined;
+    delete edits.standIns;
+    const standIns = standInsAsked && fromPerson && parent.proposal.question?.kind === 'stand_in' && Object.keys(edits).length === 0;
+    const standInNote = standInsAsked && !standIns
       ? ['Not changed: stand-ins are chosen with your press on wicked\'s question, asked when this job is short of a helper.']
       : [];
-    delete edits.standIns;
     let ctx0 = await this.jobContext(chatId, src.pid, src.turnId, fromPerson ? 'person' : (parent.proposal.seat ?? 'seat'), chat, {
       revises: parent.proposal.pid,
       lineage: parent.proposal.lineage ?? parent.proposal.pid,
@@ -3239,8 +3262,13 @@ export class ChatProposals {
     // A document's workers are its helpers (a revision can make a job a document; codex r2).
     const workers = candidate.seats !== undefined ? candidate.seats.keys : (candidate.helpers?.seats ?? []);
     const removal = seatRemovalNote(edits.removeSeats, parent.proposal.seats?.keys ?? parent.proposal.helpers?.seats ?? [], workers, (k) => ctx.roster.find((s) => s.key === k)?.name ?? k);
-    const noted = removal.length === 0 || candidate.sentence === undefined ? candidate : { ...candidate, sentence: { ...candidate.sentence, notes: [...candidate.sentence.notes, ...removal] } };
-    const proposal: ArtifactProposal = standIns ? { ...noted, standIns: true } : noted;
+    // (crew#1884) The consent holds only for the job the question was asked on: the same catalog and the same resolved
+    // option. A job that changed since (a catalog refresh, a setting) is asked again at its Start.
+    const consented = standIns && candidate.catalogRev === parent.proposal.catalogRev && candidate.resolution === parent.proposal.resolution;
+    const consentNotes = consented ? [STAND_IN_CONSENT_NOTE] : standIns ? ['Not changed: this job changed since wicked asked about stand-ins. Press Start and it asks again.'] : [];
+    const notes = [...removal, ...consentNotes];
+    const noted = notes.length === 0 || candidate.sentence === undefined ? candidate : { ...candidate, sentence: { ...candidate.sentence, notes: [...candidate.sentence.notes, ...notes] } };
+    const proposal: ArtifactProposal = consented ? { ...noted, standIns: true } : noted;
     if (!this.write(chatId, { at: this.now(), turnId: src.turnId ?? `person:${src.pid.slice(src.pid.lastIndexOf(':') + 1)}`, kind: 'proposal', proposal }, instance)) return this.gone(chatId);
     const view = foldProposals(this.deps.records(chatId)).get(src.pid);
     return { code: 201, body: { view: view !== undefined ? viewOf(view) : { proposal, state: 'open' } } };
@@ -3381,11 +3409,14 @@ export class ChatProposals {
         });
         if (ctx.seatsUnread) continue;
         const r = resolveOption(p.shape!.card, p.shape!.option, ctx.served);
-        if (r === null || ctx.served.rev !== p.catalogRev || r.resolved.resolution !== p.resolution || p.blocked !== seatsShortLine(r, p.seats?.keys.length ?? 0)) continue;
-        if ((ctx.pool ?? ctx.roster).length < seatsNeeded(r)) continue;
+        // (crew#1884) The seats the card needs, as it was drawn (a builder alone on an engine with stand-ins).
+        if (r === null) continue;
+        const need = seatsRequired(r, ctx);
+        if (ctx.served.rev !== p.catalogRev || r.resolved.resolution !== p.resolution || p.blocked !== seatsShortLine(r, p.seats?.keys.length ?? 0, need)) continue;
+        if ((ctx.pool ?? ctx.roster).length < need) continue;
         const facts = { ...factsOf(p), lead: null, seats: null };
         const fresh = keepReshape(await this.proposalOf(chatId, p.pid, facts, ctx, this.deps.records(chatId), true, p), p);
-        if (fresh.seats === undefined || fresh.seats.keys.length < seatsNeeded(r)) continue;
+        if (fresh.seats === undefined || fresh.seats.keys.length < need) continue;
         const current = foldProposals(this.deps.records(chatId)).get(p.pid);
         if (current === undefined || !held(current) || current.proposal.blocked !== p.blocked) continue;
         changed = this.write(chatId, { at: this.now(), turnId: current.turnId, kind: 'proposal', proposal: fresh }, instance) || changed;
@@ -3432,12 +3463,13 @@ export class ChatProposals {
     if (dropped.length > 0) throw new EditRefusal(`that would drop ${checksLabel(dropped)}; check the job again`);
     if (out.seats !== undefined && out.shape !== undefined) {
       const r = resolveOption(out.shape.card, out.shape.option, ctx.served);
-      if (r !== null && !(r.workflow !== null && SELF_SEATED.has(r.workflow)) && out.seats.keys.length < seatsNeeded(r)) {
+      if (r !== null && !(r.workflow !== null && SELF_SEATED.has(r.workflow)) && out.seats.keys.length < seatsRequired(r, ctx)) {
         throw new EditRefusal('this job needs another seat to check the one that builds');
       }
     }
-    // (crew#1884) Go's own edits keep the person's stand-in choice: the same card, their own press.
-    return f.proposal.standIns === true ? { ...out, standIns: true } : out;
+    // (crew#1884) Go's edits re-resolve the job, so a stand-in choice made on the card does not carry: changed work is
+    // asked again (codex r1). A Go with no edits launches the card as it is, choice included.
+    return out;
   }
 
   /**

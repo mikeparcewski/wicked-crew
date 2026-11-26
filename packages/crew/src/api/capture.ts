@@ -205,7 +205,7 @@ export function registerCaptureRoutes(app: FastifyInstance): void {
           responseType: 'CaptureResponse',
           // Every non-201 besides the body 400s is POST /runs' own answer, passed through.
           // 413: a body past CAPTURE_BODY_LIMIT, refused by the framework before the handler.
-          statusCodes: [201, 400, 404, 409, 413, 422, 501],
+          statusCodes: [201, 400, 403, 404, 409, 413, 422, 501],
         },
       },
     },

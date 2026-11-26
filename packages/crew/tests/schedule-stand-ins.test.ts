@@ -21,10 +21,10 @@ const WORKFLOW = 'bug';
 const SAVED = { scope: 'always', by: 'priya (human)', at: 3, via: 'setting' };
 
 /** The row as the store writes it (src/schedules/store.ts `put`), due an hour ago. */
-function row() {
+function row(workflow = WORKFLOW) {
   const past = new Date(Date.now() - HOUR_MS).toISOString();
   return {
-    workflow: WORKFLOW, everyHours: 48, enabled: true, projectIds: [], repoRef: null, problem: 'tidy the backlog',
+    workflow, everyHours: 48, enabled: true, projectIds: [], repoRef: null, problem: 'tidy the backlog',
     nextDueAt: past, lastRunId: null, lastRunAt: null, lastOutcome: null, lastNote: null, blocked: null, failures: 0,
     createdAt: past, updatedAt: past,
   };
@@ -40,12 +40,12 @@ afterEach(async () => {
   scratch = undefined;
 });
 
-async function boot(settings: Record<string, unknown>): Promise<LaunchRunInput[]> {
+async function boot(settings: Record<string, unknown>, workflow = WORKFLOW): Promise<LaunchRunInput[]> {
   scratch = mkdtempSync(join(tmpdir(), 'schedule-stand-ins-'));
   const home = join(scratch, 'state-home');
   mkdirSync(home);
   setCrewStateHome(home);
-  writeFileSync(defaultSchedulesPath(), JSON.stringify({ schedules: { [WORKFLOW]: row() } }));
+  writeFileSync(defaultSchedulesPath(), JSON.stringify({ schedules: { [workflow]: row(workflow) } }));
   const launches: LaunchRunInput[] = [];
   const adapter = {
     dbPath: join(home, 'core.db'),
@@ -102,6 +102,15 @@ describe('a scheduled launch and the stand-in setting (crew#1884)', () => {
     const launches = await boot({ standInReview: 'ask' });
     await until(() => launches.length > 0);
     expect(launches).toHaveLength(1);
+    expect(launches[0]!.standInAware).toBeUndefined();
+    expect(launches[0]!.standIn).toBeUndefined();
+  }, 20_000);
+
+  // codex r1 C3: a scheduled review-change is a review: it takes no stand-ins under the setting either.
+  it('a scheduled review-change under always: launched without stand-ins', async () => {
+    const launches = await boot({ standInReview: 'always', standInConsent: SAVED }, 'review-change');
+    await until(() => launches.length > 0);
+    expect(launches[0]?.workflow).toBe('review-change');
     expect(launches[0]!.standInAware).toBeUndefined();
     expect(launches[0]!.standIn).toBeUndefined();
   }, 20_000);

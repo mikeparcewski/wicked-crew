@@ -193,6 +193,10 @@ export interface JobContext {
   /** (crew#1840) The pull requests this chat's runs delivered, read when the words name a pull request. Absent = none
    *  read (a job then never updates one). */
   deliveredPrs?: readonly DeliveredPr[];
+  /** (crew#1884) Whether a job of this workflow can take stand-ins here (the linked engine fills a short checker role
+   *  with a labelled stand-in, asked at Start; not a review, the evals or a demo): such a card needs only a seat that
+   *  builds. Absent = none can (this module stays free of the engine and the launch modules). */
+  standInsFor?(workflow: string | null): boolean;
 }
 
 // ── crew#1840: a job that updates a pull request this chat delivered ──────────────────────────────────────────────
@@ -326,8 +330,21 @@ export function seatsNeeded(r: ResolvedOption): number {
   return 1 + (r.resolved.seats.distinctEvaluator ? 1 : 0);
 }
 
-export function seatsShortLine(r: ResolvedOption, have: number): string {
-  if (seatsNeeded(r) === 1) return 'Needs a seat that can work now to build it, and none can. Sign in a seat to start it.';
+/** (crew#1884) Whether a chat card's Start asks the stand-in choice: every Start but a reshape's, which rejects the held
+ *  plan before it launches, so its question would come after the plan it replaces was gone (codex r1 C5). */
+export function chatStartAsksStandIns(p: Pick<ArtifactProposal, 'reshapes'>): boolean {
+  return p.reshapes === undefined;
+}
+
+/** (crew#1884) The seats a card needs before Start: on an engine with stand-ins, a job that can take them needs only a
+ *  seat that builds (its Start asks the stand-in choice for a short checker); otherwise {@link seatsNeeded}. */
+export function seatsRequired(r: ResolvedOption, ctx: Pick<JobContext, 'standInsFor'>): number {
+  const kind = r.resolved.launch.kind;
+  return (kind === 'run' || kind === 'compose') && ctx.standInsFor?.(r.workflow) === true ? 1 : seatsNeeded(r);
+}
+
+export function seatsShortLine(r: ResolvedOption, have: number, need: number = seatsNeeded(r)): string {
+  if (need === 1) return 'Needs a seat that can work now to build it, and none can. Sign in a seat to start it.';
   return `Needs 2 seats that can work now, one to build it and one to check it, and ${have === 0 ? 'none' : `only ${have}`} can. ${have === 0 ? 'Sign in 2 more seats' : 'Sign in another seat'} to start it.`;
 }
 
@@ -376,7 +393,7 @@ function seatsOf(facts: JobFacts, ctx: JobContext, r: ResolvedOption): { seats: 
       : facts.lead !== null && facts.seats === null
         ? `${name(lead)}, with ${list(others)} checking it`
         : list([name(lead), ...others]);
-  return { seats: { lead, keys: lead === null ? [] : [lead, ...rest], label }, short: (lead === null ? 0 : 1 + rest.length) < seatsNeeded(r) };
+  return { seats: { lead, keys: lead === null ? [] : [lead, ...rest], label }, short: (lead === null ? 0 : 1 + rest.length) < seatsRequired(r, ctx) };
 }
 
 function inputValueLabel(v: ProposalInputValue): string {
@@ -616,7 +633,11 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     blockedBy.push('What to show is over 4000 characters with your corrections: say it shorter');
   }
   // A self-seated workflow picks its own seat at launch: the roster's count is not its requirement (codex r3).
-  if (short && coming === undefined && !(r.workflow !== null && SELF_SEATED.has(r.workflow))) blockedBy.push(seatsShortLine(r, seats.keys.length));
+  if (short && coming === undefined && !(r.workflow !== null && SELF_SEATED.has(r.workflow))) blockedBy.push(seatsShortLine(r, seats.keys.length, seatsRequired(r, ctx)));
+  // (crew#1884) A builder and no checker on an engine with stand-ins: said before Start, which asks the choice.
+  else if (!short && seats.keys.length < seatsNeeded(r) && !(r.workflow !== null && SELF_SEATED.has(r.workflow))) {
+    notes.push('Only one helper can work on this now, so its check would be a labelled stand-in, not an independent review: wicked asks you first when you start it, unless stand-ins are on for every job.');
+  }
   // The one question: the first required need that is missing.
   let question: ProposalQuestion | null = null;
   const missing = needs.find((n) => n.required && n.status === 'missing');

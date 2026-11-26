@@ -1,5 +1,6 @@
 // (DES-STANDIN-001 §9 T-X1, crew#1940) The stand-in receipts crew serves, read by a FROZEN copy of studio's own reader.
-// Crew relays the engine's gate frames as they are (`GET /runs/:id/events` adds only `seq`), so the seam is the wire:
+// Crew serves the engine's gate frames on `GET /runs/:id/events`; the frames go through that route here, so the seam is
+// crew's serving plus studio's reading:
 // a receipt shape crew passes that studio's reader takes the wrong way ("claude~1 reviewed", a stand-in read as an
 // independent review, a delivery that drops a gate's stand-in) fails here, in crew's CI, before a train ships it.
 //
@@ -8,13 +9,39 @@
 // come from crew's own copy of the contract package (`studio-frozen/api/types.ts`, as studio's src/api/types.ts does).
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import Fastify from 'fastify';
+import { beforeAll, describe, expect, it } from 'vitest';
 import type { CoreEvent } from 'wicked-crew-api-types';
 
+import { registerRoutes } from '../src/api/routes.js';
+import { GateCache } from '../src/api/gate-cache.js';
+import { ElicitationCache } from '../src/api/elicitation-cache.js';
+import type { AuditLog } from '../src/api/audit.js';
+import type { CoreAdapter } from '../src/core/adapter.js';
 import { assuranceKind, deliveryReceiptOf, receiptOf, receiptWords } from './fixtures/studio-frozen/board/assuranceModel.js';
 
-/** The wire: the gate frames of a stand-in run as crew served them (see the fixture's `_source`). */
-const wire = JSON.parse(readFileSync(new URL('./fixtures/stand-in-receipts.wire.json', import.meta.url), 'utf8')) as { events: Array<Record<string, unknown>> };
+/** The engine's frames of a stand-in run (see the fixture's `_source`), as the binding hands them to crew. */
+const recorded = JSON.parse(readFileSync(new URL('./fixtures/stand-in-receipts.wire.json', import.meta.url), 'utf8')) as { events: Array<Record<string, unknown>> };
+const RUN = 'b0ade71f-7abd-47a1-b675-aababb9eb9fe';
+/** The wire studio reads: those frames as crew's own `GET /runs/:id/events` serves them now (codex r1 T2). */
+const wire: { events: Array<Record<string, unknown>> } = { events: [] };
+beforeAll(async () => {
+  const adapter = {
+    sessions: async () => [RUN],
+    runEvents: async (id: string) => (id === RUN ? structuredClone(recorded.events) : []),
+    sessionsDetail: async () => [], listRepos: async () => [], listWorkflows: () => [], getWorkflow: () => null,
+  };
+  const app = Fastify({ logger: false });
+  registerRoutes(app, adapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, {
+    audit: { record: () => Date.now() } as unknown as AuditLog, authMode: 'off',
+  });
+  await app.ready();
+  const res = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/events` });
+  await app.close();
+  expect(res.statusCode, res.body).toBe(200);
+  wire.events = (res.json() as { events: Array<Record<string, unknown>> }).events;
+  expect(wire.events).toHaveLength(recorded.events.length);
+});
 const gate = (ord: number): Record<string, unknown> => {
   const e = wire.events.find((x) => x['type'] === 'gateEvaluated' && x['ord'] === ord);
   if (e === undefined) throw new Error(`no gateEvaluated for ord ${ord}`);
