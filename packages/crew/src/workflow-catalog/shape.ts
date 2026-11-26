@@ -12,6 +12,7 @@
 import type { CatalogEntry, LaunchShape, Preset, WorkflowDef } from '../core/types.js';
 import { z } from '../zod.js';
 import { buildWorkflowCatalogV2, resolveOption, servedState, type ResolvedOption, type ServedState } from './build-v2.js';
+import { DEPTH_LINES, REPORT_DEPTH_LINES } from './framing-lines.js';
 
 /** What a launch route launches. */
 export type LaunchTarget =
@@ -24,18 +25,8 @@ export type ShapeVerdict =
   | { ok: true; resolved: ResolvedOption; lines: string[]; rev: string }
   | { ok: false; code: number; body: { code: string; error: string; [k: string]: unknown } };
 
-export const DEPTH_LINES: Readonly<Record<'quick' | 'standard' | 'deep', string>> = {
-  quick: 'Depth: quick. Find the likeliest cause and stop there, each claim cited.',
-  standard: 'Depth: standard. Find the cause and what led to it, each claim cited.',
-  deep: 'Depth: deep. Trace every contributing cause and the timeline, each claim cited.',
-};
-
-/** A sourced report's depth (Research, Competitive, Due diligence): neutral lines, since there is no cause to find. */
-export const REPORT_DEPTH_LINES: Readonly<Record<'quick' | 'standard' | 'deep', string>> = {
-  quick: 'Depth: quick. Answer from the strongest sources and stop there, each claim cited.',
-  standard: 'Depth: standard. Cover the main sources and where they disagree, each claim cited.',
-  deep: 'Depth: deep. Read every source in reach and reconcile each conflict, each claim cited.',
-};
+// The depth lines live with the framing lines, which the delivered PR's title skips (crew#1938).
+export { DEPTH_LINES, REPORT_DEPTH_LINES } from './framing-lines.js';
 
 /** What the engine serves, read as a launch in `projectId` reads it. */
 export interface ShapeReads {

@@ -41,6 +41,7 @@ function intentOnly(problem: string): string {
   return stripRulesBrief(stripRunLearnings(stripLinkedIssues(problem)));
 }
 import { withRootAliases, type ChatRepoRoot } from './host-paths.js';
+import { FRAMING_LINES } from '../workflow-catalog/framing-lines.js';
 
 /**
  * The PR title cap (crew#860, S17b F15 / S17a F20). GitHub ACCEPTS 256 characters, and under that
@@ -278,11 +279,14 @@ const REPOSITORY_ROUTING = /^repo(?:sitory)?\s*:\s*[\w.-]+(?:\/[\w.-]+)*\s*(?:[.
  * never a title (review-benchmark-prs D1: three PRs titled by the bare issue URL): it is skipped,
  * and when the intent has no prose at all the issue it names becomes the headline
  * (`resolve owner/repo#N`). A leading {@link REPOSITORY_ROUTING} line is skipped the same way (and
- * only its routing sentence when prose follows it on the same line).
+ * only its routing sentence when prose follows it on the same line). A line crew put first for the card the run was
+ * started from ({@link FRAMING_LINES}: "Kind: polish. …", a depth line) is crew's, never the ask, and is skipped too
+ * (crew#1938: `/refactor polish` delivered `chore: Kind: polish`).
  */
 function firstLine(intent: string): string {
   let url: string | null = null;
   for (const raw of intent.split(/\r?\n/)) {
+    if (FRAMING_LINES.has(raw.trim())) continue;
     const line = plainLine(raw).replace(REPOSITORY_ROUTING, '');
     if (line === '') continue;
     if (BARE_URL.test(line)) {
