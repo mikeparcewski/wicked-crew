@@ -37,6 +37,17 @@ export type StandInScope = (typeof STAND_IN_SCOPES)[number];
  *  before crew recorded one, turned on by hand, or its record is out of shape. */
 export const STAND_IN_SETTING_UNRECORDED = 'the standInReview setting (author not recorded)';
 
+/** (crew#1884) The launches that keep their own checks and take no stand-ins (DES-STANDIN-001 §4, K2a scope). */
+export type NoStandInLaunch = 'review' | 'demo';
+
+/** (crew#1884) Why a launch takes no stand-ins, in the words its refusals say: a review's point is a reviewer who did
+ *  none of the work, which a stand-in is not; a demo keeps its own review. */
+export function noStandInsWhy(kind: NoStandInLaunch): string {
+  return kind === 'review'
+    ? 'A review takes no stand-ins: its point is a reviewer who did none of the work, and a stand-in is a labelled check, not an independent review.'
+    : 'A demo takes no stand-ins: it keeps its own review.';
+}
+
 /** The consent the `always` setting stores (`SystemSettings.standInConsent`): the person who saved it, and when. */
 export function settingConsent(who: string, now: number = Date.now()): StandInConsent {
   return { scope: 'always', by: who, at: now, via: 'setting' };

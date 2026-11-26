@@ -1338,5 +1338,7 @@ export function jobLaunchCommon(
     ...(p.relaunch?.campaignId !== undefined ? { campaignId: p.relaunch.campaignId } : p.relaunch?.groupLabel !== undefined ? { groupLabel: p.relaunch.groupLabel } : {}),
     ...(p.reshapes !== undefined ? { retryOf: p.reshapes } : {}),
     ...(p.reducedAssurance === true ? { reducedAssurance: true } : {}),
+    // (crew#1884) The person's press on the stand-in question: this job launches with stand-ins (consent theirs).
+    ...(p.standIns === true ? { standIns: true } : {}),
   };
 }

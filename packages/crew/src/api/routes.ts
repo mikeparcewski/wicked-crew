@@ -242,7 +242,7 @@ import type { EvalRunStore } from './eval-store.js';
 import { isSeatKeyList } from '../core/job-seats.js';
 import { engineRosterJson, noEligibleSeatBody, parseNoEligibleSeat, toEngineSeat } from '../core/engine-roster.js';
 import { launchAssuranceNotice, readJudgeCoverage } from '../core/assurance.js';
-import { STAND_IN_NEEDED_GATE, USE_STAND_INS_ACTION, consentFor, isStandInReview, preflightRefusal, readPreflight, settingConsent } from '../core/stand-in.js';
+import { STAND_IN_NEEDED_GATE, USE_STAND_INS_ACTION, consentFor, isStandInReview, noStandInsWhy, preflightRefusal, readPreflight, settingConsent } from '../core/stand-in.js';
 import { launchPosture, type PostureFacts } from '../core/launch-posture.js';
 import { launchRequiresQe, mayRequireQe, qeAcceptanceMode, qeSettingSkipReason } from '../core/qe-acceptance-setting.js';
 import {
@@ -3991,7 +3991,7 @@ export function registerRoutes(
         if (!canWork) {
           return reply.code(409).send({
             code: 'no_independent_reviewer',
-            error: `Every available seat (${ex.excludeSeats.join(', ')}) wrote part of this change, so none can review it independently. Sign in another seat, or start it again in reduced assurance (the authors review their own change, labelled on the run and every gate).`,
+            error: `Every available seat (${ex.excludeSeats.join(', ')}) wrote part of this change, so none can review it independently. Sign in another seat, or start it again in reduced assurance (the authors review their own change, labelled on the run and every gate). ${noStandInsWhy('review')}`,
             excluded: ex.excludeSeats,
             retryWith: { reducedAssurance: true },
           });
@@ -4020,7 +4020,10 @@ export function registerRoutes(
       && !(b.workflow !== undefined && (reviewPrepared(b.workflow) || b.workflow === RUN_EVALS_WORKFLOW || DEMO_PRESETS.includes(b.workflow)));
     const standInsSupported = typeof adapter.supportsStandIns === 'function' && adapter.supportsStandIns();
     if (b.standIns === true && !standInEligible) {
-      return reply.code(400).send({ code: 'stand_ins_refused', error: 'this launch does not take stand-ins (standIns): a review, a demo or a reduced launch keeps its own checks' });
+      // (crew#1884) Said why: a reduced launch skips the checks a stand-in would fill (the schema refuses it beside
+      // reducedAssurance before this), a review needs a reviewer who did none of the work, a demo keeps its own review.
+      const why = b.workflow !== undefined && DEMO_PRESETS.includes(b.workflow) ? noStandInsWhy('demo') : noStandInsWhy('review');
+      return reply.code(400).send({ code: 'stand_ins_refused', error: `This launch does not take stand-ins (standIns). ${why}` });
     }
     if (b.standIns === true && !standInsSupported) {
       return reply.code(501).send({ error: 'stand-in checks need a wicked-core-ts that carries them (Core.independencePreflight and grantStandIns); upgrade the engine' });
@@ -4784,7 +4787,9 @@ export function registerRoutes(
             // (crew#1840) A job asked to change a pull request this chat delivered updates it: no second PR.
             ...jobRevisionLaunch(p),
           },
-          { ...ctx, fromProposal: d.pid, ...(d.power === true ? { powerRequired: true } : {}) },
+          // (crew#1884) A person's Start asks the stand-in choice, as studio's Start on POST /runs does: a short roster
+          // with no consent reopens the card with the stand_in question.
+          { ...ctx, fromProposal: d.pid, standInChoice: true, ...(d.power === true ? { powerRequired: true } : {}) },
         );
         if (out.statusCode !== 201) throw jobRefusal(out.statusCode, out.payload);
         return;

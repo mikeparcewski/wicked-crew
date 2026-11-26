@@ -241,6 +241,8 @@ export const RevisionEditsSchema = z.looseObject({
   skipQe: z.strictObject({ reason: z.string().trim().min(1).max(600) }).optional(),
   restoreQe: z.literal(true).optional(),
   confirmLoss: z.union([z.literal(true), z.array(z.string().min(1).max(40)).min(1).max(12)]).optional(),
+  /** (crew#1884) The person's press on the `stand_in` question; any other use is dropped with a note. */
+  standIns: z.literal(true).optional(),
 });
 
 /** A seat's typed revision block: `{"revises":"<pid>","edits":{…}}`. `null` for anything else. */
@@ -985,6 +987,15 @@ const SEATED_KINDS: ReadonlySet<string> = new Set(['job', 'create', 'refine', 'd
 export interface DecideResult {
   code: number;
   body: Record<string, unknown>;
+}
+
+/** (crew#1884) The label of the stand-in question's choice: the words studio's Start shows for `standIns` (this job). */
+export const STAND_IN_CHOICE_LABEL = 'Use stand-ins for this job';
+
+/** (crew#1884) The question a job's card asks when its Start was refused `409 stand_in_choice`: the refusal's own words,
+ *  the choice that answers it for this job (`standIns`, taken only from the person's press), and the way back. */
+export function standInQuestion(refusal: string): ProposalQuestion {
+  return { kind: 'stand_in', text: refusal, choices: [{ label: STAND_IN_CHOICE_LABEL, edit: { standIns: true } }, { label: 'Back to the job', edit: {} }] };
 }
 
 /** A reshape's immutable context (the held run it replaces, its envelope, inherited reduced assurance) survives every
@@ -1919,7 +1930,9 @@ export class ChatProposals {
         return { code: r.code, body: { ...r.body, acceptingAt: accepting.at } };
       }
       if (err instanceof LaunchRefusal) {
-        const reopened = this.reopenLaunch(chatId, folded, resolution, instance);
+        // (crew#1884) Short of a helper with no consent: the card asks the stand-in question in the refusal's own words.
+        const ask = kind === 'job' && err.body['code'] === 'stand_in_choice' ? standInQuestion(err.message) : null;
+        const reopened = this.reopenLaunch(chatId, folded, resolution, instance, ask);
         if (reopened === null) return this.gone(chatId, accepting.at);
         this.deps.audit('chat.proposal.launch_refused', actor, { chatId, pid, code: err.body['code'], error: err.message });
         return { code: err.status, body: {
@@ -1950,8 +1963,11 @@ export class ChatProposals {
     return { code: status, body: { code, error: words, ...(after !== undefined ? { view: viewOf(after) } : {}) } };
   }
 
-  private reopenLaunch(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, instance: string | null): FoldedProposal | null {
+  private reopenLaunch(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, instance: string | null, ask: ProposalQuestion | null = null): FoldedProposal | null {
     const proposal = { ...resolution };
+    // The stand-in question belongs to the refusal that asked it: another refusal reopens the card without it.
+    if (ask !== null) proposal.question = ask;
+    else if (proposal.question?.kind === 'stand_in') proposal.question = null;
     // A Go-only opt-in belongs to that attempt; a reshape card keeps its own prior choice.
     if (folded.proposal.reducedAssurance === true) proposal.reducedAssurance = true;
     else delete proposal.reducedAssurance;
@@ -3048,6 +3064,13 @@ export class ChatProposals {
           : new Set<string>();
     const confirmed = confirmIds !== null;
     delete edits.confirmLoss;
+    // (crew#1884) Stand-ins for this job are the person's own press on wicked's stand-in question (asked when the job's
+    // Start was refused for want of a helper), never a seat's block or a field sent on another card.
+    const standIns = fromPerson && edits.standIns === true && parent.proposal.question?.kind === 'stand_in';
+    const standInNote = edits.standIns !== undefined && !standIns
+      ? ['Not changed: stand-ins are chosen with your press on wicked\'s question, asked when this job is short of a helper.']
+      : [];
+    delete edits.standIns;
     let ctx0 = await this.jobContext(chatId, src.pid, src.turnId, fromPerson ? 'person' : (parent.proposal.seat ?? 'seat'), chat, {
       revises: parent.proposal.pid,
       lineage: parent.proposal.lineage ?? parent.proposal.pid,
@@ -3059,7 +3082,7 @@ export class ChatProposals {
     // person's own reason when their message (the one this turn answers) gives one unquoted, else asking for it. A skip
     // the person never asked for in their own words changes nothing. On the person's route, only the press applies it.
     let qe: { reason: string | null } | null = null;
-    const extraNotes: string[] = [];
+    const extraNotes: string[] = [...standInNote];
     // studio#1094: only the person's repository answer can set the chat's first scope.
     if (src.person !== null && edits.repoRef !== undefined && parent.proposal.needs?.some((n) => n.id === 'repo') === true && chat.repos.length === 0 && this.deps.pickFirstRepo !== undefined) {
       const picked = await this.deps.pickFirstRepo(chatId, edits.repoRef, src.person, src.pid);
@@ -3216,7 +3239,8 @@ export class ChatProposals {
     // A document's workers are its helpers (a revision can make a job a document; codex r2).
     const workers = candidate.seats !== undefined ? candidate.seats.keys : (candidate.helpers?.seats ?? []);
     const removal = seatRemovalNote(edits.removeSeats, parent.proposal.seats?.keys ?? parent.proposal.helpers?.seats ?? [], workers, (k) => ctx.roster.find((s) => s.key === k)?.name ?? k);
-    const proposal = removal.length === 0 || candidate.sentence === undefined ? candidate : { ...candidate, sentence: { ...candidate.sentence, notes: [...candidate.sentence.notes, ...removal] } };
+    const noted = removal.length === 0 || candidate.sentence === undefined ? candidate : { ...candidate, sentence: { ...candidate.sentence, notes: [...candidate.sentence.notes, ...removal] } };
+    const proposal: ArtifactProposal = standIns ? { ...noted, standIns: true } : noted;
     if (!this.write(chatId, { at: this.now(), turnId: src.turnId ?? `person:${src.pid.slice(src.pid.lastIndexOf(':') + 1)}`, kind: 'proposal', proposal }, instance)) return this.gone(chatId);
     const view = foldProposals(this.deps.records(chatId)).get(src.pid);
     return { code: 201, body: { view: view !== undefined ? viewOf(view) : { proposal, state: 'open' } } };
@@ -3412,7 +3436,8 @@ export class ChatProposals {
         throw new EditRefusal('this job needs another seat to check the one that builds');
       }
     }
-    return out;
+    // (crew#1884) Go's own edits keep the person's stand-in choice: the same card, their own press.
+    return f.proposal.standIns === true ? { ...out, standIns: true } : out;
   }
 
   /**

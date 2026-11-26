@@ -52,6 +52,8 @@ export const ProductComposeSchema = z.strictObject({
   /** (api-types 0.192.0, DES-CATALOG-002 §4.4) What this compose is the shape of: a Backlog option, whose compose level
    *  decides how far down the draft goes. */
   shape: LaunchShapeSchema.optional(),
+  /** (crew#1884) The person's stand-in choice, the answer to this launch's `409 stand_in_choice`. */
+  standIns: z.literal(true).optional(),
 });
 
 /** The compose level a Backlog shape names (the seed's own data; the shape itself is judged by the shared launch). */
@@ -79,7 +81,7 @@ export interface ComposeLaunchExtra {
 }
 
 /** The shared launch function's shape here (DES-CHAT-FIRST-001 C3): the routes module passes its own. */
-export type ComposeLaunchRun = (raw: unknown, ctx: { actor: Actor; log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>; fromProposal?: string; target?: 'compose'; compose?: ComposeFacts }) => Promise<{ statusCode: number; payload: unknown }>;
+export type ComposeLaunchRun = (raw: unknown, ctx: { actor: Actor; log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>; fromProposal?: string; target?: 'compose'; compose?: ComposeFacts; standInChoice?: boolean }) => Promise<{ statusCode: number; payload: unknown }>;
 
 const oneLine = (s: string): string => s.replace(/\s+/gu, ' ').trim();
 /** `s` cut to at most `max` UTF-8 bytes on a character boundary, `…` marking a cut. */
@@ -258,6 +260,7 @@ export async function composeLaunch(
           ...Object.fromEntries(Object.entries(extra.common ?? {}).filter(([k]) => k !== 'shape')),
           ...(extra.humanConfirm !== undefined ? { humanConfirm: extra.humanConfirm } : {}),
           ...(parsed.data.shape !== undefined ? { shape: parsed.data.shape } : {}),
+          ...(parsed.data.standIns === true ? { standIns: true } : {}),
           plan: {
             steps: [
               { catalog: 'produce', id: 'draft', instructions: draft },
@@ -266,7 +269,9 @@ export async function composeLaunch(
             ],
           },
         },
-        { ...ctx, target: 'compose', compose: composeFactsOf(id, rows, level, draft, review), ...(extra.fromProposal !== undefined ? { fromProposal: extra.fromProposal } : {}) },
+        // (crew#1884) A person starts every compose (the route, a chat Backlog job's Go): its launch asks the stand-in
+        // choice, as `POST /runs` does; the route relays the 409 and a chat job reopens its card with the question.
+        { ...ctx, target: 'compose', standInChoice: true, compose: composeFactsOf(id, rows, level, draft, review), ...(extra.fromProposal !== undefined ? { fromProposal: extra.fromProposal } : {}) },
       );
       // POST /runs' own refusal (no eligible seat, a busy engine, an archived project, …) is
       // relayed as it answered; its 201 `{runId}` becomes this route's 202.
