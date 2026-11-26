@@ -7,8 +7,8 @@
 // no gh account name baked into crew code (the env-driven GH_ACCOUNT guard replaces it).
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   DELIVER_BASE_MOVED_MARKER as BASE_MOVED_MARKER,
@@ -22,6 +22,7 @@ import {
   deliverPrScript,
 } from '../src/core/deliver.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
+import { deliverKeyDir } from '../src/core/deliver-key.js';
 import { deliverNonceOf, trustedDeliverOutcome, trustedOutcomeIn } from '../src/core/deliver-triage.js';
 import type { WorkflowDef } from '../src/core/types.js';
 import { SKIP_CORE_CHECKS, requireCoreDir } from './support/core-checkout.js';
@@ -198,7 +199,15 @@ describe('deliverPrScript (the hardened field script)', () => {
     });
     // The callback to THIS daemon for the run-derived text, then the embedded fallback.
     expect(withIntent).toContain("API='http://127.0.0.1:7701'");
-    expect(withIntent).toContain('"$API/api/v1/runs/$RUNID/deliver-text"');
+    expect(withIntent).toContain('"$API/api/v1/deliver/text"'); // crew#1885: POST with the script's read key
+    // (crew#1885, codex-check on crew#1946) The script names its key FILE, one of crew's (0600, `core/deliver-key.ts`);
+    // the key itself is in no line of this text, which is `bash -lc`'s argv while it runs.
+    const keyFile = /^DELIVER_KEY_FILE='([^']+)'$/m.exec(withIntent)?.[1];
+    expect(keyFile).toBeDefined();
+    expect(dirname(keyFile!)).toBe(deliverKeyDir());
+    expect(statSync(keyFile!).mode & 0o777).toBe(0o600);
+    expect(withIntent).not.toContain(readFileSync(keyFile!, 'utf8').trim());
+    expect(withIntent).not.toContain('/deliver-text"');
     // The LAUNCH run id rides pre-encoded as one path segment; the branch-derived id is only the
     // fallback, percent-encoded byte-wise by the script (Copilot on #525).
     expect(withIntent).toContain("RUNID='run-1'");
@@ -208,7 +217,7 @@ describe('deliverPrScript (the hardened field script)', () => {
     );
     expect(script).toContain("RUNID=''"); // no launch id known ⇒ derived + encoded at run time
     // The fetched text is used ONLY when it is framed (title / blank / body) — a 200 that is not
-    // the run record falls back (Copilot on #525).
+    // the run record is refused (Copilot on #525; crew#1885).
     expect(withIntent).toContain('&& _framed "$TD/text"; then');
     expect(withIntent).toMatch(/_framed\(\) \{ \[ -s "\$1" \] && \[ -n "\$\(sed -n 1p "\$1"\)" \] && \[ -z "\$\(sed -n 2p "\$1"\)" \]/);
     expect(withIntent).toContain('using the launch-time PR text');
@@ -231,9 +240,19 @@ describe('deliverPrScript (the hardened field script)', () => {
     // on #525) — every branch names its reason.
     expect(script).toContain("API=''");
     expect(script).toContain('no daemon origin was known when this run launched — using the launch-time PR text');
-    expect(script).toContain('curl is not available in this shell — using the launch-time PR text');
-    expect(script).toContain('did not answer with the run record — using the launch-time PR text');
+    // (crew#1885) A known daemon that cannot be read refuses: only the run record carries the assurance lines.
+    expect(script).toContain('_norecord "curl is not available in this shell to read the run record"');
+    expect(script).toContain('_norecord "the daemon at $API did not answer with the run record"');
+    expect(script).not.toContain('did not answer with the run record — using the launch-time PR text');
     expect(script).toContain('deliver: PR text composed from the run record ($API)');
+    // The script asks with the key from its key file, never an operator bearer (crew#1885): read by the shell's own
+    // `read` and handed to curl's stdin by its own `printf`, so no program it starts has the key in its argv.
+    // `builtin`: a function a login profile defines under either name never sees the key (codex r2).
+    expect(script).toContain('elif ! { [ -n "$DELIVER_KEY_FILE" ] && IFS= builtin read -r DKEY < "$DELIVER_KEY_FILE"; } 2>/dev/null; then');
+    // Tracing a login profile turned on is off before anything runs (the trace would print the key, codex r2).
+    expect(script.split('\n').slice(0, 2)).toEqual(['set -euo pipefail', '{ set +x; } 2>/dev/null']);
+    expect(script).toContain("DELIVER_KEY_FILE=''"); // no daemon origin known: no key minted
+    expect(script).toContain(`elif builtin printf '{"run":"%s","key":"%s"}' "$RUNID" "$DKEY" | curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" -H "Content-Type: application/json" --data-binary @- "$API/api/v1/deliver/text"`);
     // A hostile intent cannot break out of the quoted heredoc: no expansion happens inside it, CR
     // and control characters are removed, and a line equal to the base delimiter is NOT dropped —
     // the delimiter moves instead (Copilot on #525: dropping it could delete the title line).
@@ -459,9 +478,10 @@ describe('the trusted terminal sentinel (crew#739)', () => {
     expect(script).toMatch(/VERDICT=pr\necho "\$URL"$/);
     expect(script).toContain('VERDICT=pushed; echo "deliver: PUSHED-NO-PR');
     // Both push refusals, plus (crew#720) the credentials-missing refusal, the Azure DevOps
-    // credential-mint and fetch refusals and (crew#940) the pinned GitHub fetch refusal — every
-    // one a recoverable park, never a strand.
-    expect(script.match(/VERDICT=rejected; /g)).toHaveLength(6);
+    // credential-mint and fetch refusals, (crew#940) the pinned GitHub fetch refusal and
+    // (crew#1885) the unread run record — every one a recoverable park, never a strand.
+    expect(script.match(/VERDICT=rejected; /g)).toHaveLength(7);
+    expect(script).toContain('_norecord() { VERDICT=rejected; ');
     expect(script).toContain('VERDICT=stranded; echo "deliver: LIFT-CONFLICT');
   });
 

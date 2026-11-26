@@ -83,6 +83,7 @@ type RecordedOpenGate =
   | { state: 'none' }
   | { state: 'ambiguous'; ords: number[] }
   | { state: 'open'; ord: number; row: InteractionRequest };
+import { GateReadTimer, untimed, type TimePart } from './gate-timing.js';
 import { detectRefusal, gateSeqOf, isOpenGate, offeredChoices, replayOpenGate, type GateCache, type GateRead, type GateResolution } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
 import { acceptanceRequirementOf, buildAcceptanceView } from '../qe/acceptance.js';
@@ -442,6 +443,7 @@ import {
   type VacuityProbes,
   type DeliveryResolver,
 } from './delivery-index.js';
+import { deliverTextAllowed, postHocDeliverText } from '../core/deliver-grants.js';
 import { REVIEW_CHANGE_WORKFLOW, reviewChangeExclusion, type ReviewChangeDeps } from './review-change.js';
 import { noStandInsKind } from './stand-in-scope.js';
 import { rosterWithout } from '../interactive/review-events.js';
@@ -470,7 +472,8 @@ import { engineConformance, gardenPackCheck, type ConformanceRunner, type PackCh
 import { conformanceProvisioner, conformanceRuntimeReady, conformanceRuntimeRoot, conformanceVenvDir, editorPluginLaunchListener, venvPython } from '../editors/conformance-runtime.js';
 import { EditorRegistry } from '../editors/registry.js';
 import { packSkillsPort } from '../editors/pack-extras.js';
-import { registerEditorRoutes, unitTokenProbe, type UnitTokenVerdict } from '../editors/routes.js';
+import { registerEditorRoutes } from '../editors/routes.js';
+import { unitTokenProbe, type UnitTokenProbe } from './seat-token.js';
 import { broadcast } from '../events/bus.js';
 import type { AppActionStore } from '../apps/actions/store.js';
 import { AppWritePath } from '../apps/actions/write-path.js';
@@ -1722,8 +1725,9 @@ interface RuntimeServices {
   packCheck?: PackCheckRunner;
   /** (tests) the install-time conformance run `POST /editors` uses; default = garden's runner as a child. */
   editorConformance?: ConformanceRunner;
-  /** F37 (tests): is a bearer a governed unit's token (the grant write's tripwire); default = the engine's `resolveEstateScope`. */
-  editorUnitTokenProbe?: (token: string) => Promise<UnitTokenVerdict>;
+  /** F37 (tests): is a bearer a governed unit's token (the tripwire on the editor and skills writes, `seat-token.ts`);
+   *  default = the engine's `resolveEstateScope`. */
+  editorUnitTokenProbe?: UnitTokenProbe;
   /** EP-C1 (tests): where `daemon-editors.json` lives; default = the crew state home. */
   editorsStateHome?: string;
   /** (DES-APPS-001 K5) A unit token → its run and step, for `POST /apps/check`; absent = that route answers 503. */
@@ -2251,6 +2255,8 @@ export function registerRoutes(
       off();
     });
   }
+  // The seat-token tripwire's probe (F37 §6.4; crew#1890), shared by the editor writes and the skills writes.
+  const seatProbe = runtime.editorUnitTokenProbe !== undefined ? runtime.editorUnitTokenProbe : unitTokenProbe(CoreAdapter.estateScopeResolver());
   registerEditorRoutes(app, {
     registry: editorRegistry,
     adapter,
@@ -2261,11 +2267,8 @@ export function registerRoutes(
     presets: adapter,
     packCheck: runtime.packCheck ?? gardenPackCheck(discoverLivePlugin()?.path ?? null),
     conformance: runtime.editorConformance ?? engineConformance({ provision: editorConformanceRuntime }),
-    // F37: the grant write's §6.4 tripwire asks the engine whether a bearer is a governed unit's token.
-    ...(() => {
-      const probe = runtime.editorUnitTokenProbe !== undefined ? runtime.editorUnitTokenProbe : unitTokenProbe(CoreAdapter.estateScopeResolver());
-      return probe !== undefined ? { isUnitToken: probe } : {};
-    })(),
+    // F37: the §6.4 tripwire on the editor writes asks the engine whether a bearer is a governed unit's token.
+    ...(seatProbe !== undefined ? { isUnitToken: seatProbe } : {}),
     log: (m) => app.log.warn(m),
   });
   // DES-APPS-001 §7.6 (K2a): the app store's routes, when this daemon has a store.
@@ -5133,6 +5136,26 @@ export function registerRoutes(
   // title, line 2 blank, then the body — the same shape the script's embedded fallback has, so the
   // script parses exactly one thing. Read-only; the run's `deliver` unit is still running when it
   // asks, and is listed as `this PR`.
+  const deliverTextOf = async (run: SessionView, id: string): Promise<string> => {
+    const followUps = await evaluatorFollowUps(run);
+    const reports = await seatReports(run);
+    // crew#1192: the QE check the deliver gate reads, so a required QE that passed says so.
+    const qeAcceptance = await qeAcceptanceCheckFor(run);
+    // (DES-PM-001 §6 step 3) Each addressed issue links back in its tracker's own form.
+    const trackerRefs = ((await runtime.trackerAddresses?.of(id).catch(() => [])) ?? []).map((a) => ({ system: a.system, ref: a.ref, ...(a.asked !== undefined ? { asked: a.asked } : {}) }));
+    // The run's preset or workflow NAME, as the engine recorded it (seam X2).
+    const text = composeDeliverText(
+      factsFromRun(decorateRun(run), runUrlFor(configuredPublicOrigin(), id), {
+        ...(trackerRefs.length > 0 ? { trackerRefs } : {}),
+        workflowId: runIdentityOf(run).name,
+        revisesPr: retryIndex.revisesPrFor(id) ?? null,
+        ...(followUps !== undefined ? { followUps } : {}),
+        ...(reports !== undefined ? { reports } : {}),
+        qeAcceptance,
+      }),
+    );
+    return framedDeliverText(text);
+  };
   app.get(
     `${V}/runs/:id/deliver-text`,
     { config: { manifest: { statusCodes: [200, 404] } } },
@@ -5140,24 +5163,38 @@ export function registerRoutes(
       const { id } = req.params as { id: string };
       const run = await adapter.runView(id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
-      const followUps = await evaluatorFollowUps(run);
-      const reports = await seatReports(run);
-      // crew#1192: the QE check the deliver gate reads, so a required QE that passed says so.
-      const qeAcceptance = await qeAcceptanceCheckFor(run);
-      // (DES-PM-001 §6 step 3) Each addressed issue links back in its tracker's own form.
-      const trackerRefs = ((await runtime.trackerAddresses?.of(id).catch(() => [])) ?? []).map((a) => ({ system: a.system, ref: a.ref, ...(a.asked !== undefined ? { asked: a.asked } : {}) }));
-      // The run's preset or workflow NAME, as the engine recorded it (seam X2).
-      const text = composeDeliverText(
-        factsFromRun(decorateRun(run), runUrlFor(configuredPublicOrigin(), id), {
-          ...(trackerRefs.length > 0 ? { trackerRefs } : {}),
-          workflowId: runIdentityOf(run).name,
-          revisesPr: retryIndex.revisesPrFor(id) ?? null,
-          ...(followUps !== undefined ? { followUps } : {}),
-          ...(reports !== undefined ? { reports } : {}),
-          qeAcceptance,
-        }),
-      );
-      return reply.type('text/plain; charset=utf-8').send(framedDeliverText(text));
+      return reply.type('text/plain; charset=utf-8').send(await deliverTextOf(run, id));
+    },
+  );
+  // (crew#1885) The same text for the run's OWN deliver script, in every auth mode. The script holds no operator
+  // bearer, so under `auth: required` the route above answered it 401 and the PR went out with the launch-time text,
+  // none of the run's assurance lines on it. Bearer-exempt (`auth.ts` UNIT_TOKEN_ROUTES): the body's key is the
+  // credential, checked against the 0600 key file the run's deliver unit's script names while that unit can be running,
+  // or a post-hoc delivery's running now, which answers the text composed for it (`core/deliver-grants.ts`,
+  // `core/deliver-key.ts`). The key is on no command line (codex-check on crew#1946). No answer or log line carries it.
+  // An unknown run and a wrong key get the same 403, so the route says nothing of which runs exist. `run` is the run id
+  // as the script holds it, one percent-encoded path segment.
+  const DeliverTextBody = z.strictObject({ run: z.string().min(1).max(1024), key: z.string().regex(/^[0-9a-fA-F]{64}$/) });
+  app.post(
+    `${V}/deliver/text`,
+    { config: { manifest: { statusCodes: [200, 400, 403] } } },
+    async (req, reply) => {
+      const parsed = DeliverTextBody.safeParse(req.body);
+      if (!parsed.success) return reply.code(400).send({ error: "body must be { run: <the run id, percent-encoded>, key: <the deliver script's read key> }" });
+      let id: string;
+      try {
+        id = decodeURIComponent(parsed.data.run);
+      } catch {
+        return reply.code(400).send({ error: 'run is not a percent-encoded run id' });
+      }
+      // A post-hoc delivery the daemon is running now: the text composed for it, with the QE check it was approved on.
+      const posted = postHocDeliverText(id, parsed.data.key);
+      if (posted !== null) return reply.type('text/plain; charset=utf-8').send(posted);
+      const run = await adapter.runView(id);
+      if (!run || !deliverTextAllowed(run.units, parsed.data.key, TERMINAL_RUN_STATUSES.has(run.session.status))) {
+        return reply.code(403).send({ code: 'not_the_deliver_script', error: "only this run's own deliver script can read its delivery text here" });
+      }
+      return reply.type('text/plain; charset=utf-8').send(await deliverTextOf(run, id));
     },
   );
 
@@ -7604,8 +7641,26 @@ export function registerRoutes(
    * `'no-log'` = this build cannot read the log, so nothing can be said; `'unstable'` = live gate
    * events kept landing while the record was read, so nothing was verified (retry).
    */
-  async function resolveOpenGate(id: string): Promise<GateResolution> {
-    return gateCache.resolve(id, () => readOpenGate(id));
+  /** (crew#1950) The parts of each gate hydration, keyed by the cache's own promise for it (one per hydration), so
+   *  every GET that waits on it (whoever started it, a POST decision too) names that hydration's parts and no other's. */
+  const hydrationParts = new WeakMap<Promise<GateResolution>, GateReadTimer>();
+  async function resolveOpenGate(id: string, timer?: GateReadTimer): Promise<GateResolution> {
+    // A fresh timer per hydration this call starts, kept across that hydration's re-reads.
+    let started: GateReadTimer | undefined;
+    const resolution = gateCache.resolve(id, () => {
+      started ??= new GateReadTimer();
+      return readOpenGate(id, started.time);
+    });
+    // The hydration this call started or joined, known synchronously (`resolve` starts or finds it before its first
+    // await); none when the cache served the gate.
+    const hydration = gateCache.inflightOf(id);
+    if (hydration !== undefined && started !== undefined && !hydrationParts.has(hydration)) hydrationParts.set(hydration, started);
+    const parts = hydration === undefined ? undefined : hydrationParts.get(hydration);
+    try {
+      return await resolution;
+    } finally {
+      if (parts !== undefined) timer?.absorb(parts);
+    }
   }
 
   /**
@@ -7614,8 +7669,9 @@ export function registerRoutes(
    * predating the table. Never consults the cache — `GateCache.resolve` owns that, and runs this
    * again when a live gate event overlaps it.
    */
-  async function readOpenGate(id: string): Promise<GateRead> {
-    const recorded = await recordedOpenGate(id);
+  async function readOpenGate(id: string, time: TimePart = untimed): Promise<GateRead> {
+    // (crew#1950) Its own record and event-log reads are timed apart from the resolve that holds them.
+    const recorded = await time('record', () => recordedOpenGate(id));
     if (recorded?.state === 'ambiguous') return 'ambiguous';
     if (recorded?.state === 'open') {
       const durableGate = recorded.row;
@@ -7628,7 +7684,7 @@ export function registerRoutes(
       // Issue #969: the row has no `choices`/`recommended`, so they come from the newest
       // `awaitingHuman` for this ord in the event log. A log this build cannot read (null, or a read
       // that throws) leaves both out — the gate is still served, just without the offered answers.
-      const events = await adapter.runEvents(id).catch(() => null);
+      const events = await time('events', () => adapter.runEvents(id)).catch(() => null);
       const frame = events?.filter((e) => e.type === 'awaitingHuman' && e.session === id && e.ord === ord).at(-1);
       return {
         ord,
@@ -7646,7 +7702,7 @@ export function registerRoutes(
         })(),
       };
     }
-    const events = await adapter.runEvents(id);
+    const events = await time('events', () => adapter.runEvents(id));
     if (events === null) return 'no-log';
     return replayOpenGate(id, events) ?? null;
   }
@@ -8814,14 +8870,14 @@ export function registerRoutes(
    * steering-author run (its approve lands the proposal). Marks
    * `humanOnly` where crew answers a non-human actor 403 `human_operator_only`.
    */
-  async function crewGateActions(run: SessionView, gated: WorkUnit | undefined, gateKind: string, actions: GateAction[]): Promise<GateAction[]> {
+  async function crewGateActions(run: SessionView, gated: WorkUnit | undefined, gateKind: string, actions: GateAction[], time: TimePart = untimed): Promise<GateAction[]> {
     const declines = (a: GateAction): boolean => a.action === 'reject' || a.action === 'request_changes';
     // crew#1157 / crew#1259: an analysis or delivering chat run's held plan change is never approved (`gateForDecision`): only the declines stay.
     let approveRefused = chatPlanRefusal(run.session.id, { gateKind }) !== null;
     let skipRefused = approveRefused;
     if (!approveRefused && gated !== undefined && isDeliverUnit(gated)) {
-      approveRefused = 'refusal' in (await deliverApprovalRefusal(run, gated));
-      skipRefused = 'refusal' in (await deliverApprovalRefusal(run, gated, 'skip'));
+      approveRefused = 'refusal' in (await time('deliver-qe', () => deliverApprovalRefusal(run, gated)));
+      skipRefused = 'refusal' in (await time('deliver-qe', () => deliverApprovalRefusal(run, gated, 'skip')));
     }
     const steering = isSteeringAuthorRun(run);
     return actions
@@ -9058,13 +9114,35 @@ export function registerRoutes(
   // the fallback existed a daemon restart left every parked run unable to say what it was asking —
   // not because the prompt was gone (core records `awaitingHuman` to the log) but because nothing
   // read it. A restart is routine: deploy, crash, laptop sleep.
-  app.get(`${V}/runs/:id/gate`, async (req, reply) => {
+  // (crew#1950) Each read's parts, timed: the answer's Server-Timing header, and one warn line for a slow read.
+  const gateReadTimers = new WeakMap<object, GateReadTimer>();
+  app.get(`${V}/runs/:id/gate`, {
+    onSend: (req, reply, payload, done) => {
+      // Taken off first, so a send that re-enters this hook (an error answer) times nothing twice; and nothing here
+      // may replace the answer: a failed header or log line is dropped (codex r1).
+      const timer = gateReadTimers.get(req);
+      gateReadTimers.delete(req);
+      if (timer !== undefined) {
+        try {
+          const total = timer.total();
+          reply.header('Server-Timing', timer.header(total));
+          const slow = timer.slowLine((req.params as { id: string }).id, reply.statusCode, total);
+          if (slow !== null) req.log.warn(slow);
+        } catch {
+          // Diagnostics only.
+        }
+      }
+      done(null, payload);
+    },
+  }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const timer = new GateReadTimer();
+    gateReadTimers.set(req, timer);
     // F35, crew#1775: this run's view only, never every run's (studio reads this route for parked runs,
     // from every open tab): one engine read of this run, off the actor, as the store is when it starts.
     // Read once per request: the cached-but-not-servable path and the miss path share it (coord review C6).
     let viewRead: Promise<SessionView | undefined> | undefined;
-    const runOf = (): Promise<SessionView | undefined> => (viewRead ??= adapter.runView(id));
+    const runOf = (): Promise<SessionView | undefined> => (viewRead ??= timer.time('view', () => adapter.runView(id)));
     // (rejudge, api-types 0.134.0) A gate whose unit no judge could rule on says whether its judge
     // can be re-run now, and from which seats — the engine's own selection, read each time (a seat
     // signed in since the pause counts). Absent on every other gate and on an addon without the read.
@@ -9074,7 +9152,7 @@ export function registerRoutes(
       if (gated?.status !== 'rejected' || denial?.source !== 'judge_unavailable') return {};
       if (typeof adapter.rejudgeReadiness !== 'function') return {};
       try {
-        const r = await adapter.rejudgeReadiness(id);
+        const r = await timer.time('rejudge', () => adapter.rejudgeReadiness!(id));
         if (r === null || !r.applies || r.ord !== ord) return {};
         return { rejudge: { available: r.available, eligible: r.eligible, missing: r.missing } };
       } catch {
@@ -9092,7 +9170,7 @@ export function registerRoutes(
       if (run === undefined) return {};
       const decision = qeDecisionOf(run);
       if (decision === null || qeDecisionBypasses(decision)) return {};
-      const check = await qeAcceptanceCheckFor(run);
+      const check = await timer.time('deliver-qe', () => qeAcceptanceCheckFor(run));
       if (check === null || check.satisfied) return {};
       return {
         skipQe: {
@@ -9117,7 +9195,7 @@ export function registerRoutes(
       for (let attempt = 0; attempt < 2; attempt++) {
         let listed: Awaited<ReturnType<CoreAdapter['gateActions']>>;
         try {
-          listed = await adapter.gateActions(id);
+          listed = await timer.time('actions', () => adapter.gateActions!(id));
         } catch {
           threw = true;
           continue;
@@ -9127,14 +9205,14 @@ export function registerRoutes(
         if (run === undefined) return {};
         const gated = run.units?.find((u) => u.ord === ord);
         return {
-          actions: await crewGateActions(run, gated, listed.gateKind, listed.actions),
+          actions: await timer.time('crew-actions', () => crewGateActions(run, gated, listed.gateKind, listed.actions, timer.time)),
           ...(listed.planRev !== undefined ? { planRev: listed.planRev } : {}),
         };
       }
       // Persistent only if it still holds NOW: a gate that opened or advanced during the read shows as an open row on
       // this durable re-read, and that is a race, so 503 whatever the run snapshot says (it may predate the run).
       if (threw) return null;
-      return (await recordedOpenGate(id))?.state === 'open' ? null : {};
+      return (await timer.time('record', () => recordedOpenGate(id)))?.state === 'open' ? null : {};
     };
     const actionsUnavailable = {
       error: 'Gate actions unavailable: the engine\'s answers for this gate could not be read consistently — retry.',
@@ -9158,7 +9236,7 @@ export function registerRoutes(
     // not replay the log on every poll, and dropped once it is not (a late frame for an answered
     // gate). Any entry not served is dropped and the gate read from the record. Only an engine that
     // keeps no rows serves the cache unjudged.
-    const recorded = await recordedOpenGate(id);
+    const recorded = await timer.time('record', () => recordedOpenGate(id));
     if (recorded?.state === 'ambiguous') {
       return reply.code(409).send({
         error: `Gate unknown: the engine's record shows gates open before units ${recorded.ords.join(' and ')} on this run, so the daemon cannot tell which one is open.`,
@@ -9210,7 +9288,7 @@ export function registerRoutes(
     // daemon restart reads it back instead of replaying the log; the replay stays the FALLBACK for
     // runs parked before the engine grew the table. `resolveOpenGate` is that one resolution, shared
     // with the POST route's `ord` check.
-    let open = await resolveOpenGate(id);
+    let open = await timer.time('resolve', () => resolveOpenGate(id, timer));
     // The record judges what the resolver returns too (crew#1083 final review): a stale frame folded
     // into the cache after GET's record read — during the status read, before any hydration began,
     // so no revision guard ran — is a cache hit for the resolver. When the answer disagrees with
@@ -9223,12 +9301,12 @@ export function registerRoutes(
       && (gateSeqOf(r.row['gate_seq']) === undefined || o.gateSeq === gateSeqOf(r.row['gate_seq']));
     let record: RecordedOpenGate | null = recorded;
     if (recorded?.state === 'open' && isOpenGate(open) && !sameOpening(open, recorded)) {
-      const now = await recordedOpenGate(id);
+      const now = await timer.time('record', () => recordedOpenGate(id));
       record = now;
       const matchesNow = (o: GateResolution): boolean => sameOpening(o, now);
       if (!matchesNow(open)) {
         gateCache.forget(id);
-        open = await resolveOpenGate(id);
+        open = await timer.time('resolve', () => resolveOpenGate(id, timer));
         if (isOpenGate(open) && !matchesNow(open)) open = 'unstable';
       }
     }
@@ -12315,8 +12393,10 @@ export function registerRoutes(
   registerSkillsRoutes(app, {
     ...(runtime.skills !== undefined ? { runtime: runtime.skills } : {}),
     ...(runtime.skillUsage !== undefined ? { usage: runtime.skillUsage } : {}),
+    ...(seatProbe !== undefined ? { isUnitToken: seatProbe } : {}),
     audit,
     actorOf,
+    log: (m) => app.log.warn(m),
   });
 
   // ── MCP tools registry (DES-MCP-TOOLS-001 S2) — upstream servers, their tools, their secrets ─

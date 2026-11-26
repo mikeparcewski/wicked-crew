@@ -48,6 +48,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from '../zod.js';
 
 import { LOCAL_ACTOR, trustAtLeast } from '../api/auth.js';
+import { seatTokenClear, type UnitTokenProbe } from '../api/seat-token.js';
 import type { Actor, ConformanceRule, CoreEvent, EditorGrantsChangedFrame, EditorGrantsResponse, EditorView, ListEditorsResponse } from '../core/types.js';
 import { bundleHeaders } from './csp.js';
 import { withdrawPackExtras } from './pack-extras.js';
@@ -163,52 +164,15 @@ export async function editGrant(adapter: EditorGrantsAdapter, id: string, permis
   await adapter.upsertConformanceRule({ ...ledger, excludes: next });
 }
 
-/** The bearer a request carries, if any (`Authorization: Bearer <token>`). */
-function bearerOf(req: FastifyRequest): string | null {
-  const h = req.headers.authorization;
-  if (typeof h !== 'string') return null;
-  const m = /^Bearer\s+(\S+)\s*$/iu.exec(h);
-  return m === null ? null : m[1]!;
-}
-
-/**
- * A governed unit's token → true (the engine's `resolveEstateScope` names its unit), anything else → false.
- * The §6.4 tripwire for the grant write: under `auth=off` every caller is the local human, so a worker
- * that SENDS its token is caught here; one that omits it is the stated honest limit.
- */
-export type UnitTokenVerdict = 'unit' | 'not_unit' | 'unknown';
-
-/**
- * The engine's word on a bearer: `unit` (it names the unit), `not_unit` (it refused the token as
- * `invalid_token:`), or `unknown` (any other failure, or an answer without a unit): the tripwire then
- * fails CLOSED, so a resolver fault never waves a worker's token through (codex r1).
- */
-export function unitTokenProbe(resolve: ((requestJson: string) => Promise<string>) | null): ((token: string) => Promise<UnitTokenVerdict>) | undefined {
-  if (resolve === null) return undefined;
-  return async (token) => {
-    let raw: string;
-    try {
-      raw = await resolve(JSON.stringify({ token }));
-    } catch (err) {
-      return /^invalid_token\b/u.test(err instanceof Error ? err.message : String(err)) ? 'not_unit' : 'unknown';
-    }
-    try {
-      const unit = (JSON.parse(raw) as { unit?: { runId?: unknown } }).unit;
-      return typeof unit?.runId === 'string' ? 'unit' : 'unknown';
-    } catch {
-      return 'unknown';
-    }
-  };
-}
-
 export interface EditorRoutesDeps {
   registry: EditorRegistry;
   adapter: EditorGrantsAdapter;
   packCheck: PackCheckRunner;
   /** The install-time conformance run (garden's runner against this daemon's conformance host page). */
   conformance: ConformanceRunner;
-  /** The §6.4 tripwire: is this bearer a governed unit's token? Absent = no engine to ask (nothing refused on it). */
-  isUnitToken?: (token: string) => Promise<UnitTokenVerdict>;
+  /** The §6.4 tripwire on every human-only write (`api/seat-token.ts`): is this bearer a governed unit's token? Absent =
+   *  no engine to ask, so a bearer the local actor sends cannot be cleared (503). */
+  isUnitToken?: UnitTokenProbe;
   /** (crew#1703) The daemon skills root a pack's skills join; absent = this daemon has none (such a pack is refused). */
   skills?: PackSkillsPort | null;
   /** (crew#1703) The engine's preset store and phase catalog, for a pack's blocks. */
@@ -236,13 +200,17 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
     void reply.code(403).send({ error: `Insufficient trust: editors require 'operator' (you are '${actor.trust}')` });
     return false;
   };
-  const humanOnly = (req: FastifyRequest, reply: FastifyReply): boolean => {
+  // A human operator, and (crew#1890) under auth off no request carrying a governed unit's token: the §6.4 tripwire
+  // the grant write had alone now guards the install, removal and enable as well.
+  const humanOnly = async (req: FastifyRequest, reply: FastifyReply, refusal: string): Promise<boolean> => {
     const actor = actorOf(req);
-    if (actor.kind === 'human' && trustAtLeast(actor, 'operator')) return true;
-    void reply
-      .code(403)
-      .send({ error: `only a human operator can install, remove, enable or disable an editor, or allow what it asks for (you are ${actor.kind}/${actor.trust})` });
-    return false;
+    if (!(actor.kind === 'human' && trustAtLeast(actor, 'operator'))) {
+      void reply
+        .code(403)
+        .send({ error: `only a human operator can install, remove, enable or disable an editor, or allow what it asks for (you are ${actor.kind}/${actor.trust})` });
+      return false;
+    }
+    return seatTokenClear(req, reply, actor, deps.isUnitToken, refusal, (m) => deps.log?.(`[editors] ${m}`));
   };
   const idOf = (req: FastifyRequest): string => (req.params as { id: string }).id;
 
@@ -297,9 +265,9 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
   });
   app.post(
     `${V}/editors`,
-    { config: { manifest: { requestType: 'InstallEditorBody', responseType: 'InstallEditorResponse', statusCodes: [200, 400, 403, 404, 409, 422] } } },
+    { config: { manifest: { requestType: 'InstallEditorBody', responseType: 'InstallEditorResponse', statusCodes: [200, 400, 403, 404, 409, 422, 503] } } },
     async (req, reply) => {
-      if (!humanOnly(req, reply)) return reply;
+      if (!(await humanOnly(req, reply, 'a governed worker cannot install an editor pack; only the person can, in studio'))) return reply;
       const parsed = InstallSchema.safeParse(req.body);
       if (!parsed.success) return reply.code(400).send({ error: 'body must be { packRoot: <absolute path>, enabled?: boolean, approve?: { skills: string[], blocks: string[], digest?: string } }' });
       try {
@@ -361,7 +329,7 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
     `${V}/editors/:id`,
     { config: { manifest: { responseType: 'RemoveEditorResponse', statusCodes: [200, 403, 404, 409, 503] } } },
     async (req, reply) => {
-      if (!humanOnly(req, reply)) return reply;
+      if (!(await humanOnly(req, reply, 'a governed worker cannot remove an editor; only the person can, in studio'))) return reply;
       const id = idOf(req);
       if (!EDITOR_ID.test(id)) return reply.code(404).send({ error: `no editor '${id}' is installed` });
       if (registry.get(id)?.firstParty === true) {
@@ -412,9 +380,9 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
   const EnabledSchema = z.strictObject({ enabled: z.boolean() });
   app.post(
     `${V}/editors/:id/enabled`,
-    { config: { manifest: { responseType: 'EditorView', statusCodes: [200, 400, 403, 404] } } },
+    { config: { manifest: { responseType: 'EditorView', statusCodes: [200, 400, 403, 404, 503] } } },
     async (req, reply) => {
-      if (!humanOnly(req, reply)) return reply;
+      if (!(await humanOnly(req, reply, 'a governed worker cannot enable or disable an editor; only the person can, in studio'))) return reply;
       const parsed = EnabledSchema.safeParse(req.body);
       if (!parsed.success) return reply.code(400).send({ error: 'body must be { enabled: boolean }' });
       const id = idOf(req);
@@ -495,19 +463,7 @@ export function registerEditorRoutes(app: FastifyInstance, deps: EditorRoutesDep
     `${V}/editors/:id/grants`,
     { config: { manifest: { requestType: 'SetEditorGrantBody', responseType: 'EditorGrantsResponse', statusCodes: [200, 400, 403, 404, 409, 501, 502, 503] } } },
     async (req, reply) => {
-      if (!humanOnly(req, reply)) return reply;
-      // The tripwire (§6.4): a request that carries a governed unit's token is a worker's, whatever the auth mode says.
-      // Under auth=required the bearer already proved a human operator (a unit token is no identity there: 401), so
-      // only the local actor of auth=off is checked; with no engine to ask, a bearer cannot be cleared (codex r2).
-      const bearer = actorOf(req) === LOCAL_ACTOR ? bearerOf(req) : null;
-      const verdict: UnitTokenVerdict = bearer === null ? 'not_unit' : deps.isUnitToken !== undefined ? await deps.isUnitToken(bearer) : 'unknown';
-      if (verdict === 'unit') {
-        deps.log?.(`[editors] refused a grant write carrying a governed unit's token (${idOf(req)})`);
-        return reply.code(403).send({ code: 'seat_token', error: 'a governed worker cannot allow or revoke an editor permission; only the person can, in studio' });
-      }
-      if (verdict === 'unknown') {
-        return reply.code(503).send({ error: 'could not tell whether this request carries a governed worker\'s token, so nothing was changed; try again' });
-      }
+      if (!(await humanOnly(req, reply, 'a governed worker cannot allow or revoke an editor permission; only the person can, in studio'))) return reply;
       const parsed = GrantSchema.safeParse(req.body);
       if (!parsed.success) return reply.code(400).send({ error: 'body must be { permission: <permission id>, allow: boolean, version: <the version shown>, sha256: <the hash shown>, project?: <project id> }' });
       const { permission, allow } = parsed.data;

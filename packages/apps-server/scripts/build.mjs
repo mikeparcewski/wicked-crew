@@ -5,17 +5,21 @@
 //   dist/server/node_modules/libpg-query/    its wasm build, from the workspace's lockfile
 //   dist/server/shim/host.js, host.css       the in-process host (IIFE) and its rules
 //   dist/server/shim/host.test.js            TESTS ONLY: the host with the framed-token seam on (never packed)
-//   dist/runners/sqlite-runner.mjs           crew's SQLite reader (the driver resolves it three levels up)
+//   dist/runners/sqlite-runner.mjs           crew's SQLite reader (the driver resolves it three levels up), and
+//   dist/runners/<every module it imports>   the siblings it loads, derived from its imports (runner-files.mjs)
+//   dist/runners/files.json                  that list, which crew's appsServerArtifact() requires file by file
 //
 // Cross-platform: pure Node fs, no shell.
 
-import { cpSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import { build } from 'esbuild';
+
+import { runnerFiles } from './runner-files.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkg = resolve(here, '..');
@@ -72,8 +76,12 @@ function copyPackage(name) {
 }
 copyPackage('libpg-query');
 
+// Every module the runner loads (crew#1956: upload-parse.mjs was left out, and every upload source answered 503 in
+// the container). A relative import that names no file beside the runner throws here, failing the build.
 mkdirSync(join(dist, 'runners'), { recursive: true });
-cpSync(join(crew, 'runners', 'sqlite-runner.mjs'), join(dist, 'runners', 'sqlite-runner.mjs'));
+const runners = runnerFiles(join(crew, 'runners'));
+for (const file of runners) cpSync(join(crew, 'runners', file), join(dist, 'runners', file));
+writeFileSync(join(dist, 'runners', 'files.json'), `${JSON.stringify(runners)}\n`);
 cpSync(join(pkg, 'image', 'Dockerfile'), join(dist, 'Dockerfile'));
 
 console.log(`[apps-server] built ${dist}`);

@@ -181,6 +181,19 @@ describe('unit-token routes (crew#714)', () => {
     expect(isProtectedPath('/api/v1/mcp/tools')).toBe(true);
   });
 
+  it('exempts the deliver script\'s text request, whose credential is its nonce (crew#1885), and nothing beside it', () => {
+    expect(isUnitTokenRoute('POST', '/api/v1/deliver/text')).toBe(true);
+    for (const [method, path] of [
+      ['GET', '/api/v1/deliver/text'],
+      ['POST', '/api/v1/deliver/text/x'],
+      ['POST', '/api/v1/deliver'],
+      ['GET', '/api/v1/runs/x/deliver-text'],
+      ['POST', '/api/v1/runs/x/deliver'],
+    ] as const) {
+      expect(isUnitTokenRoute(method, path), `${method} ${path}`).toBe(false);
+    }
+  });
+
   it('never widens to a prefix, another method, or a neighbouring MCP route', () => {
     for (const [method, path] of [
       ['GET', '/api/v1/mcp/call'],

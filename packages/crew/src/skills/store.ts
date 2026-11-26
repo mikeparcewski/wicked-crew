@@ -761,6 +761,44 @@ function unsafeRecordPath(rel: unknown): string | null {
   }
 }
 
+/** (crew#1881) The mode a pack's executable skill file lands with: read and run for all, written by the daemon only. */
+export const EXECUTABLE_FILE_MODE = 0o755;
+/** (crew#1881) The mode of a pack's skill file that is not executable. */
+export const PLAIN_FILE_MODE = 0o644;
+
+/**
+ * (crew#1881) The modes `swapOwnFiles` writes, keyed `<skill dir>/<rel>`, from a caller's modes keyed by the path
+ * relative to the skill: a pack's normalized modes, or a put-back's recorded earlier ones. Only the permission bits are
+ * kept (`& 0o777`), so no setuid, setgid or sticky bit ever lands; a file the caller gives no mode gets
+ * {@link PLAIN_FILE_MODE}. As every skills write, the daemon's umask applies (a stricter umask lands narrower modes:
+ * crew#1955). Absent = an empty map (each file the default mode).
+ */
+function sourceModes(dir: string, files: Readonly<Record<string, string>>, modes: Readonly<Record<string, number>> | undefined): Map<string, number> {
+  const out = new Map<string, number>();
+  if (modes === undefined) return out;
+  for (const rel of Object.keys(files)) out.set(`${dir}/${rel}`, (Object.hasOwn(modes, rel) ? modes[rel]! : PLAIN_FILE_MODE) & 0o777);
+  return out;
+}
+
+/**
+ * (crew#1881) Whether every file of the generation about to be published has the execute bit its copy in the current
+ * generation has. The publish identity hashes paths and bytes only, so without this a change of modes alone would be
+ * an `unchanged` publish, and a script made executable (or no longer) would not reach the seats.
+ */
+function sameExecuteBits(files: ReadonlyArray<FileRecord>, generation: string): boolean {
+  const exec = (abs: string): boolean | null => {
+    try {
+      return (lstatSync(abs).mode & 0o111) !== 0;
+    } catch {
+      return null;
+    }
+  };
+  return files.every((f) => {
+    const here = exec(f.abs);
+    return here !== null && here === exec(join(generation, ...f.rel.split('/')));
+  });
+}
+
 export class SkillsStore {
   private rootDir: string;
   private readonly registeredRefs: () => ReadonlySet<string>;
@@ -3083,8 +3121,12 @@ export class SkillsStore {
     return findings.filter((f) => f.severity === 'blocking');
   }
 
-  /** Add a user skill at `skills/<name minus the prefix>` — staged, then swapped in (`swapOwnFiles`). */
-  add(name: string, files: Readonly<Record<string, string>>, expectedRevision: number, opts: { origin?: string } = {}): SkillMutationResult {
+  /**
+   * Add a user skill at `skills/<name minus the prefix>` — staged, then swapped in (`swapOwnFiles`). `opts.modes`
+   * (crew#1881): each file's mode, keyed by its path relative to the skill (a pack's executable scripts); without it,
+   * every file lands with the default mode. See {@link sourceModes}.
+   */
+  add(name: string, files: Readonly<Record<string, string>>, expectedRevision: number, opts: { origin?: string; modes?: Readonly<Record<string, number>> } = {}): SkillMutationResult {
     if (opts.origin !== undefined && !SKILL_ORIGIN_RE.test(opts.origin)) throw new Error(`a skill origin must be pack:<pack name>, not ${JSON.stringify(opts.origin)}`);
     const m = this.manifest();
     this.refuseDuringPublish();
@@ -3099,7 +3141,7 @@ export class SkillsStore {
     }
     const destinations = this.containedDestinations(name, dir, files, []);
     if ('finding' in destinations) return this.blocked(m, [destinations.finding]);
-    const swap = this.swapOwnFiles(name, dir, [], destinations.targets, new Map());
+    const swap = this.swapOwnFiles(name, dir, [], destinations.targets, sourceModes(dir, files, opts.modes));
     if ('finding' in swap) return this.blocked(m, [swap.finding]);
     this.commitSwap(swap.handle, m, () => {
       m.skills[name] = {
@@ -3123,11 +3165,12 @@ export class SkillsStore {
 
   /**
    * Replace the skill's own files wholesale (nested skills — registered or on disk — untouched); an
-   * existing file's mode bits survive the replace. EVERY destination is lstat-walked from the root
+   * existing file's mode bits survive the replace, unless `opts.modes` (crew#1881) gives each file's mode, as in
+   * {@link add}. EVERY destination is lstat-walked from the root
    * and checked against entries of the other kind BEFORE the first byte moves, and the swap itself
    * is staged + rolled back on failure (`swapOwnFiles`): a refused or failed replace changes nothing.
    */
-  replace(name: string, files: Readonly<Record<string, string>>, expectedRevision: number): SkillMutationResult {
+  replace(name: string, files: Readonly<Record<string, string>>, expectedRevision: number, opts: { modes?: Readonly<Record<string, number>> } = {}): SkillMutationResult {
     const m = this.manifest();
     const entry = this.requireEntry(m, name, expectedRevision);
     const findings = this.replaceGuards(m, name, entry, files);
@@ -3141,7 +3184,7 @@ export class SkillsStore {
     const own = this.ownFilesIn(effective, entry.dir, this.ownershipDirs(m));
     const destinations = this.containedDestinations(name, entry.dir, files, own);
     if ('finding' in destinations) return this.blocked(m, [destinations.finding]);
-    const modes = new Map(own.map((f) => [f.rel, lstatSync(f.abs).mode & 0o777]));
+    const modes = opts.modes !== undefined ? sourceModes(entry.dir, files, opts.modes) : new Map(own.map((f) => [f.rel, lstatSync(f.abs).mode & 0o777]));
     const swap = this.swapOwnFiles(name, entry.dir, own, destinations.targets, modes);
     if ('finding' in swap) return this.blocked(m, [swap.finding]);
     this.commitSwap(swap.handle, m, () => {
@@ -3973,6 +4016,7 @@ export class SkillsStore {
     const meta = this.readSnapshotMetadata(current.path);
     if (typeof meta === 'string' || meta.rawSha !== published.snapshotHash) return none(validateMs, hashMs);
     if (meta.parsed.rulesVersion !== PORTABILITY_RULES_IDENTITY.version || meta.parsed.rulesSha256 !== PORTABILITY_RULES_IDENTITY.sha256) return none(validateMs, hashMs);
+    if (!sameExecuteBits(v.snapshotFiles, current.path)) return none(validateMs, hashMs); // crew#1881: a mode change is a change
     return {
       result: {
         verdict: verdictOf(v.findings),
