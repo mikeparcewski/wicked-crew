@@ -14,7 +14,7 @@ import { COMPOSE_MAX_REQUIREMENTS, ComposeSelectionTooLargeError, composeInstruc
 describe('POST /projects/:id/product/compose (crew#372)', () => {
   let base: string;
   let app: FastifyInstance;
-  const launched: Array<{ body: Record<string, unknown>; auth: string | undefined; compose?: unknown }> = [];
+  const launched: Array<{ body: Record<string, unknown>; auth: string | undefined; compose?: unknown; standInChoice?: boolean | undefined }> = [];
   let runsAnswer: { status: number; body: unknown } = { status: 201, body: { runId: 'run-compose-1' } };
   let adapterRef: CoreAdapter;
 
@@ -62,7 +62,7 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
     app = Fastify({ logger: false });
     // DES-CHAT-FIRST-001 C3: the compose launches through the shared launch function, as the caller.
     registerProductRoutes(app, adapter as unknown as CoreAdapter, async (raw, ctx) => {
-      launched.push({ body: raw as Record<string, unknown>, auth: `${ctx.actor.id}:${ctx.target ?? ''}`, compose: ctx.compose });
+      launched.push({ body: raw as Record<string, unknown>, auth: `${ctx.actor.id}:${ctx.target ?? ''}`, compose: ctx.compose, standInChoice: (ctx as { standInChoice?: boolean }).standInChoice });
       return { statusCode: runsAnswer.status, payload: runsAnswer.body };
     });
     await app.ready();
@@ -78,6 +78,21 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
 
   const compose = (payload: unknown, headers: Record<string, string> = {}) =>
     app.inject({ method: 'POST', url: '/api/v1/projects/p1/product/compose', payload: payload as Record<string, unknown>, headers });
+
+  // crew#1884: a person starts the product plan, so its launch asks the stand-in choice (POST /runs' 409, relayed), and the
+  // person's answer (`standIns: true`) reaches the launch.
+  it('asks the stand-in choice and relays it; standIns: true reaches the launch (crew#1884)', async () => {
+    runsAnswer = { status: 409, body: { code: 'stand_in_choice', error: 'short', retryWith: { standIns: true } } };
+    const asked = await compose({ requirements: [{ repoId: 'alpha', key: 'billing::r1' }] });
+    expect(asked.statusCode, asked.body).toBe(409);
+    expect(asked.json()).toMatchObject({ code: 'stand_in_choice', retryWith: { standIns: true } });
+    expect(launched[0]!.standInChoice).toBe(true);
+    runsAnswer = { status: 201, body: { runId: 'run-compose-1' } };
+    const res = await compose({ requirements: [{ repoId: 'alpha', key: 'billing::r1' }], standIns: true });
+    expect(res.statusCode, res.body).toBe(202);
+    expect(launched[1]!.body['standIns']).toBe(true);
+    expect(launched[1]!.standInChoice).toBe(true);
+  });
 
   it('a requirement of a member with no repo-graph root answers 503 with the diagnosis, and nothing launches', async () => {
     const res = await compose({ requirements: [{ repoId: 'rootless', key: 'billing::r1' }] });

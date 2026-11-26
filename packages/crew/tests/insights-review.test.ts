@@ -242,6 +242,8 @@ describe('the review seat ran none of the work it reviews (crew#1375, R≠)', ()
     expect((refused as NoIndependentReviewer).code).toBe('no_independent_reviewer');
     expect((refused as NoIndependentReviewer).excluded).toEqual(['claude', 'codex']);
     expect((refused as Error).message).toMatch(/\(claude, codex\) ran some of the work it reviews.*reduced assurance/u);
+    // crew#1884: the review says why it takes no stand-ins.
+    expect((refused as Error).message).toContain('A review takes no stand-ins: its point is a reviewer who did none of the work');
     expect(r.store.get('rev-1')).toBeUndefined();
     expect(existsSync(join(r.root, 'reviews', 'rev-1'))).toBe(false);
   });

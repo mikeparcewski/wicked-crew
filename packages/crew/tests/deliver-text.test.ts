@@ -9,7 +9,7 @@
 // persisted record of that run, plus the launch-time fallback and the framing both carriers share.
 
 import { readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
 import { setCrewStateHome } from '../src/projects/state-home.js';
 import {
@@ -1243,6 +1243,30 @@ describe('the run\'s assurance labels (crew#1186)', () => {
     // A run no stand-in took part in says nothing about stand-ins.
     const none = composeDeliverText(factsFromRun(withAssurance({ ...engine.assurance, standIns: [] }), null)).body;
     expect(none).not.toContain('stand-in');
+  });
+
+  // (DES-STANDIN-001 §9 T-K6, crew#1940) The leak grep on the STAND-IN PR body: the engine's own stand-in session, on a
+  // run whose words name the host's home, temp and state-home paths. The body says who stood in by tool name only: no
+  // host path, no binding key (`claude~1`), no seat invocation id.
+  it('the stand-in PR body leaks no host path, binding key or invocation id (T-K6 leak grep)', () => {
+    const STATE = '/srv/crew-1940-state';
+    setCrewStateHome(STATE);
+    try {
+      const engine = JSON.parse(readFileSync(new URL('./fixtures/stand-in-session.json', import.meta.url), 'utf8')) as { assurance: Record<string, unknown> };
+      const binding = (engine.assurance['standIns'] as Array<Record<string, unknown>>)[0]!;
+      const v = withAssurance(engine.assurance);
+      const paths = [`${homedir()}/work/notes.md`, '/private/var/folders/ab/synthetic-hash/T/x.md', '/tmp/x.md', `${STATE}/vault/record.json`];
+      v.session.problem = `Fix the lift; notes in ${paths.join(' and ')}`;
+      const text = composeDeliverText(factsFromRun(v, null));
+      const framed = framedDeliverText(text);
+      expect(text.body).toContain('**Checked by stand-ins**');
+      for (const leak of [...paths, STATE, '/private/var/folders', String(binding['key']), String(binding['invocation'])]) {
+        expect(framed, leak).not.toContain(leak);
+      }
+      expect(framed).not.toMatch(/\b[a-z]+~\d+\b/u);
+    } finally {
+      setCrewStateHome(undefined);
+    }
   });
 
   it('leaves the section out when the engine recorded no assurance contract', () => {

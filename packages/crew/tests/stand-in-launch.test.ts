@@ -275,6 +275,15 @@ describe('POST /runs asks the stand-in question (T-K1, T-K2)', () => {
     expect(preflights).toEqual([]);
     expect((await post({ reducedAssurance: true, standIns: true })).statusCode).toBe(400);
   });
+
+  // crew#1884: a review launch says why it takes no stand-ins.
+  it('standIns on a review launch (run-evals) is 400 stand_ins_refused, saying why a review takes none', async () => {
+    const res = await post({ workflow: 'run-evals', standIns: true });
+    expect(res.statusCode, res.body).toBe(400);
+    expect(res.json()).toMatchObject({ code: 'stand_ins_refused' });
+    expect(res.json().error).toContain('A review takes no stand-ins: its point is a reviewer who did none of the work');
+    expect(launched).toEqual([]);
+  });
 });
 
 describe('PUT /settings standInReview is a person\'s', () => {

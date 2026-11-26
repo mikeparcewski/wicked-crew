@@ -10347,6 +10347,10 @@ export interface ProposalRevisionEdits {
    *  swap or suggestion naming what it drops (the ids its label names: check ids and seat rules). A loss beyond what the
    *  press was shown asks again. */
   confirmLoss?: true | string[];
+  /** (api-types 0.233.0, crew#1884) Only on the person route, and only as the choice of wicked's `stand_in` question:
+   *  this job may fill a role its helpers are short of with a labelled stand-in (consent for this job only). A seat's
+   *  block, or the field on any other proposal, changes nothing (a note says so). */
+  standIns?: true;
 }
 
 /**
@@ -10411,9 +10415,12 @@ export interface ProposalSuggestion {
  * A question wicked asks instead of "Start?": a missing input (its choices fill it), or a revision that would lose a
  * check (`lost` names it; the lossy choice carries `confirmLoss`, which only the person route takes). `input`: the
  * answer is typed (a QE skip's reason), bound to the question by the client and sent as the choice's edit.
+ * (api-types 0.233.0, crew#1884) `stand_in`: the job's Start was refused `409 stand_in_choice` (its helpers are short of
+ * a role a check needs); the text is the refusal's own words, and the choice `{ standIns: true }` makes the job use
+ * stand-ins (only the person's press takes it). Its other choice (`{}`) goes back to the job unchanged.
  */
 export interface ProposalQuestion {
-  kind: 'missing' | 'lost_check';
+  kind: 'missing' | 'lost_check' | 'stand_in';
   text: string;
   choices: { label: string; edit: ProposalRevisionEdits }[];
   lost?: CatalogGateId[];
@@ -10702,6 +10709,9 @@ export interface ArtifactProposal {
    *  held run had it (disclosed). */
   reshapes?: string;
   reducedAssurance?: true;
+  /** (api-types 0.233.0, crew#1884) The person chose stand-ins for this job (their press on the `stand_in` question):
+   *  its Start launches with `standIns: true`. A later revision drops it (a changed job is asked again). */
+  standIns?: true;
   /** (§2.5) The held run's plan was answered Reject for this reshape (a retry after that launches the replacement). */
   heldRejected?: true;
   /** (api-types 0.194.0) The held plan this reshape was offered for (a `plan_offer`'s `ord` and `planRev`): its Reject is
@@ -13243,6 +13253,9 @@ export interface CaptureBody {
   files?: Array<CaptureTextFile | CaptureImageFile>;
   /** (crew ≥ 0.9.0) The explicit reduced-assurance opt-in, as `LaunchRunBody.reducedAssurance`. */
   reducedAssurance?: boolean;
+  /** (api-types 0.233.0, crew#1884) A person's stand-in choice for this capture, as `LaunchRunBody.standIns`: the
+   *  answer to the launch's `409 stand_in_choice` (relayed from `POST /runs`, like its other refusals). */
+  standIns?: true;
 }
 
 /** `POST /projects/:id/capture` → 201. */
@@ -17737,6 +17750,10 @@ export interface ProductComposeBody {
   /** (api-types 0.192.0) As {@link LaunchRunBody.shape}: must name a card option whose launch is `compose`; its compose
    *  level (`epics` · `stories` · `tasks`) decides how far down the draft goes. */
   shape?: LaunchShape;
+  /** (api-types 0.233.0, crew#1884) A person's stand-in choice for this draft, as `LaunchRunBody.standIns`. The compose
+   *  is a person's start, so its launch asks the choice: a short roster with no consent is `409 stand_in_choice`
+   *  (relayed), answered by sending the body again with `standIns: true`. */
+  standIns?: true;
 }
 
 /** `POST /projects/:id/product/compose` 202. */
