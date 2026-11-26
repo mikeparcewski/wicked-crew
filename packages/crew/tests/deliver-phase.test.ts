@@ -238,7 +238,8 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(script).not.toContain('did not answer with the run record — using the launch-time PR text');
     expect(script).toContain('deliver: PR text composed from the run record ($API)');
     // The script asks with its own nonce, never an operator bearer (crew#1885).
-    expect(script).toContain('--data-binary "{\\"run\\":\\"$RUNID\\",\\"nonce\\":\\"$DELIVER_NONCE\\"}" "$API/api/v1/deliver/text"');
+    // …on curl's stdin from the shell's printf, so the nonce is never in curl's argv (codex r1).
+    expect(script).toContain(`printf '{"run":"%s","nonce":"%s"}' "$RUNID" "$DELIVER_NONCE" | curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" -H "Content-Type: application/json" --data-binary @- "$API/api/v1/deliver/text"`);
     // A hostile intent cannot break out of the quoted heredoc: no expansion happens inside it, CR
     // and control characters are removed, and a line equal to the base delimiter is NOT dropped —
     // the delimiter moves instead (Copilot on #525: dropping it could delete the title line).

@@ -7,13 +7,14 @@
  * nothing to review against. This module composes the text from the RUN instead. ONE composer, two
  * moments it can be asked:
  *
- *  - at DELIVERY, from the persisted run view (`GET /runs/:id/deliver-text`, text/plain): every
+ *  - at DELIVERY, from the persisted run view (text/plain; the deliver script asks `POST /deliver/text`
+ *    with its own nonce, an operator `GET /runs/:id/deliver-text` with a bearer, crew#1885): every
  *    phase the run went through with its seat and gate outcome, the repo checks the verify phase
- *    ran with their exit codes, the evaluator's verdict, and a link to the run;
- *  - at LAUNCH, from the workflow definition — the fallback the deliver script carries in case the
- *    daemon cannot answer when the PR opens (an auth-required daemon, no `curl`, a daemon that went
- *    away): the intent, the issue links, the run id and the phase list ARE known then; the runtime
- *    sections say plainly that they were not available rather than pretending.
+ *    ran with their exit codes, the evaluator's verdict, the run's assurance lines and a link to the run;
+ *  - at LAUNCH, from the workflow definition — the text the deliver script carries for a launch that
+ *    knew no daemon origin (a CLI-driven launch): the intent, the issue links, the run id and the
+ *    phase list ARE known then; the runtime sections say plainly that they were not available rather
+ *    than pretending. A known daemon that cannot answer refuses the delivery instead (crew#1885).
  *
  * The title is the intent's first line, cut at a WORD boundary within {@link DELIVER_TITLE_MAX}
  * characters (never mid-word), or `wicked-crew run <id>` when the intent is blank. `Fixes #N` is
@@ -643,7 +644,7 @@ export function boundIntentForEmbedding(intent: string): string {
  * intent rides BOUNDED ({@link boundIntentForEmbedding} — the script is one argv entry) but the
  * issue references are derived from the FULL intent FIRST, so a `fixes #214` that sits past the
  * {@link EMBEDDED_INTENT_CAP} still reaches the body as `Fixes #214` — the line GitHub acts on —
- * when no daemon answers `GET /runs/:id/deliver-text`. The title is the intent's first line either
+ * when no daemon origin was known (crew#1885: a known daemon that does not answer refuses). The title is the intent's first line either
  * way. The cut copy carries the "longer than the script embeds" note, so the omission is disclosed
  * and the reference is not.
  */

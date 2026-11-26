@@ -1629,15 +1629,20 @@ describe('deliver script — composed PR text (crew#524)', () => {
     const daemon = await fakeDaemon(() => ({ status: 200, body: 'never\n\nread\n' }), { nonce: 'fedcba9876543210fedcba9876543210' });
     daemons.push(daemon);
 
+    const head = git(fx.workdir, 'rev-parse', 'HEAD').trim();
+
     const r = await runDeliver(fx, { intent: INTENT, script: { runId: RUN_ID, apiOrigin: daemon.origin } });
 
     expect(r.status).not.toBe(0);
     expect(r.outcome).toBe('rejected');
+    // Nothing staged or committed (codex r1): HEAD and the index are as they were, the change still untracked.
+    expect(git(fx.workdir, 'rev-parse', 'HEAD').trim()).toBe(head);
+    expect(git(fx.workdir, 'diff', '--cached', '--name-only').trim()).toBe('');
+    expect(git(fx.workdir, 'status', '--porcelain', '--', 'fix.ts').trim()).toBe('?? fix.ts');
     expect(r.output).toContain(`deliver: the daemon at ${daemon.origin} did not answer with the run record, so the pull request could not say how this run was checked`);
     expect(r.output).not.toContain('using the launch-time PR text');
     expect(r.pr).toBeNull();
     expect(originBranches(fx)).not.toContain(`wicked/${RUN_ID}`);
-    expect(git(fx.workdir, 'status', '--porcelain')).toContain('fix.ts');
   }, 60_000);
 
   it('opens the PR with the RUN-DERIVED text the daemon answers, and commits the same text', async () => {

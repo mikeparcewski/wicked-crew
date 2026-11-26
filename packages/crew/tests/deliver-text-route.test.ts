@@ -17,6 +17,7 @@ import { parseFramedDeliverText } from '../src/core/deliver-text.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { registerAuthHooks, type ResolvedAuth } from '../src/api/auth.js';
 import { deliverPrScript } from '../src/core/deliver.js';
+import { grantPostHocDeliverText } from '../src/core/deliver-grants.js';
 import type { PhaseDef, SessionView, WorkflowDef, WorkUnit } from '../src/core/types.js';
 import { withRunViews } from './support/run-views.js';
 
@@ -257,6 +258,20 @@ describe('POST /deliver/text (crew#1885)', () => {
     for (const body of [{ run: RUN_ID }, { run: RUN_ID, nonce: 'not-hex-at-all-x' }, { run: RUN_ID, nonce: 'abc' }, { run: '', nonce: NONCE }, { run: RUN_ID, nonce: NONCE, extra: 1 }]) {
       expect((await post(app, body)).statusCode, JSON.stringify(body)).toBe(400);
     }
+  });
+
+  it('answers a post-hoc delivery\'s own text (composed with the QE check it was approved on) while its grant is held, and refuses after', async () => {
+    const POST_HOC = 'abcdef0123456789abcdef0123456789';
+    const { app } = await buildApp([view()], [], REQUIRED);
+    const release = grantPostHocDeliverText(RUN_ID, POST_HOC, 'fix: composed for the post-hoc delivery\n\nbody\n');
+    try {
+      const res = await post(app, { run: RUN_ID, nonce: POST_HOC });
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toBe('fix: composed for the post-hoc delivery\n\nbody\n');
+    } finally {
+      release();
+    }
+    expect((await post(app, { run: RUN_ID, nonce: POST_HOC })).statusCode).toBe(403);
   });
 
   it('answers the same under auth off (the script asks one way in every mode)', async () => {

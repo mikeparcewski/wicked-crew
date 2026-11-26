@@ -1493,8 +1493,8 @@ export class CoreAdapter {
   /**
    * This daemon's own bound origin, resolved LAZILY (crew#524): the adapter exists before the
    * server listens, so `registerRoutes` hands a getter rather than a value. The deliver phase
-   * composed for a run bakes the origin in, so its script can ask `GET /runs/:id/deliver-text`
-   * for the run-derived PR text at delivery time and the PR body can link the run. `null` (a
+   * composed for a run bakes the origin in, so its script can ask `POST /deliver/text` (its nonce
+   * as the credential, crew#1885) for the run-derived PR text at delivery time and the PR body can link the run. `null` (a
    * CLI-driven adapter with no daemon) ⇒ the script carries only its launch-time text.
    */
   private deliverApiOrigin: (() => string | null) | null = null;

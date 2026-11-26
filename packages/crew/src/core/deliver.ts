@@ -1352,8 +1352,9 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     'elif ! command -v curl >/dev/null 2>&1; then',
     '  _norecord "curl is not available in this shell to read the run record"',
     // `--noproxy "*"`: the daemon is loopback; an operator shell's http_proxy must not swallow it. The body is JSON
-    // as written: RUNID is one percent-encoded segment (`[A-Za-z0-9._~%-]`) and the nonce is hex.
-    `elif curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" -H "Content-Type: application/json" --data-binary "{\\"run\\":\\"$RUNID\\",\\"nonce\\":\\"$${DELIVER_NONCE_VAR}\\"}" "$API/api/v1/deliver/text" -o "$TD/text" 2>/dev/null && _framed "$TD/text"; then`,
+    // as written (RUNID is one percent-encoded segment, `[A-Za-z0-9._~%-]`, and the nonce is hex), and reaches curl on
+    // stdin from the shell's own printf, so the nonce is never in curl's argv.
+    `elif printf '{"run":"%s","nonce":"%s"}' "$RUNID" "$${DELIVER_NONCE_VAR}" | curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" -H "Content-Type: application/json" --data-binary @- "$API/api/v1/deliver/text" -o "$TD/text" 2>/dev/null && _framed "$TD/text"; then`,
     '  echo "deliver: PR text composed from the run record ($API)"; FROMRUN=1',
     'else',
     '  rm -f "$TD/text"',

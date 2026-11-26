@@ -34,7 +34,7 @@ import { MembershipIndex } from '../src/projects/membership-index.js';
 import { DeliveryIndex } from '../src/api/delivery-index.js';
 import { AuditLog } from '../src/api/audit.js';
 import { runDeliverScript } from '../src/api/post-hoc-deliver.js';
-import { deliverTextAllowed } from '../src/core/deliver-grants.js';
+import { postHocDeliverText } from '../src/core/deliver-grants.js';
 import { RetryIndex } from '../src/api/retry-index.js';
 import type { RuntimeDeps } from '../src/api/routes.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
@@ -592,17 +592,19 @@ describe('POST /runs/:id/deliver — a stranded REVISION re-pushes onto the PR b
   it('crew#1885: the post-hoc script reads its run record with a nonce registered only while it runs', async () => {
     const fx = revisionFixture();
     const seen: Array<{ run: string; allowed: boolean }> = [];
+    const served: string[] = [];
     const daemon = createServer((req, res) => {
       let raw = '';
       req.on('data', (c: Buffer) => { raw += c.toString('utf8'); });
       req.on('end', () => {
         const body = JSON.parse(raw) as { run: string; nonce: string };
         const run = decodeURIComponent(body.run);
-        // What crew's route asks: no unit of this run declares the nonce, so only the post-hoc grant can allow it.
-        const allowed = deliverTextAllowed(run, [], body.nonce);
-        seen.push({ run, allowed });
-        res.writeHead(allowed ? 200 : 403, { 'content-type': 'text/plain; charset=utf-8' });
-        res.end(allowed ? 'fix: the title only the run record has\n\n## Intent\n\nfrom the record\n' : 'refused');
+        // What crew's route answers first: the text this post-hoc delivery registered with its nonce.
+        const text = postHocDeliverText(run, body.nonce);
+        seen.push({ run, allowed: text !== null });
+        if (text !== null) served.push(text);
+        res.writeHead(text !== null ? 200 : 403, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end(text ?? 'refused');
       });
     });
     await new Promise<void>((r) => daemon.listen(0, '127.0.0.1', r));
@@ -621,8 +623,11 @@ describe('POST /runs/:id/deliver — a stranded REVISION re-pushes onto the PR b
       // The script asked once, for this run, and was allowed while it ran (the revision's work was committed by the
       // run, so its commit keeps the run's own subject; the text rides the PR comment).
       expect(seen).toEqual([{ run: RUN_ID, allowed: true }]);
+      // The text the route composed for this delivery, from the facts it was approved on.
+      expect(served).toHaveLength(1);
+      expect(served[0]).toContain(`Delivered by [wicked-crew](https://wc.wickedagile.com) run \`${RUN_ID}\``);
       // Released once the script exited: the same nonce no longer reads the text.
-      expect(deliverTextAllowed(RUN_ID, [], nonce)).toBe(false);
+      expect(postHocDeliverText(RUN_ID, nonce)).toBeNull();
     } finally {
       await new Promise<void>((r) => daemon.close(() => r()));
     }
