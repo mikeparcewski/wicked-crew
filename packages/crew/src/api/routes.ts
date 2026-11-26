@@ -931,7 +931,7 @@ export function primaryRefusal(primary: string, clisJson: string): string | null
   return null;
 }
 
-/** (api-types next, J6 K1) {@link DomainScope}: what a domain model run covers. */
+/** (api-types 0.232.0, J6 K1) {@link DomainScope}: what a domain model run covers. */
 const DomainScopeSchema = z.strictObject({
   intent: z.string().trim().min(1).max(2000),
   phrases: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
@@ -1033,7 +1033,7 @@ export const LaunchSchema = z.strictObject({
   documents: z.array(z.string().trim().min(1).max(300)).max(RUN_DOCS_TOKENS_MAX).optional(),
   /** (DES-CATALOG-002 §2.d piece 4, CS4) The run's source pick (registered source names); `[]` = none. */
   sources: z.array(z.string().trim().min(1).max(100)).max(RUN_SOURCES_MAX).optional(),
-  /** (api-types next, J6 K1) A domain-extraction launch's scope: required on that workflow, refused on any other. */
+  /** (api-types 0.232.0, J6 K1) A domain-extraction launch's scope: required on that workflow, refused on any other. */
   domainScope: DomainScopeSchema.optional(),
 }).refine((b) => b.domainScope === undefined || b.workflow === DOMAIN_EXTRACTION_WORKFLOW, {
   path: ['domainScope'],
