@@ -260,6 +260,7 @@ import {
   walkFiles,
   walkTree,
   walkTreeSteps,
+  mkdirExact,
   writeFileAtomic,
 } from './tree.js';
 
@@ -770,8 +771,8 @@ export const PLAIN_FILE_MODE = 0o644;
  * (crew#1881) The modes `swapOwnFiles` writes, keyed `<skill dir>/<rel>`, from a caller's modes keyed by the path
  * relative to the skill: a pack's normalized modes, or a put-back's recorded earlier ones. Only the permission bits are
  * kept (`& 0o777`), so no setuid, setgid or sticky bit ever lands; a file the caller gives no mode gets
- * {@link PLAIN_FILE_MODE}. The write sets each mode exactly, whatever the daemon's umask (crew#1955). Absent = an
- * empty map (each file the default mode).
+ * {@link PLAIN_FILE_MODE}. The write sets each mode exactly but at most 0755 (`SKILL_FILE_MODE_MAX`), whatever the
+ * daemon's umask (crew#1955). Absent = an empty map (each file {@link PLAIN_FILE_MODE}, as the swap writes it).
  */
 function sourceModes(dir: string, files: Readonly<Record<string, string>>, modes: Readonly<Record<string, number>> | undefined): Map<string, number> {
   const out = new Map<string, number>();
@@ -2837,7 +2838,7 @@ export class SkillsStore {
     const existing = lstatOrNull(dest);
     const current = existing !== null && existing.isFile() ? existing : null;
     try {
-      writeFileAtomic(src, content, current === null ? {} : { mode: current.mode & 0o777 });
+      writeFileAtomic(src, content, { mode: current === null ? PLAIN_FILE_MODE : current.mode & 0o777 }); // crew#1955: a new file is 0644 exactly
     } catch (err) {
       removeTreeForce(staging);
       throw err;
@@ -2987,7 +2988,7 @@ export class SkillsStore {
       place = targets.map((t) => {
         const src = join(stagedDir, ...t.rel.split('/'));
         const mode = modes.get(`${dir}/${t.rel}`);
-        writeFileAtomic(src, t.text, mode === undefined ? {} : { mode });
+        writeFileAtomic(src, t.text, { mode: mode ?? PLAIN_FILE_MODE }); // crew#1955: a file given no mode is 0644 exactly
         return { src, dest: t.abs };
       });
     } catch (err) {
@@ -3038,7 +3039,7 @@ export class SkillsStore {
       // already created its parent directories before its rename failed.
       for (const p of place) pruneEmptyDirs(dirname(p.dest), effective);
       for (const { from, to } of parked) {
-        mkdirSync(dirname(from), { recursive: true });
+        mkdirExact(dirname(from));
         renameSync(to, from);
       }
     };
@@ -3052,7 +3053,7 @@ export class SkillsStore {
       for (const f of park) pruneEmptyDirs(dirname(f.abs), effective);
       for (const p of place) {
         this.removeEmptyDirTree(p.dest);
-        mkdirSync(dirname(p.dest), { recursive: true });
+        mkdirExact(dirname(p.dest)); // crew#1955: a new skill directory is 0755 whatever the umask
         renameSync(p.src, p.dest);
         placed.push(p.dest);
       }

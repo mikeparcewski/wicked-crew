@@ -29,6 +29,7 @@ import {
   hashTree,
   impliedDirs,
   makeTreeReadOnly,
+  mkdirExact,
   removeTreeForce,
   SymlinkComponentError,
   UnsafePathSegmentError,
@@ -368,13 +369,65 @@ describe('skills file modes are exact under a strict umask (crew#1955)', () => {
     expect(modeOf(join(dest, 'doc.md'))).toBe(0o644);
   });
 
-  it('never more than 0755: no group or other write, no setuid, setgid or sticky bit', () => {
+  it('never more than 0755: no group or other write, no setuid, setgid or sticky bit (under umask 077 and 000)', () => {
     if (process.platform === 'win32') return;
+    for (const umask of [0o077, 0o000]) {
+      const dir = join(base, `u${umask.toString(8)}`);
+      mkdirSync(dir);
+      const src = join(dir, 'wide-src.sh');
+      writeFileSync(src, 'x');
+      chmodSync(src, 0o777);
+      const existing = join(dir, 'group-write.sh');
+      writeFileSync(existing, 'old');
+      chmodSync(existing, 0o775);
+      const was = process.umask(umask);
+      try {
+        writeFileAtomic(join(dir, 'wide.sh'), 'x', { mode: 0o777 });
+        writeFileAtomic(join(dir, 'suid.sh'), 'x', { mode: 0o4755 });
+        writeFileAtomic(join(dir, 'sgid.sh'), 'x', { mode: 0o2755 });
+        writeFileAtomic(join(dir, 'sticky.sh'), 'x', { mode: 0o1755 });
+        writeFileAtomic(existing, 'new'); // an existing file's mode is masked too
+        copyFileNoFollow(src, join(dir, 'wide-copy.sh'));
+      } finally {
+        process.umask(was);
+      }
+      for (const f of ['wide.sh', 'suid.sh', 'sgid.sh', 'sticky.sh', 'group-write.sh', 'wide-copy.sh']) {
+        expect([umask, f, modeOf(join(dir, f))]).toEqual([umask, f, 0o755]);
+      }
+    }
+  });
+
+  it('the directories created for skill content are 0755; an existing one is left alone; no mode, no change', () => {
+    if (process.platform === 'win32') return;
+    const src = join(base, 'src');
+    mkdirSync(src);
+    writeFileSync(join(src, 'c.md'), 'c');
+    chmodSync(join(src, 'c.md'), 0o644);
+    const kept = join(base, 'kept');
+    mkdirSync(kept);
+    chmodSync(kept, 0o700);
     strict(() => {
-      writeFileAtomic(join(base, 'wide.sh'), 'x', { mode: 0o777 });
-      writeFileAtomic(join(base, 'suid.sh'), 'x', { mode: 0o4755 });
+      copyFiles([{ rel: 'a/b/c.md', abs: join(src, 'c.md') }], join(base, 'gen'));
+      writeFileAtomic(join(kept, 'x', 'y', 'f.md'), 'f', { mode: 0o644 });
+      writeFileAtomic(join(base, 'private', 'state.json'), '{}'); // the store's own file: no mode asked
     });
-    expect(modeOf(join(base, 'wide.sh'))).toBe(0o755);
-    expect(modeOf(join(base, 'suid.sh'))).toBe(0o755);
+    for (const d of ['gen', 'gen/a', 'gen/a/b', 'kept/x', 'kept/x/y']) expect([d, modeOf(join(base, d))]).toEqual([d, 0o755]);
+    expect(modeOf(join(base, 'gen', 'a', 'b', 'c.md'))).toBe(0o644);
+    expect(modeOf(kept)).toBe(0o700);
+    expect(modeOf(join(base, 'private'))).toBe(0o700);
+    expect(modeOf(join(base, 'private', 'state.json'))).toBe(0o600);
+  });
+
+  it('mkdirExact sets the mode only of what it created; a link it passes through keeps its target as it was', () => {
+    if (process.platform === 'win32') return;
+    const outside = join(base, 'outside');
+    mkdirSync(outside);
+    chmodSync(outside, 0o700);
+    symlinkSync(outside, join(base, 'link'));
+    expect(() => mkdirExact(join(base, 'link', 'sub'))).not.toThrow(); // the link existed: mkdir -p goes through it, no mode set on it
+    expect(modeOf(outside)).toBe(0o700);
+    expect(modeOf(join(outside, 'sub'))).toBe(0o755);
+    expect(() => mkdirExact(join(base, 'link'))).not.toThrow();
+    expect(modeOf(outside)).toBe(0o700);
   });
 });
