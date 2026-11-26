@@ -19,10 +19,28 @@ function hasFiles(dir: string, files: string[]): boolean {
   }
 }
 
-/** The product Dockerfile, bundled server and SQLite runner, pinned by crew's build. */
+/**
+ * The runner files a build recorded in `runners/files.json` (apps-server's runner-files.mjs derives them from the
+ * runner's own imports), or null when the list is absent, unreadable or not plain file names beside the runner.
+ * A build from before crew#1956 has no list: its image would miss upload-parse.mjs, so it is not an artifact.
+ */
+function runnerFiles(dir: string): string[] | null {
+  try {
+    const list: unknown = JSON.parse(readFileSync(join(dir, 'runners', 'files.json'), 'utf8'));
+    if (!Array.isArray(list) || !list.includes('sqlite-runner.mjs')) return null;
+    if (!list.every((f): f is string => typeof f === 'string' && /^[\w.-]+$/.test(f) && f !== '.' && f !== '..')) return null;
+    return list.map((f) => `runners/${f}`);
+  } catch {
+    return null;
+  }
+}
+
+/** The product Dockerfile, bundled server and SQLite runner with every module it imports, pinned by crew's build. */
 export function appsServerArtifact(): string | null {
   for (const dir of [join(crew, 'dist/apps-server'), resolve(crew, '../apps-server/dist')]) {
-    if (hasFiles(dir, ['Dockerfile', 'server/lib/bundle/server.mjs', 'server/shim/host.js', 'server/shim/host.css', 'runners/sqlite-runner.mjs'])) return dir;
+    if (!hasFiles(dir, ['Dockerfile', 'server/lib/bundle/server.mjs', 'server/shim/host.js', 'server/shim/host.css', 'runners/files.json'])) continue;
+    const runners = runnerFiles(dir);
+    if (runners !== null && hasFiles(dir, runners)) return dir;
   }
   return null;
 }

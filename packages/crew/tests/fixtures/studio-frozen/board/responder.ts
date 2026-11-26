@@ -1,0 +1,132 @@
+import type { SessionView as RunView } from '../api/types.js';
+import { seatKeyName, type SeatNameInput } from './seatNames.js';
+
+/**
+ * H3 (DES-EDITOR-PLUGIN-CONTRACT §2 goal 2): the run page is the chat, and every turn in it says WHO
+ * responded. There are three kinds of responder, and only three:
+ *
+ *  - `seat`     — an agent: a CLI seat that wrote a reply, asked a question, or produced an artifact;
+ *  - `operator` — you;
+ *  - `crew`     — the system and its floor: the run's status and record lines, the team path's quiet
+ *                 lines, a gate no seat raised, the closed-chat and orphaned lines.
+ *
+ * Pure: the thread decides which entry is which; this module only names them, from the roster when it
+ * knows the seat and from the raw key when it does not (a seat the roster has not listed yet is still a
+ * seat, never "crew").
+ */
+export type ResponderRole = 'seat' | 'operator' | 'crew';
+
+export interface Responder {
+  role: ResponderRole;
+  /** The name the turn shows: "You", "crew", or the seat's one name ("Claude Code"). */
+  name: string;
+  /** The seat's key when `role` is `seat` (a way into its sheet); else null. */
+  cli: string | null;
+}
+
+export const OPERATOR: Responder = Object.freeze({ role: 'operator', name: 'You', cli: null });
+export const CREW: Responder = Object.freeze({ role: 'crew', name: 'crew', cli: null });
+
+type Roster = readonly SeatNameInput[] | null | undefined;
+
+/**
+ * A seat key that is a program's path (`/opt/homebrew/…/bin/node`, `C:\tools\node.exe`): crew's tool executor
+ * runs a script step on a binary and the wire names the binary where a seat goes (e2e-1105, 2026-11-07). It is crew's
+ * machinery, never a helper, and its path is never shown as a name.
+ */
+export function isCommandPath(cli: unknown): boolean {
+  return typeof cli === 'string' && /[\/\\]/.test(cli);
+}
+
+/** A seat by its key: its roster name when listed, else the key itself (honest, never invented). A program's path is
+ *  crew's own step ({@link isCommandPath}). */
+export function seatResponder(cli: string, roster: Roster): Responder {
+  if (isCommandPath(cli)) return CREW;
+  // A stand-in key (`claude~1`) is named through its base seat: "Claude Code (stand-in)" (studio#1437).
+  return { role: 'seat', name: seatKeyName(cli, roster), cli };
+}
+
+/** A chat turn: `you`, or the seat key that replied. A reply with no seat named is crew's. */
+export function turnResponder(who: string | null | undefined, roster: Roster): Responder {
+  if (who === 'you') return OPERATOR;
+  if (typeof who !== 'string' || who.trim() === '' || who === 'helper') return CREW;
+  return seatResponder(who, roster);
+}
+
+/** The seat a run's unit ran on, when it has one. */
+export function unitResponder(view: RunView | null, ord: number | null | undefined, roster: Roster): Responder {
+  if (view === null || typeof ord !== 'number') return CREW;
+  const cli = view.units.find((u) => u.ord === ord)?.assigned_cli;
+  return typeof cli === 'string' && cli !== '' ? seatResponder(cli, roster) : CREW;
+}
+
+/**
+ * Who is asking at a gate: the seat of the unit the gate sits on (a review, an escalation, a hand-over
+ * a seat raised). A plan approval, or a gate on a unit with no seat, is crew's own question.
+ */
+export function gateResponder(view: RunView | null, gate: { ord: number; gateKind?: string } | undefined, roster: Roster): Responder {
+  if (gate === undefined || gate.gateKind === 'plan_approval') return CREW;
+  return unitResponder(view, gate.ord, roster);
+}
+
+/**
+ * Who is asking a live run's question. An ask question says which seat asked (`seat`) and from which
+ * step (`ord`), and the card names that seat: in a run with helpers, the seat running the current
+ * step is often not the one asking. Without either (an older daemon, another producer), the seat
+ * running the current step, as before.
+ */
+export function askingResponder(view: RunView, roster: Roster, asker?: { seat?: string; ord?: number }): Responder {
+  if (typeof asker?.seat === 'string' && asker.seat.trim() !== '') return seatResponder(asker.seat, roster);
+  if (typeof asker?.ord === 'number') {
+    const byStep = unitResponder(view, asker.ord, roster);
+    if (byStep.role === 'seat') return byStep;
+  }
+  return unitResponder(view, view.session.unit_ix, roster);
+}
+
+/**
+ * Who produced a run's artifacts: the seat of the newest FINISHED making step (not a review — a reviewer
+ * judges the work, it does not make it; codex h3-r1 #3), the line above the artifacts (HOST-API §2
+ * `producedBy`). No finished making step on a seat: crew's.
+ */
+export function producerOf(view: RunView, roster: Roster): Responder {
+  const makers = view.units.filter((u) => typeof u.assigned_cli === 'string' && u.assigned_cli !== '' && u.status === 'done' && !isReviewUnit(u));
+  const last = [...makers].sort((a, b) => b.ord - a.ord)[0];
+  return last === undefined ? CREW : seatResponder(last.assigned_cli!, roster);
+}
+
+/** A step that judges work rather than making it: a review or critique stage, or a reviewing role
+ *  (the wire carries crew's stage words, `critique` included, beyond the typed `StageKind`). */
+export function isReviewUnit(u: { stage?: unknown; role?: unknown }): boolean {
+  return /^(review|critique)$/i.test(String(u.stage ?? '')) || /review|judge|evaluat|critic/i.test(String(u.role ?? ''));
+}
+
+/** Two entries with the same key share one "who" line. */
+export function responderKey(r: Responder): string {
+  return r.role === 'seat' ? `seat:${r.cli ?? r.name}` : r.role;
+}
+
+/** Seats that are crew's own machinery (a deliver script, a tool step, estate's index/annotate), never a
+ *  helper building the work. (B-P7: `wicked-estate` runs the onboarding index + annotate with no helper.) */
+const NOT_A_HELPER = new Set(['bash', 'tool', 'shell', 'script', 'crew', 'wicked-estate', 'estate']);
+
+/** Whether a unit's seat is a helper (a coding-agent CLI), not crew's own machinery (a deliver script, a tool step, a
+ *  program's path). */
+export function isHelperSeat(cli: unknown): cli is string {
+  return typeof cli === 'string' && cli !== '' && !isCommandPath(cli) && !NOT_A_HELPER.has(cli.split('#')[0]!.toLowerCase());
+}
+
+/**
+ * (mockup ui-v2-gate) Who the job is waiting with at a gate: the BUILDER — the newest creator step at or before the
+ * gate (`role: creator`, a helper's seat), else the gate's own step when a helper runs it; `null` when neither names a
+ * helper (a hand-over's script, a plan), and the dock then says "the job is waiting".
+ */
+export function builderResponder(view: RunView | null, ord: number | null | undefined, roster: Roster): Responder | null {
+  if (view === null) return null;
+  const helper = isHelperSeat;
+  const at = typeof ord === 'number' ? ord : Number.POSITIVE_INFINITY;
+  const creators = view.units.filter((u) => u.role === 'creator' && u.ord <= at && helper(u.assigned_cli)).sort((a, b) => b.ord - a.ord);
+  if (creators[0] !== undefined) return seatResponder(creators[0].assigned_cli as string, roster);
+  const own = view.units.find((u) => u.ord === ord)?.assigned_cli;
+  return helper(own) ? seatResponder(own, roster) : null;
+}

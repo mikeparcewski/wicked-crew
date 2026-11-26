@@ -1,0 +1,591 @@
+{
+ "_source": "The gateEvaluated (ord 2 and 3) and deliverLiftEvaluated frames of wicked-studio tests/fixtures/run-b0ade71f-standin.json (studio main bd0cb132), copied verbatim. That file recorded GET /api/v1/runs/b0ade71f-7abd-47a1-b675-aababb9eb9fe/events on the train-14 proof daemon (crew 0.18.22, core-ts 0.15.50) on 2026-11-25: the wire as crew wrote it, home paths read ~. The engine's writer is wicked-core src/assurance.rs AssuranceReceipt / RoleRecord::stand_in.",
+ "events": [
+  {
+   "agentReasoning": "PASS \u2014 The worktree evidence shows commit b50119a on the run's branch, changing src/math.js (+4/\u22121) to add the `@example` JSDoc line to `max()`. That is a real change left in the worktree, and it matches the criterion. The failing `sum`/`mean` tests are reported as already failing on the base, so they don't affect whether a change was left. PASS",
+   "agentVerdict": "pass",
+   "assurance": {
+    "attempt": 0,
+    "creator": "claude",
+    "evaluator": null,
+    "independence": "stand_in",
+    "judge": null,
+    "mode": "full",
+    "ran": [
+     "pinned_validator",
+     "repo_checks"
+    ],
+    "required": [
+     "distinct_evaluator",
+     "judge"
+    ],
+    "roles": [
+     {
+      "attempt": 0,
+      "filled": "stand_in",
+      "ord": 2,
+      "role": "judge",
+      "seat": "claude~2",
+      "standIn": {
+       "base": "claude",
+       "builderModel": null,
+       "cli": "claude~2",
+       "label": "Claude Code stood in for the judge, using Claude Code's default model: only Claude Code was signed in",
+       "lens": null,
+       "model": null,
+       "reason": "only Claude Code was signed in"
+      },
+      "state": "answered",
+      "subject": null
+     }
+    ],
+    "skipped": [
+     {
+      "detail": "Claude Code stood in for the judge, using Claude Code's default model: only Claude Code was signed in",
+      "instrument": "judge",
+      "reason": "stand_in"
+     }
+    ],
+    "standInLabel": "Claude Code stood in for the review, using Claude Code's default model: only Claude Code was signed in",
+    "tree": null
+   },
+   "combined": false,
+   "criterion": "the run left a change in its worktree (done is re-derived from the diff, never asserted); the repository's own checks pass in the run's worktree (every detected check exits 0 \u2014 done is re-derived by running them, never asserted)",
+   "denial": {
+    "claimId": null,
+    "deniedTool": null,
+    "phase": "unit-2",
+    "reason": "repo checks floor failed: the repository's own checks pass in the run's worktree (every detected check exits 0 \u2014 done is re-derived by running them, never asserted). test: exit 1 (7.5s; + re-run 2.6s, base 4.1s = 14.1s over 3 passes) [base_red_unseparated: base red, cannot separate: exclusion disabled (WICKED_FLOOR_EXCLUDE)] \u2014 stdout tail: operator: 'strictEqual', | diff: 'simple' | } \u2014 the run base 4783b06d41 fails this check too, and its failures cannot be told apart from the head's (base red, cannot separate: exclusion disabled (WICKED_FLOOR_EXCLUDE)): escalated with both logs \u2014 the operator's floor override is the path through. Every failing test also fails on the run base 4783b06d41 (2 shared): none of them is this change's. The engine ran these itself in the run's worktree; the full tails are on the unit's `repo_checks` record and the `repoChecksEvaluated` event.",
+    "ruleIds": [],
+    "source": "repo_checks"
+   },
+   "denialReason": "repo checks floor failed: the repository's own checks pass in the run's worktree (every detected check exits 0 \u2014 done is re-derived by running them, never asserted). test: exit 1 (7.5s; + re-run 2.6s, base 4.1s = 14.1s over 3 passes) [base_red_unseparated: base red, cannot separate: exclusion disabled (WICKED_FLOOR_EXCLUDE)] \u2014 stdout tail: operator: 'strictEqual', | diff: 'simple' | } \u2014 the run base 4783b06d41 fails this check too, and its failures cannot be told apart from the head's (base red, cannot separate: exclusion disabled (WICKED_FLOOR_EXCLUDE)): escalated with both logs \u2014 the operator's floor override is the path through. Every failing test also fails on the run base 4783b06d41 (2 shared): none of them is this change's. The engine ran these itself in the run's worktree; the full tails are on the unit's `repo_checks` record and the `repoChecksEvaluated` event.",
+   "deterministicPass": false,
+   "evaluatorPass": true,
+   "evaluatorPolicies": [],
+   "evaluatorVerdict": null,
+   "floorNote": "`test`: base red, cannot separate: exclusion disabled (WICKED_FLOOR_EXCLUDE)",
+   "hasDeterministicFloor": true,
+   "judgeCli": "claude",
+   "judgeDistinct": false,
+   "judgeSkippedReason": null,
+   "ord": 2,
+   "seq": 1532,
+   "session": "b0ade71f-7abd-47a1-b675-aababb9eb9fe",
+   "ts": 1795636739677,
+   "type": "gateEvaluated",
+   "ungated": false,
+   "ungatedReason": null
+  },
+  {
+   "agentReasoning": "PASS \u2014 The worktree evidence shows commit b50119a on the run's branch, touching src/math.js with 4 insertions and 1 deletion. That is a real change left in the worktree, derived from the diff. The pre-existing `sum` test failures are disclosed and don't affect the criterion. PASS",
+   "agentVerdict": "pass",
+   "assurance": {
+    "attempt": 2,
+    "creator": "claude",
+    "evaluator": null,
+    "independence": "stand_in",
+    "judge": null,
+    "mode": "full",
+    "ran": [
+     "pinned_validator",
+     "rule_check"
+    ],
+    "required": [
+     "distinct_evaluator",
+     "judge"
+    ],
+    "roles": [
+     {
+      "attempt": 2,
+      "filled": "stand_in",
+      "ord": 3,
+      "role": "evaluator",
+      "seat": "claude~1",
+      "standIn": {
+       "base": "claude",
+       "builderModel": null,
+       "cli": "claude~1",
+       "label": "Claude Code stood in for the review, using Claude Code's default model: only Claude Code was signed in",
+       "lens": null,
+       "model": null,
+       "reason": "only Claude Code was signed in"
+      },
+      "state": "answered",
+      "subject": null
+     },
+     {
+      "attempt": 2,
+      "filled": "stand_in",
+      "ord": 3,
+      "role": "judge",
+      "seat": "claude~2",
+      "standIn": {
+       "base": "claude",
+       "builderModel": null,
+       "cli": "claude~2",
+       "label": "Claude Code stood in for the judge, using Claude Code's default model: only Claude Code was signed in",
+       "lens": null,
+       "model": null,
+       "reason": "only Claude Code was signed in"
+      },
+      "state": "answered",
+      "subject": null
+     }
+    ],
+    "rules": [
+     {
+      "evidenceKey": "e3ccf417926f881eee08eaba591dc463abd053adf2db2a3d8e7cf516c3767388",
+      "how": "operator",
+      "origin": "operator",
+      "reason": "skipped by local (human): Cert leg for the stand-in journey: the rule check found no judge seat distinct from the builder although a judge stand-in (claude~2) is on this run; reported as a finding. The change is a one-line JSDoc comment.",
+      "reviewer": {
+       "by": "reviewer",
+       "cite": "the comment adds no code and no library, so nothing duplicates a built-in.",
+       "seat": "claude~1",
+       "status": "kept"
+      },
+      "ruleId": "POL-2101",
+      "ruleKey": "d818e618df6c84071508f4d91f6ee80a2b98e0a152206169b9aad49581ffbdef",
+      "status": "skipped"
+     },
+     {
+      "blocking": false,
+      "evidenceKey": "2af9a07a33a5256afc3d2563d3b364d1b2febe60bc15d54a1fbdfc9ebc8fc266",
+      "how": "none",
+      "party": "engine",
+      "reason": "no signed-in judge seat distinct from the work's creators [claude] on the run's roster",
+      "ruleId": "RVWL-1002",
+      "ruleKey": "9a44fb761d1fbf550a2bb54a1f54dc7df3add83ed37945745f3b40bd833e755e",
+      "status": "unchecked"
+     },
+     {
+      "evidenceKey": "1e849b28ff41fb0aad3a043e0f95ae2238a042646bc55e7a7185542ab149835f",
+      "how": "operator",
+      "origin": "operator",
+      "reason": "skipped by local (human): Cert leg for the stand-in journey: the rule check found no judge seat distinct from the builder although a judge stand-in (claude~2) is on this run; reported as a finding. The change is a one-line JSDoc comment.",
+      "ruleId": "proposal:01a20ede-54ac-7483-ac58-9d7fa8084f03",
+      "ruleKey": "3a9027e38ff5a8a70bb6f711314b8200d1222804415358dda3bbffcb9debe83b",
+      "status": "skipped"
+     },
+     {
+      "blocking": false,
+      "evidenceKey": "b6852b541c596dce3186eaf4501927a92a266531549154be9ee8bb1b608732fb",
+      "how": "none",
+      "party": "reviewer",
+      "reason": "no signed-in judge seat distinct from the work's creators [claude] on the run's roster",
+      "ruleId": "RVWL-1001",
+      "ruleKey": "d18c17593301d0adc84ded1addd26caea79eaf3c927b0e4ed72ce64c3bf35114",
+      "status": "unchecked"
+     },
+     {
+      "blocking": false,
+      "evidenceKey": "ab772e67a3ba8660abd9764ec07dbc0acc0abc7d9dbf6fbeccf493f22c6c47d0",
+      "how": "none",
+      "party": "engine",
+      "reason": "no signed-in judge seat distinct from the work's creators [claude] on the run's roster",
+      "ruleId": "RVWL-1003",
+      "ruleKey": "c779ffd1566556537358af09d283face50e691e7c80834876a7abb7016846b70",
+      "status": "unchecked"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (editor), which the MCP and editor gates judge on each call, not the review",
+      "ruleId": "EDITOR-GRANTS",
+      "ruleKey": "15290efa884bdb3e64b04c4d46d4585fd04cbeabeab9e868d707c065a2e59e55",
+      "status": "n_a"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (mcp), which the MCP and editor gates judge on each call, not the review",
+      "ruleId": "MCP-FIRST-USE",
+      "ruleKey": "fc5389ca906a2f49f37e7c82a7802f5b5cb439fc1d3f8f31f5b523217b6e7bbe",
+      "status": "n_a"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (mcp-mode:ask), which the MCP and editor gates judge on each call, not the review; its trigger \"\\\"mcp\\\":\\\\{\\\"annotations\\\":\\\\{[^{}]*\\\\},\\\"class\\\":\\\"(write|destructive)\\\"\" matches nothing in the diff",
+      "ruleId": "MCP-MODE-ASK-WRITE",
+      "ruleKey": "5bd1d61384dafe115924ba3f7524aef49272f6c0a6220fa8530b450e8bcaad9d",
+      "status": "n_a"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (mcp-mode:balanced), which the MCP and editor gates judge on each call, not the review; its trigger \"\\\"mcp\\\":\\\\{\\\"annotations\\\":\\\\{[^{}]*\\\\},\\\"class\\\":\\\"(write|destructive)\\\"\" matches nothing in the diff",
+      "ruleId": "MCP-POSTURE-WRITE",
+      "ruleKey": "173539c93a5e3318550235238701e0f59cd002c2ce1da99c1cf52479025c6277",
+      "status": "n_a"
+     },
+     {
+      "blocking": false,
+      "how": "fact",
+      "origin": "fact",
+      "party": "person",
+      "reason": "selected for scope, clarify, plan, design; this job's steps are pa-scope, build, review, deliver",
+      "ruleId": "RVWL-1004",
+      "ruleKey": "ff28f767f07a1b892fe7685ef30c770fc23821a161ed277decfba98a484ebe0e",
+      "status": "n_a"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (editor-origin:first-party), which the MCP and editor gates judge on each call, not the review; its trigger \"\\\"permission\\\":\\\"(artifact\\\\.read|artifact\\\\.write|selection\\\\.chip|composer\\\\.draft|checks\\\\.read|checks\\\\.contribute|sources\\\\.read|media\\\\.read|artifact\\\\.export|ui\\\\.fullscreen)\\\"\" matches nothing in the diff",
+      "ruleId": "EDITOR-BUILTIN",
+      "ruleKey": "45c544d748d224e91e81c46fbc013ede6a0b40c97e595162872e0939ec95aae5",
+      "status": "n_a"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (editor-origin:first-party), which the MCP and editor gates judge on each call, not the review; its trigger \"\\\"id\\\":\\\"wicked-doc\\\",\\\"permission\\\":\\\"network\\\\.media\\\"\" matches nothing in the diff",
+      "ruleId": "EDITOR-BUILTIN-DOC-MEDIA",
+      "ruleKey": "f3e02e7953655875e7a09d945a15cbbd0be48fb4199c46036e5351957472019a",
+      "status": "n_a"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (editor-origin:first-party), which the MCP and editor gates judge on each call, not the review; its trigger \"\\\"id\\\":\\\"wicked-page\\\",\\\"permission\\\":\\\"network\\\\.media\\\"\" matches nothing in the diff",
+      "ruleId": "EDITOR-BUILTIN-PAGE-MEDIA",
+      "ruleKey": "b7f346c465144ef81ac36c23ae030b5b808b5d65a193d1468c42e86aa0530082",
+      "status": "n_a"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (editor-origin:first-party), which the MCP and editor gates judge on each call, not the review; its trigger \"\\\"permission\\\":\\\"artifact\\\\.theme\\\"\" matches nothing in the diff",
+      "ruleId": "EDITOR-BUILTIN-THEME",
+      "ruleKey": "cdf61f01c30b946668f141cc0f8a341381b57ab8f3758739599f50afd06132ac",
+      "status": "n_a"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (editor), which the MCP and editor gates judge on each call, not the review; its trigger \"\\\"permission\\\":\\\"(artifact\\\\.read|selection\\\\.chip|checks\\\\.contribute|ui\\\\.fullscreen)\\\"\" matches nothing in the diff",
+      "ruleId": "EDITOR-OPEN-DEFAULTS",
+      "ruleKey": "1f4b08348acd137e9ef07e9d78a83b838ac9147caf8013e0e58de5f62ec83d52",
+      "status": "n_a"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (mcp), which the MCP and editor gates judge on each call, not the review; its trigger \"\\\"mcp\\\":\\\\{\\\"annotations\\\":\\\\{[^{}]*\\\\},\\\"class\\\":\\\"read\\\"\" matches nothing in the diff",
+      "ruleId": "MCP-POSTURE-READ",
+      "ruleKey": "d98e58fea44133256056936831b5bca0148270ca02224554b50e66bd0a35aedd",
+      "status": "n_a"
+     }
+    ],
+    "skipped": [
+     {
+      "detail": "Claude Code stood in for the review, using Claude Code's default model: only Claude Code was signed in",
+      "instrument": "distinct_evaluator",
+      "reason": "stand_in"
+     },
+     {
+      "detail": "Claude Code stood in for the judge, using Claude Code's default model: only Claude Code was signed in",
+      "instrument": "judge",
+      "reason": "stand_in"
+     }
+    ],
+    "standInLabel": "Claude Code stood in for the review, using Claude Code's default model: only Claude Code was signed in",
+    "tree": null
+   },
+   "combined": true,
+   "criterion": "the run left a change in its worktree (done is re-derived from the diff, never asserted)",
+   "denial": null,
+   "denialReason": null,
+   "deterministicPass": true,
+   "evaluatorPass": true,
+   "evaluatorPolicies": [],
+   "evaluatorVerdict": "PASS",
+   "floorNote": null,
+   "hasDeterministicFloor": true,
+   "judgeCli": "claude",
+   "judgeDistinct": false,
+   "judgeSkippedReason": null,
+   "ord": 3,
+   "seq": 1847,
+   "session": "b0ade71f-7abd-47a1-b675-aababb9eb9fe",
+   "ts": 1795637606792,
+   "type": "gateEvaluated",
+   "ungated": false,
+   "ungatedReason": null
+  },
+  {
+   "assurance": {
+    "attempt": 0,
+    "creator": null,
+    "evaluator": null,
+    "independence": "stand_in",
+    "judge": null,
+    "mode": "full",
+    "operatorJudges": [
+     {
+      "at": 1795636982113,
+      "by": "local (human)",
+      "floorOverride": {
+       "attempt": 0,
+       "fingerprint": "402e48910a8506f8621565c89ac3a3181eb82b47d023918962a0517dd327c389",
+       "key": {
+        "base": "4783b06d413e2a7f2c19f0c3ff9e3265ecddc21d",
+        "checks": "a5f08f88fbe3a24e964c96f659f9c77045d191c1e913b62c9c78edef6fe8366c",
+        "tree": "f620bc079ac8f5555f5ccc9a08d45e168a3d9d0c"
+       },
+       "label": "floor overridden by operator",
+       "layer": "repo_checks",
+       "ord": 2,
+       "resultId": "b0ade71f-7abd-47a1-b675-aababb9eb9fe:unit-2:attempt-0:repo_checks",
+       "tree": "f620bc079ac8f5555f5ccc9a08d45e168a3d9d0c"
+      },
+      "note": "The failing check is npm test: sum([1,2,3]) returns 5 at the base commit too (the i = 1 loop in src/math.js, fixed separately in tiny-math#40). This job only adds a JSDoc line to max(), so that failure is not this work.",
+      "reason": "repo checks floor failed: the repository's own checks pass in the run's worktree (every detected check exits 0 \u2014 done is re-derived by running them, never asserted). test: exit 1 (7.5s; + re-run 2.6s, base 4.1s = 14.1s over 3 passes) [base_red_unseparated: base red, cannot separate: exclusion disabled (WICKED_FLOOR_EXCLUDE)] \u2014 stdout tail: operator: 'strictEqual', | diff: 'simple' | } \u2014 the run base 4783b06d41 fails this check too, and its failures cannot be told apart from the head's (base red, cannot separate: exclusion disabled (WICKED_FLOOR_EXCLUDE)): escalated with both logs \u2014 the operator's floor override is the path through. Every failing test also fails on the run base 4783b06d41 (2 shared): none of them is this change's. The engine ran these itself in the run's worktree; the full tails are on the unit's `repo_checks` record and the `repoChecksEvaluated` event."
+     }
+    ],
+    "ran": [
+     "pinned_validator",
+     "repo_checks",
+     "operator_judge",
+     "rule_check"
+    ],
+    "required": [
+     "distinct_evaluator",
+     "judge"
+    ],
+    "roles": [
+     {
+      "attempt": 0,
+      "filled": "stand_in",
+      "ord": 2,
+      "role": "judge",
+      "seat": "claude~2",
+      "standIn": {
+       "base": "claude",
+       "builderModel": null,
+       "cli": "claude~2",
+       "label": "Claude Code stood in for the judge, using Claude Code's default model: only Claude Code was signed in",
+       "lens": null,
+       "model": null,
+       "reason": "only Claude Code was signed in"
+      },
+      "state": "answered",
+      "subject": null
+     },
+     {
+      "attempt": 2,
+      "filled": "stand_in",
+      "ord": 3,
+      "role": "evaluator",
+      "seat": "claude~1",
+      "standIn": {
+       "base": "claude",
+       "builderModel": null,
+       "cli": "claude~1",
+       "label": "Claude Code stood in for the review, using Claude Code's default model: only Claude Code was signed in",
+       "lens": null,
+       "model": null,
+       "reason": "only Claude Code was signed in"
+      },
+      "state": "answered",
+      "subject": null
+     },
+     {
+      "attempt": 2,
+      "filled": "stand_in",
+      "ord": 3,
+      "role": "judge",
+      "seat": "claude~2",
+      "standIn": {
+       "base": "claude",
+       "builderModel": null,
+       "cli": "claude~2",
+       "label": "Claude Code stood in for the judge, using Claude Code's default model: only Claude Code was signed in",
+       "lens": null,
+       "model": null,
+       "reason": "only Claude Code was signed in"
+      },
+      "state": "answered",
+      "subject": null
+     }
+    ],
+    "rules": [
+     {
+      "evidenceKey": "e3ccf417926f881eee08eaba591dc463abd053adf2db2a3d8e7cf516c3767388",
+      "how": "operator",
+      "origin": "operator",
+      "reason": "skipped by local (human): Cert leg for the stand-in journey: the rule check found no judge seat distinct from the builder although a judge stand-in (claude~2) is on this run; reported as a finding. The change is a one-line JSDoc comment.",
+      "reviewer": {
+       "by": "reviewer",
+       "cite": "the comment adds no code and no library, so nothing duplicates a built-in.",
+       "seat": "claude~1",
+       "status": "kept"
+      },
+      "ruleId": "POL-2101",
+      "ruleKey": "d818e618df6c84071508f4d91f6ee80a2b98e0a152206169b9aad49581ffbdef",
+      "status": "skipped"
+     },
+     {
+      "blocking": false,
+      "evidenceKey": "2af9a07a33a5256afc3d2563d3b364d1b2febe60bc15d54a1fbdfc9ebc8fc266",
+      "how": "none",
+      "party": "engine",
+      "reason": "no signed-in judge seat distinct from the work's creators [claude] on the run's roster",
+      "ruleId": "RVWL-1002",
+      "ruleKey": "9a44fb761d1fbf550a2bb54a1f54dc7df3add83ed37945745f3b40bd833e755e",
+      "status": "unchecked"
+     },
+     {
+      "evidenceKey": "1e849b28ff41fb0aad3a043e0f95ae2238a042646bc55e7a7185542ab149835f",
+      "how": "operator",
+      "origin": "operator",
+      "reason": "skipped by local (human): Cert leg for the stand-in journey: the rule check found no judge seat distinct from the builder although a judge stand-in (claude~2) is on this run; reported as a finding. The change is a one-line JSDoc comment.",
+      "ruleId": "proposal:01a20ede-54ac-7483-ac58-9d7fa8084f03",
+      "ruleKey": "3a9027e38ff5a8a70bb6f711314b8200d1222804415358dda3bbffcb9debe83b",
+      "status": "skipped"
+     },
+     {
+      "blocking": false,
+      "evidenceKey": "b6852b541c596dce3186eaf4501927a92a266531549154be9ee8bb1b608732fb",
+      "how": "none",
+      "party": "reviewer",
+      "reason": "no signed-in judge seat distinct from the work's creators [claude] on the run's roster",
+      "ruleId": "RVWL-1001",
+      "ruleKey": "d18c17593301d0adc84ded1addd26caea79eaf3c927b0e4ed72ce64c3bf35114",
+      "status": "unchecked"
+     },
+     {
+      "blocking": false,
+      "evidenceKey": "ab772e67a3ba8660abd9764ec07dbc0acc0abc7d9dbf6fbeccf493f22c6c47d0",
+      "how": "none",
+      "party": "engine",
+      "reason": "no signed-in judge seat distinct from the work's creators [claude] on the run's roster",
+      "ruleId": "RVWL-1003",
+      "ruleKey": "c779ffd1566556537358af09d283face50e691e7c80834876a7abb7016846b70",
+      "status": "unchecked"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (editor), which the MCP and editor gates judge on each call, not the review",
+      "ruleId": "EDITOR-GRANTS",
+      "ruleKey": "15290efa884bdb3e64b04c4d46d4585fd04cbeabeab9e868d707c065a2e59e55",
+      "status": "n_a"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (mcp), which the MCP and editor gates judge on each call, not the review",
+      "ruleId": "MCP-FIRST-USE",
+      "ruleKey": "fc5389ca906a2f49f37e7c82a7802f5b5cb439fc1d3f8f31f5b523217b6e7bbe",
+      "status": "n_a"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (mcp-mode:ask), which the MCP and editor gates judge on each call, not the review; its trigger \"\\\"mcp\\\":\\\\{\\\"annotations\\\":\\\\{[^{}]*\\\\},\\\"class\\\":\\\"(write|destructive)\\\"\" matches nothing in the diff",
+      "ruleId": "MCP-MODE-ASK-WRITE",
+      "ruleKey": "5bd1d61384dafe115924ba3f7524aef49272f6c0a6220fa8530b450e8bcaad9d",
+      "status": "n_a"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (mcp-mode:balanced), which the MCP and editor gates judge on each call, not the review; its trigger \"\\\"mcp\\\":\\\\{\\\"annotations\\\":\\\\{[^{}]*\\\\},\\\"class\\\":\\\"(write|destructive)\\\"\" matches nothing in the diff",
+      "ruleId": "MCP-POSTURE-WRITE",
+      "ruleKey": "173539c93a5e3318550235238701e0f59cd002c2ce1da99c1cf52479025c6277",
+      "status": "n_a"
+     },
+     {
+      "blocking": false,
+      "how": "fact",
+      "origin": "fact",
+      "party": "person",
+      "reason": "selected for scope, clarify, plan, design; this job's steps are pa-scope, build, review, deliver",
+      "ruleId": "RVWL-1004",
+      "ruleKey": "ff28f767f07a1b892fe7685ef30c770fc23821a161ed277decfba98a484ebe0e",
+      "status": "n_a"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (editor-origin:first-party), which the MCP and editor gates judge on each call, not the review; its trigger \"\\\"permission\\\":\\\"(artifact\\\\.read|artifact\\\\.write|selection\\\\.chip|composer\\\\.draft|checks\\\\.read|checks\\\\.contribute|sources\\\\.read|media\\\\.read|artifact\\\\.export|ui\\\\.fullscreen)\\\"\" matches nothing in the diff",
+      "ruleId": "EDITOR-BUILTIN",
+      "ruleKey": "45c544d748d224e91e81c46fbc013ede6a0b40c97e595162872e0939ec95aae5",
+      "status": "n_a"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (editor-origin:first-party), which the MCP and editor gates judge on each call, not the review; its trigger \"\\\"id\\\":\\\"wicked-doc\\\",\\\"permission\\\":\\\"network\\\\.media\\\"\" matches nothing in the diff",
+      "ruleId": "EDITOR-BUILTIN-DOC-MEDIA",
+      "ruleKey": "f3e02e7953655875e7a09d945a15cbbd0be48fb4199c46036e5351957472019a",
+      "status": "n_a"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (editor-origin:first-party), which the MCP and editor gates judge on each call, not the review; its trigger \"\\\"id\\\":\\\"wicked-page\\\",\\\"permission\\\":\\\"network\\\\.media\\\"\" matches nothing in the diff",
+      "ruleId": "EDITOR-BUILTIN-PAGE-MEDIA",
+      "ruleKey": "b7f346c465144ef81ac36c23ae030b5b808b5d65a193d1468c42e86aa0530082",
+      "status": "n_a"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (editor-origin:first-party), which the MCP and editor gates judge on each call, not the review; its trigger \"\\\"permission\\\":\\\"artifact\\\\.theme\\\"\" matches nothing in the diff",
+      "ruleId": "EDITOR-BUILTIN-THEME",
+      "ruleKey": "cdf61f01c30b946668f141cc0f8a341381b57ab8f3758739599f50afd06132ac",
+      "status": "n_a"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (editor), which the MCP and editor gates judge on each call, not the review; its trigger \"\\\"permission\\\":\\\"(artifact\\\\.read|selection\\\\.chip|checks\\\\.contribute|ui\\\\.fullscreen)\\\"\" matches nothing in the diff",
+      "ruleId": "EDITOR-OPEN-DEFAULTS",
+      "ruleKey": "1f4b08348acd137e9ef07e9d78a83b838ac9147caf8013e0e58de5f62ec83d52",
+      "status": "n_a"
+     },
+     {
+      "how": "fact",
+      "origin": "fact",
+      "reason": "selected only for tool tokens (mcp), which the MCP and editor gates judge on each call, not the review; its trigger \"\\\"mcp\\\":\\\\{\\\"annotations\\\":\\\\{[^{}]*\\\\},\\\"class\\\":\\\"read\\\"\" matches nothing in the diff",
+      "ruleId": "MCP-POSTURE-READ",
+      "ruleKey": "d98e58fea44133256056936831b5bca0148270ca02224554b50e66bd0a35aedd",
+      "status": "n_a"
+     }
+    ],
+    "skipped": [
+     {
+      "detail": "Claude Code stood in for the judge, using Claude Code's default model: only Claude Code was signed in",
+      "instrument": "judge",
+      "reason": "stand_in"
+     },
+     {
+      "detail": "Claude Code stood in for the review, using Claude Code's default model: only Claude Code was signed in",
+      "instrument": "distinct_evaluator",
+      "reason": "stand_in"
+     }
+    ],
+    "standInLabel": "Claude Code stood in for the review, using Claude Code's default model: only Claude Code was signed in",
+    "tree": null
+   },
+   "attempt": 0,
+   "baseAfter": null,
+   "baseBefore": null,
+   "baseRef": null,
+   "conflicts": [],
+   "note": "`git fetch origin` failed (`git fetch origin` failed (exit status: 128): fatal: repository 'https://github.com/mikeparcewski/tiny-math.git/' not found) \u2014 the cached origin/* refs cannot stand in for the current tip, so the lift was not decided; the deliver script's own fetch and rebase stand, and no verified base is reported",
+   "ord": 4,
+   "outcome": "skipped",
+   "seq": 1896,
+   "session": "b0ade71f-7abd-47a1-b675-aababb9eb9fe",
+   "treeAfter": null,
+   "treeBefore": null,
+   "ts": 1795637827465,
+   "type": "deliverLiftEvaluated"
+  }
+ ]
+}

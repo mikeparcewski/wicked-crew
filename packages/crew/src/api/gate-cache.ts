@@ -281,6 +281,12 @@ export class GateCache {
     return resolution;
   }
 
+  /** (crew#1950) The run's read in flight, if any: one promise per hydration, set synchronously when `resolve` starts
+   *  it, so a caller can tell which hydration it started or joined (and none when it was served from the cache). */
+  inflightOf(runId: string): Promise<GateResolution> | undefined {
+    return this.inflight.get(runId);
+  }
+
   /** In-flight resolutions per run: `resolve` hands every concurrent caller the same one. */
   private readonly inflight = new Map<string, Promise<GateResolution>>();
 

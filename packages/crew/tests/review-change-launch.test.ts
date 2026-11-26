@@ -106,6 +106,17 @@ describe('review-change launch', () => {
     expect(res.statusCode).toBe(409);
     expect(res.json()).toMatchObject({ code: 'no_independent_reviewer', excluded: ['claude'], retryWith: { reducedAssurance: true } });
     expect(res.json().error).toContain('Sign in another seat');
+    // crew#1884 (T-K4): a review says why it takes no stand-ins.
+    expect(res.json().error).toContain('A review takes no stand-ins: its point is a reviewer who did none of the work');
+    expect(launched).toHaveLength(0);
+  });
+
+  it('standIns on a review-change launch is 400 stand_ins_refused, saying why (crew#1884)', async () => {
+    const { post, launched } = buildApp();
+    const res = await post({ standIns: true });
+    expect(res.statusCode, res.body).toBe(400);
+    expect(res.json()).toMatchObject({ code: 'stand_ins_refused' });
+    expect(res.json().error).toContain('A review takes no stand-ins');
     expect(launched).toHaveLength(0);
   });
 

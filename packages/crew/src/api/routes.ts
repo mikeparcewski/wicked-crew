@@ -83,6 +83,7 @@ type RecordedOpenGate =
   | { state: 'none' }
   | { state: 'ambiguous'; ords: number[] }
   | { state: 'open'; ord: number; row: InteractionRequest };
+import { GateReadTimer, untimed, type TimePart } from './gate-timing.js';
 import { detectRefusal, gateSeqOf, isOpenGate, offeredChoices, replayOpenGate, type GateCache, type GateRead, type GateResolution } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
 import { acceptanceRequirementOf, buildAcceptanceView } from '../qe/acceptance.js';
@@ -242,7 +243,7 @@ import type { EvalRunStore } from './eval-store.js';
 import { isSeatKeyList } from '../core/job-seats.js';
 import { engineRosterJson, noEligibleSeatBody, parseNoEligibleSeat, toEngineSeat } from '../core/engine-roster.js';
 import { launchAssuranceNotice, readJudgeCoverage } from '../core/assurance.js';
-import { STAND_IN_NEEDED_GATE, USE_STAND_INS_ACTION, consentFor, isStandInReview, preflightRefusal, readPreflight, settingConsent } from '../core/stand-in.js';
+import { STAND_IN_NEEDED_GATE, USE_STAND_INS_ACTION, consentFor, isStandInReview, noStandInsWhy, preflightRefusal, readPreflight, settingConsent } from '../core/stand-in.js';
 import { launchPosture, type PostureFacts } from '../core/launch-posture.js';
 import { launchRequiresQe, mayRequireQe, qeAcceptanceMode, qeSettingSkipReason } from '../core/qe-acceptance-setting.js';
 import {
@@ -327,7 +328,7 @@ const BRIEF_COPY_MAX = 512 * 1024;
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
 import { crewStateHome, stateHomeOfDb, wickedWorkRoot } from '../projects/state-home.js';
-import { demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, jobLaunchRoster, jobRevisionLaunch, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
+import { chatStartStandIns, demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, jobLaunchRoster, jobRevisionLaunch, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
 import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, removeStagedDocuments, stagedDocumentsRemoved, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
 import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks, webScopeReason } from './run-sources.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
@@ -444,6 +445,7 @@ import {
 } from './delivery-index.js';
 import { deliverTextAllowed, postHocDeliverText } from '../core/deliver-grants.js';
 import { REVIEW_CHANGE_WORKFLOW, reviewChangeExclusion, type ReviewChangeDeps } from './review-change.js';
+import { noStandInsKind } from './stand-in-scope.js';
 import { rosterWithout } from '../interactive/review-events.js';
 import { DeliveryDerivationCache } from './delivery-cache.js';
 import {
@@ -635,6 +637,9 @@ export interface LaunchContext {
    *  `409 stand_in_choice` / `no_usable_helper` before anything is written (`POST /runs`; its callers draw the choice).
    *  Without it a launch takes stand-ins only on the consent a person already gave (the `standInReview` setting). */
   standInChoice?: boolean;
+  /** (crew#1884) Launch stand-in-aware without asking (a chat reshape's Start, which cannot ask before it rejects the
+   *  held plan): a role the roster is short of holds at the run's stand-in gate, where the person answers. */
+  standInAware?: boolean;
 }
 
 /**
@@ -3993,7 +3998,7 @@ export function registerRoutes(
         if (!canWork) {
           return reply.code(409).send({
             code: 'no_independent_reviewer',
-            error: `Every available seat (${ex.excludeSeats.join(', ')}) wrote part of this change, so none can review it independently. Sign in another seat, or start it again in reduced assurance (the authors review their own change, labelled on the run and every gate).`,
+            error: `Every available seat (${ex.excludeSeats.join(', ')}) wrote part of this change, so none can review it independently. Sign in another seat, or start it again in reduced assurance (the authors review their own change, labelled on the run and every gate). ${noStandInsWhy('review')}`,
             excluded: ex.excludeSeats,
             retryWith: { reducedAssurance: true },
           });
@@ -4018,11 +4023,15 @@ export function registerRoutes(
     // the launcher's caller draws as the choice; with consent (the person's `standIns`, or the `standInReview:
     // 'always'` setting) the run launches stand-in-aware and fills a short role with a labelled stand-in. A review
     // (review-change, the prepared reviews, run-evals), a demo and a reduced launch keep today's path (K2a scope).
-    const standInEligible = b.reducedAssurance !== true && reviewChange === undefined
-      && !(b.workflow !== undefined && (reviewPrepared(b.workflow) || b.workflow === RUN_EVALS_WORKFLOW || DEMO_PRESETS.includes(b.workflow)));
+    // (crew#1884) One classifier with a schedule and a chat card (`stand-in-scope.ts`).
+    const noStandIns = noStandInsKind(b.workflow);
+    const standInEligible = b.reducedAssurance !== true && reviewChange === undefined && noStandIns === null;
     const standInsSupported = typeof adapter.supportsStandIns === 'function' && adapter.supportsStandIns();
     if (b.standIns === true && !standInEligible) {
-      return reply.code(400).send({ code: 'stand_ins_refused', error: 'this launch does not take stand-ins (standIns): a review, a demo or a reduced launch keeps its own checks' });
+      // (crew#1884) Said why: a review needs a reviewer who did none of the work, the evals are computed, a demo keeps
+      // its own review (a reduced launch beside standIns is the schema's 400, before this).
+      const why = noStandInsWhy(noStandIns ?? 'review');
+      return reply.code(400).send({ code: 'stand_ins_refused', error: `This launch does not take stand-ins (standIns). ${why}` });
     }
     if (b.standIns === true && !standInsSupported) {
       return reply.code(501).send({ error: 'stand-in checks need a wicked-core-ts that carries them (Core.independencePreflight and grantStandIns); upgrade the engine' });
@@ -4053,8 +4062,8 @@ export function registerRoutes(
       if (consent !== null) {
         input.standInAware = true;
         input.standIn = consent;
-      } else if (preflight !== null) {
-        // Not short: launched aware, so a seat lost mid-run holds at the stand-in gate instead of failing.
+      } else if (preflight !== null || ctx.standInAware === true) {
+        // Not short (or not asked): launched aware, so a short or lost seat holds at the stand-in gate instead of failing.
         input.standInAware = true;
       }
     }
@@ -4786,7 +4795,10 @@ export function registerRoutes(
             // (crew#1840) A job asked to change a pull request this chat delivered updates it: no second PR.
             ...jobRevisionLaunch(p),
           },
-          { ...ctx, fromProposal: d.pid, ...(d.power === true ? { powerRequired: true } : {}) },
+          // (crew#1884) A person's Start asks the stand-in choice, as studio's Start on POST /runs does: a short roster
+          // with no consent reopens the card with the stand_in question. A reshape does not ask: its Start rejects the
+          // held plan first, so the question would come after the plan it replaces was gone.
+          { ...ctx, fromProposal: d.pid, ...chatStartStandIns(p), ...(d.power === true ? { powerRequired: true } : {}) },
         );
         if (out.statusCode !== 201) throw jobRefusal(out.statusCode, out.payload);
         return;
@@ -4798,6 +4810,8 @@ export function registerRoutes(
           fromProposal: d.pid,
           humanConfirm: 'before:1',
           common,
+          // (crew#1884) The card draws the stand-in question; a reshape does not ask (as above).
+          standIns: chatStartStandIns(p),
         });
         if (out.code !== 202) throw jobRefusal(out.code, out.body);
         return;
@@ -6285,6 +6299,7 @@ export function registerRoutes(
       return new Set((await adapter.listPresets(projectId !== null && projectId !== DEFAULT_PROJECT_ID ? projectId : undefined)).map((p) => p.name));
     },
     acceptsJobs: (chatId) => chatAccepts.get(chatId) === true,
+    standInsFor: (workflow) => typeof adapter.supportsStandIns === 'function' && adapter.supportsStandIns() && noStandInsKind(workflow) === null,
     acceptsOnboard: (chatId) => chatAcceptsOnboard.get(chatId) === true,
     acceptsCut: (chatId) => chatArtifactFlags.cut === true && chatAcceptsCut.get(chatId) === true,
     cut: { bridgeFor: (projectId) => cutBridgeFor(projectId) },
@@ -7626,8 +7641,26 @@ export function registerRoutes(
    * `'no-log'` = this build cannot read the log, so nothing can be said; `'unstable'` = live gate
    * events kept landing while the record was read, so nothing was verified (retry).
    */
-  async function resolveOpenGate(id: string): Promise<GateResolution> {
-    return gateCache.resolve(id, () => readOpenGate(id));
+  /** (crew#1950) The parts of each gate hydration, keyed by the cache's own promise for it (one per hydration), so
+   *  every GET that waits on it (whoever started it, a POST decision too) names that hydration's parts and no other's. */
+  const hydrationParts = new WeakMap<Promise<GateResolution>, GateReadTimer>();
+  async function resolveOpenGate(id: string, timer?: GateReadTimer): Promise<GateResolution> {
+    // A fresh timer per hydration this call starts, kept across that hydration's re-reads.
+    let started: GateReadTimer | undefined;
+    const resolution = gateCache.resolve(id, () => {
+      started ??= new GateReadTimer();
+      return readOpenGate(id, started.time);
+    });
+    // The hydration this call started or joined, known synchronously (`resolve` starts or finds it before its first
+    // await); none when the cache served the gate.
+    const hydration = gateCache.inflightOf(id);
+    if (hydration !== undefined && started !== undefined && !hydrationParts.has(hydration)) hydrationParts.set(hydration, started);
+    const parts = hydration === undefined ? undefined : hydrationParts.get(hydration);
+    try {
+      return await resolution;
+    } finally {
+      if (parts !== undefined) timer?.absorb(parts);
+    }
   }
 
   /**
@@ -7636,8 +7669,9 @@ export function registerRoutes(
    * predating the table. Never consults the cache — `GateCache.resolve` owns that, and runs this
    * again when a live gate event overlaps it.
    */
-  async function readOpenGate(id: string): Promise<GateRead> {
-    const recorded = await recordedOpenGate(id);
+  async function readOpenGate(id: string, time: TimePart = untimed): Promise<GateRead> {
+    // (crew#1950) Its own record and event-log reads are timed apart from the resolve that holds them.
+    const recorded = await time('record', () => recordedOpenGate(id));
     if (recorded?.state === 'ambiguous') return 'ambiguous';
     if (recorded?.state === 'open') {
       const durableGate = recorded.row;
@@ -7650,7 +7684,7 @@ export function registerRoutes(
       // Issue #969: the row has no `choices`/`recommended`, so they come from the newest
       // `awaitingHuman` for this ord in the event log. A log this build cannot read (null, or a read
       // that throws) leaves both out — the gate is still served, just without the offered answers.
-      const events = await adapter.runEvents(id).catch(() => null);
+      const events = await time('events', () => adapter.runEvents(id)).catch(() => null);
       const frame = events?.filter((e) => e.type === 'awaitingHuman' && e.session === id && e.ord === ord).at(-1);
       return {
         ord,
@@ -7668,7 +7702,7 @@ export function registerRoutes(
         })(),
       };
     }
-    const events = await adapter.runEvents(id);
+    const events = await time('events', () => adapter.runEvents(id));
     if (events === null) return 'no-log';
     return replayOpenGate(id, events) ?? null;
   }
@@ -8836,14 +8870,14 @@ export function registerRoutes(
    * steering-author run (its approve lands the proposal). Marks
    * `humanOnly` where crew answers a non-human actor 403 `human_operator_only`.
    */
-  async function crewGateActions(run: SessionView, gated: WorkUnit | undefined, gateKind: string, actions: GateAction[]): Promise<GateAction[]> {
+  async function crewGateActions(run: SessionView, gated: WorkUnit | undefined, gateKind: string, actions: GateAction[], time: TimePart = untimed): Promise<GateAction[]> {
     const declines = (a: GateAction): boolean => a.action === 'reject' || a.action === 'request_changes';
     // crew#1157 / crew#1259: an analysis or delivering chat run's held plan change is never approved (`gateForDecision`): only the declines stay.
     let approveRefused = chatPlanRefusal(run.session.id, { gateKind }) !== null;
     let skipRefused = approveRefused;
     if (!approveRefused && gated !== undefined && isDeliverUnit(gated)) {
-      approveRefused = 'refusal' in (await deliverApprovalRefusal(run, gated));
-      skipRefused = 'refusal' in (await deliverApprovalRefusal(run, gated, 'skip'));
+      approveRefused = 'refusal' in (await time('deliver-qe', () => deliverApprovalRefusal(run, gated)));
+      skipRefused = 'refusal' in (await time('deliver-qe', () => deliverApprovalRefusal(run, gated, 'skip')));
     }
     const steering = isSteeringAuthorRun(run);
     return actions
@@ -9080,13 +9114,35 @@ export function registerRoutes(
   // the fallback existed a daemon restart left every parked run unable to say what it was asking —
   // not because the prompt was gone (core records `awaitingHuman` to the log) but because nothing
   // read it. A restart is routine: deploy, crash, laptop sleep.
-  app.get(`${V}/runs/:id/gate`, async (req, reply) => {
+  // (crew#1950) Each read's parts, timed: the answer's Server-Timing header, and one warn line for a slow read.
+  const gateReadTimers = new WeakMap<object, GateReadTimer>();
+  app.get(`${V}/runs/:id/gate`, {
+    onSend: (req, reply, payload, done) => {
+      // Taken off first, so a send that re-enters this hook (an error answer) times nothing twice; and nothing here
+      // may replace the answer: a failed header or log line is dropped (codex r1).
+      const timer = gateReadTimers.get(req);
+      gateReadTimers.delete(req);
+      if (timer !== undefined) {
+        try {
+          const total = timer.total();
+          reply.header('Server-Timing', timer.header(total));
+          const slow = timer.slowLine((req.params as { id: string }).id, reply.statusCode, total);
+          if (slow !== null) req.log.warn(slow);
+        } catch {
+          // Diagnostics only.
+        }
+      }
+      done(null, payload);
+    },
+  }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const timer = new GateReadTimer();
+    gateReadTimers.set(req, timer);
     // F35, crew#1775: this run's view only, never every run's (studio reads this route for parked runs,
     // from every open tab): one engine read of this run, off the actor, as the store is when it starts.
     // Read once per request: the cached-but-not-servable path and the miss path share it (coord review C6).
     let viewRead: Promise<SessionView | undefined> | undefined;
-    const runOf = (): Promise<SessionView | undefined> => (viewRead ??= adapter.runView(id));
+    const runOf = (): Promise<SessionView | undefined> => (viewRead ??= timer.time('view', () => adapter.runView(id)));
     // (rejudge, api-types 0.134.0) A gate whose unit no judge could rule on says whether its judge
     // can be re-run now, and from which seats — the engine's own selection, read each time (a seat
     // signed in since the pause counts). Absent on every other gate and on an addon without the read.
@@ -9096,7 +9152,7 @@ export function registerRoutes(
       if (gated?.status !== 'rejected' || denial?.source !== 'judge_unavailable') return {};
       if (typeof adapter.rejudgeReadiness !== 'function') return {};
       try {
-        const r = await adapter.rejudgeReadiness(id);
+        const r = await timer.time('rejudge', () => adapter.rejudgeReadiness!(id));
         if (r === null || !r.applies || r.ord !== ord) return {};
         return { rejudge: { available: r.available, eligible: r.eligible, missing: r.missing } };
       } catch {
@@ -9114,7 +9170,7 @@ export function registerRoutes(
       if (run === undefined) return {};
       const decision = qeDecisionOf(run);
       if (decision === null || qeDecisionBypasses(decision)) return {};
-      const check = await qeAcceptanceCheckFor(run);
+      const check = await timer.time('deliver-qe', () => qeAcceptanceCheckFor(run));
       if (check === null || check.satisfied) return {};
       return {
         skipQe: {
@@ -9139,7 +9195,7 @@ export function registerRoutes(
       for (let attempt = 0; attempt < 2; attempt++) {
         let listed: Awaited<ReturnType<CoreAdapter['gateActions']>>;
         try {
-          listed = await adapter.gateActions(id);
+          listed = await timer.time('actions', () => adapter.gateActions!(id));
         } catch {
           threw = true;
           continue;
@@ -9149,14 +9205,14 @@ export function registerRoutes(
         if (run === undefined) return {};
         const gated = run.units?.find((u) => u.ord === ord);
         return {
-          actions: await crewGateActions(run, gated, listed.gateKind, listed.actions),
+          actions: await timer.time('crew-actions', () => crewGateActions(run, gated, listed.gateKind, listed.actions, timer.time)),
           ...(listed.planRev !== undefined ? { planRev: listed.planRev } : {}),
         };
       }
       // Persistent only if it still holds NOW: a gate that opened or advanced during the read shows as an open row on
       // this durable re-read, and that is a race, so 503 whatever the run snapshot says (it may predate the run).
       if (threw) return null;
-      return (await recordedOpenGate(id))?.state === 'open' ? null : {};
+      return (await timer.time('record', () => recordedOpenGate(id)))?.state === 'open' ? null : {};
     };
     const actionsUnavailable = {
       error: 'Gate actions unavailable: the engine\'s answers for this gate could not be read consistently — retry.',
@@ -9180,7 +9236,7 @@ export function registerRoutes(
     // not replay the log on every poll, and dropped once it is not (a late frame for an answered
     // gate). Any entry not served is dropped and the gate read from the record. Only an engine that
     // keeps no rows serves the cache unjudged.
-    const recorded = await recordedOpenGate(id);
+    const recorded = await timer.time('record', () => recordedOpenGate(id));
     if (recorded?.state === 'ambiguous') {
       return reply.code(409).send({
         error: `Gate unknown: the engine's record shows gates open before units ${recorded.ords.join(' and ')} on this run, so the daemon cannot tell which one is open.`,
@@ -9232,7 +9288,7 @@ export function registerRoutes(
     // daemon restart reads it back instead of replaying the log; the replay stays the FALLBACK for
     // runs parked before the engine grew the table. `resolveOpenGate` is that one resolution, shared
     // with the POST route's `ord` check.
-    let open = await resolveOpenGate(id);
+    let open = await timer.time('resolve', () => resolveOpenGate(id, timer));
     // The record judges what the resolver returns too (crew#1083 final review): a stale frame folded
     // into the cache after GET's record read — during the status read, before any hydration began,
     // so no revision guard ran — is a cache hit for the resolver. When the answer disagrees with
@@ -9245,12 +9301,12 @@ export function registerRoutes(
       && (gateSeqOf(r.row['gate_seq']) === undefined || o.gateSeq === gateSeqOf(r.row['gate_seq']));
     let record: RecordedOpenGate | null = recorded;
     if (recorded?.state === 'open' && isOpenGate(open) && !sameOpening(open, recorded)) {
-      const now = await recordedOpenGate(id);
+      const now = await timer.time('record', () => recordedOpenGate(id));
       record = now;
       const matchesNow = (o: GateResolution): boolean => sameOpening(o, now);
       if (!matchesNow(open)) {
         gateCache.forget(id);
-        open = await resolveOpenGate(id);
+        open = await timer.time('resolve', () => resolveOpenGate(id, timer));
         if (isOpenGate(open) && !matchesNow(open)) open = 'unstable';
       }
     }

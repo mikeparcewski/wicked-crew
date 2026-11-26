@@ -37,6 +37,22 @@ export type StandInScope = (typeof STAND_IN_SCOPES)[number];
  *  before crew recorded one, turned on by hand, or its record is out of shape. */
 export const STAND_IN_SETTING_UNRECORDED = 'the standInReview setting (author not recorded)';
 
+/** (crew#1884) The launches that keep their own checks and take no stand-ins (DES-STANDIN-001 §4, K2a scope). */
+export type NoStandInLaunch = 'review' | 'evals' | 'demo';
+
+/** (crew#1884) Why a launch takes no stand-ins, in the words its refusals say: a review's point is a reviewer who did
+ *  none of the work, which a stand-in is not; the evals are computed; a demo keeps its own review. */
+export function noStandInsWhy(kind: NoStandInLaunch): string {
+  if (kind === 'review') return 'A review takes no stand-ins: its point is a reviewer who did none of the work, and a stand-in is a labelled check, not an independent review.';
+  if (kind === 'evals') return 'The evals take no stand-ins: their results are computed, with no reviewer role to fill.';
+  return 'A demo takes no stand-ins: it keeps its own review.';
+}
+
+/** (crew#1884) The ways through the stand-in choice, as its refusal ends (`preflightRefusal`). A chat card offers only
+ *  this job (every job is a setting), so it says {@link STAND_IN_CARD_ASK} instead. */
+export const STAND_IN_CHOICE_ASK = 'Use stand-ins for this job or for every job, or add another helper to the job.';
+export const STAND_IN_CARD_ASK = 'Use stand-ins for this job, or go back to the job and add another helper.';
+
 /** The consent the `always` setting stores (`SystemSettings.standInConsent`): the person who saved it, and when. */
 export function settingConsent(who: string, now: number = Date.now()): StandInConsent {
   return { scope: 'always', by: who, at: now, via: 'setting' };
@@ -169,7 +185,7 @@ export function preflightRefusal(p: IndependencePreflight, oneStep = false): Sta
       `${needsSentence(needed, conditional)} `
       + 'wicked can fill those roles with stand-ins (a fresh session that sees the work but none of the builder\'s reasoning), '
       + 'labelled on the job, every gate, the delivery and the pull request. They are not independent reviews. '
-      + 'Use stand-ins for this job or for every job, or add another helper to the job.',
+      + STAND_IN_CHOICE_ASK,
     preflight: p,
     choices: [
       { id: 'job', label: 'Use stand-ins for this job' },

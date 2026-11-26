@@ -193,6 +193,10 @@ export interface JobContext {
   /** (crew#1840) The pull requests this chat's runs delivered, read when the words name a pull request. Absent = none
    *  read (a job then never updates one). */
   deliveredPrs?: readonly DeliveredPr[];
+  /** (crew#1884) Whether a job of this workflow can take stand-ins here (the linked engine fills a short checker role
+   *  with a labelled stand-in, asked at Start; not a review, the evals or a demo): such a card needs only a seat that
+   *  builds. Absent = none can (this module stays free of the engine and the launch modules). */
+  standInsFor?(workflow: string | null): boolean;
 }
 
 // ── crew#1840: a job that updates a pull request this chat delivered ──────────────────────────────────────────────
@@ -326,8 +330,27 @@ export function seatsNeeded(r: ResolvedOption): number {
   return 1 + (r.resolved.seats.distinctEvaluator ? 1 : 0);
 }
 
-export function seatsShortLine(r: ResolvedOption, have: number): string {
-  if (seatsNeeded(r) === 1) return 'Needs a seat that can work now to build it, and none can. Sign in a seat to start it.';
+/** (crew#1884) The note on a card a builder alone can start, before the person chose stand-ins for it (the choice's
+ *  own note replaces it). */
+export const STAND_IN_PENDING_NOTE = 'Only one helper can work on this now, so its check would be a labelled stand-in, not an independent review: wicked asks you first when you start it, unless stand-ins are on for every job.';
+
+/** (crew#1884) How a chat card's Start meets the stand-in choice. Every Start but a reshape's asks it (`standInChoice`).
+ *  A reshape's Start rejects the held plan before it launches, so a question then would come after the plan it replaces
+ *  was gone (codex r1 C5): it launches stand-in-aware without asking (`standInAware`), and a short role holds at the
+ *  run's stand-in gate, where the person answers (codex r2). */
+export function chatStartStandIns(p: Pick<ArtifactProposal, 'reshapes'>): { standInChoice: true } | { standInAware: true } {
+  return p.reshapes === undefined ? { standInChoice: true } : { standInAware: true };
+}
+
+/** (crew#1884) The seats a card needs before Start: on an engine with stand-ins, a job that can take them needs only a
+ *  seat that builds (its Start asks the stand-in choice for a short checker); otherwise {@link seatsNeeded}. */
+export function seatsRequired(r: ResolvedOption, ctx: { standInsFor?: JobContext['standInsFor'] | undefined }): number {
+  const kind = r.resolved.launch.kind;
+  return (kind === 'run' || kind === 'compose') && ctx.standInsFor?.(r.workflow) === true ? 1 : seatsNeeded(r);
+}
+
+export function seatsShortLine(r: ResolvedOption, have: number, need: number = seatsNeeded(r)): string {
+  if (need === 1) return 'Needs a seat that can work now to build it, and none can. Sign in a seat to start it.';
   return `Needs 2 seats that can work now, one to build it and one to check it, and ${have === 0 ? 'none' : `only ${have}`} can. ${have === 0 ? 'Sign in 2 more seats' : 'Sign in another seat'} to start it.`;
 }
 
@@ -376,7 +399,7 @@ function seatsOf(facts: JobFacts, ctx: JobContext, r: ResolvedOption): { seats: 
       : facts.lead !== null && facts.seats === null
         ? `${name(lead)}, with ${list(others)} checking it`
         : list([name(lead), ...others]);
-  return { seats: { lead, keys: lead === null ? [] : [lead, ...rest], label }, short: (lead === null ? 0 : 1 + rest.length) < seatsNeeded(r) };
+  return { seats: { lead, keys: lead === null ? [] : [lead, ...rest], label }, short: (lead === null ? 0 : 1 + rest.length) < seatsRequired(r, ctx) };
 }
 
 function inputValueLabel(v: ProposalInputValue): string {
@@ -616,7 +639,11 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     blockedBy.push('What to show is over 4000 characters with your corrections: say it shorter');
   }
   // A self-seated workflow picks its own seat at launch: the roster's count is not its requirement (codex r3).
-  if (short && coming === undefined && !(r.workflow !== null && SELF_SEATED.has(r.workflow))) blockedBy.push(seatsShortLine(r, seats.keys.length));
+  if (short && coming === undefined && !(r.workflow !== null && SELF_SEATED.has(r.workflow))) blockedBy.push(seatsShortLine(r, seats.keys.length, seatsRequired(r, ctx)));
+  // (crew#1884) A builder and no checker on an engine with stand-ins: said before Start, which asks the choice.
+  else if (!short && coming === undefined && seats.keys.length < seatsNeeded(r) && !(r.workflow !== null && SELF_SEATED.has(r.workflow))) {
+    notes.push(STAND_IN_PENDING_NOTE);
+  }
   // The one question: the first required need that is missing.
   let question: ProposalQuestion | null = null;
   const missing = needs.find((n) => n.required && n.status === 'missing');
@@ -941,7 +968,7 @@ export function seatProtections(r: ResolvedOption | null): SeatProtection[] {
 export function mergeRevision(
   parent: ArtifactProposal,
   edits: ProposalRevisionEdits,
-  ctx: { chat: JobChat; served: ServedState; roster: ReadonlyArray<{ key: string; name: string }>; pool?: JobContext['pool']; jobSources?: JobContext['jobSources'] },
+  ctx: { chat: JobChat; served: ServedState; roster: ReadonlyArray<{ key: string; name: string }>; pool?: JobContext['pool']; jobSources?: JobContext['jobSources']; standInsFor?: JobContext['standInsFor'] },
 ): MergeResult {
   const notes: string[] = [];
   const refusedInputs: string[] = [];
@@ -1028,7 +1055,8 @@ export function mergeRevision(
   }
   if (edits.removeSeats !== undefined && edits.removeSeats.length > 0) {
     const r = resolveOption(facts.card, optionFor(CATALOG_V2_CARDS.find((c) => c.id === facts.card)!, facts.option), ctx.served);
-    const need = r !== null && proposalKindOf(r) === 'create' ? 2 : r === null ? 1 : seatsNeeded(r);
+    // (crew#1884) A card that can take stand-ins needs only its builder, as when it was drawn (codex r2).
+    const need = r !== null && proposalKindOf(r) === 'create' ? 2 : r === null ? 1 : seatsRequired(r, ctx);
     const current = facts.seats ?? drawOrder(facts.lead, ctx).filter((k) => can.has(k));
     // (F1/F2) A removal is applied or refused in the card's words; what WAS applied is said from the published card
     // (`seatRemovalNote`), never from this intermediate merge. The count reads only the seats that can work now.
@@ -1338,5 +1366,7 @@ export function jobLaunchCommon(
     ...(p.relaunch?.campaignId !== undefined ? { campaignId: p.relaunch.campaignId } : p.relaunch?.groupLabel !== undefined ? { groupLabel: p.relaunch.groupLabel } : {}),
     ...(p.reshapes !== undefined ? { retryOf: p.reshapes } : {}),
     ...(p.reducedAssurance === true ? { reducedAssurance: true } : {}),
+    // (crew#1884) The person's press on the stand-in question: this job launches with stand-ins (consent theirs).
+    ...(p.standIns === true ? { standIns: true } : {}),
   };
 }

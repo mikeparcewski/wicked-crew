@@ -52,6 +52,8 @@ export const ProductComposeSchema = z.strictObject({
   /** (api-types 0.192.0, DES-CATALOG-002 §4.4) What this compose is the shape of: a Backlog option, whose compose level
    *  decides how far down the draft goes. */
   shape: LaunchShapeSchema.optional(),
+  /** (crew#1884) The person's stand-in choice, the answer to this launch's `409 stand_in_choice`. */
+  standIns: z.literal(true).optional(),
 });
 
 /** The compose level a Backlog shape names (the seed's own data; the shape itself is judged by the shared launch). */
@@ -76,10 +78,13 @@ export interface ComposeLaunchExtra {
   fromProposal?: string;
   /** Hold the run at its plan (a chat launch always does). */
   humanConfirm?: string;
+  /** (crew#1884) How the caller meets the stand-in choice (`chatStartStandIns`): asked (a chat card draws the question),
+   *  or launched aware without asking (a reshape). Absent: neither (the route's own caller). */
+  standIns?: { standInChoice: true } | { standInAware: true };
 }
 
 /** The shared launch function's shape here (DES-CHAT-FIRST-001 C3): the routes module passes its own. */
-export type ComposeLaunchRun = (raw: unknown, ctx: { actor: Actor; log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>; fromProposal?: string; target?: 'compose'; compose?: ComposeFacts }) => Promise<{ statusCode: number; payload: unknown }>;
+export type ComposeLaunchRun = (raw: unknown, ctx: { actor: Actor; log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>; fromProposal?: string; target?: 'compose'; compose?: ComposeFacts; standInChoice?: boolean; standInAware?: boolean }) => Promise<{ statusCode: number; payload: unknown }>;
 
 const oneLine = (s: string): string => s.replace(/\s+/gu, ' ').trim();
 /** `s` cut to at most `max` UTF-8 bytes on a character boundary, `…` marking a cut. */
@@ -258,6 +263,7 @@ export async function composeLaunch(
           ...Object.fromEntries(Object.entries(extra.common ?? {}).filter(([k]) => k !== 'shape')),
           ...(extra.humanConfirm !== undefined ? { humanConfirm: extra.humanConfirm } : {}),
           ...(parsed.data.shape !== undefined ? { shape: parsed.data.shape } : {}),
+          ...(parsed.data.standIns === true ? { standIns: true } : {}),
           plan: {
             steps: [
               { catalog: 'produce', id: 'draft', instructions: draft },
@@ -266,7 +272,10 @@ export async function composeLaunch(
             ],
           },
         },
-        { ...ctx, target: 'compose', compose: composeFactsOf(id, rows, level, draft, review), ...(extra.fromProposal !== undefined ? { fromProposal: extra.fromProposal } : {}) },
+        // (crew#1884) A chat Backlog job's Go asks the stand-in choice, as `POST /runs` does: its card reopens with the
+        // question. The route's own caller (studio's Draft) does not draw the choice yet, so the route takes `standIns`
+        // and the setting but does not ask (studio follow-up).
+        { ...ctx, target: 'compose', ...(extra.standIns ?? {}), compose: composeFactsOf(id, rows, level, draft, review), ...(extra.fromProposal !== undefined ? { fromProposal: extra.fromProposal } : {}) },
       );
       // POST /runs' own refusal (no eligible seat, a busy engine, an archived project, …) is
       // relayed as it answered; its 201 `{runId}` becomes this route's 202.
@@ -280,7 +289,7 @@ export async function composeLaunch(
 export function registerProductRoutes(app: FastifyInstance, adapter: CoreAdapter, launchRun: ComposeLaunchRun): void {
   app.post(
     `${V}/projects/:id/product/compose`,
-    { config: { manifest: { requestType: 'ProductComposeBody', responseType: 'ProductComposeResponse', statusCodes: [202, 400, 404, 409, 422, 501, 503] } } },
+    { config: { manifest: { requestType: 'ProductComposeBody', responseType: 'ProductComposeResponse', statusCodes: [202, 400, 403, 404, 409, 422, 501, 503] } } },
     async (req: FastifyRequest & { actor?: Actor }, reply) => {
       const { id } = req.params as { id: string };
       const out = await composeLaunch(adapter, launchRun, id, req.body, { actor: req.actor ?? LOCAL_ACTOR, log: req.log });
