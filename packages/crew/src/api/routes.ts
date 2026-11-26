@@ -83,6 +83,7 @@ type RecordedOpenGate =
   | { state: 'none' }
   | { state: 'ambiguous'; ords: number[] }
   | { state: 'open'; ord: number; row: InteractionRequest };
+import { GateReadTimer, untimed, type TimePart } from './gate-timing.js';
 import { detectRefusal, gateSeqOf, isOpenGate, offeredChoices, replayOpenGate, type GateCache, type GateRead, type GateResolution } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
 import { acceptanceRequirementOf, buildAcceptanceView } from '../qe/acceptance.js';
@@ -7626,8 +7627,26 @@ export function registerRoutes(
    * `'no-log'` = this build cannot read the log, so nothing can be said; `'unstable'` = live gate
    * events kept landing while the record was read, so nothing was verified (retry).
    */
-  async function resolveOpenGate(id: string): Promise<GateResolution> {
-    return gateCache.resolve(id, () => readOpenGate(id));
+  /** (crew#1950) The parts of each gate hydration, keyed by the cache's own promise for it (one per hydration), so
+   *  every GET that waits on it (whoever started it, a POST decision too) names that hydration's parts and no other's. */
+  const hydrationParts = new WeakMap<Promise<GateResolution>, GateReadTimer>();
+  async function resolveOpenGate(id: string, timer?: GateReadTimer): Promise<GateResolution> {
+    // A fresh timer per hydration this call starts, kept across that hydration's re-reads.
+    let started: GateReadTimer | undefined;
+    const resolution = gateCache.resolve(id, () => {
+      started ??= new GateReadTimer();
+      return readOpenGate(id, started.time);
+    });
+    // The hydration this call started or joined, known synchronously (`resolve` starts or finds it before its first
+    // await); none when the cache served the gate.
+    const hydration = gateCache.inflightOf(id);
+    if (hydration !== undefined && started !== undefined && !hydrationParts.has(hydration)) hydrationParts.set(hydration, started);
+    const parts = hydration === undefined ? undefined : hydrationParts.get(hydration);
+    try {
+      return await resolution;
+    } finally {
+      if (parts !== undefined) timer?.absorb(parts);
+    }
   }
 
   /**
@@ -7636,8 +7655,9 @@ export function registerRoutes(
    * predating the table. Never consults the cache — `GateCache.resolve` owns that, and runs this
    * again when a live gate event overlaps it.
    */
-  async function readOpenGate(id: string): Promise<GateRead> {
-    const recorded = await recordedOpenGate(id);
+  async function readOpenGate(id: string, time: TimePart = untimed): Promise<GateRead> {
+    // (crew#1950) Its own record and event-log reads are timed apart from the resolve that holds them.
+    const recorded = await time('record', () => recordedOpenGate(id));
     if (recorded?.state === 'ambiguous') return 'ambiguous';
     if (recorded?.state === 'open') {
       const durableGate = recorded.row;
@@ -7650,7 +7670,7 @@ export function registerRoutes(
       // Issue #969: the row has no `choices`/`recommended`, so they come from the newest
       // `awaitingHuman` for this ord in the event log. A log this build cannot read (null, or a read
       // that throws) leaves both out — the gate is still served, just without the offered answers.
-      const events = await adapter.runEvents(id).catch(() => null);
+      const events = await time('events', () => adapter.runEvents(id)).catch(() => null);
       const frame = events?.filter((e) => e.type === 'awaitingHuman' && e.session === id && e.ord === ord).at(-1);
       return {
         ord,
@@ -7668,7 +7688,7 @@ export function registerRoutes(
         })(),
       };
     }
-    const events = await adapter.runEvents(id);
+    const events = await time('events', () => adapter.runEvents(id));
     if (events === null) return 'no-log';
     return replayOpenGate(id, events) ?? null;
   }
@@ -8836,14 +8856,14 @@ export function registerRoutes(
    * steering-author run (its approve lands the proposal). Marks
    * `humanOnly` where crew answers a non-human actor 403 `human_operator_only`.
    */
-  async function crewGateActions(run: SessionView, gated: WorkUnit | undefined, gateKind: string, actions: GateAction[]): Promise<GateAction[]> {
+  async function crewGateActions(run: SessionView, gated: WorkUnit | undefined, gateKind: string, actions: GateAction[], time: TimePart = untimed): Promise<GateAction[]> {
     const declines = (a: GateAction): boolean => a.action === 'reject' || a.action === 'request_changes';
     // crew#1157 / crew#1259: an analysis or delivering chat run's held plan change is never approved (`gateForDecision`): only the declines stay.
     let approveRefused = chatPlanRefusal(run.session.id, { gateKind }) !== null;
     let skipRefused = approveRefused;
     if (!approveRefused && gated !== undefined && isDeliverUnit(gated)) {
-      approveRefused = 'refusal' in (await deliverApprovalRefusal(run, gated));
-      skipRefused = 'refusal' in (await deliverApprovalRefusal(run, gated, 'skip'));
+      approveRefused = 'refusal' in (await time('deliver-qe', () => deliverApprovalRefusal(run, gated)));
+      skipRefused = 'refusal' in (await time('deliver-qe', () => deliverApprovalRefusal(run, gated, 'skip')));
     }
     const steering = isSteeringAuthorRun(run);
     return actions
@@ -9080,13 +9100,35 @@ export function registerRoutes(
   // the fallback existed a daemon restart left every parked run unable to say what it was asking —
   // not because the prompt was gone (core records `awaitingHuman` to the log) but because nothing
   // read it. A restart is routine: deploy, crash, laptop sleep.
-  app.get(`${V}/runs/:id/gate`, async (req, reply) => {
+  // (crew#1950) Each read's parts, timed: the answer's Server-Timing header, and one warn line for a slow read.
+  const gateReadTimers = new WeakMap<object, GateReadTimer>();
+  app.get(`${V}/runs/:id/gate`, {
+    onSend: (req, reply, payload, done) => {
+      // Taken off first, so a send that re-enters this hook (an error answer) times nothing twice; and nothing here
+      // may replace the answer: a failed header or log line is dropped (codex r1).
+      const timer = gateReadTimers.get(req);
+      gateReadTimers.delete(req);
+      if (timer !== undefined) {
+        try {
+          const total = timer.total();
+          reply.header('Server-Timing', timer.header(total));
+          const slow = timer.slowLine((req.params as { id: string }).id, reply.statusCode, total);
+          if (slow !== null) req.log.warn(slow);
+        } catch {
+          // Diagnostics only.
+        }
+      }
+      done(null, payload);
+    },
+  }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const timer = new GateReadTimer();
+    gateReadTimers.set(req, timer);
     // F35, crew#1775: this run's view only, never every run's (studio reads this route for parked runs,
     // from every open tab): one engine read of this run, off the actor, as the store is when it starts.
     // Read once per request: the cached-but-not-servable path and the miss path share it (coord review C6).
     let viewRead: Promise<SessionView | undefined> | undefined;
-    const runOf = (): Promise<SessionView | undefined> => (viewRead ??= adapter.runView(id));
+    const runOf = (): Promise<SessionView | undefined> => (viewRead ??= timer.time('view', () => adapter.runView(id)));
     // (rejudge, api-types 0.134.0) A gate whose unit no judge could rule on says whether its judge
     // can be re-run now, and from which seats — the engine's own selection, read each time (a seat
     // signed in since the pause counts). Absent on every other gate and on an addon without the read.
@@ -9096,7 +9138,7 @@ export function registerRoutes(
       if (gated?.status !== 'rejected' || denial?.source !== 'judge_unavailable') return {};
       if (typeof adapter.rejudgeReadiness !== 'function') return {};
       try {
-        const r = await adapter.rejudgeReadiness(id);
+        const r = await timer.time('rejudge', () => adapter.rejudgeReadiness!(id));
         if (r === null || !r.applies || r.ord !== ord) return {};
         return { rejudge: { available: r.available, eligible: r.eligible, missing: r.missing } };
       } catch {
@@ -9114,7 +9156,7 @@ export function registerRoutes(
       if (run === undefined) return {};
       const decision = qeDecisionOf(run);
       if (decision === null || qeDecisionBypasses(decision)) return {};
-      const check = await qeAcceptanceCheckFor(run);
+      const check = await timer.time('deliver-qe', () => qeAcceptanceCheckFor(run));
       if (check === null || check.satisfied) return {};
       return {
         skipQe: {
@@ -9139,7 +9181,7 @@ export function registerRoutes(
       for (let attempt = 0; attempt < 2; attempt++) {
         let listed: Awaited<ReturnType<CoreAdapter['gateActions']>>;
         try {
-          listed = await adapter.gateActions(id);
+          listed = await timer.time('actions', () => adapter.gateActions!(id));
         } catch {
           threw = true;
           continue;
@@ -9149,14 +9191,14 @@ export function registerRoutes(
         if (run === undefined) return {};
         const gated = run.units?.find((u) => u.ord === ord);
         return {
-          actions: await crewGateActions(run, gated, listed.gateKind, listed.actions),
+          actions: await timer.time('crew-actions', () => crewGateActions(run, gated, listed.gateKind, listed.actions, timer.time)),
           ...(listed.planRev !== undefined ? { planRev: listed.planRev } : {}),
         };
       }
       // Persistent only if it still holds NOW: a gate that opened or advanced during the read shows as an open row on
       // this durable re-read, and that is a race, so 503 whatever the run snapshot says (it may predate the run).
       if (threw) return null;
-      return (await recordedOpenGate(id))?.state === 'open' ? null : {};
+      return (await timer.time('record', () => recordedOpenGate(id)))?.state === 'open' ? null : {};
     };
     const actionsUnavailable = {
       error: 'Gate actions unavailable: the engine\'s answers for this gate could not be read consistently — retry.',
@@ -9180,7 +9222,7 @@ export function registerRoutes(
     // not replay the log on every poll, and dropped once it is not (a late frame for an answered
     // gate). Any entry not served is dropped and the gate read from the record. Only an engine that
     // keeps no rows serves the cache unjudged.
-    const recorded = await recordedOpenGate(id);
+    const recorded = await timer.time('record', () => recordedOpenGate(id));
     if (recorded?.state === 'ambiguous') {
       return reply.code(409).send({
         error: `Gate unknown: the engine's record shows gates open before units ${recorded.ords.join(' and ')} on this run, so the daemon cannot tell which one is open.`,
@@ -9232,7 +9274,7 @@ export function registerRoutes(
     // daemon restart reads it back instead of replaying the log; the replay stays the FALLBACK for
     // runs parked before the engine grew the table. `resolveOpenGate` is that one resolution, shared
     // with the POST route's `ord` check.
-    let open = await resolveOpenGate(id);
+    let open = await timer.time('resolve', () => resolveOpenGate(id, timer));
     // The record judges what the resolver returns too (crew#1083 final review): a stale frame folded
     // into the cache after GET's record read — during the status read, before any hydration began,
     // so no revision guard ran — is a cache hit for the resolver. When the answer disagrees with
@@ -9245,12 +9287,12 @@ export function registerRoutes(
       && (gateSeqOf(r.row['gate_seq']) === undefined || o.gateSeq === gateSeqOf(r.row['gate_seq']));
     let record: RecordedOpenGate | null = recorded;
     if (recorded?.state === 'open' && isOpenGate(open) && !sameOpening(open, recorded)) {
-      const now = await recordedOpenGate(id);
+      const now = await timer.time('record', () => recordedOpenGate(id));
       record = now;
       const matchesNow = (o: GateResolution): boolean => sameOpening(o, now);
       if (!matchesNow(open)) {
         gateCache.forget(id);
-        open = await resolveOpenGate(id);
+        open = await timer.time('resolve', () => resolveOpenGate(id, timer));
         if (isOpenGate(open) && !matchesNow(open)) open = 'unstable';
       }
     }
