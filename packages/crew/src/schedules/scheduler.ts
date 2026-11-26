@@ -19,7 +19,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { SessionStatus, SessionView } from 'wicked-crew-api-types';
-import { HOUR_MS, blockedDetail, type ScheduleBlocked, type ScheduleStore, type WorkflowSchedule } from './store.js';
+import { HOUR_MS, blockedDetail, notSchedulable, type ScheduleBlocked, type ScheduleStore, type WorkflowSchedule } from './store.js';
 
 export const DEFAULT_SWEEP_MS = 60_000;
 /** A launched run the daemon does not list holds its schedule's slot this long, then lets go. */
@@ -265,6 +265,9 @@ export class WorkflowScheduler {
 
   /** Why `row` may not launch now, or `null`. */
   private blocker(row: WorkflowSchedule, status: ReadonlyMap<string, string>): string | null {
+    // A row saved before its workflow was refused for schedules (J6 K1): it never fires, and says why.
+    const never = notSchedulable(row.workflow);
+    if (never !== null) return never;
     if (row.lastRunId !== null && (row.lastOutcome === 'launched' || row.lastOutcome === 'launching')) {
       const s = status.get(row.lastRunId);
       // A run the daemon does not list yet holds the slot: a launched one for two days, a reservation the engine

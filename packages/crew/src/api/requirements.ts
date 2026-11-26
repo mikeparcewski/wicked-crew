@@ -98,7 +98,7 @@ export interface EstateRequirementsGraph {
   domains?: Record<string, ArtifactDomain>;
 }
 
-/** What the engine answers for one repository: its graph (null until a build reached the minimum),
+/** What the engine answers for one repository: its graph (null until one is built; an engine before J6 v3 built it only at its minimum),
  * the coverage label from the store's own counts (present either way), and which build the graph is:
  * its generation and the label that build persisted (wicked-core 2026-11-01; ABSENT from an older
  * engine, null when nothing is built). */
@@ -114,7 +114,7 @@ export interface EstateRequirementsRead {
     head?: unknown;
     commits_behind?: unknown;
   } | null;
-  /** The minimum in force and where it comes from: the repository's own target (`repo`, null when unset) and the
+  /** (J6 M1) No longer read: the minimum is gone (an engine before C3 still sends its target; it is ignored). The
    * daemon-wide one (`daemon`). ABSENT from an older engine. */
   target?: { repo?: unknown; daemon?: unknown } | null;
   /** The engine's verdict on each listed requirement that recorded its code unit, by domain then requirement id:
@@ -186,27 +186,9 @@ export async function readRequirementsGraph(
 export type CoreCliRunner = (args: string[]) => Promise<unknown>;
 
 /** The engine CLI: the binary the daemon located at boot (`WICKED_CORE_EXE`, set by the adapter), else the one on
- *  PATH (the same command a job's "Lower the minimum" answer runs). The write needs the CLI, not only the addon. */
+ *  PATH. The write needs the CLI, not only the addon. */
 const runCoreCli: CoreCliRunner = (args) =>
   execCapped(process.env['WICKED_CORE_EXE'] || WICKED_CORE_EXE_NAME, args, { timeout: 30_000 });
-
-/**
- * Set (`pct`) or clear (`null`) a repository's OWN minimum, kept in its store (operator ruling 2026-11-06, P3: the
- * requirements page can raise and clear it, not only a job's ask lower it). The engine's own command does the write
- * (`wicked-core requirements-target`, the one a job's "Lower the minimum" runs); the next read shows it. `false`
- * when the repository has no store yet (nothing to hold a target).
- */
-export async function setRepoMinimum(
-  repo: RepoEntry,
-  pct: number | null,
-  run: CoreCliRunner = runCoreCli,
-): Promise<boolean> {
-  const db = codeGraphDb(repo);
-  if (!existsSync(db)) return false;
-  await run(['requirements-target', '--db', db, ...(pct === null ? ['--clear'] : ['--set', String(pct)])]);
-  forgetRequirementsReads(repo);
-  return true;
-}
 
 /** What {@link retireRequirement} did. `engine_too_old`: the installed wicked-core has no `--retire`. */
 export type RetireOutcome = 'retired' | 'not_found' | 'not_unindexed' | 'engine_too_old';
@@ -282,14 +264,15 @@ export interface RequirementCorroboration {
 
 /**
  * How much of the repository's product code is REAL requirements (domain-model 1.1.0
- * `metadata.coverage`, schema bundle 1.3.0; wicked-core#1233). `realPct` is the one number the
- * minimum is checked against; `placeholders` are shown, never counted.
+ * `metadata.coverage`, schema bundle 1.3.0; wicked-core#1233). `realPct` follows the counts; nothing is
+ * held to a minimum (J6 M1). `placeholders` are shown, never counted.
  */
 export interface RequirementsCoverage {
   realPct: number;
   /** Confidence-weighted share, headline only; optional, absent when the engine did not send a usable one. */
   weightedPct?: number;
-  minPct: number;
+  /** The engine's minimum, while an engine before J6 C3 still sends one; never a gate here (J6 M1). */
+  minPct?: number;
   behaviorBearing: number;
   real: number;
   placeholders: number;
@@ -299,8 +282,8 @@ export interface RequirementsCoverage {
 
 /**
  * The graph the list holds, as it was BUILT. The list's rows are the last `domain-graph` build; the page's
- * `coverage` counts the store NOW, which moves on whenever a run maps more without building (a run stopped at
- * its repeat ask, or one below the minimum, where the build refuses). `behind` says the header's counts are not
+ * `coverage` counts the store NOW, which moves on whenever a run maps more without building (on an engine before
+ * J6 v3: a run stopped at its repeat ask, or one below the minimum, where the build refused). `behind` says the header's counts are not
  * the rows' (req-list-stale 2026-11-01: 1,383 real listed under a header counting 3,585).
  */
 export interface RequirementsGraphBuild {
@@ -317,7 +300,7 @@ export interface RequirementsGraphBuild {
   behind: boolean;
 }
 
-/** The counts that say what the store held; `minPct` is a setting, not a count, and `realPct` follows them. */
+/** The counts that say what the store held; `minPct` (an older engine's) is not a count, and `realPct` follows them. */
 const BUILD_COUNTS = ['behaviorBearing', 'real', 'placeholders', 'unmapped', 'notProduct'] as const;
 
 /**
@@ -386,7 +369,6 @@ export function coverageOf(raw: ArtifactCoverage | undefined): RequirementsCover
   if (raw === undefined || raw === null || typeof raw !== 'object') return null;
   const out = {
     realPct: count(raw.real_pct),
-    minPct: count(raw.min_pct),
     behaviorBearing: count(raw.behavior_bearing),
     real: count(raw.real),
     placeholders: count(raw.placeholders),
@@ -398,7 +380,10 @@ export function coverageOf(raw: ArtifactCoverage | undefined): RequirementsCover
   // label at all: a label whose share its counts do not support is never shown (codex on #1252).
   if (Object.values(out).some((v) => v === null)) return null;
   const c = out as RequirementsCoverage;
-  if (c.realPct > 100 || c.minPct < 1 || c.minPct > 100) return null;
+  if (c.realPct > 100) return null;
+  // J6 M1: the minimum is the engine's to send or not (C3 drops it); one out of range is left off, never the label.
+  const minPct = count(raw.min_pct);
+  if (minPct !== null && minPct >= 1 && minPct <= 100) c.minPct = minPct;
   if (c.real + c.placeholders + c.unmapped !== c.behaviorBearing) return null;
   const share = c.behaviorBearing === 0 ? 100 : Math.floor((c.real * 100) / c.behaviorBearing);
   if (c.realPct !== share) return null;
@@ -614,15 +599,6 @@ export interface RequirementsCodeDrift {
   headCommit: string | null;
 }
 
-/** The minimum in force for this repository and where it comes from: its own target (set at a job's ask or on the
- *  requirements page) or the daemon-wide setting. */
-export interface RequirementsMinimum {
-  pct: number;
-  source: 'repo' | 'settings';
-  repoPct: number | null;
-  settingsPct: number | null;
-}
-
 /** The engine's `code`, or `null` when absent or malformed. */
 export function codeDriftOf(raw: EstateRequirementsRead['code']): RequirementsCodeDrift | null {
   if (raw === undefined || raw === null || typeof raw !== 'object') return null;
@@ -639,27 +615,6 @@ export function codeDriftOf(raw: EstateRequirementsRead['code']): RequirementsCo
     commitsBehind: count(raw.commits_behind),
     headCommit: typeof raw.head === 'string' && /^[0-9a-f]{4,64}$/u.test(raw.head) ? raw.head : null,
   };
-}
-
-const pctOf = (v: unknown): number | null => {
-  const n = count(v);
-  return n !== null && n >= 1 && n <= 100 ? n : null;
-};
-
-/** The engine's `target` with the minimum the label applies (`coverage.minPct`), or `null` when the engine does not
- *  say (an older engine). */
-export function minimumOf(
-  raw: EstateRequirementsRead['target'],
-  coverage: RequirementsCoverage | null,
-): RequirementsMinimum | null {
-  if (raw === undefined || raw === null || typeof raw !== 'object') return null;
-  const repoPct = pctOf(raw.repo);
-  const settingsPct = pctOf(raw.daemon);
-  // The number in force follows the source it is named after (pi r1): the label's own minimum only when the engine
-  // named neither.
-  const pct = repoPct ?? settingsPct ?? coverage?.minPct ?? null;
-  if (pct === null) return null;
-  return { pct, source: repoPct !== null ? 'repo' : 'settings', repoPct, settingsPct };
 }
 
 export interface RequirementDetail extends RequirementSummary {
@@ -715,7 +670,6 @@ interface RepoIndex {
   uncounted: RequirementsUncountedRows | null;
   categories: { functional: number; configData: number };
   codeDrift: RequirementsCodeDrift | null;
-  minimum: RequirementsMinimum | null;
   /** Rows whose code does not meet them. */
   mismatches: number;
   /** (J6 K1) The 1.2.0 document's model ({@link domainModelOf}); `null` for any other document. */
@@ -772,7 +726,7 @@ async function buildIndex(repo: RepoEntry, reader: RequirementsGraphReader): Pro
 async function buildIndexRead(
   repo: RepoEntry,
   reader: RequirementsGraphReader,
-): Promise<{ index: RepoIndex | null; coverage: RequirementsCoverage | null; minimum: RequirementsMinimum | null }> {
+): Promise<{ index: RepoIndex | null; coverage: RequirementsCoverage | null}> {
   const [read, ovMtime] = await Promise.all([
     readRequirementsGraph(repo, reader),
     mtimeMs(requirementsOverrides(repo)),
@@ -781,7 +735,7 @@ async function buildIndexRead(
   if (graph === null || typeof graph !== 'object') {
     cache.delete(repoKey(repo)); // nothing built (any more): no stale index survives
     const coverage = coverageOf(read.coverage ?? undefined);
-    return { index: null, coverage, minimum: minimumOf(read.target, coverage) };
+    return { index: null, coverage };
   }
   const token = createHash('sha1')
     .update(JSON.stringify(graph))
@@ -790,11 +744,10 @@ async function buildIndexRead(
     .update(JSON.stringify(read.rows ?? null))
     .update(JSON.stringify(read.satisfied_by ?? null))
     .update(JSON.stringify(read.code ?? null))
-    .update(JSON.stringify(read.target ?? null))
     .digest('hex');
   const cached = cache.get(repoKey(repo));
   if (cached && cached.sourceToken === token && cached.overridesMtimeMs === ovMtime) {
-    return { index: cached, coverage: cached.coverage, minimum: cached.minimum };
+    return { index: cached, coverage: cached.coverage };
   }
   const overrides = await readOverrides(repo);
   const productOnly = graph.metadata?.product_only === true;
@@ -886,12 +839,11 @@ async function buildIndexRead(
       configData: entries.filter((e) => e.summary.category === 'config-data').length,
     },
     codeDrift: codeDriftOf(read.code),
-    minimum: minimumOf(read.target, coverage),
     mismatches: entries.filter((e) => e.summary.codeMismatch !== null).length,
     model: domainModelOf(graph),
   };
   cache.set(repoKey(repo), index);
-  return { index, coverage: index.coverage, minimum: index.minimum };
+  return { index, coverage: index.coverage };
 }
 
 export interface RequirementsQuery {
@@ -925,8 +877,8 @@ export interface RequirementsPage {
    */
   orphanedOverrides: number;
   /**
-   * The share of product behaviours that are REAL requirements, the placeholders apart, and the
-   * minimum ("23% real requirements · 4397 placeholders · minimum 80%"); `null` when the label is
+   * The share of product behaviours that are REAL requirements, the placeholders apart
+   * ("23% real requirements · 4397 placeholders"); `null` when the label is
    * absent, an older engine's `mapped_pct` label, or one its counts do not support.
    */
   coverage: RequirementsCoverage | null;
@@ -954,8 +906,6 @@ export interface RequirementsPage {
   categories: { functional: number; configData: number };
   /** How old the code behind the listed build is; `null` when the engine does not say. */
   codeDrift: RequirementsCodeDrift | null;
-  /** The minimum in force and where it comes from; `null` when the engine does not say. */
-  minimum: RequirementsMinimum | null;
   /** Rows of the whole corpus whose code does not meet them (findings beside real requirements). */
   mismatches: number;
   /** (J6 K1) The 1.2.0 model the rows come from; omitted for any other document. */
@@ -989,10 +939,10 @@ export async function listRequirementsRead(
   repo: RepoEntry,
   query: RequirementsQuery,
   reader: RequirementsGraphReader,
-): Promise<{ page: RequirementsPage | null; coverage: RequirementsCoverage | null; minimum: RequirementsMinimum | null }> {
-  const { index, coverage, minimum } = await buildIndexRead(repo, reader);
-  if (index === null) return { page: null, coverage, minimum };
-  return { page: pageOf(index, query), coverage, minimum };
+): Promise<{ page: RequirementsPage | null; coverage: RequirementsCoverage | null}> {
+  const { index, coverage } = await buildIndexRead(repo, reader);
+  if (index === null) return { page: null, coverage };
+  return { page: pageOf(index, query), coverage };
 }
 
 /** {@link listRequirementsRead} for several queries over ONE engine read and one index (crew#1412: a chat's map takes
@@ -1001,10 +951,10 @@ export async function listRequirementsReadMany(
   repo: RepoEntry,
   queries: readonly RequirementsQuery[],
   reader: RequirementsGraphReader,
-): Promise<{ pages: RequirementsPage[] | null; coverage: RequirementsCoverage | null; minimum: RequirementsMinimum | null }> {
-  const { index, coverage, minimum } = await buildIndexRead(repo, reader);
-  if (index === null) return { pages: null, coverage, minimum };
-  return { pages: queries.map((q) => pageOf(index, q)), coverage, minimum };
+): Promise<{ pages: RequirementsPage[] | null; coverage: RequirementsCoverage | null}> {
+  const { index, coverage } = await buildIndexRead(repo, reader);
+  if (index === null) return { pages: null, coverage };
+  return { pages: queries.map((q) => pageOf(index, q)), coverage };
 }
 
 /**
@@ -1083,7 +1033,6 @@ function pageOf(index: RepoIndex, query: RequirementsQuery): RequirementsPage {
     uncounted: index.uncounted,
     categories: index.categories,
     codeDrift: index.codeDrift,
-    minimum: index.minimum,
     mismatches: index.mismatches,
     ...(index.model !== null ? { model: index.model } : {}),
   };

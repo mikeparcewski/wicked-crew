@@ -7,13 +7,12 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from '../zod.js';
 import type { Actor } from '../core/types.js';
 import { API_PREFIX } from '../api/api-prefix.js';
-import { DOMAIN_EXTRACTION_WORKFLOW } from '../api/domain-model.js';
 import { LOCAL_ACTOR } from '../api/auth.js';
 import type { AuditLog } from '../api/audit.js';
 import { isHumanOperator } from '../api/watch-routes.js';
 import { NoIndependentReviewer, ReviewPreparationRefused, isNoIndependentReviewerNote } from '../insights/review-service.js';
 import { ScheduleBusyError, type WorkflowScheduler } from './scheduler.js';
-import { MAX_EVERY_HOURS, MIN_EVERY_HOURS, SCHEDULE_ID, type ScheduleStore, type WorkflowSchedule } from './store.js';
+import { MAX_EVERY_HOURS, MIN_EVERY_HOURS, notSchedulable, SCHEDULE_ID, type ScheduleStore, type WorkflowSchedule } from './store.js';
 
 const V = API_PREFIX;
 
@@ -58,6 +57,9 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: ScheduleRoute
     // (crew#1837) The last start was refused because every seat that could review the work ran some of it: the
     // person's one accept (PUT or Run it now with reducedAssurance) lets it run.
     if (row.lastOutcome === 'refused' && !row.reducedAssurance && isNoIndependentReviewerNote(row.lastNote)) out.retryWith = RETRY_REDUCED;
+    // (J6 M1, codex r1) A row whose workflow can never run on a schedule says so in every listing, due or not.
+    const never = notSchedulable(row.workflow);
+    if (never !== null) out.lastNote = `skipped: ${never}`;
     return out;
   };
 
@@ -80,9 +82,8 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: ScheduleRoute
       if (!deps.knowsWorkflow(parsed.data.workflow)) return reply.code(404).send({ error: `no workflow ${parsed.data.workflow}` });
       // (J6 K1, coord R2 F4) A domain model maps what a person says it should cover, after they see its scope; a
       // schedule has no one to say it, so it would fail on every tick. Refused when it is saved, in words.
-      if (parsed.data.workflow === DOMAIN_EXTRACTION_WORKFLOW) {
-        return reply.code(400).send({ code: 'workflow_not_schedulable', error: 'a domain model run covers what a person says it should and is started by them (a repository\'s Requirements: Map the domain); it cannot run on a schedule' });
-      }
+      const never = notSchedulable(parsed.data.workflow);
+      if (never !== null) return reply.code(400).send({ code: 'workflow_not_schedulable', error: never });
       const row = deps.store.put(id, parsed.data, now());
       deps.audit.record('schedule.saved', actor, { detail: { id, workflow: row.workflow, everyHours: row.everyHours, enabled: row.enabled, reducedAssurance: row.reducedAssurance } });
       return view(row);

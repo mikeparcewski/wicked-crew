@@ -47,12 +47,11 @@ import type {
   RequirementDetail,
   RequirementsCodeDrift,
   RequirementsCoverage,
-  RequirementsMinimum,
   RequirementsPage,
   RequirementSummary,
 } from '../src/api/requirements.js';
 import { REQUIREMENTS_NOT_GENERATED } from '../src/api/requirements.js';
-import type { ChatOpenSchema, GateSchema, GuidanceSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema, RepoGraphReply, ReqMinimumSchema, RetireMemorySchema } from '../src/api/routes.js';
+import type { ChatOpenSchema, GateSchema, GuidanceSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema, RepoGraphReply, RetireMemorySchema } from '../src/api/routes.js';
 import type { SteeringAuthorSchema, SteeringImportSchema } from '../src/api/governance-steering.js';
 import type {
   ImportEvalCorpusSchema,
@@ -1043,10 +1042,6 @@ respondsWith<Wire.RequirementsNotGenerated, typeof REQUIREMENTS_NOT_GENERATED>()
   const nullArbiter: Wire.RuleCouncilRecord = { ...arbitrated, arbiter: null };
   void [waivable, unmarked, falseMark, nullArbiter];
 }
-// PUT /repos/:id/requirements/minimum (0.197.0): the minimum in force after the change.
-respondsWith<Wire.RequirementsMinimum, RequirementsMinimum>();
-respondsWith<Wire.RequirementsMinimumResponse, { minimum: RequirementsMinimum | null }>();
-accepts<z.input<typeof ReqMinimumSchema>, Wire.RequirementsMinimumBody>();
 respondsWith<Wire.RequirementsCodeDrift, RequirementsCodeDrift>();
 
 // GET/PUT /settings — persisted system settings (defaults applied server-side). Checked twice:

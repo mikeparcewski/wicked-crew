@@ -159,16 +159,11 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = ([
   // (core ships it as a *drop-in*, not a seeded built-in, and exposes no dump command — hence a
   // hand-transcribed mirror, like every other entry in this array).
   //
-  // The pin is a content hash over the validator's criterion + script + approved flag. Core
-  // re-derives it in `domain_extraction.rs` and fails its own test if it drifts; if that test ever
-  // forces core's constant to change, THIS literal must change with it or crew will write an
-  // overlay that fails closed at plan time.
-  //
-  // Running it needs a one-time, idempotent `wicked-core seed-domain-validators` to vault + approve
-  // that validator. That step is deliberately manual — approval is an audited act a human/council
-  // owns, not something a daemon does unattended — and until it is run, a launch fails CLOSED at
-  // plan time rather than running the phase ungated. Not `is_system`: this is an operator-selectable
-  // work mode, unlike the dedicated-entry-point workflows above.
+  // (J6 M1) A historical shape: this is the workflow as it was before wicked-core#1922, which made a domain
+  // model run two host tools with no validator and no pin. Crew tests keep it as a workflow with an armed
+  // `validator_pin` (a content hash core no longer declares), so it no longer tracks core and is not to be
+  // re-synced. Not `is_system`: an operator-selectable work mode, unlike the dedicated-entry-point workflows
+  // above.
   {
     id: 'domain-extraction',
     phases: [

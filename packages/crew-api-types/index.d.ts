@@ -7729,29 +7729,8 @@ export interface SystemSettings {
    * Exported as `WICKED_COUNCIL_SPAWN_STAGGER_MS`, read per council. Absent = the default.
    */
   councilSpawnStaggerMs?: number;
-  /**
-   * (api-types 0.159.0, operator ruling 2026-10-31) The requirements graph's minimum coverage:
-   * `minCoveragePct`, a whole percentage 1..100, default 80. A repository's requirements graph is
-   * built, and shown labelled with its share, once REAL requirements (0.164.0: placeholders never
-   * count) reach this share of its behaviour-bearing product code; below it the
-   * `domain-extraction` run says "N% real requirements, minimum M%" and keeps the mapping for the
-   * next run. The daemon exports it as
-   * `WICKED_REQUIREMENTS_MIN_COVERAGE_PCT` at boot and on every change. Absent = the default.
-   */
-  requirementsGraph?: {
-    minCoveragePct?: number;
-    /**
-     * (api-types 0.163.0, domain-graph-3) A domain-extraction run maps page after page until the
-     * target; its budget per grant — `maxPages` (1..200, default 20) or `maxMinutes` (1..1440,
-     * default 240), whichever is spent first — ends in an ask: map more, lower the target for the
-     * repository, or stop. `pageSize` (50..2000, default 500) is how many behaviours one page
-     * maps. Exported as `WICKED_DOMAIN_MAX_PAGES` / `WICKED_DOMAIN_MAX_MINUTES` /
-     * `WICKED_DOMAIN_PAGE_SIZE`. Absent = the defaults.
-     */
-    maxPages?: number;
-    maxMinutes?: number;
-    pageSize?: number;
-  };
+  // (api-types next, J6 M1) `requirementsGraph` (the minimum and the page knobs, 0.159.0 / 0.163.0) is no longer a setting: a PUT
+  // naming it keeps nothing (a domain model has no share to reach and no pages).
   /*
    * There is NO skills setting (skills keystone, api-types 0.28.0). The daemon-owned skills root is
    * `<state home>/skills` — the directory holding `manifest.json`, `baseline/<hash>/`, `effective/`,
@@ -7969,19 +7948,19 @@ export interface RequirementCorroboration {
 
 /**
  * (0.164.0, operator decision 2026-11-01, wicked-core#1233) How much of a repository's product code
- * is REAL requirements, and the minimum the graph is held to (`SystemSettings.requirementsGraph
- * .minCoveragePct`): label it "23% real requirements · 4397 placeholders · minimum 80%".
+ * is REAL requirements: label it "23% real requirements · 4397 placeholders". (J6 M1: the minimum the graph was held
+ * to is gone; an engine before J6 C3 may still send it as `minPct`.)
  *
- * - `realPct` is the one number the minimum is checked against: `floor(real * 100 /
- *   behaviorBearing)`, floored so it never reads above the minimum it was compared to; 100 when
+ * - `realPct` is the real share: `floor(real * 100 / behaviorBearing)` (an older engine checked its minimum
+ *   against it, floored so it never read above the minimum); 100 when
  *   `behaviorBearing` is 0 (nothing in product code to map). `real + placeholders + unmapped ===
  *   behaviorBearing`; a label that breaks either is not sent.
  * - `weightedPct` (api-types 0.208.0, wicked-crew#1530): optional confidence-weighted headline (integer 0..100) when the engine sends a usable one;
- *   the stated share stays `realPct`, which is still checked against the minimum.
+ *   the stated share stays `realPct`.
  * - `real`: behaviours resolved to a stated, sourced business rule.
  * - `placeholders`: behaviours carrying only a risk-flagged placeholder (an empty statement, a rule
  *   under the confidence threshold, one written unconfirmed). Shown in the graph as unconfirmed,
- *   NEVER counted toward the minimum.
+ *   NEVER counted in the real share.
  * - `unmapped`: behaviours with nothing recorded yet.
  * - `behaviorBearing`: the denominator, product code only. `notProduct` counts the behaviour-kind
  *   nodes left out because their file is a test, data, manifest or document file.
@@ -7993,7 +7972,9 @@ export interface RequirementsCoverage {
   realPct: number;
   /** (api-types 0.208.0, wicked-crew#1530) Since wicked-core#1445: optional confidence-weighted headline; the stated share stays `realPct`. */
   weightedPct?: number;
-  minPct: number;
+  /** (api-types next, J6 M1) Optional: the engine's minimum, only while an engine before J6 C3 still sends one. Nothing is held to it
+   *  any more; show it, if at all, as the old label's number. */
+  minPct?: number;
   behaviorBearing: number;
   real: number;
   placeholders: number;
@@ -8083,25 +8064,8 @@ export interface RequirementsCodeDrift {
   headCommit: string | null;
 }
 
-/** (0.197.0) The minimum in force for a repository and where it comes from: its own target (`'repo'`: set at a job's
- *  "Lower the minimum" ask or on the requirements page) or the daemon-wide setting (`'settings'`). */
-export interface RequirementsMinimum {
-  pct: number;
-  source: 'repo' | 'settings';
-  repoPct: number | null;
-  settingsPct: number | null;
-}
-
-/** (0.197.0) `PUT /repos/:id/requirements/minimum`: set the repository's own minimum, or clear it (`null`: the
- *  Settings minimum applies again). 409 when the repository has no code graph yet. */
-export interface RequirementsMinimumBody {
-  minPct: number | null;
-}
-
-/** (0.197.0) The answer to {@link RequirementsMinimumBody}: the minimum in force after the change. */
-export interface RequirementsMinimumResponse {
-  minimum: RequirementsMinimum | null;
-}
+// (api-types next, J6 M1) RequirementsMinimum, RequirementsMinimumBody and RequirementsMinimumResponse are gone with
+// `PUT /repos/:id/requirements/minimum`.
 
 export interface RequirementDetail extends RequirementSummary {
   description: string;
@@ -8157,8 +8121,8 @@ export interface RequirementsPage {
   businessDomains?: RequirementBusinessDomainCatalogEntry[];
   /**
    * (0.165.0) Which build the rows are. The list is the last graph BUILD; `coverage` counts the store NOW,
-   * which moves on when a run maps more without building (stopped at its repeat ask, or below the minimum,
-   * where the build refuses). `null` when the engine does not say; ABSENT from an older daemon.
+   * which moves on when a run maps more without building (on an engine before J6 v3: stopped at its repeat ask,
+   * or below the minimum, where the build refused). `null` when the engine does not say; ABSENT from an older daemon.
    */
   graphBuild?: RequirementsGraphBuild | null;
   /** (0.159.0) How many requirements of the whole corpus are validated / unconfirmed. (0.167.0) Rows the share does
@@ -8178,9 +8142,6 @@ export interface RequirementsPage {
   /** (0.197.0) How old the code behind the listed build is; `null` when the engine does not say. ABSENT from an older
    *  daemon. */
   codeDrift?: RequirementsCodeDrift | null;
-  /** (0.197.0) The minimum in force and where it comes from; `null` when the engine does not say. ABSENT from an
-   *  older daemon. */
-  minimum?: RequirementsMinimum | null;
   /** (0.197.0) Rows of the whole corpus whose code does not meet them (`?mismatch=yes` lists them). ABSENT from an
    *  older daemon. */
   mismatches?: number;
@@ -8359,13 +8320,10 @@ export interface RequirementsNotGenerated {
   workflow: string;
   /**
    * (api-types 0.163.0, domain-graph-3; real requirements since 0.164.0) How far the repository
-   * is, against its target ("23% real requirements · 4397 placeholders · target 80%"): present
-   * when the repository has a store to count.
-   * `minPct` is the target in force (the repository's own when lowered, else the daemon's).
+   * is ("23% real requirements · 4397 placeholders"): present when the repository has a store to count.
+   * (api-types next, J6 M1) `minPct`, when an engine before J6 C3 still sends it, is that engine's old target; nothing is held to it.
    */
   coverage?: RequirementsCoverage;
-  /** (0.197.0) The minimum in force and where it comes from, when the repository has a store to read it from. */
-  minimum?: RequirementsMinimum;
 }
 
 export interface RequirementPatch {

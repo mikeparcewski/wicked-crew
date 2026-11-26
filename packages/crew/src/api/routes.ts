@@ -14,7 +14,6 @@ import { record, z } from '../zod.js';
 import {
   listRequirements,
   listRequirementsRead,
-  setRepoMinimum,
   getRequirement,
   patchRequirement,
   retireRequirement,
@@ -123,11 +122,6 @@ import { matchRulesForJob, stripRulesBrief, withRulesBrief } from '../decisions/
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
 import { applyCouncilSettings, isCouncilSize, isCouncilStaggerMs } from '../core/council-settings.js';
-import {
-  applyRequirementsGraphSettings,
-  isRequirementsGraphSettings,
-  REQUIREMENTS_GRAPH_SETTINGS_RULE,
-} from '../core/requirements-graph-setting.js';
 import { defaultLaunchRoster, markOptIn } from '../core/opt-in-seats.js';
 import { chatSeatAdmission, homeless, type StandingSeat } from './seat-standing.js';
 import {
@@ -798,9 +792,6 @@ const RULE_STATUSES: ReadonlySet<string> = new Set(['active', 'retired', 'all'])
 // Repo names become directory components under the state-home-derived repos root — reject anything
 // that would allow path traversal (slashes, dots-only segments, control chars).
 const SAFE_REPO_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
-
-/** `PUT /repos/:id/requirements/minimum` (api-types 0.197.0 `RequirementsMinimumBody`): `null` clears. */
-export const ReqMinimumSchema = z.strictObject({ minPct: z.number().int().min(1).max(100).nullable() });
 
 export const RegisterRepoSchema = z.strictObject({
   name: z
@@ -4644,7 +4635,7 @@ export function registerRoutes(
     error: 'domainScope is the scope of a domain-extraction launch; this preview names another workflow',
   });
   /** (J6 K1) The scope card of a domain-extraction preview with a repository, or why there is none. */
-  const domainScopeCard = async (repoRef: string, scope: { intent: string; phrases?: string[] | undefined }): Promise<{ card: DomainScopeCard } | { error: string }> => {
+  const domainScopeCard = async (repoRef: string, scope: { intent: string; phrases?: string[] | undefined }, signal?: AbortSignal): Promise<{ card: DomainScopeCard } | { error: string }> => {
     const repo = (await adapter.listRepos()).find((r) => r.id === repoRef);
     if (repo === undefined) return { error: `repository ${repoRef} is not registered` };
     // garden walks a missing folder as an empty tree, so a gone checkout would read as "nothing matched"
@@ -4656,7 +4647,7 @@ export function registerRoutes(
     } catch (err) {
       return { error: message(err) };
     }
-    return scopeCardFor({ root: repo.root_path, db, gardenRoot: gardenRootFor(process.env), scope });
+    return scopeCardFor({ root: repo.root_path, db, gardenRoot: gardenRootFor(process.env), scope, ...(signal !== undefined ? { signal } : {}) });
   };
   app.post(
     `${V}/runs/preview`,
@@ -4664,21 +4655,32 @@ export function registerRoutes(
     async (req, reply) => {
       const parsed = LaunchPreviewSchema.safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
-      const p = await launchPosture(parsed.data, postureFacts);
-      const posture: LaunchPreviewPosture = {
-        power: p.power,
-        ...(p.humanConfirm !== undefined ? { humanConfirm: p.humanConfirm } : {}),
-        deliver: p.deliver,
-        autoDeliver: p.autoDeliver,
-        ...(p.powerNotice !== null ? { powerNotice: p.powerNotice } : {}),
-        ...(p.humanConfirmNotice !== null ? { humanConfirmNotice: p.humanConfirmNotice } : {}),
-      };
-      const scope = parsed.data.domainScope;
-      if (scope === undefined) return { posture } satisfies LaunchPreviewResponse;
-      const card = parsed.data.repoRef === undefined
-        ? { error: 'name the repository the model covers to see its scope' }
-        : await domainScopeCard(parsed.data.repoRef, scope);
-      return ('card' in card ? { posture, scopeCard: card.card } : { posture, scopeError: card.error }) satisfies LaunchPreviewResponse;
+      // (J6 M1, F6) A person who typed on (studio aborts the older ask) or left closes the request: its scope read, if
+      // still waiting for a turn, never starts. Watched from here, so a close during the posture read is not missed.
+      const gone = new AbortController();
+      const onClose = (): void => { if (!reply.raw.writableFinished) gone.abort(); };
+      reply.raw.once('close', onClose);
+      try {
+        const p = await launchPosture(parsed.data, postureFacts);
+        const posture: LaunchPreviewPosture = {
+          power: p.power,
+          ...(p.humanConfirm !== undefined ? { humanConfirm: p.humanConfirm } : {}),
+          deliver: p.deliver,
+          autoDeliver: p.autoDeliver,
+          ...(p.powerNotice !== null ? { powerNotice: p.powerNotice } : {}),
+          ...(p.humanConfirmNotice !== null ? { humanConfirmNotice: p.humanConfirmNotice } : {}),
+        };
+        const scope = parsed.data.domainScope;
+        if (scope === undefined) return { posture } satisfies LaunchPreviewResponse;
+        // A connection already gone before this point never fires `close` again.
+        if (reply.raw.destroyed) gone.abort();
+        const card = parsed.data.repoRef === undefined
+          ? { error: 'name the repository the model covers to see its scope' }
+          : await domainScopeCard(parsed.data.repoRef, scope, gone.signal);
+        return ('card' in card ? { posture, scopeCard: card.card } : { posture, scopeError: card.error }) satisfies LaunchPreviewResponse;
+      } finally {
+        reply.raw.off('close', onClose);
+      }
     },
   );
 
@@ -10267,9 +10269,8 @@ export function registerRoutes(
     }
     let page: Awaited<ReturnType<typeof listRequirements>>;
     let coverage: Awaited<ReturnType<typeof listRequirementsRead>>['coverage'] = null;
-    let minimum: Awaited<ReturnType<typeof listRequirementsRead>>['minimum'] = null;
     try {
-      ({ page, coverage, minimum } = await listRequirementsRead(repo, parsed.data, adapter));
+      ({ page, coverage } = await listRequirementsRead(repo, parsed.data, adapter));
     } catch (err) {
       // wicked-core#406: a CURRENT engine with no repo-graph root is a 503, not a 500.
       const status = codeGraphErrorStatus(err);
@@ -10278,7 +10279,7 @@ export function registerRoutes(
     }
     if (page === null) {
       // Not generated yet is a state, typed by `code`, not a refusal (lane repo-page). It says how
-      // far the repository is ("23% real requirements · 4397 placeholders · target 80%";
+      // far the repository is ("23% real requirements · 4397 placeholders";
       // wicked-core#1233), from the very engine read the page used, when it has a store to count.
       // A 200, not a 404 (studio#986): a repository nobody has generated requirements for is a normal
       // answer, and studio reads it for every such repository on each page. `code` is the discriminator;
@@ -10286,7 +10287,6 @@ export function registerRoutes(
       return reply.code(200).send({
         ...REQUIREMENTS_NOT_GENERATED,
         ...(coverage === null ? {} : { coverage }),
-        ...(minimum === null ? {} : { minimum }),
       });
     }
     // Overrides keyed by ids the corpus no longer mints (an estate id-scheme migration re-keys
@@ -10301,33 +10301,7 @@ export function registerRoutes(
     return page;
   });
 
-  // P3 (operator ruling 2026-11-06): raise, lower or clear a repository's OWN minimum from the requirements page.
-  // `minPct: null` clears it (the Settings minimum applies again).
-  app.put(
-    `${V}/repos/:id/requirements/minimum`,
-    { config: { manifest: { requestType: 'RequirementsMinimumBody', responseType: 'RequirementsMinimumResponse', statusCodes: [200, 400, 404, 409, 500, 503] } } },
-    async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const repos = await adapter.listRepos();
-    const repo = repos.find((r) => r.id === id);
-    if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
-    const parsed = ReqMinimumSchema.safeParse(req.body);
-    if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid minimum'));
-    let set: boolean;
-    try {
-      set = await setRepoMinimum(repo, parsed.data.minPct);
-    } catch (err) {
-      const status = codeGraphErrorStatus(err);
-      if (status !== null) return reply.code(status).send({ error: message(err) });
-      return reply.code(500).send({ error: `the minimum could not be saved: ${message(err)}` });
-    }
-    if (!set) {
-      return reply.code(409).send({ error: `${repo.name} has no code graph yet, so it has no minimum of its own to set` });
-    }
-    const { minimum } = await listRequirementsRead(repo, { offset: 0, limit: 0 }, adapter);
-    return { minimum };
-    },
-  );
+  // J6 M1: PUT /repos/:id/requirements/minimum is gone with the minimum (a domain model has no share to reach).
 
   app.get(`${V}/repos/:id/requirements/:key`, async (req, reply) => {
     const { id, key } = req.params as { id: string; key: string };
@@ -10794,12 +10768,6 @@ export function registerRoutes(
         .code(400)
         .send({ error: 'councilSpawnStaggerMs must be an integer between 0 and 30000' });
     }
-    // Requirements-graph minimum coverage (operator ruling 2026-10-31): `{ minCoveragePct: 1..100 }`.
-    if (Object.hasOwn(patch, 'requirementsGraph') && !isRequirementsGraphSettings(patch.requirementsGraph)) {
-      return reply
-        .code(400)
-        .send({ error: REQUIREMENTS_GRAPH_SETTINGS_RULE });
-    }
     if (Object.hasOwn(patch, 'worker_config_root')) {
       const root = patch.worker_config_root;
       if (typeof root !== 'string' || (root !== '' && !isAbsolute(root))) {
@@ -11051,7 +11019,8 @@ export function registerRoutes(
       'baseSkillPolicy',
       'councilSize',
       'councilSpawnStaggerMs',
-      'requirementsGraph',
+      // J6 M1: `requirementsGraph` (the minimum and the page knobs) is no longer a setting: a patch naming it is
+      // dropped like any unknown key. The answer is `{ settings }` only; the audit record lists it as ignored.
     ];
     const safe: Partial<import('../core/types.js').CrewSystemSettings> = {};
     for (const key of allowed) {
@@ -11100,8 +11069,6 @@ export function registerRoutes(
     applyWorkerConfigRoot(settings.worker_config_root);
     // …and the council size + stagger, read by the engine per council (wicked-core#888).
     applyCouncilSettings(settings);
-    // …and the requirements-graph minimum, read by the engine's coverage check and domain-graph step.
-    applyRequirementsGraphSettings(settings);
     // Re-judge and re-export the BASE skill (crew#554) — the engine reads WICKED_BASE_SKILL_REF at
     // intake, per launch, so this alone makes a changed name or policy live at the next launch.
     // Only when the patch named either key: an unrelated settings write must not re-log the seam.
