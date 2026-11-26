@@ -15,6 +15,8 @@ import { MembershipIndex } from '../src/projects/membership-index.js';
 import { AuditLog } from '../src/api/audit.js';
 import { parseFramedDeliverText } from '../src/core/deliver-text.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
+import { registerAuthHooks, type ResolvedAuth } from '../src/api/auth.js';
+import { deliverPrScript } from '../src/core/deliver.js';
 import type { PhaseDef, SessionView, WorkflowDef, WorkUnit } from '../src/core/types.js';
 import { withRunViews } from './support/run-views.js';
 
@@ -85,6 +87,7 @@ afterEach(async () => {
 async function buildApp(
   views: SessionView[],
   workflows: WorkflowDef[] = [],
+  auth?: ResolvedAuth,
 ): Promise<{ app: FastifyInstance; setOrigin: Mock }> {
   const setOrigin = vi.fn();
   const mockAdapter = {
@@ -94,13 +97,14 @@ async function buildApp(
     listWorkflows: () => workflows,
   } as unknown as CoreAdapter;
   const app = Fastify({ logger: false });
+  if (auth !== undefined) registerAuthHooks(app, auth);
   registerRoutes(
     app,
     withRunViews(mockAdapter),
     new GateCache(),
     new ElicitationCache(),
     { bus: null, index: new MembershipIndex(), log: () => undefined },
-    { audit: AuditLog.noop(), authMode: 'off' },
+    { audit: AuditLog.noop(), authMode: auth?.mode ?? 'off' },
     {},
   );
   apps.push(app);
@@ -181,5 +185,65 @@ describe('GET /runs/:id/deliver-text (crew#524)', () => {
     const addr = app.server.address();
     const port = typeof addr === 'object' && addr ? addr.port : 0;
     expect(get()).toBe(`http://127.0.0.1:${port}`);
+  });
+});
+
+// crew#1885: the deliver script holds no operator bearer, so under `auth: required` the GET above answered it 401 and the
+// PR went out with the launch-time text, none of the run's assurance lines on it. The script asks with the nonce its own
+// command carries instead; the deliver unit's command here is the one the composer writes (`deliverPrScript`).
+describe('POST /deliver/text (crew#1885)', () => {
+  const NONCE = '0123456789abcdef0123456789abcdef';
+  const REQUIRED: ResolvedAuth = {
+    mode: 'required',
+    verifiers: [{ name: 'test', verify: async (t) => (t === 'operator-token' ? { id: 'op', kind: 'human', trust: 'admin' } : null) }],
+    allowedOrigins: null,
+  };
+  /** The run, its deliver unit carrying the script the composer writes for it, with this nonce. */
+  function delivering(): SessionView {
+    const v = view();
+    const deliver = v.units.find((u) => u.id.endsWith(':deliver'))!;
+    deliver.tool_cmd = ['bash', '-lc', deliverPrScript('fix issue #214', { runId: RUN_ID, nonce: NONCE, apiOrigin: 'http://127.0.0.1:7701' })];
+    (v.session as { assurance?: unknown }).assurance = {
+      mode: 'reduced',
+      required: [],
+    };
+    return v;
+  }
+  const post = (app: FastifyInstance, body: unknown) =>
+    app.inject({ method: 'POST', url: '/api/v1/deliver/text', headers: { 'content-type': 'application/json' }, payload: JSON.stringify(body) });
+
+  it('answers the run\'s own deliver script, with no bearer, under required auth: the same text, assurance lines and all', async () => {
+    const { app } = await buildApp([delivering()], [], REQUIRED);
+    // The cause: the bearer route refuses the script, which holds no operator token.
+    expect((await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN_ID}/deliver-text` })).statusCode).toBe(401);
+    const res = await post(app, { run: RUN_ID, nonce: NONCE });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.headers['content-type']).toMatch(/^text\/plain/);
+    const body = parseFramedDeliverText(res.body)!.body;
+    expect(body).toContain('**Reduced assurance**');
+    // The same text an operator reads on the bearer route.
+    const operator = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN_ID}/deliver-text`, headers: { authorization: 'Bearer operator-token' } });
+    expect(operator.statusCode).toBe(200);
+    expect(res.body).toBe(operator.body);
+    // The nonce's case does not matter (hex), and the run id may come percent-encoded, as the script sends it.
+    expect((await post(app, { run: encodeURIComponent(RUN_ID), nonce: NONCE.toUpperCase() })).statusCode).toBe(200);
+  });
+
+  it('refuses another nonce and an unknown run alike (403, so it says nothing of which runs exist), and a bad body (400)', async () => {
+    const { app } = await buildApp([delivering(), { ...view(), session: { ...view().session, id: 'other-run' } }], [], REQUIRED);
+    for (const body of [{ run: RUN_ID, nonce: 'fedcba9876543210fedcba9876543210' }, { run: 'nope', nonce: NONCE }, { run: 'other-run', nonce: NONCE }]) {
+      const res = await post(app, body);
+      expect(res.statusCode, JSON.stringify(body)).toBe(403);
+      expect(res.json()).toMatchObject({ code: 'not_the_deliver_script' });
+    }
+    for (const body of [{ run: RUN_ID }, { run: RUN_ID, nonce: 'not-hex-at-all-x' }, { run: RUN_ID, nonce: 'abc' }, { run: '', nonce: NONCE }, { run: RUN_ID, nonce: NONCE, extra: 1 }]) {
+      expect((await post(app, body)).statusCode, JSON.stringify(body)).toBe(400);
+    }
+  });
+
+  it('answers the same under auth off (the script asks one way in every mode)', async () => {
+    const { app } = await buildApp([delivering()]);
+    expect((await post(app, { run: RUN_ID, nonce: NONCE })).statusCode).toBe(200);
+    expect((await post(app, { run: RUN_ID, nonce: 'fedcba9876543210fedcba9876543210' })).statusCode).toBe(403);
   });
 });

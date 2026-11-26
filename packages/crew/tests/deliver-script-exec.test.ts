@@ -387,23 +387,48 @@ interface PrCreateCall {
 }
 
 /** A stand-in daemon answering `GET /api/v1/runs/:id/deliver-text` (crew#524). */
-async function fakeDaemon(handler: (runId: string) => { status: number; body: string } | null): Promise<{
+async function fakeDaemon(
+  handler: (runId: string) => { status: number; body: string } | null,
+  opts: { required?: boolean; nonce?: string } = {},
+): Promise<{
   origin: string;
   close: () => Promise<void>;
   requests: string[];
 }> {
   const requests: string[] = [];
   const server: Server = createServer((req, res) => {
-    requests.push(`${req.method} ${req.url}`);
-    const m = /^\/api\/v1\/runs\/([^/]+)\/deliver-text$/.exec(req.url ?? '');
-    const answer = m ? handler(decodeURIComponent(m[1]!)) : null;
-    if (answer === null) {
-      res.writeHead(404, { 'content-type': 'application/json' });
-      res.end('{"error":"Run not found"}');
-      return;
-    }
-    res.writeHead(answer.status, { 'content-type': 'text/plain; charset=utf-8' });
-    res.end(answer.body);
+    let raw = '';
+    req.on('data', (c: Buffer) => { raw += c.toString('utf8'); });
+    req.on('end', () => {
+      requests.push(`${req.method} ${req.url}`);
+      // (crew#1885) A daemon under `auth: required` refuses the bearer route to a script that holds no operator token…
+      const m = /^\/api\/v1\/runs\/([^/]+)\/deliver-text$/.exec(req.url ?? '');
+      if (m && opts.required === true) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end('{"error":"Authentication required: send Authorization: Bearer <token>"}');
+        return;
+      }
+      // …and answers `POST /deliver/text {run, nonce}` only for the script's own nonce, as crew's route does.
+      let answer: { status: number; body: string } | null = null;
+      if (m) answer = handler(decodeURIComponent(m[1]!));
+      else if (req.method === 'POST' && req.url === '/api/v1/deliver/text') {
+        let body: { run?: unknown; nonce?: unknown } = {};
+        try { body = JSON.parse(raw) as typeof body; } catch { /* not JSON: refused below */ }
+        if (typeof body.run !== 'string' || body.nonce !== (opts.nonce ?? TEST_NONCE)) {
+          res.writeHead(403, { 'content-type': 'application/json' });
+          res.end('{"code":"not_the_deliver_script"}');
+          return;
+        }
+        answer = handler(decodeURIComponent(body.run));
+      }
+      if (answer === null) {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end('{"error":"Run not found"}');
+        return;
+      }
+      res.writeHead(answer.status, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end(answer.body);
+    });
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const addr = server.address();
@@ -1575,6 +1600,45 @@ describe('deliver script — composed PR text (crew#524)', () => {
   afterEach(async () => {
     for (const d of daemons.splice(0)) await d.close();
   });
+
+  // crew#1885: under `auth: required` the bearer route answered the script 401, and the PR went out with the launch-time
+  // text: a stand-in run, a reduced run, a QE skip or a floor override went unmentioned.
+  it('crew#1885: under required auth the script reads its run record with its own nonce, assurance lines included', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    const runText = framedDeliverText({
+      title: 'Archive/Restore reachable from the project shell',
+      body: '## Intent\n\nfix issue #214\n\n## Assurance\n\n- **Reduced assurance**: the run was launched in reduced-assurance mode.\n',
+    });
+    const daemon = await fakeDaemon((id) => (id === RUN_ID ? { status: 200, body: runText } : null), { required: true });
+    daemons.push(daemon);
+
+    const r = await runDeliver(fx, { intent: INTENT, script: { runId: RUN_ID, apiOrigin: daemon.origin } });
+
+    expect(r.status, r.output).toBe(0);
+    expect(daemon.requests).toEqual(['POST /api/v1/deliver/text']);
+    expect(r.output).toContain(`deliver: PR text composed from the run record (${daemon.origin})`);
+    expect(r.pr!.title).toBe('Archive/Restore reachable from the project shell');
+    expect(r.pr!.body).toContain('**Reduced assurance**');
+  }, 60_000);
+
+  it('crew#1885: a known daemon that does not answer with the record refuses: no launch-time PR, nothing staged, committed or pushed', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    // A daemon that refuses the script (another nonce): the record cannot be read.
+    const daemon = await fakeDaemon(() => ({ status: 200, body: 'never\n\nread\n' }), { nonce: 'fedcba9876543210fedcba9876543210' });
+    daemons.push(daemon);
+
+    const r = await runDeliver(fx, { intent: INTENT, script: { runId: RUN_ID, apiOrigin: daemon.origin } });
+
+    expect(r.status).not.toBe(0);
+    expect(r.outcome).toBe('rejected');
+    expect(r.output).toContain(`deliver: the daemon at ${daemon.origin} did not answer with the run record, so the pull request could not say how this run was checked`);
+    expect(r.output).not.toContain('using the launch-time PR text');
+    expect(r.pr).toBeNull();
+    expect(originBranches(fx)).not.toContain(`wicked/${RUN_ID}`);
+    expect(git(fx.workdir, 'status', '--porcelain')).toContain('fix.ts');
+  }, 60_000);
 
   it('opens the PR with the RUN-DERIVED text the daemon answers, and commits the same text', async () => {
     const fx = fixture();
