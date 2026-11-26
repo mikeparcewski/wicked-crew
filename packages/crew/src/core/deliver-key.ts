@@ -57,7 +57,8 @@ function keyDirSafe(): boolean {
       const uid = ownUid();
       if (uid !== null && st.uid !== uid) return false;
     }
-    return !POSIX || (lstatSync(dir).mode & 0o077) === 0;
+    // The key dir closed to others; `artifacts` above it writable by its owner alone (no one else can move it aside).
+    return !POSIX || ((lstatSync(dir).mode & 0o077) === 0 && (lstatSync(dirname(dir)).mode & 0o022) === 0);
   } catch {
     return false;
   }

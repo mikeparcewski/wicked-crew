@@ -68,7 +68,8 @@ export interface DeliverTextUnit {
 
 /** The key file line crew's deliver script carries (`deliverPrScript`), on a line of its own: the path shell-quoted,
  *  ending in the file's id. Only the id is read; the file is always the one of that id in crew's own key dir. */
-const SCRIPT_KEY_FILE_LINE = new RegExp(`^${DELIVER_KEY_FILE_VAR}='[^\\n]*/([0-9a-f]{32})\\.key'$`, 'm');
+// Either separator before the id: a Windows state home's path is written with backslashes (codex r2 re-check).
+const SCRIPT_KEY_FILE_LINE = new RegExp(`^${DELIVER_KEY_FILE_VAR}='[^\\n]*[\\\\/]([0-9a-f]{32})\\.key'$`, 'm');
 
 /**
  * The key file of a deliver unit's script that can be running now, or null: the run's deliver unit (by id or catalog

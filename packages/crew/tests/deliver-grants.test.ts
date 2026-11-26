@@ -81,6 +81,15 @@ describe('the key dir (crew#1885, codex r2)', () => {
     const key = readDeliverKey(path)!;
     chmodSync(deliverKeyDir(), 0o755);
     expect(readDeliverKey(path)).toBeNull();
+    // `artifacts` above it writable by others: someone could move the key dir aside, so no key counts (codex r2).
+    chmodSync(deliverKeyDir(), 0o700);
+    chmodSync(dirname(deliverKeyDir()), 0o777);
+    try {
+      expect(readDeliverKey(path)).toBeNull();
+    } finally {
+      chmodSync(dirname(deliverKeyDir()), 0o755);
+    }
+    chmodSync(deliverKeyDir(), 0o755);
     // Minting narrows a dir of the daemon user's own back to 0700.
     mintDeliverKey();
     expect(lstatSync(deliverKeyDir()).mode & 0o777).toBe(0o700);
@@ -115,6 +124,14 @@ describe('deliver text grants (crew#1885)', () => {
     // The key is the file's: once the file is gone, nothing on the command line stands in for it.
     dropDeliverKey(d.keyFile);
     expect(deliverTextAllowed(units, d.key, false)).toBe(false);
+  });
+
+  it('reads the key file\'s id whichever separator the script\'s path uses (a Windows state home writes backslashes, codex r2)', () => {
+    const d = deliverUnit('distributed');
+    const id = basename(d.keyFile, '.key');
+    const script = d.unit.tool_cmd[2]!.replace(/^DELIVER_KEY_FILE='[^']+'$/m, `DELIVER_KEY_FILE='C:\\Users\\op\\.wicked-crew\\artifacts\\deliver-keys\\${id}.key'`);
+    expect(script).toContain(`deliver-keys\\${id}.key'`);
+    expect(deliverTextAllowed([{ ...d.unit, tool_cmd: ['bash', '-lc', script] }], d.key, false)).toBe(true);
   });
 
   it('never takes a value off the command line: the script text holds neither the key nor anything that reads as one', () => {

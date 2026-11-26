@@ -955,6 +955,8 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
   // (crew#1885) The read key for `POST /deliver/text`: a file only the daemon's user can read, named here by path. The
   // key itself is never in this text, which is the shell's argv while the script runs (`bash -lc`).
   const keyFile = api === '' ? '' : (opts.keyFile ?? mintDeliverKey());
+  // A quote is shell-quoted below; a line break would split the line the route reads the key's id from.
+  if (/[\r\n]/.test(keyFile)) throw new Error('deliver read key: the key file path holds a line break');
   const fallbackLines = heredocLines(framedDeliverText(fallback));
   const heredoc = heredocDelimiter(fallbackLines);
   // crew#550: the PR title may run to GitHub's 256 characters, the commit subject stays at git's 72.
