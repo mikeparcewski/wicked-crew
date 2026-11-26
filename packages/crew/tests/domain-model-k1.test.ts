@@ -102,8 +102,9 @@ describe('domainModelOf: the model core built', () => {
 
 describe('domainModelOf: the statements no requirement holds (garden#1545)', () => {
   // model-cert.json: core's own build of the train-16 cert's shape. MAIN-PARA's file open is cited only by a housekeeping
-  // rule the prose check withheld, its file close only by a shown housekeeping rule, READ-PARA's open statement by
-  // nothing; core keeps all three out of the requirements, in `metadata.statements`.
+  // rule the prose check withheld, its file close only by a shown housekeeping rule, READ-PARA's plain-rate statement
+  // only by a business detail the prose check withheld, its open statement by nothing; core keeps all four out of the
+  // requirements, in `metadata.statements`.
   const cert = (): Record<string, unknown> => fixture('model-cert.json') as Record<string, unknown>;
   const MAIN = 'ts-cobol . . . app/cbl/PAYCALC1/PAYCALC1#MAIN-PARA().';
   const READ = 'ts-cobol . . . app/cbl/PAYCALC1/PAYCALC1#READ-PARA().';
@@ -115,6 +116,7 @@ describe('domainModelOf: the statements no requirement holds (garden#1545)', () 
       [`${MAIN}#0`, null, 'Checked'],
       [`${MAIN}#1`, null, 'Checked'],
       [`${READ}#1`, null, 'open'],
+      [`${READ}#2`, null, 'Checked'],
     ]);
     for (const s of m.statements) expect(s.key).toMatch(/^v1:[0-9a-f]{64}$/u);
     expect(m.statements[1]!.claims.length).toBeGreaterThan(0);
@@ -124,10 +126,10 @@ describe('domainModelOf: the statements no requirement holds (garden#1545)', () 
     const m = domainModelOf(cert())!;
     const byId = new Map(m.statements.map((s) => [s.id, s]));
     expect(m.ruleGroups.map((g) => [g.kind, g.rule === null, g.withheld.length])).toEqual([
-      ['business', false, 0], ['housekeeping', true, 1], ['housekeeping', false, 0],
+      ['business', false, 1], ['housekeeping', true, 1], ['housekeeping', false, 0],
     ]);
     const cites = m.ruleGroups.flatMap((g) => [...(g.rule ? [g.rule] : []), ...g.details, ...g.withheld]).flatMap((s) => s.cites);
-    expect(cites).toEqual([`${READ}#0`, `${MAIN}#0`, `${MAIN}#1`]);
+    expect(cites).toEqual([`${READ}#0`, `${READ}#2`, `${MAIN}#0`, `${MAIN}#1`]);
     for (const c of cites) expect(byId.has(c), c).toBe(true);
     const open = m.followups.filter((f) => f.statement !== null);
     expect(open.map((f) => f.statement)).toEqual([`${READ}#1`]);
@@ -566,7 +568,7 @@ describe('GET /repos/:id/requirements and POST …/rulings', () => {
     const { app } = await daemon({ getRequirementsGraphForRepo: vi.fn().mockResolvedValue({ graph, coverage: null }) });
     const page = (await app.inject({ method: 'GET', url: '/api/v1/repos/repo-1/requirements' })).json();
     expect(page.items.map((i: { key: string; title: string }) => [i.key, i.title])).toEqual([['app/cbl/PAYCALC1.cbl::REQ-001', 'Overtime pay']]);
-    expect(page.model.statements).toHaveLength(4);
+    expect(page.model.statements).toHaveLength(5);
     expect(page.model).toEqual(domainModelOf(graph));
   });
 

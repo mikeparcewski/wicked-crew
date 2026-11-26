@@ -15,7 +15,7 @@
         "desc": "payroll",
         "details": [],
         "g": 1,
-        "id": "fa1e7fc7f93ef5d0",
+        "id": "fc80bc1f841a7f59",
         "kind": "business",
         "rule": {
           "cites": [
@@ -28,7 +28,17 @@
         },
         "stale": false,
         "title": "Overtime pay",
-        "withheld": []
+        "withheld": [
+          {
+            "cites": [
+              "ts-cobol . . . app/cbl/PAYCALC1/PAYCALC1#READ-PARA().#2"
+            ],
+            "id": "g1.d1",
+            "layer": "detail",
+            "reason": "OVERREACH : QUANTIFIER: the statement gives no multiplier",
+            "text": "Hours up to forty are paid at double the plain rate."
+          }
+        ]
       },
       {
         "area": "PAYCALC1",
@@ -153,7 +163,8 @@
         "stale": false,
         "statements": [
           "ts-cobol . . . app/cbl/PAYCALC1/PAYCALC1#READ-PARA().#0",
-          "ts-cobol . . . app/cbl/PAYCALC1/PAYCALC1#READ-PARA().#1"
+          "ts-cobol . . . app/cbl/PAYCALC1/PAYCALC1#READ-PARA().#1",
+          "ts-cobol . . . app/cbl/PAYCALC1/PAYCALC1#READ-PARA().#2"
         ],
         "target_hash": "dc54423787f3d854629009aa6d5ad8f01f38331c393ff16821ea2a30dc8fa62a",
         "unaccounted_reasons": []
@@ -311,9 +322,56 @@
             ]
           }
         ]
+      },
+      {
+        "id": "ts-cobol . . . app/cbl/PAYCALC1/PAYCALC1#READ-PARA().#2",
+        "statement": "Runs: READ-PARA (app/cbl/PAYCALC1.cbl:24-28)\n- Unless `PAY-HOURS > 40`: `PAY-AMOUNT` is the plain rate times the hours [27-28]",
+        "confidence": 0.9,
+        "provenance": {
+          "source": "domain-run",
+          "ref": "app/cbl/PAYCALC1.cbl#L24-L28",
+          "source_kinds": [
+            "code-body"
+          ]
+        },
+        "source_ref": "app/cbl/PAYCALC1.cbl#L24-L28",
+        "statement_key": "v1:c1b741f50016ae2367cc4d08fe78bc68dcab9f254232a82e2f973836af65c30f",
+        "status": "Checked",
+        "located": true,
+        "target": "ts-cobol . . . app/cbl/PAYCALC1/PAYCALC1#READ-PARA().",
+        "claims": [
+          {
+            "i": 0,
+            "ranges": [
+              {
+                "file": "app/cbl/PAYCALC1.cbl",
+                "from": 24,
+                "to": 24
+              }
+            ],
+            "text": "`PAY-HOURS > 40`",
+            "type": "condition"
+          },
+          {
+            "i": 1,
+            "ranges": [
+              {
+                "file": "app/cbl/PAYCALC1.cbl",
+                "from": 27,
+                "to": 28
+              }
+            ],
+            "text": "`PAY-AMOUNT` is the plain rate times the hours",
+            "type": "else",
+            "unless": [
+              0
+            ]
+          }
+        ],
+        "checked_by": "codex"
       }
     ],
-    "built_at": 1795725925,
+    "built_at": 1795726776,
     "skipped": {
       "retired": 0,
       "malformed": 0,
