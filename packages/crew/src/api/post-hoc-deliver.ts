@@ -28,10 +28,10 @@ import {
   deliverAdoTarget,
   deliverChecksTimeoutSecs,
   deliverPrScript,
-  mintDeliverNonce,
   type DeliverScriptOptions,
 } from '../core/deliver.js';
 import { grantPostHocDeliverText } from '../core/deliver-grants.js';
+import { dropDeliverKey, mintDeliverKey } from '../core/deliver-key.js';
 import { composeDeliverText, framedDeliverText } from '../core/deliver-text.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 import { gitChildEnv, withAdoCredential } from '../core/exec.js';
@@ -173,14 +173,17 @@ export function deliverShellEnv(env?: Record<string, string>, adoOrigin = false)
 }
 
 /**
- * (crew#1885) No unit carries a post-hoc delivery's script, so its nonce is registered for the run while it runs, with
- * the text composed from the facts this delivery was approved on (its own QE check): the script reads that text back
- * with the nonce (`POST /deliver/text`, `core/deliver-grants.ts`). Returns the release.
+ * (crew#1885) No unit carries a post-hoc delivery's script, so its read key file is registered for the run while it
+ * runs, with the text composed from the facts this delivery was approved on (its own QE check): the script reads that
+ * text back with the key in that file (`POST /deliver/text`, `core/deliver-grants.ts`). The file is minted here and
+ * dropped once the script has exited. Returns the key file (null: no daemon to ask, so none) and the release.
  */
-function grantPostHocText(opts: DeliverScriptOptions | undefined, nonce: string): () => void {
+function grantPostHocText(opts: DeliverScriptOptions | undefined): { keyFile: string | null; release: () => void } {
   const runId = opts?.runId ?? opts?.facts?.runId ?? '';
-  if (runId === '' || opts?.facts === undefined) return () => {};
-  return grantPostHocDeliverText(runId, nonce, framedDeliverText(composeDeliverText(opts.facts)));
+  if (opts?.apiOrigin == null || opts.apiOrigin === '') return { keyFile: null, release: () => {} };
+  const keyFile = opts.keyFile ?? mintDeliverKey();
+  const ungrant = runId === '' || opts.facts === undefined ? () => {} : grantPostHocDeliverText(runId, keyFile, framedDeliverText(composeDeliverText(opts.facts)));
+  return { keyFile, release: () => { ungrant(); dropDeliverKey(keyFile); } };
 }
 
 /**
@@ -196,8 +199,7 @@ export function runDeliverScript(
   opts?: DeliverScriptOptions,
   env?: Record<string, string>,
 ): Promise<DeliverScriptResult> {
-  const nonce = opts?.nonce ?? mintDeliverNonce();
-  const release = grantPostHocText(opts, nonce); // (crew#1885) held while the script runs
+  const { keyFile, release } = grantPostHocText(opts); // (crew#1885) held while the script runs
   // Only an Azure DevOps delivery needs the raw credential (review r1 on #1869), and it is the one the script itself
   // targets (`deliverAdoTarget`, from the same options), so the env never disagrees with the push (review r1 delta).
   const shellEnv = deliverShellEnv(env, deliverAdoTarget(opts) !== null);
@@ -213,7 +215,7 @@ export function runDeliverScript(
   return new Promise<DeliverScriptResult>((resolve) => {
     execFile(
       'bash',
-      ['-lc', deliverPrScript(intent, { ...opts, nonce })],
+      ['-lc', deliverPrScript(intent, { ...opts, ...(keyFile !== null ? { keyFile } : {}) })],
       {
         cwd: workdir,
         env: shellEnv,

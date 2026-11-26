@@ -6,6 +6,9 @@
 // know at launch which seat took each phase, what the repo checks returned or what the evaluator
 // said — the run record does, and this is where the script reads it.
 
+import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
@@ -18,6 +21,7 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import { registerAuthHooks, type ResolvedAuth } from '../src/api/auth.js';
 import { deliverPrScript } from '../src/core/deliver.js';
 import { grantPostHocDeliverText } from '../src/core/deliver-grants.js';
+import { mintDeliverKey, readDeliverKey } from '../src/core/deliver-key.js';
 import type { PhaseDef, SessionView, WorkflowDef, WorkUnit } from '../src/core/types.js';
 import { withRunViews } from './support/run-views.js';
 
@@ -190,34 +194,38 @@ describe('GET /runs/:id/deliver-text (crew#524)', () => {
 });
 
 // crew#1885: the deliver script holds no operator bearer, so under `auth: required` the GET above answered it 401 and the
-// PR went out with the launch-time text, none of the run's assurance lines on it. The script asks with the nonce its own
-// command carries instead; the deliver unit's command here is the one the composer writes (`deliverPrScript`).
+// PR went out with the launch-time text, none of the run's assurance lines on it. The script asks with the read key in
+// the 0600 file its own command names instead (`core/deliver-key.ts`); the deliver unit's command here is the one the
+// composer writes (`deliverPrScript`), and the key is read back from that file, as the script itself reads it.
 describe('POST /deliver/text (crew#1885)', () => {
-  const NONCE = '0123456789abcdef0123456789abcdef';
   const REQUIRED: ResolvedAuth = {
     mode: 'required',
     verifiers: [{ name: 'test', verify: async (t) => (t === 'operator-token' ? { id: 'op', kind: 'human', trust: 'admin' } : null) }],
     allowedOrigins: null,
   };
-  /** The run, its deliver unit carrying the script the composer writes for it, with this nonce. */
-  function delivering(): SessionView {
+  /** The key in the file a composed script names. */
+  const keyOf = (script: string): string => readDeliverKey(/^DELIVER_KEY_FILE='([^']+)'$/m.exec(script)![1]!)!;
+  /** The run, its deliver unit carrying the script the composer writes for it (with its own key file). */
+  function delivering(): { view: SessionView; key: string } {
     const v = view();
     const deliver = v.units.find((u) => u.id.endsWith(':deliver'))!;
-    deliver.tool_cmd = ['bash', '-lc', deliverPrScript('fix issue #214', { runId: RUN_ID, nonce: NONCE, apiOrigin: 'http://127.0.0.1:7701' })];
+    const script = deliverPrScript('fix issue #214', { runId: RUN_ID, apiOrigin: 'http://127.0.0.1:7701' });
+    deliver.tool_cmd = ['bash', '-lc', script];
     (v.session as { assurance?: unknown }).assurance = {
       mode: 'reduced',
       required: [],
     };
-    return v;
+    return { view: v, key: keyOf(script) };
   }
   const post = (app: FastifyInstance, body: unknown) =>
     app.inject({ method: 'POST', url: '/api/v1/deliver/text', headers: { 'content-type': 'application/json' }, payload: JSON.stringify(body) });
 
   it('answers the run\'s own deliver script, with no bearer, under required auth: the same text, assurance lines and all', async () => {
-    const { app } = await buildApp([delivering()], [], REQUIRED);
+    const d = delivering();
+    const { app } = await buildApp([d.view], [], REQUIRED);
     // The cause: the bearer route refuses the script, which holds no operator token.
     expect((await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN_ID}/deliver-text` })).statusCode).toBe(401);
-    const res = await post(app, { run: RUN_ID, nonce: NONCE });
+    const res = await post(app, { run: RUN_ID, key: d.key });
     expect(res.statusCode, res.body).toBe(200);
     expect(res.headers['content-type']).toMatch(/^text\/plain/);
     const body = parseFramedDeliverText(res.body)!.body;
@@ -226,65 +234,86 @@ describe('POST /deliver/text (crew#1885)', () => {
     const operator = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN_ID}/deliver-text`, headers: { authorization: 'Bearer operator-token' } });
     expect(operator.statusCode).toBe(200);
     expect(res.body).toBe(operator.body);
-    // The nonce's case does not matter (hex), and the run id may come percent-encoded, as the script sends it.
-    expect((await post(app, { run: encodeURIComponent(RUN_ID), nonce: NONCE.toUpperCase() })).statusCode).toBe(200);
+    // The key's case does not matter (hex), and the run id may come percent-encoded, as the script sends it.
+    expect((await post(app, { run: encodeURIComponent(RUN_ID), key: d.key.toUpperCase() })).statusCode).toBe(200);
   });
 
-  it('refuses another nonce, another run\'s deliver nonce, a finished deliver unit and an unknown run alike (403, so it says nothing of which runs exist), and a bad body (400)', async () => {
-    const OTHER_NONCE = 'fedcba9876543210fedcba9876543210';
-    // Another run, delivering now, with its own deliver script and nonce.
+  it('refuses another key, another run\'s deliver key, a finished deliver unit, a key file outside crew\'s dir, a tampered key file and an unknown run alike (403, so it says nothing of which runs exist), and a bad body (400)', async () => {
+    const mine = delivering();
+    const KEY = mine.key;
+    // Another run, delivering now, with its own deliver script and key.
+    const otherScript = deliverPrScript('other work', { runId: 'other-run', apiOrigin: 'http://127.0.0.1:7701' });
+    const OTHER_KEY = keyOf(otherScript);
     const other = view();
     other.session = { ...other.session, id: 'other-run' };
-    other.units = other.units.map((u) => (u.id.endsWith(':deliver')
-      ? { ...u, id: 'other-run:deliver', tool_cmd: ['bash', '-lc', deliverPrScript('other work', { runId: 'other-run', nonce: OTHER_NONCE, apiOrigin: 'http://127.0.0.1:7701' })] }
-      : u));
-    // A run whose deliver unit is done: its script printed the nonce in its exit sentinel, so the nonce reads nothing.
+    other.units = other.units.map((u) => (u.id.endsWith(':deliver') ? { ...u, id: 'other-run:deliver', tool_cmd: ['bash', '-lc', otherScript] } : u));
+    // A run whose deliver unit is done.
     const finished = delivering();
-    finished.session = { ...finished.session, id: 'finished-run' };
-    finished.units = finished.units.map((u) => (u.id.endsWith(':deliver') ? { ...u, status: 'done' } : u));
+    finished.view.session = { ...finished.view.session, id: 'finished-run' };
+    finished.view.units = finished.view.units.map((u) => (u.id.endsWith(':deliver') ? { ...u, status: 'done' } : u));
     // Approving the deliver-refusal gate re-runs the same script while the engine still marks the unit rejected (the
     // integration test's escalation retry): it reads its text. The same unit on a run that has ended reads nothing.
     const retrying = delivering();
-    retrying.session = { ...retrying.session, id: 'retrying-run', status: 'awaiting_human' as const };
-    retrying.units = retrying.units.map((u) => (u.id.endsWith(':deliver') ? { ...u, status: 'rejected' } : u));
-    const ended = { ...retrying, session: { ...retrying.session, id: 'ended-run', status: 'failed' as const } };
-    const { app } = await buildApp([delivering(), other, finished, retrying, ended], [], REQUIRED);
-    expect((await post(app, { run: 'other-run', nonce: OTHER_NONCE })).statusCode).toBe(200); // the other run's own script
-    expect((await post(app, { run: 'retrying-run', nonce: NONCE })).statusCode).toBe(200);
+    retrying.view.session = { ...retrying.view.session, id: 'retrying-run', status: 'awaiting_human' as const };
+    retrying.view.units = retrying.view.units.map((u) => (u.id.endsWith(':deliver') ? { ...u, status: 'rejected' } : u));
+    const ended = { ...retrying.view, session: { ...retrying.view.session, id: 'ended-run', status: 'failed' as const } };
+    // A deliver script naming a file outside crew's key dir, holding a key a reader of its command line could plant.
+    const planted = delivering();
+    const outside = join(mkdtempSync(join(tmpdir(), 'deliver-key-')), `${'a'.repeat(32)}.key`);
+    writeFileSync(outside, `${'b'.repeat(64)}\n`, { mode: 0o600 });
+    planted.view.session = { ...planted.view.session, id: 'planted-run' };
+    planted.view.units = planted.view.units.map((u) => (u.id.endsWith(':deliver')
+      ? { ...u, tool_cmd: ['bash', '-lc', (u.tool_cmd![2]!).replace(/^DELIVER_KEY_FILE='[^']+'$/m, `DELIVER_KEY_FILE='${outside}'`)] }
+      : u));
+    // A key file another user could read (the mode widened after it was minted) counts for nothing.
+    const widened = delivering();
+    widened.view.session = { ...widened.view.session, id: 'widened-run' };
+    chmodSync(/^DELIVER_KEY_FILE='([^']+)'$/m.exec(widened.view.units.find((u) => u.id.endsWith(':deliver'))!.tool_cmd![2]!)![1]!, 0o644);
+    const { app } = await buildApp([mine.view, other, finished.view, retrying.view, ended, planted.view, widened.view], [], REQUIRED);
+    expect((await post(app, { run: 'other-run', key: OTHER_KEY })).statusCode).toBe(200); // the other run's own script
+    expect((await post(app, { run: 'retrying-run', key: retrying.key })).statusCode).toBe(200);
     for (const body of [
-      { run: RUN_ID, nonce: OTHER_NONCE }, // another run's deliver nonce
-      { run: 'other-run', nonce: NONCE }, // this run's nonce on another run
-      { run: 'finished-run', nonce: NONCE }, // a finished deliver unit
-      { run: 'ended-run', nonce: NONCE }, // a refused deliver unit on a run that has ended
-      { run: 'nope', nonce: NONCE }, // an unknown run
+      { run: RUN_ID, key: OTHER_KEY }, // another run's deliver key
+      { run: 'other-run', key: KEY }, // this run's key on another run
+      { run: 'finished-run', key: finished.key }, // a finished deliver unit
+      { run: 'ended-run', key: retrying.key }, // a refused deliver unit on a run that has ended
+      { run: 'planted-run', key: 'b'.repeat(64) }, // a key file outside crew's key dir
+      { run: 'widened-run', key: widened.key }, // a key file others can read
+      { run: 'nope', key: KEY }, // an unknown run
     ]) {
       const res = await post(app, body);
-      expect(res.statusCode, JSON.stringify(body)).toBe(403);
+      expect(res.statusCode, body.run).toBe(403);
       expect(res.json()).toEqual({ code: 'not_the_deliver_script', error: "only this run's own deliver script can read its delivery text here" });
-      expect(res.body).not.toContain(body.nonce); // the refusal never echoes a nonce
+      expect(res.body).not.toContain(body.key); // the refusal never echoes a key
     }
-    for (const body of [{ run: RUN_ID }, { run: RUN_ID, nonce: 'not-hex-at-all-x' }, { run: RUN_ID, nonce: 'abc' }, { run: '', nonce: NONCE }, { run: RUN_ID, nonce: NONCE, extra: 1 }]) {
+    // The sentinel nonce, which is on the command line, is no credential (codex-check on crew#1946).
+    const nonce = /^DELIVER_NONCE='([0-9a-f]+)'$/m.exec(mine.view.units.find((u) => u.id.endsWith(':deliver'))!.tool_cmd![2]!)![1]!;
+    expect((await post(app, { run: RUN_ID, nonce })).statusCode).toBe(400);
+    for (const body of [{ run: RUN_ID }, { run: RUN_ID, key: 'not-hex-at-all-x' }, { run: RUN_ID, key: 'abc' }, { run: '', key: KEY }, { run: RUN_ID, key: KEY, extra: 1 }]) {
       expect((await post(app, body)).statusCode, JSON.stringify(body)).toBe(400);
     }
   });
 
   it('answers a post-hoc delivery\'s own text (composed with the QE check it was approved on) while its grant is held, and refuses after', async () => {
-    const POST_HOC = 'abcdef0123456789abcdef0123456789';
+    const keyFile = mintDeliverKey();
+    const key = readDeliverKey(keyFile)!;
     const { app } = await buildApp([view()], [], REQUIRED);
-    const release = grantPostHocDeliverText(RUN_ID, POST_HOC, 'fix: composed for the post-hoc delivery\n\nbody\n');
+    const release = grantPostHocDeliverText(RUN_ID, keyFile, 'fix: composed for the post-hoc delivery\n\nbody\n');
     try {
-      const res = await post(app, { run: RUN_ID, nonce: POST_HOC });
+      const res = await post(app, { run: RUN_ID, key });
       expect(res.statusCode).toBe(200);
       expect(res.body).toBe('fix: composed for the post-hoc delivery\n\nbody\n');
+      expect((await post(app, { run: 'another-run', key })).statusCode).toBe(403);
     } finally {
       release();
     }
-    expect((await post(app, { run: RUN_ID, nonce: POST_HOC })).statusCode).toBe(403);
+    expect((await post(app, { run: RUN_ID, key })).statusCode).toBe(403);
   });
 
   it('answers the same under auth off (the script asks one way in every mode)', async () => {
-    const { app } = await buildApp([delivering()]);
-    expect((await post(app, { run: RUN_ID, nonce: NONCE })).statusCode).toBe(200);
-    expect((await post(app, { run: RUN_ID, nonce: 'fedcba9876543210fedcba9876543210' })).statusCode).toBe(403);
+    const d = delivering();
+    const { app } = await buildApp([d.view]);
+    expect((await post(app, { run: RUN_ID, key: d.key })).statusCode).toBe(200);
+    expect((await post(app, { run: RUN_ID, key: 'f'.repeat(64) })).statusCode).toBe(403);
   });
 });

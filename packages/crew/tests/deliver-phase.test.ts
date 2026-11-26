@@ -7,8 +7,8 @@
 // no gh account name baked into crew code (the env-driven GH_ACCOUNT guard replaces it).
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   DELIVER_BASE_MOVED_MARKER as BASE_MOVED_MARKER,
@@ -22,6 +22,7 @@ import {
   deliverPrScript,
 } from '../src/core/deliver.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
+import { deliverKeyDir } from '../src/core/deliver-key.js';
 import { deliverNonceOf, trustedDeliverOutcome, trustedOutcomeIn } from '../src/core/deliver-triage.js';
 import type { WorkflowDef } from '../src/core/types.js';
 import { SKIP_CORE_CHECKS, requireCoreDir } from './support/core-checkout.js';
@@ -198,7 +199,14 @@ describe('deliverPrScript (the hardened field script)', () => {
     });
     // The callback to THIS daemon for the run-derived text, then the embedded fallback.
     expect(withIntent).toContain("API='http://127.0.0.1:7701'");
-    expect(withIntent).toContain('"$API/api/v1/deliver/text"'); // crew#1885: POST with the script's nonce
+    expect(withIntent).toContain('"$API/api/v1/deliver/text"'); // crew#1885: POST with the script's read key
+    // (crew#1885, codex-check on crew#1946) The script names its key FILE, one of crew's (0600, `core/deliver-key.ts`);
+    // the key itself is in no line of this text, which is `bash -lc`'s argv while it runs.
+    const keyFile = /^DELIVER_KEY_FILE='([^']+)'$/m.exec(withIntent)?.[1];
+    expect(keyFile).toBeDefined();
+    expect(dirname(keyFile!)).toBe(deliverKeyDir());
+    expect(statSync(keyFile!).mode & 0o777).toBe(0o600);
+    expect(withIntent).not.toContain(readFileSync(keyFile!, 'utf8').trim());
     expect(withIntent).not.toContain('/deliver-text"');
     // The LAUNCH run id rides pre-encoded as one path segment; the branch-derived id is only the
     // fallback, percent-encoded byte-wise by the script (Copilot on #525).
@@ -237,9 +245,11 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(script).toContain('_norecord "the daemon at $API did not answer with the run record"');
     expect(script).not.toContain('did not answer with the run record — using the launch-time PR text');
     expect(script).toContain('deliver: PR text composed from the run record ($API)');
-    // The script asks with its own nonce, never an operator bearer (crew#1885).
-    // …on curl's stdin from the shell's printf, so the nonce is never in curl's argv (codex r1).
-    expect(script).toContain(`printf '{"run":"%s","nonce":"%s"}' "$RUNID" "$DELIVER_NONCE" | curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" -H "Content-Type: application/json" --data-binary @- "$API/api/v1/deliver/text"`);
+    // The script asks with the key from its key file, never an operator bearer (crew#1885): read by the shell's own
+    // `read` and handed to curl's stdin by its own `printf`, so no program it starts has the key in its argv.
+    expect(script).toContain('elif ! { [ -n "$DELIVER_KEY_FILE" ] && IFS= read -r DKEY < "$DELIVER_KEY_FILE"; } 2>/dev/null; then');
+    expect(script).toContain("DELIVER_KEY_FILE=''"); // no daemon origin known: no key minted
+    expect(script).toContain(`printf '{"run":"%s","key":"%s"}' "$RUNID" "$DKEY" | curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" -H "Content-Type: application/json" --data-binary @- "$API/api/v1/deliver/text"`);
     // A hostile intent cannot break out of the quoted heredoc: no expansion happens inside it, CR
     // and control characters are removed, and a line equal to the base delimiter is NOT dropped —
     // the delimiter moves instead (Copilot on #525: dropping it could delete the title line).

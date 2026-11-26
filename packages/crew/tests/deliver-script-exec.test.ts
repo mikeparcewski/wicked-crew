@@ -13,7 +13,7 @@
 // prepends the fake bin, which is sourced AFTER path_helper and does win.
 
 import { execFile, execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,6 +33,7 @@ import {
 } from '../src/core/deliver.js';
 import { deliveryRecordFrom } from '../src/api/delivery-index.js';
 import { DELIVER_CREDENTIALS_MISSING_MARKER } from '../src/core/deliver-credentials.js';
+import { deliverKeyDir, deliverKeyMatches, dropDeliverKey, mintDeliverKey } from '../src/core/deliver-key.js';
 import { triageDeliverFailure, trustedDeliverOutcome, trustedOutcomeIn } from '../src/core/deliver-triage.js';
 
 /** (crew#739) The sentinel nonce every composed script in this file carries. */
@@ -386,10 +387,16 @@ interface PrCreateCall {
   argv: string;
 }
 
+/** (crew#1885) The read key files composed scripts in this process have minted (`core/deliver-key.ts`). */
+function heldKeyFiles(): string[] {
+  if (!existsSync(deliverKeyDir())) return [];
+  return readdirSync(deliverKeyDir()).map((n) => join(deliverKeyDir(), n));
+}
+
 /** A stand-in daemon answering `GET /api/v1/runs/:id/deliver-text` (crew#524). */
 async function fakeDaemon(
   handler: (runId: string) => { status: number; body: string } | null,
-  opts: { required?: boolean; nonce?: string } = {},
+  opts: { required?: boolean; refuseKey?: boolean } = {},
 ): Promise<{
   origin: string;
   close: () => Promise<void>;
@@ -408,13 +415,14 @@ async function fakeDaemon(
         res.end('{"error":"Authentication required: send Authorization: Bearer <token>"}');
         return;
       }
-      // …and answers `POST /deliver/text {run, nonce}` only for the script's own nonce, as crew's route does.
+      // …and answers `POST /deliver/text {run, key}` only for a key in one of crew's key files, as crew's route does.
       let answer: { status: number; body: string } | null = null;
       if (m) answer = handler(decodeURIComponent(m[1]!));
       else if (req.method === 'POST' && req.url === '/api/v1/deliver/text') {
-        let body: { run?: unknown; nonce?: unknown } = {};
+        let body: { run?: unknown; key?: unknown } = {};
         try { body = JSON.parse(raw) as typeof body; } catch { /* not JSON: refused below */ }
-        if (typeof body.run !== 'string' || body.nonce !== (opts.nonce ?? TEST_NONCE)) {
+        const key = body.key;
+        if (typeof body.run !== 'string' || typeof key !== 'string' || opts.refuseKey === true || !heldKeyFiles().some((f) => deliverKeyMatches(f, key))) {
           res.writeHead(403, { 'content-type': 'application/json' });
           res.end('{"code":"not_the_deliver_script"}');
           return;
@@ -1603,7 +1611,7 @@ describe('deliver script — composed PR text (crew#524)', () => {
 
   // crew#1885: under `auth: required` the bearer route answered the script 401, and the PR went out with the launch-time
   // text: a stand-in run, a reduced run, a QE skip or a floor override went unmentioned.
-  it('crew#1885: under required auth the script reads its run record with its own nonce, assurance lines included', async () => {
+  it('crew#1885: under required auth the script reads its run record with the key in its own key file, assurance lines included', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
     const runText = framedDeliverText({
@@ -1625,8 +1633,8 @@ describe('deliver script — composed PR text (crew#524)', () => {
   it('crew#1885: a known daemon that does not answer with the record refuses: no launch-time PR, nothing staged, committed or pushed', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
-    // A daemon that refuses the script (another nonce): the record cannot be read.
-    const daemon = await fakeDaemon(() => ({ status: 200, body: 'never\n\nread\n' }), { nonce: 'fedcba9876543210fedcba9876543210' });
+    // A daemon that refuses the script's key: the record cannot be read.
+    const daemon = await fakeDaemon(() => ({ status: 200, body: 'never\n\nread\n' }), { refuseKey: true });
     daemons.push(daemon);
 
     const head = git(fx.workdir, 'rev-parse', 'HEAD').trim();
@@ -1645,6 +1653,25 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(originBranches(fx)).not.toContain(`wicked/${RUN_ID}`);
   }, 60_000);
 
+  it('crew#1885: a script whose key file cannot be read refuses before asking: nothing staged, committed or pushed', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    const daemon = await fakeDaemon(() => ({ status: 200, body: 'never\n\nread\n' }));
+    daemons.push(daemon);
+    const head = git(fx.workdir, 'rev-parse', 'HEAD').trim();
+    const gone = mintDeliverKey();
+    dropDeliverKey(gone);
+
+    const r = await runDeliver(fx, { intent: INTENT, script: { runId: RUN_ID, apiOrigin: daemon.origin, keyFile: gone } });
+
+    expect(r.outcome).toBe('rejected');
+    expect(daemon.requests).toEqual([]);
+    expect(r.output).toContain("deliver: this script's read key for the daemon could not be read, so the pull request could not say how this run was checked");
+    expect(git(fx.workdir, 'rev-parse', 'HEAD').trim()).toBe(head);
+    expect(git(fx.workdir, 'status', '--porcelain', '--', 'fix.ts').trim()).toBe('?? fix.ts');
+    expect(r.pr).toBeNull();
+  }, 60_000);
+
   it('opens the PR with the RUN-DERIVED text the daemon answers, and commits the same text', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
@@ -1659,7 +1686,7 @@ describe('deliver script — composed PR text (crew#524)', () => {
 
     expect(r.status).toBe(0);
     expect(r.lastLine).toBe('https://github.com/o/r/pull/7');
-    // The script asked THIS daemon for THIS run's text, exactly once, with its own nonce (crew#1885).
+    // The script asked THIS daemon for THIS run's text, exactly once, with its own key (crew#1885).
     expect(daemon.requests).toEqual(['POST /api/v1/deliver/text']);
     expect(r.output).toContain(`deliver: PR text composed from the run record (${daemon.origin})`);
     // …and opened the PR with it: title from line 1, body from line 3 on — the checks table included.

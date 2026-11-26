@@ -8,7 +8,7 @@
  * moments it can be asked:
  *
  *  - at DELIVERY, from the persisted run view (text/plain; the deliver script asks `POST /deliver/text`
- *    with its own nonce, an operator `GET /runs/:id/deliver-text` with a bearer, crew#1885): every
+ *    with the read key in its own key file, an operator `GET /runs/:id/deliver-text` with a bearer, crew#1885): every
  *    phase the run went through with its seat and gate outcome, the repo checks the verify phase
  *    ran with their exit codes, the evaluator's verdict, the run's assurance lines and a link to the run;
  *  - at LAUNCH, from the workflow definition — the text the deliver script carries for a launch that
