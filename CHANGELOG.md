@@ -14,7 +14,7 @@ mentioned only where a daemon release depends on them.
 
 Patch release on the train-15 cut b74a39fc, carrying 8 PRs since 0.18.22: #1923, #1925, #1931, #1933, #1929, #1909, #1936, #1937.
 
-Ships with wicked-crew-api-types 0.232.0 (tag api-types-v0.232.0, the first train stamp under #1929), pins wicked-core-ts ^0.15.51 and bundles wicked-studio 0.16.19 (the pin commit lands after their publish). Known limitation (domain mapping accuracy): unchanged from 0.18.22; `/analyze domain` keeps its current mapping loop.
+Ships with wicked-crew-api-types 0.232.0 (tag api-types-v0.232.0, the first train stamp under #1929), pins wicked-core-ts ^0.15.51 and bundles wicked-studio 0.16.19. Known limitation (domain mapping accuracy): unchanged from 0.18.22; `/analyze domain` keeps its current mapping loop.
 
 ### Fixed
 
