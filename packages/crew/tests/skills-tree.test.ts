@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   assertNoSymlinkComponents,
   assertSafeRelSegments,
+  copyFileNoFollow,
   copyFiles,
   hashFileSet,
   hashFileSetAsync,
@@ -313,5 +314,67 @@ describe('makeTreeReadOnly / removeTreeForce', () => {
     }
     // A vanished entry is the one tolerated case: locking a tree that is gone is a no-op, not an error.
     expect(() => makeTreeReadOnly(join(base, 'never-existed'))).not.toThrow();
+  });
+});
+
+// crew#1955: a skills file's mode is the one asked for (or preserved), not narrowed by the daemon's umask. Under umask
+// 077 an executable script used to land 0700 and the rest 0600, and a put-back of a 0755 file came back 0700.
+describe('skills file modes are exact under a strict umask (crew#1955)', () => {
+  const strict = (fn: () => void): void => {
+    const was = process.umask(0o077);
+    try {
+      fn();
+    } finally {
+      process.umask(was);
+    }
+  };
+  const modeOf = (p: string): number => lstatSync(p).mode & 0o7777;
+
+  it('a new file lands with the mode asked for: 0755 and 0644', () => {
+    if (process.platform === 'win32') return; // modes are advisory there
+    strict(() => {
+      writeFileAtomic(join(base, 'run.sh'), '#!/bin/sh\n', { mode: 0o755 });
+      writeFileAtomic(join(base, 'SKILL.md'), '# skill\n', { mode: 0o644 });
+    });
+    expect(modeOf(join(base, 'run.sh'))).toBe(0o755);
+    expect(modeOf(join(base, 'SKILL.md'))).toBe(0o644);
+  });
+
+  it("a rewrite (the put-back after a failed pass) keeps the file's earlier 0755", () => {
+    if (process.platform === 'win32') return;
+    const file = join(base, 'exec.sh');
+    writeFileSync(file, 'old');
+    chmodSync(file, 0o755);
+    strict(() => writeFileAtomic(file, 'new'));
+    expect(readFileSync(file, 'utf8')).toBe('new');
+    expect(modeOf(file)).toBe(0o755);
+  });
+
+  it("a copied baseline script keeps its source's 0755, a document its 0644", () => {
+    if (process.platform === 'win32') return;
+    const src = join(base, 'src');
+    mkdirSync(src);
+    writeFileSync(join(src, 'tool.sh'), 'x');
+    chmodSync(join(src, 'tool.sh'), 0o755);
+    writeFileSync(join(src, 'doc.md'), 'y');
+    chmodSync(join(src, 'doc.md'), 0o644);
+    const dest = join(base, 'dest');
+    mkdirSync(dest);
+    strict(() => {
+      copyFileNoFollow(join(src, 'tool.sh'), join(dest, 'tool.sh'));
+      copyFileNoFollow(join(src, 'doc.md'), join(dest, 'doc.md'));
+    });
+    expect(modeOf(join(dest, 'tool.sh'))).toBe(0o755);
+    expect(modeOf(join(dest, 'doc.md'))).toBe(0o644);
+  });
+
+  it('never more than 0755: no group or other write, no setuid, setgid or sticky bit', () => {
+    if (process.platform === 'win32') return;
+    strict(() => {
+      writeFileAtomic(join(base, 'wide.sh'), 'x', { mode: 0o777 });
+      writeFileAtomic(join(base, 'suid.sh'), 'x', { mode: 0o4755 });
+    });
+    expect(modeOf(join(base, 'wide.sh'))).toBe(0o755);
+    expect(modeOf(join(base, 'suid.sh'))).toBe(0o755);
   });
 });
