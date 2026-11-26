@@ -247,9 +247,12 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(script).toContain('deliver: PR text composed from the run record ($API)');
     // The script asks with the key from its key file, never an operator bearer (crew#1885): read by the shell's own
     // `read` and handed to curl's stdin by its own `printf`, so no program it starts has the key in its argv.
-    expect(script).toContain('elif ! { [ -n "$DELIVER_KEY_FILE" ] && IFS= read -r DKEY < "$DELIVER_KEY_FILE"; } 2>/dev/null; then');
+    // `builtin`: a function a login profile defines under either name never sees the key (codex r2).
+    expect(script).toContain('elif ! { [ -n "$DELIVER_KEY_FILE" ] && IFS= builtin read -r DKEY < "$DELIVER_KEY_FILE"; } 2>/dev/null; then');
+    // Tracing a login profile turned on is off before anything runs (the trace would print the key, codex r2).
+    expect(script.split('\n').slice(0, 2)).toEqual(['set -euo pipefail', '{ set +x; } 2>/dev/null']);
     expect(script).toContain("DELIVER_KEY_FILE=''"); // no daemon origin known: no key minted
-    expect(script).toContain(`printf '{"run":"%s","key":"%s"}' "$RUNID" "$DKEY" | curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" -H "Content-Type: application/json" --data-binary @- "$API/api/v1/deliver/text"`);
+    expect(script).toContain(`elif builtin printf '{"run":"%s","key":"%s"}' "$RUNID" "$DKEY" | curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" -H "Content-Type: application/json" --data-binary @- "$API/api/v1/deliver/text"`);
     // A hostile intent cannot break out of the quoted heredoc: no expansion happens inside it, CR
     // and control characters are removed, and a line equal to the base delimiter is NOT dropped —
     // the delimiter moves instead (Copilot on #525: dropping it could delete the title line).

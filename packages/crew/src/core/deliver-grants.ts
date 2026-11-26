@@ -11,7 +11,7 @@
  *
  *  - for the engine-run deliver phase: the key in the file that run's DELIVER unit's script names, read only from the
  *    script crew composes (`bash -lc` of a script opening `set -euo pipefail` with a `DELIVER_KEY_FILE='<path>'` line
- *    naming a file of crew's key dir), and only while that script can be running: the unit dispatched
+ *    whose file name gives its id in crew's key dir), and only while that script can be running: the unit dispatched
  *    (`distributed`), or refused (`rejected`) while its run has not ended, since approving the deliver-refusal gate
  *    re-runs the same script with the unit still marked `rejected` (seen in
  *    `tests/integration/deliver-revision-e2e.test.ts`). A path named in any other command never counts; nor does a
@@ -24,7 +24,7 @@
  */
 
 import { DELIVER_PHASE_ID } from './deliver.js';
-import { DELIVER_KEY_FILE_VAR, deliverKeyMatches } from './deliver-key.js';
+import { DELIVER_KEY_FILE_VAR, deliverKeyMatches, deliverKeyPathOf } from './deliver-key.js';
 
 /** The post-hoc deliveries running now, per run: each key file with its composed text and a hold count. */
 const postHoc = new Map<string, Map<string, { text: string; holds: number }>>();
@@ -66,8 +66,9 @@ export interface DeliverTextUnit {
   tool_cmd?: readonly string[] | null | undefined;
 }
 
-/** The key file line crew's deliver script carries (`deliverPrScript`), on a line of its own. */
-const SCRIPT_KEY_FILE_LINE = new RegExp(`^${DELIVER_KEY_FILE_VAR}='([^'\\n]+)'$`, 'm');
+/** The key file line crew's deliver script carries (`deliverPrScript`), on a line of its own: the path shell-quoted,
+ *  ending in the file's id. Only the id is read; the file is always the one of that id in crew's own key dir. */
+const SCRIPT_KEY_FILE_LINE = new RegExp(`^${DELIVER_KEY_FILE_VAR}='[^\\n]*/([0-9a-f]{32})\\.key'$`, 'm');
 
 /**
  * The key file of a deliver unit's script that can be running now, or null: the run's deliver unit (by id or catalog
@@ -82,7 +83,8 @@ function liveDeliverKeyFile(u: DeliverTextUnit, runEnded: boolean): string | nul
   if (cmd == null || cmd.length !== 3 || cmd[0] !== 'bash' || cmd[1] !== '-lc') return null;
   const script = cmd[2]!;
   if (!script.startsWith('set -euo pipefail\n')) return null;
-  return SCRIPT_KEY_FILE_LINE.exec(script)?.[1] ?? null;
+  const id = SCRIPT_KEY_FILE_LINE.exec(script)?.[1];
+  return id === undefined ? null : deliverKeyPathOf(id);
 }
 
 /**

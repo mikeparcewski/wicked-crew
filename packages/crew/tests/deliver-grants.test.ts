@@ -2,14 +2,16 @@
 // in the 0600 file the script crew composes for its deliver unit names (never a value on its command line, codex-check
 // on crew#1946), or a post-hoc delivery's, registered with its text while it runs.
 
-import { chmodSync, lstatSync, mkdtempSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdtempSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { deliverTextAllowed, grantPostHocDeliverText, postHocDeliverText } from '../src/core/deliver-grants.js';
 import { deliverKeyDir, deliverKeyMatches, dropDeliverKey, mintDeliverKey, readDeliverKey } from '../src/core/deliver-key.js';
 import { deliverPrScript } from '../src/core/deliver.js';
 import { deliverableFloorPhase } from '../src/core/deliverable-floor.js';
+import { surveyStateHome } from '../src/projects/state-home-preflight.js';
+import { crewStateHome } from '../src/projects/state-home.js';
 
 const RUN = 'run-1885';
 
@@ -46,8 +48,10 @@ describe('deliver read keys (crew#1885)', () => {
     const outside = join(elsewhere, `${'a'.repeat(32)}.key`);
     writeFileSync(outside, `${'b'.repeat(64)}\n`, { mode: 0o600 });
     expect(readDeliverKey(outside)).toBeNull();
-    const traversal = join(deliverKeyDir(), '..', 'deliver-keys', `${'a'.repeat(32)}.key`);
-    expect(readDeliverKey(traversal)).toBeNull();
+    // A literal traversal (never normalized first, codex r2) names no key file.
+    const real = mintDeliverKey();
+    expect(readDeliverKey(`${deliverKeyDir()}/../deliver-keys/${basename(real)}`)).toBeNull();
+    expect(readDeliverKey(real)).not.toBeNull();
     const link = join(deliverKeyDir(), `${'c'.repeat(32)}.key`);
     mintDeliverKey(); // the dir exists
     symlinkSync(outside, link);
@@ -60,6 +64,41 @@ describe('deliver read keys (crew#1885)', () => {
     writeFileSync(misnamed, `${'b'.repeat(64)}\n`, { mode: 0o600 });
     expect(readDeliverKey(misnamed)).toBeNull();
     unlinkSync(misnamed);
+  });
+});
+
+describe('the key dir (crew#1885, codex r2)', () => {
+  it('sits under a registered state-home entry no worker reads, so it adds nothing the engine\'s preflight refuses launches over', () => {
+    mintDeliverKey();
+    expect(dirname(deliverKeyDir())).toBe(join(crewStateHome(), 'artifacts'));
+    const unregistered = surveyStateHome(crewStateHome()).map((e) => e.name);
+    expect(unregistered).not.toContain('deliver-keys');
+    expect(unregistered).not.toContain('artifacts');
+  });
+
+  it('counts no key once the dir is open to others or is a symlink, and mints into neither', () => {
+    const path = mintDeliverKey();
+    const key = readDeliverKey(path)!;
+    chmodSync(deliverKeyDir(), 0o755);
+    expect(readDeliverKey(path)).toBeNull();
+    // Minting narrows a dir of the daemon user's own back to 0700.
+    mintDeliverKey();
+    expect(lstatSync(deliverKeyDir()).mode & 0o777).toBe(0o700);
+    expect(readDeliverKey(path)).toBe(key);
+    // The dir swapped for a symlink to a dir elsewhere: no key reads, and nothing is minted through it.
+    const aside = `${deliverKeyDir()}.aside`;
+    renameSync(deliverKeyDir(), aside);
+    const elsewhere = mkdtempSync(join(tmpdir(), 'deliver-keys-elsewhere-'));
+    chmodSync(elsewhere, 0o700);
+    symlinkSync(elsewhere, deliverKeyDir());
+    try {
+      renameSync(join(aside, basename(path)), join(elsewhere, basename(path)));
+      expect(readDeliverKey(path)).toBeNull();
+      expect(() => mintDeliverKey()).toThrow(/not the daemon user's own private dir/);
+    } finally {
+      unlinkSync(deliverKeyDir());
+      renameSync(aside, deliverKeyDir());
+    }
   });
 });
 

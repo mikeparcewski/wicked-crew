@@ -955,7 +955,6 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
   // (crew#1885) The read key for `POST /deliver/text`: a file only the daemon's user can read, named here by path. The
   // key itself is never in this text, which is the shell's argv while the script runs (`bash -lc`).
   const keyFile = api === '' ? '' : (opts.keyFile ?? mintDeliverKey());
-  if (/['\n\r]/.test(keyFile)) throw new Error('deliver read key: the key file path holds a quote or a line break');
   const fallbackLines = heredocLines(framedDeliverText(fallback));
   const heredoc = heredocDelimiter(fallbackLines);
   // crew#550: the PR title may run to GitHub's 256 characters, the commit subject stays at git's 72.
@@ -1013,6 +1012,9 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
   }
   return [
     'set -euo pipefail',
+    // (crew#1885, codex r2) A login profile (`bash -lc`) may have turned tracing on; the trace would print the read key
+    // into the captured output. Off before anything else runs; the group's own stderr keeps the `set +x` line quiet.
+    '{ set +x; } 2>/dev/null',
     // The engine concatenates the child's stdout and THEN its stderr, so anything git writes to
     // stderr would land after the PR URL and break "(f) the URL is the last line". Folding stderr
     // into stdout for the whole phase keeps the output in true chronological order and makes the
@@ -1346,7 +1348,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // and must not become the PR text (Copilot on #525).
     "_framed() { [ -s \"$1\" ] && [ -n \"$(sed -n 1p \"$1\")\" ] && [ -z \"$(sed -n 2p \"$1\")\" ] && [ -n \"$(sed -n '3,$p' \"$1\" | tr -d '[:space:]' | head -c 1)\" ]; }",
     `API='${api}'`,
-    `${DELIVER_KEY_FILE_VAR}='${keyFile}'`,
+    `${DELIVER_KEY_FILE_VAR}=${shellSingleQuote(keyFile)}`,
     // (e2e-1105 F4c) Set only when the text below is the run record: only that text may replace an
     // existing PR's description (the launch-time fallback knows no correction given since).
     "FROMRUN=''",
@@ -1362,11 +1364,11 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '  echo "deliver: no daemon origin was known when this run launched — using the launch-time PR text"',
     'elif ! command -v curl >/dev/null 2>&1; then',
     '  _norecord "curl is not available in this shell to read the run record"',
-    `elif ! { [ -n "$${DELIVER_KEY_FILE_VAR}" ] && IFS= read -r DKEY < "$${DELIVER_KEY_FILE_VAR}"; } 2>/dev/null; then`,
+    `elif ! { [ -n "$${DELIVER_KEY_FILE_VAR}" ] && IFS= builtin read -r DKEY < "$${DELIVER_KEY_FILE_VAR}"; } 2>/dev/null; then`,
     '  _norecord "this script\'s read key for the daemon could not be read"',
     // `--noproxy "*"`: the daemon is loopback; an operator shell's http_proxy must not swallow it. The body is JSON
     // as written (RUNID is one percent-encoded segment, `[A-Za-z0-9._~%-]`, and the key is hex).
-    `elif printf '{"run":"%s","key":"%s"}' "$RUNID" "$DKEY" | curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" -H "Content-Type: application/json" --data-binary @- "$API/api/v1/deliver/text" -o "$TD/text" 2>/dev/null && _framed "$TD/text"; then`,
+    `elif builtin printf '{"run":"%s","key":"%s"}' "$RUNID" "$DKEY" | curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" -H "Content-Type: application/json" --data-binary @- "$API/api/v1/deliver/text" -o "$TD/text" 2>/dev/null && _framed "$TD/text"; then`,
     '  echo "deliver: PR text composed from the run record ($API)"; FROMRUN=1',
     'else',
     '  rm -f "$TD/text"',

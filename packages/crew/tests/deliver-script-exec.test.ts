@@ -33,7 +33,7 @@ import {
 } from '../src/core/deliver.js';
 import { deliveryRecordFrom } from '../src/api/delivery-index.js';
 import { DELIVER_CREDENTIALS_MISSING_MARKER } from '../src/core/deliver-credentials.js';
-import { deliverKeyDir, deliverKeyMatches, dropDeliverKey, mintDeliverKey } from '../src/core/deliver-key.js';
+import { deliverKeyDir, deliverKeyMatches, dropDeliverKey, mintDeliverKey, readDeliverKey } from '../src/core/deliver-key.js';
 import { triageDeliverFailure, trustedDeliverOutcome, trustedOutcomeIn } from '../src/core/deliver-triage.js';
 
 /** (crew#739) The sentinel nonce every composed script in this file carries. */
@@ -185,6 +185,8 @@ async function runDeliver(
     gh?: GhStub;
     env?: Record<string, string>;
     script?: DeliverScriptOptions;
+    /** (crew#1885) Extra lines for the login profile `bash -lc` sources before the script. */
+    profile?: string;
     /** R1: what `git remote get-url --push origin` answers inside the script (a `git` shim; every
      *  other git call reaches the real git, so the push still lands on the bare fixture). */
     originPushUrl?: string;
@@ -204,7 +206,7 @@ async function runDeliver(
   if (!existsSync(bin)) mkdirSync(bin, { recursive: true });
   if (!existsSync(home)) mkdirSync(home, { recursive: true });
   // Sourced after /etc/profile's path_helper, so this prepend is the one that survives.
-  writeFileSync(join(home, '.bash_profile'), `export PATH="${bin}:$PATH"\n`);
+  writeFileSync(join(home, '.bash_profile'), `export PATH="${bin}:$PATH"\n${opts.profile ?? ''}`);
   // A real `gh` would talk to GitHub; this one reports what the test needs and nothing else.
   writeFileSync(
     join(bin, 'gh'),
@@ -1651,6 +1653,40 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(r.output).not.toContain('using the launch-time PR text');
     expect(r.pr).toBeNull();
     expect(originBranches(fx)).not.toContain(`wicked/${RUN_ID}`);
+  }, 60_000);
+
+  it('crew#1885 (codex r2): a login profile that turns tracing on and wraps read and printf never sees the key, nor does the output', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    const runText = framedDeliverText({ title: 'Archive/Restore reachable', body: '## Intent\n\nfix issue #214\n' });
+    const daemon = await fakeDaemon((id) => (id === RUN_ID ? { status: 200, body: runText } : null), { required: true });
+    daemons.push(daemon);
+    const keyFile = mintDeliverKey();
+    const key = readDeliverKey(keyFile)!;
+    const seen = join(fx.root, 'profile-seen');
+    const trace = join(fx.root, 'xtrace');
+    // Tracing on, into a file the test reads (BASH_XTRACEFD), so every traced line is kept whatever the script does with
+    // its own stderr. A profile function shadows a builtin of the same name; these log every argument, then do the work.
+    const profile = [
+      `exec 9>>'${trace}'`,
+      'BASH_XTRACEFD=9',
+      'set -x',
+      `printf() { echo "printf-fn $*" >> '${seen}'; command printf "$@"; }`,
+      `read() { echo "read-fn $*" >> '${seen}'; command read "$@"; }`,
+      '',
+    ].join('\n');
+
+    const r = await runDeliver(fx, { intent: INTENT, profile, script: { runId: RUN_ID, apiOrigin: daemon.origin, keyFile } });
+
+    expect(r.status, r.output).toBe(0);
+    expect(daemon.requests).toEqual(['POST /api/v1/deliver/text']);
+    expect(r.output).toContain(`deliver: PR text composed from the run record (${daemon.origin})`);
+    // Neither the trace nor a profile function saw the key.
+    const traced = readFileSync(trace, 'utf8');
+    expect(traced).toContain('set -euo pipefail'); // tracing was on when the script began
+    expect(traced).not.toContain(key);
+    expect(r.output).not.toContain(key);
+    expect(existsSync(seen) ? readFileSync(seen, 'utf8') : '').not.toContain(key);
   }, 60_000);
 
   it('crew#1885: a script whose key file cannot be read refuses before asking: nothing staged, committed or pushed', async () => {
