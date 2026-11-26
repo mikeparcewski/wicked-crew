@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- Evaluate no longer says a run made on this daemon was judged against "a different rule store" (crew#1934). The run route recorded the store's absolute path, and `GET /diagnostics` shows it home-masked, so studio's comparison never matched on a daemon whose store lives under the home directory: every run was tagged "Another rule store" and Steering dropped its per-rule eval marks. `GET /testing/evals` and `GET /testing/evals/:id` now compare each run's store with the daemon's own as canonical paths (`~` expanded, resolved, symlinks followed) and only then mask for display: this daemon's store reads exactly as diagnostics lists `core.db`, and any other store reads home-masked. A different store whose masked path would read the same is marked `(a different store)`. History rows recorded before the fix read correctly too, and `rule_store` on these routes no longer carries the home directory.
+
 ### Added
 
 - `npm run stamp:api-types -- <X.Y.Z>` stamps `wicked-crew-api-types` once per release train (coord ruling, train 15). A pull request that changes the contract now tags what it adds `(api-types next)` and leaves the package version, crew's caret and `package-lock.json` alone. The train's crew version PR runs the stamp. It sets the version and the caret, edits the two lockfile fields in place, turns each `next` tag in `index.d.ts`, crew's src and this file into the number, and regenerates the endpoint manifest and the API sample test. `--check` is the guard. CI runs it on a PR that moves crew's version, the api-types release runs it before publishing, and crew's release runs it as a job of its own that publish does not wait on. It fails on a `next` tag left behind, on a caret, lockfile entry or endpoint manifest naming another version, and when the contract on disk differs from its `api-types-v<version>` tag. Feature PRs no longer pick numbers that collide, so they stop re-stamping and re-running CI. The rule is in the api-types README.
