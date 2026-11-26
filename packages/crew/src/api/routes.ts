@@ -7591,8 +7591,25 @@ export function registerRoutes(
    * `'no-log'` = this build cannot read the log, so nothing can be said; `'unstable'` = live gate
    * events kept landing while the record was read, so nothing was verified (retry).
    */
-  async function resolveOpenGate(id: string, time: TimePart = untimed): Promise<GateResolution> {
-    return gateCache.resolve(id, () => readOpenGate(id, time));
+  /** (crew#1950) The parts of each run's in-flight gate hydration, so every GET that waits on it (whoever started it,
+   *  a POST decision too) can name them. Held only while the hydration runs. */
+  const hydrationParts = new Map<string, GateReadTimer>();
+  async function resolveOpenGate(id: string, timer?: GateReadTimer): Promise<GateResolution> {
+    let started: GateReadTimer | undefined;
+    const resolution = gateCache.resolve(id, () => {
+      // Per hydration, across its re-reads.
+      started ??= hydrationParts.get(id) ?? new GateReadTimer();
+      hydrationParts.set(id, started);
+      return readOpenGate(id, started.time);
+    });
+    // The hydration this call started or joined (set synchronously when it began); none when served from the cache.
+    const parts = hydrationParts.get(id);
+    try {
+      return await resolution;
+    } finally {
+      if (parts !== undefined) timer?.absorb(parts);
+      if (started !== undefined && hydrationParts.get(id) === started) hydrationParts.delete(id);
+    }
   }
 
   /**
@@ -9220,7 +9237,7 @@ export function registerRoutes(
     // daemon restart reads it back instead of replaying the log; the replay stays the FALLBACK for
     // runs parked before the engine grew the table. `resolveOpenGate` is that one resolution, shared
     // with the POST route's `ord` check.
-    let open = await timer.time('resolve', () => resolveOpenGate(id, timer.time));
+    let open = await timer.time('resolve', () => resolveOpenGate(id, timer));
     // The record judges what the resolver returns too (crew#1083 final review): a stale frame folded
     // into the cache after GET's record read — during the status read, before any hydration began,
     // so no revision guard ran — is a cache hit for the resolver. When the answer disagrees with
@@ -9238,7 +9255,7 @@ export function registerRoutes(
       const matchesNow = (o: GateResolution): boolean => sameOpening(o, now);
       if (!matchesNow(open)) {
         gateCache.forget(id);
-        open = await timer.time('resolve', () => resolveOpenGate(id, timer.time));
+        open = await timer.time('resolve', () => resolveOpenGate(id, timer));
         if (isOpenGate(open) && !matchesNow(open)) open = 'unstable';
       }
     }

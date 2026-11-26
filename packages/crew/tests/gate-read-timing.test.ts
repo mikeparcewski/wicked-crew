@@ -28,6 +28,9 @@ const PARTS = new Set(['record', 'view', 'resolve', 'events', 'actions', 'crew-a
 
 interface Setup {
   run?: unknown;
+  eventsDelayMs?: number;
+  /** Requests sent together; the first one's answer is returned as `res`. */
+  requests?: Array<{ method: 'GET' | 'POST'; payload?: Record<string, unknown> }>;
   gateActions?: () => Promise<unknown>;
   cached?: boolean;
   throwingLog?: boolean;
@@ -45,7 +48,10 @@ async function gateRead(o: Setup = {}) {
     runView: vi.fn(async () => o.run ?? parked),
     gateActions: vi.fn(o.gateActions ?? (async () => ({ ord, gateKind: 'escalation', actions }))),
     interactionRequests: vi.fn(async () => [row]),
-    runEvents: vi.fn(async () => []),
+    runEvents: vi.fn(async () => {
+      if (o.eventsDelayMs !== undefined) await new Promise((r) => setTimeout(r, o.eventsDelayMs));
+      return [];
+    }),
     listWorkflows: () => BUILTIN_WORKFLOWS,
     listConformanceClaims: vi.fn(async () => []),
   };
@@ -64,8 +70,9 @@ async function gateRead(o: Setup = {}) {
   registerRoutes(app, adapter as unknown as CoreAdapter, cache, new ElicitationCache());
   await app.ready();
   try {
-    const res = await app.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` });
-    return { res, lines, adapter };
+    const url = `/api/v1/runs/${id}/gate`;
+    const all = await Promise.all((o.requests ?? [{ method: 'GET' }]).map((r) => app.inject({ method: r.method, url, ...(r.payload !== undefined ? { payload: r.payload } : {}) })));
+    return { res: all[0]!, all, lines, adapter };
   } finally {
     await app.close();
   }
@@ -99,6 +106,21 @@ describe('GET /runs/:id/gate names the time of each part (crew#1950)', () => {
     for (const name of ['record', 'view', 'resolve', 'events', 'crew-actions', 'total']) expect(parts.has(name), name).toBe(true);
     expect(parts.get('total')).toBeGreaterThanOrEqual(parts.get('actions')!);
     expect(lines.filter((l) => l.msg.includes('/gate took'))).toEqual([]);
+  });
+
+  it('a GET that joins a gate read another request started names that read\'s parts too (codex r2)', async () => {
+    // Two GETs together: one hydration (one event-log read), and both answers name it.
+    const both = await gateRead({ eventsDelayMs: 80, requests: [{ method: 'GET' }, { method: 'GET' }] });
+    expect(both.adapter.runEvents).toHaveBeenCalledTimes(1);
+    for (const r of both.all) {
+      expect(r.statusCode, r.body).toBe(200);
+      expect(partsOf(r.headers['server-timing']).get('events')).toBeGreaterThanOrEqual(70);
+    }
+    // A decision (POST, untimed) that starts the read first: the GET waiting on it still names the event-log read.
+    const joined = await gateRead({ eventsDelayMs: 80, requests: [{ method: 'POST', payload: { approve: true, ord } }, { method: 'GET' }] });
+    expect(joined.adapter.runEvents).toHaveBeenCalledTimes(1);
+    expect(joined.all[1]!.statusCode, joined.all[1]!.body).toBe(200);
+    expect(partsOf(joined.all[1]!.headers['server-timing']).get('events')).toBeGreaterThanOrEqual(70);
   });
 
   it('the cache path is timed too, and serves the same answer', async () => {

@@ -38,6 +38,11 @@ export class GateReadTimer {
     }
   };
 
+  /** Add another timer's parts to this one's (a shared read this request waited on). */
+  absorb(other: GateReadTimer): void {
+    for (const [name, d] of other.parts) this.parts.set(name, (this.parts.get(name) ?? 0) + d);
+  }
+
   /** Milliseconds since the read began. */
   total(): number {
     return this.clock() - this.started;
