@@ -164,6 +164,48 @@ describe('a public app with an action fails', () => {
   });
 });
 
+// ── crew#1949: the QE reads the manifest from the evidence ───────────────────────────────────────────
+
+describe('crew#1949: the publish check\'s evidence holds the manifest the QE judges', () => {
+  it('a public app\'s check writes manifest.json beside the renders: targets, audience, each query\'s public flag, the blocked sources per target and the rules; the CLI materializes it', async () => {
+    const digest = 'a'.repeat(64);
+    const base = depsFor({ actions: [], digest });
+    const rec = recordFor([], digest);
+    // The row-16 shape: a public app, read-only, its queries public, published to the studio and the standalone site.
+    rec.manifest = { ...rec.manifest, identity: null, audience: { kind: 'public' }, queries: [{ id: 'open', source: 'support', public: true }], actions: [], volume: null };
+    const deps: PublishCheckDeps = { ...base, publishOf: (runId) => (runId === rec.runId ? rec : null) };
+    const r = await publishCheck(deps, { slug: 'esc', runId: 'run-1' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const file = r.evidence.find((e) => e.path === 'manifest.json');
+    expect(file, JSON.stringify(r.evidence.map((e) => e.path))).toBeDefined();
+    const doc = JSON.parse(Buffer.from(file!.base64, 'base64').toString('utf8')) as Record<string, unknown> & { manifest: AppPublishManifest };
+    expect(doc).toMatchObject({ tree: rec.tree, digest });
+    expect(doc.manifest.targets).toEqual(['studio', 'site']);
+    expect(doc.manifest.audience).toEqual({ kind: 'public' });
+    expect(doc.manifest.queries).toEqual([{ id: 'open', source: 'support', public: true }]);
+    expect(doc.manifest.actions).toEqual([]);
+    // Every target the manifest names, with the blocked sources the rebuilt manifest found for it: none.
+    expect(doc['blockedSources']).toEqual({ studio: [], site: [] });
+    expect(doc['publicApp']).toEqual({ public: true, actions: [], signedInQueries: [] });
+    expect((doc['rules'] as Array<{ rule: string; ok: boolean }>).map((x) => x.rule)).toEqual(expect.arrayContaining(['turn_check', 'manifest_digest', 'render']));
+    expect(doc['card']).toContain('open (support): public');
+    // The CLI writes it into the evidence directory the QE reads, beside the render's report.
+    const cwd = mkTmp();
+    const code = await runAppsCheck(['--publish'], {
+      env: { WICKED_MCP_TOKEN: 'tok', WICKED_CREW_URL: 'http://127.0.0.1:1', WICKED_TREE: 'a'.repeat(40) },
+      cwd,
+      out: () => undefined,
+      err: () => undefined,
+      fetch: (async () => ({ ok: true, status: 200, json: async () => r })) as unknown as typeof fetch,
+    });
+    expect(code).toBe(0);
+    const dir = join(cwd, '.wicked', 'publish-check', digest.slice(0, 12));
+    expect(JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8'))).toEqual(doc);
+    expect(existsSync(join(dir, 'out', 'report.json'))).toBe(true);
+  });
+});
+
 // ── the fixture cards: one per action, fixture values, no record/rate/source call ──────────────────
 
 describe('the fixture cards', () => {
