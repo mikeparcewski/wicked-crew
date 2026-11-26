@@ -83,7 +83,7 @@ type RecordedOpenGate =
   | { state: 'none' }
   | { state: 'ambiguous'; ords: number[] }
   | { state: 'open'; ord: number; row: InteractionRequest };
-import { GateReadTimer } from './gate-timing.js';
+import { GateReadTimer, untimed, type TimePart } from './gate-timing.js';
 import { detectRefusal, gateSeqOf, isOpenGate, offeredChoices, replayOpenGate, type GateCache, type GateRead, type GateResolution } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
 import { acceptanceRequirementOf, buildAcceptanceView } from '../qe/acceptance.js';
@@ -7591,8 +7591,8 @@ export function registerRoutes(
    * `'no-log'` = this build cannot read the log, so nothing can be said; `'unstable'` = live gate
    * events kept landing while the record was read, so nothing was verified (retry).
    */
-  async function resolveOpenGate(id: string): Promise<GateResolution> {
-    return gateCache.resolve(id, () => readOpenGate(id));
+  async function resolveOpenGate(id: string, time: TimePart = untimed): Promise<GateResolution> {
+    return gateCache.resolve(id, () => readOpenGate(id, time));
   }
 
   /**
@@ -7601,8 +7601,9 @@ export function registerRoutes(
    * predating the table. Never consults the cache — `GateCache.resolve` owns that, and runs this
    * again when a live gate event overlaps it.
    */
-  async function readOpenGate(id: string): Promise<GateRead> {
-    const recorded = await recordedOpenGate(id);
+  async function readOpenGate(id: string, time: TimePart = untimed): Promise<GateRead> {
+    // (crew#1950) Its own record and event-log reads are timed apart from the resolve that holds them.
+    const recorded = await time('record', () => recordedOpenGate(id));
     if (recorded?.state === 'ambiguous') return 'ambiguous';
     if (recorded?.state === 'open') {
       const durableGate = recorded.row;
@@ -7615,7 +7616,7 @@ export function registerRoutes(
       // Issue #969: the row has no `choices`/`recommended`, so they come from the newest
       // `awaitingHuman` for this ord in the event log. A log this build cannot read (null, or a read
       // that throws) leaves both out — the gate is still served, just without the offered answers.
-      const events = await adapter.runEvents(id).catch(() => null);
+      const events = await time('events', () => adapter.runEvents(id)).catch(() => null);
       const frame = events?.filter((e) => e.type === 'awaitingHuman' && e.session === id && e.ord === ord).at(-1);
       return {
         ord,
@@ -7633,7 +7634,7 @@ export function registerRoutes(
         })(),
       };
     }
-    const events = await adapter.runEvents(id);
+    const events = await time('events', () => adapter.runEvents(id));
     if (events === null) return 'no-log';
     return replayOpenGate(id, events) ?? null;
   }
@@ -8801,14 +8802,14 @@ export function registerRoutes(
    * steering-author run (its approve lands the proposal). Marks
    * `humanOnly` where crew answers a non-human actor 403 `human_operator_only`.
    */
-  async function crewGateActions(run: SessionView, gated: WorkUnit | undefined, gateKind: string, actions: GateAction[]): Promise<GateAction[]> {
+  async function crewGateActions(run: SessionView, gated: WorkUnit | undefined, gateKind: string, actions: GateAction[], time: TimePart = untimed): Promise<GateAction[]> {
     const declines = (a: GateAction): boolean => a.action === 'reject' || a.action === 'request_changes';
     // crew#1157 / crew#1259: an analysis or delivering chat run's held plan change is never approved (`gateForDecision`): only the declines stay.
     let approveRefused = chatPlanRefusal(run.session.id, { gateKind }) !== null;
     let skipRefused = approveRefused;
     if (!approveRefused && gated !== undefined && isDeliverUnit(gated)) {
-      approveRefused = 'refusal' in (await deliverApprovalRefusal(run, gated));
-      skipRefused = 'refusal' in (await deliverApprovalRefusal(run, gated, 'skip'));
+      approveRefused = 'refusal' in (await time('deliver-qe', () => deliverApprovalRefusal(run, gated)));
+      skipRefused = 'refusal' in (await time('deliver-qe', () => deliverApprovalRefusal(run, gated, 'skip')));
     }
     const steering = isSteeringAuthorRun(run);
     return actions
@@ -9049,11 +9050,19 @@ export function registerRoutes(
   const gateReadTimers = new WeakMap<object, GateReadTimer>();
   app.get(`${V}/runs/:id/gate`, {
     onSend: (req, reply, payload, done) => {
+      // Taken off first, so a send that re-enters this hook (an error answer) times nothing twice; and nothing here
+      // may replace the answer: a failed header or log line is dropped (codex r1).
       const timer = gateReadTimers.get(req);
+      gateReadTimers.delete(req);
       if (timer !== undefined) {
-        reply.header('Server-Timing', timer.header());
-        const slow = timer.slowLine((req.params as { id: string }).id, reply.statusCode);
-        if (slow !== null) req.log.warn(slow);
+        try {
+          const total = timer.total();
+          reply.header('Server-Timing', timer.header(total));
+          const slow = timer.slowLine((req.params as { id: string }).id, reply.statusCode, total);
+          if (slow !== null) req.log.warn(slow);
+        } catch {
+          // Diagnostics only.
+        }
       }
       done(null, payload);
     },
@@ -9093,7 +9102,7 @@ export function registerRoutes(
       if (run === undefined) return {};
       const decision = qeDecisionOf(run);
       if (decision === null || qeDecisionBypasses(decision)) return {};
-      const check = await timer.time('qe', () => qeAcceptanceCheckFor(run));
+      const check = await timer.time('deliver-qe', () => qeAcceptanceCheckFor(run));
       if (check === null || check.satisfied) return {};
       return {
         skipQe: {
@@ -9128,7 +9137,7 @@ export function registerRoutes(
         if (run === undefined) return {};
         const gated = run.units?.find((u) => u.ord === ord);
         return {
-          actions: await timer.time('crew-actions', () => crewGateActions(run, gated, listed.gateKind, listed.actions)),
+          actions: await timer.time('crew-actions', () => crewGateActions(run, gated, listed.gateKind, listed.actions, timer.time)),
           ...(listed.planRev !== undefined ? { planRev: listed.planRev } : {}),
         };
       }
@@ -9211,7 +9220,7 @@ export function registerRoutes(
     // daemon restart reads it back instead of replaying the log; the replay stays the FALLBACK for
     // runs parked before the engine grew the table. `resolveOpenGate` is that one resolution, shared
     // with the POST route's `ord` check.
-    let open = await timer.time('resolve', () => resolveOpenGate(id));
+    let open = await timer.time('resolve', () => resolveOpenGate(id, timer.time));
     // The record judges what the resolver returns too (crew#1083 final review): a stale frame folded
     // into the cache after GET's record read — during the status read, before any hydration began,
     // so no revision guard ran — is a cache hit for the resolver. When the answer disagrees with
@@ -9229,7 +9238,7 @@ export function registerRoutes(
       const matchesNow = (o: GateResolution): boolean => sameOpening(o, now);
       if (!matchesNow(open)) {
         gateCache.forget(id);
-        open = await timer.time('resolve', () => resolveOpenGate(id));
+        open = await timer.time('resolve', () => resolveOpenGate(id, timer.time));
         if (isOpenGate(open) && !matchesNow(open)) open = 'unstable';
       }
     }
