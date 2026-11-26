@@ -922,7 +922,7 @@ export function primaryRefusal(primary: string, clisJson: string): string | null
   return null;
 }
 
-/** (api-types next, J6 K1) {@link DomainScope}: what a domain model run covers. */
+/** (api-types 0.232.0, J6 K1) {@link DomainScope}: what a domain model run covers. */
 const DomainScopeSchema = z.strictObject({
   intent: z.string().trim().min(1).max(2000),
   phrases: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
@@ -1024,7 +1024,7 @@ export const LaunchSchema = z.strictObject({
   documents: z.array(z.string().trim().min(1).max(300)).max(RUN_DOCS_TOKENS_MAX).optional(),
   /** (DES-CATALOG-002 §2.d piece 4, CS4) The run's source pick (registered source names); `[]` = none. */
   sources: z.array(z.string().trim().min(1).max(100)).max(RUN_SOURCES_MAX).optional(),
-  /** (api-types next, J6 K1) A domain-extraction launch's scope: required on that workflow, refused on any other. */
+  /** (api-types 0.232.0, J6 K1) A domain-extraction launch's scope: required on that workflow, refused on any other. */
   domainScope: DomainScopeSchema.optional(),
 }).refine((b) => b.domainScope === undefined || b.workflow === DOMAIN_EXTRACTION_WORKFLOW, {
   path: ['domainScope'],
@@ -4042,7 +4042,10 @@ export function registerRoutes(
         }
         // No helper signed in at all: the engine's own launch refusal (`no_eligible_seat`) names each benched seat, its
         // cause and the remedy; there is nothing a stand-in could stand in from.
-        const refusal = preflight === null || preflight.signedIn.length === 0 ? null : preflightRefusal(preflight);
+        // (crew#1932) No plan and no workflow: the engine plans one unit with no review step (`resolve_launch_plan`'s
+        // (None, None)), so the launch asks nothing; a check the work calls for still holds at the aware run's gate.
+        const oneStep = input.plan === undefined && input.workflow === undefined && input.power !== true;
+        const refusal = preflight === null || preflight.signedIn.length === 0 ? null : preflightRefusal(preflight, oneStep);
         if (refusal !== null && (consent === null || refusal.code === 'no_usable_helper')) return reply.code(409).send(refusal);
       }
       if (consent !== null) {

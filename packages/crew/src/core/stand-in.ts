@@ -93,15 +93,14 @@ export function readPreflight(raw: string): IndependencePreflight | null {
 }
 
 /** The roles a stand-in could fill (split into the ones every run needs and the ones a run needs only if it calls
- *  for them, DES §2.2), and those no helper on the job can fill (DES §2.5). */
-function shortRoles(p: IndependencePreflight): { canFill: string[]; needed: string[]; conditional: string[]; cannot: string[] } {
+ *  for them, DES §2.2), and the ones every run needs that no helper on the job can fill (DES §2.5). */
+function shortRoles(p: IndependencePreflight): { needed: string[]; conditional: string[]; cannot: string[] } {
   const short = p.roles.filter((r) => r.shortBy > 0);
   const fill = short.filter((r) => r.canStandIn);
   return {
-    canFill: fill.map((r) => r.role),
     needed: fill.filter((r) => !r.conditional).map((r) => r.role),
     conditional: fill.filter((r) => r.conditional).map((r) => r.role),
-    cannot: short.filter((r) => !r.canStandIn).map((r) => r.role),
+    cannot: short.filter((r) => !r.canStandIn && !r.conditional).map((r) => r.role),
   };
 }
 
@@ -133,17 +132,32 @@ function words(roles: readonly string[]): string {
 }
 
 /**
- * What the launch answers for this preflight with no consent: `null` = launch (not short), else the
- * `409` body. Short and no role a stand-in could fill → `no_usable_helper` (§2.5: a stand-in never makes
- * up for a CLI that cannot run); short otherwise → `stand_in_choice` (§2.1).
+ * What the launch answers for this preflight with no consent: `null` = launch, else the `409` body.
+ *
+ * (crew#1932) The launch asks only for the roles a stand-in can fill, which are the ones every run of its shape seats
+ * (the reviewer, the judge, the QE reviewer and the party-excluded review). The preflight also lists the roles a run
+ * needs only if an event calls for them (a council on a dispute, the monitors, the rules checks; `conditional`), sized
+ * by defaults rather than by the plan the run will score (three monitors where the plan seats one). The engine fills
+ * none of those with a stand-in (its one fill site is the review's distribution, plus the judge's and QE reviewer's
+ * holds), so a person's answer changes nothing for them: a short one takes the run's own path (the council falls back,
+ * the team pauses, a rules check holds as `rules_unchecked`), as before crew#1888, whatever the launch asked. Such a
+ * launch goes on stand-in-aware with no consent, as a launch that is not short does.
+ * `oneStep`: a launch with no plan and no workflow, which the engine plans as one unit with no review step. The launch
+ * asks nothing; a check its work calls for (the default floor's judge) still holds at the run's `stand_in_needed` gate,
+ * since the launch is stand-in-aware.
+ *
+ * A short role every run needs that no helper can stand in for → `no_usable_helper` (§2.5: a stand-in never makes up
+ * for a CLI that cannot run); one a stand-in can fill → `stand_in_choice` (§2.1), its words naming the conditional
+ * roles too, though no stand-in fills those today (a wording gap noted on crew#1932).
  */
-export function preflightRefusal(p: IndependencePreflight): StandInChoiceRefusal | NoUsableHelperRefusal | null {
-  if (!p.short) return null;
-  const { canFill, needed, conditional, cannot } = shortRoles(p);
-  if (cannot.length > 0 || canFill.length === 0) {
+export function preflightRefusal(p: IndependencePreflight, oneStep = false): StandInChoiceRefusal | NoUsableHelperRefusal | null {
+  if (!p.short || oneStep) return null;
+  const { needed, conditional, cannot } = shortRoles(p);
+  if (needed.length === 0 && cannot.length === 0) return null;
+  if (cannot.length > 0) {
     return {
       code: 'no_usable_helper',
-      error: `No helper on this job can be ${words(cannot.length > 0 ? cannot : p.roles.map((r) => r.role))} for it, even as a stand-in, so it can't start. Add another helper to the job, or sign one in, and start it again.`,
+      error: `No helper on this job can be ${words(cannot)} for it, even as a stand-in, so it can't start. Add another helper to the job, or sign one in, and start it again.`,
       preflight: p,
     };
   }
