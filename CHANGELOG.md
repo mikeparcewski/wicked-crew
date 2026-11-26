@@ -12,6 +12,7 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
+- A pull request delivered from a card with a framing line (`/refactor polish`, `/refactor upgrade`, the Focus and Lens options, an Investigate depth) is titled from the person's ask. It was titled from crew's own line, for example `chore: Kind: polish`; that line is now skipped, as the `Repository:` routing line already was (crew#1938).
 - Evaluate no longer says a run made on this daemon was judged against "a different rule store" (crew#1934). The run route recorded the store's absolute path, and `GET /diagnostics` shows it home-masked, so studio's comparison never matched on a daemon whose store lives under the home directory: every run was tagged "Another rule store" and Steering dropped its per-rule eval marks. `GET /testing/evals` and `GET /testing/evals/:id` now compare each run's store with the daemon's own as canonical paths (`~` expanded, resolved, symlinks followed) and only then mask for display: this daemon's store reads exactly as diagnostics lists `core.db`, and any other store reads home-masked. A different store whose masked path would read the same is marked `(a different store)`. History rows recorded before the fix read correctly too, and `rule_store` on these routes no longer carries the home directory.
 
 ### Added
