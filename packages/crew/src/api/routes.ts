@@ -11017,7 +11017,7 @@ export function registerRoutes(
       'councilSize',
       'councilSpawnStaggerMs',
       // J6 M1: `requirementsGraph` (the minimum and the page knobs) is no longer a setting: a patch naming it is
-      // answered with it in `ignored`, as any unknown key is, and studio says the setting is not offered.
+      // dropped like any unknown key. The answer is `{ settings }` only; the audit record lists it as ignored.
     ];
     const safe: Partial<import('../core/types.js').CrewSystemSettings> = {};
     for (const key of allowed) {

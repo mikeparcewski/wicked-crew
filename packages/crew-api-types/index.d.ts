@@ -7725,7 +7725,7 @@ export interface SystemSettings {
    * Exported as `WICKED_COUNCIL_SPAWN_STAGGER_MS`, read per council. Absent = the default.
    */
   councilSpawnStaggerMs?: number;
-  // (J6 M1) `requirementsGraph` (the minimum and the page knobs, 0.159.0 / 0.163.0) is no longer a setting: a PUT
+  // (api-types next, J6 M1) `requirementsGraph` (the minimum and the page knobs, 0.159.0 / 0.163.0) is no longer a setting: a PUT
   // naming it keeps nothing (a domain model has no share to reach and no pages).
   /*
    * There is NO skills setting (skills keystone, api-types 0.28.0). The daemon-owned skills root is
@@ -7968,7 +7968,7 @@ export interface RequirementsCoverage {
   realPct: number;
   /** (api-types 0.208.0, wicked-crew#1530) Since wicked-core#1445: optional confidence-weighted headline; the stated share stays `realPct`. */
   weightedPct?: number;
-  /** (J6 M1) Optional: the engine's minimum, only while an engine before J6 C3 still sends one. Nothing is held to it
+  /** (api-types next, J6 M1) Optional: the engine's minimum, only while an engine before J6 C3 still sends one. Nothing is held to it
    *  any more; show it, if at all, as the old label's number. */
   minPct?: number;
   behaviorBearing: number;
@@ -8060,7 +8060,7 @@ export interface RequirementsCodeDrift {
   headCommit: string | null;
 }
 
-// (J6 M1) RequirementsMinimum, RequirementsMinimumBody and RequirementsMinimumResponse are gone with
+// (api-types next, J6 M1) RequirementsMinimum, RequirementsMinimumBody and RequirementsMinimumResponse are gone with
 // `PUT /repos/:id/requirements/minimum`.
 
 export interface RequirementDetail extends RequirementSummary {
@@ -8317,7 +8317,7 @@ export interface RequirementsNotGenerated {
   /**
    * (api-types 0.163.0, domain-graph-3; real requirements since 0.164.0) How far the repository
    * is ("23% real requirements · 4397 placeholders"): present when the repository has a store to count.
-   * (J6 M1) `minPct`, when an engine before J6 C3 still sends it, is that engine's old target; nothing is held to it.
+   * (api-types next, J6 M1) `minPct`, when an engine before J6 C3 still sends it, is that engine's old target; nothing is held to it.
    */
   coverage?: RequirementsCoverage;
 }

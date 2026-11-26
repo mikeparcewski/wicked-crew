@@ -264,8 +264,8 @@ export interface RequirementCorroboration {
 
 /**
  * How much of the repository's product code is REAL requirements (domain-model 1.1.0
- * `metadata.coverage`, schema bundle 1.3.0; wicked-core#1233). `realPct` is the one number the
- * minimum is checked against; `placeholders` are shown, never counted.
+ * `metadata.coverage`, schema bundle 1.3.0; wicked-core#1233). `realPct` follows the counts; nothing is
+ * held to a minimum (J6 M1). `placeholders` are shown, never counted.
  */
 export interface RequirementsCoverage {
   realPct: number;
