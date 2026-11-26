@@ -14,6 +14,7 @@ import { registerRoutes } from '../src/api/routes.js';
 import * as artifacts from '../src/apps/publish/artifacts.js';
 import type { AppStore } from '../src/apps/store.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
+import { runnerFiles } from '../../apps-server/scripts/runner-files.mjs';
 
 vi.mock('node:fs', async (original) => ({ ...await original<typeof import('node:fs')>() }));
 vi.mock('node:child_process', async (original) => ({ ...await original<typeof import('node:child_process')>() }));
@@ -23,7 +24,11 @@ const server = join(crew, 'dist/apps-server');
 const checkoutServer = resolve(crew, '../apps-server/dist');
 const runtime = join(crew, 'dist/studio/apps-standalone');
 const checkoutRuntime = resolve(crew, '../../../wicked-studio/dist/apps-standalone');
-const serverFiles = ['Dockerfile', 'server/lib/bundle/server.mjs', 'server/shim/host.js', 'server/shim/host.css', 'runners/sqlite-runner.mjs'];
+// crew#1956: the runner list a build records, as apps-server's build.mjs writes it (runner-files.mjs over crew's
+// own runners), and every file on it.
+const runners = runnerFiles(join(crew, 'runners'));
+const recorded = `${JSON.stringify(runners)}\n`;
+const serverFiles = ['Dockerfile', 'server/lib/bundle/server.mjs', 'server/shim/host.js', 'server/shim/host.css', 'runners/files.json', ...runners.map((f) => `runners/${f}`)];
 const runtimeFiles = ['runtime.js', 'runtime.css', 'fixture.html', 'fixture.js'];
 
 function filesAt(...dirs: string[]): void {
@@ -32,7 +37,7 @@ function filesAt(...dirs: string[]): void {
     if (!files.has(String(path))) throw new Error('missing');
     return { isFile: () => true } as fs.Stats;
   });
-  vi.spyOn(fs, 'readFileSync').mockImplementation((path) => String(path).endsWith('.js') ? 'standalone js' : 'standalone css');
+  vi.spyOn(fs, 'readFileSync').mockImplementation((path) => String(path).endsWith('files.json') ? recorded : String(path).endsWith('.js') ? 'standalone js' : 'standalone css');
 }
 
 afterEach(() => {
@@ -59,6 +64,32 @@ describe('publish artifact resolution', () => {
       if (path === join(server, missing)) throw new Error('missing');
       return present(path, options);
     });
+    expect(artifacts.appsServerArtifact()).toBeNull();
+  });
+
+  it('derives the runner set from the runner itself: upload-parse.mjs is on it (crew#1956)', () => {
+    expect(runners[0]).toBe('sqlite-runner.mjs');
+    expect(runners).toContain('upload-parse.mjs');
+  });
+
+  it.each([
+    ['absent (a build from before crew#1956, as the 0.19.0 package)', null],
+    ['not JSON', 'sqlite-runner.mjs'],
+    ['without the runner', JSON.stringify(runners.filter((f) => f !== 'sqlite-runner.mjs'))],
+    ['naming a path', JSON.stringify([...runners, '../server/lib/bundle/server.mjs'])],
+    ['naming a nested file', JSON.stringify([...runners, 'sub/x.mjs'])],
+  ])('refuses a server build whose runners/files.json is %s', (_why, text) => {
+    filesAt(server);
+    vi.mocked(fs.readFileSync).mockImplementation((path) => {
+      if (String(path).endsWith('files.json') && text !== null) return text;
+      throw new Error('missing');
+    });
+    expect(artifacts.appsServerArtifact()).toBeNull();
+  });
+
+  it('refuses a server build missing a file its runner list names', () => {
+    filesAt(server);
+    vi.mocked(fs.readFileSync).mockImplementation(() => JSON.stringify([...runners, 'later-sibling.mjs']));
     expect(artifacts.appsServerArtifact()).toBeNull();
   });
 
