@@ -17751,9 +17751,9 @@ export interface ProductComposeBody {
   /** (api-types 0.192.0) As {@link LaunchRunBody.shape}: must name a card option whose launch is `compose`; its compose
    *  level (`epics` · `stories` · `tasks`) decides how far down the draft goes. */
   shape?: LaunchShape;
-  /** (api-types next, crew#1884) A person's stand-in choice for this draft, as `LaunchRunBody.standIns`. The compose
-   *  is a person's start, so its launch asks the choice: a short roster with no consent is `409 stand_in_choice`
-   *  (relayed), answered by sending the body again with `standIns: true`. */
+  /** (api-types next, crew#1884) A person's stand-in choice for this draft, as `LaunchRunBody.standIns`; the
+   *  `standInReview: 'always'` setting applies as on any launch. This route does not ask the choice itself (its client
+   *  draws no question yet); a chat Backlog job's compose asks it on the card. */
   standIns?: true;
 }
 

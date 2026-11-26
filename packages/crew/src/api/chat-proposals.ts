@@ -102,6 +102,7 @@ import {
   seatProtections,
   seatRemovalNote,
   seatsRequired,
+  STAND_IN_PENDING_NOTE,
   seatsShortLine,
   briefOf,
   inputLines,
@@ -3090,7 +3091,8 @@ export class ChatProposals {
     // The press consents to exactly the job the question was asked on (codex r1 on crew#1884): nothing bundled with it.
     const standInsAsked = edits.standIns !== undefined;
     delete edits.standIns;
-    const standIns = standInsAsked && fromPerson && parent.proposal.question?.kind === 'stand_in' && Object.keys(edits).length === 0;
+    // Exactly `{ standIns: true }` as sent: a `confirmLoss` (consumed above) or any other edit beside it is not this press.
+    const standIns = standInsAsked && fromPerson && parent.proposal.question?.kind === 'stand_in' && Object.keys(rev.edits).length === 1;
     const standInNote = standInsAsked && !standIns
       ? ['Not changed: stand-ins are chosen with your press on wicked\'s question, asked when this job is short of a helper.']
       : [];
@@ -3264,10 +3266,15 @@ export class ChatProposals {
     const removal = seatRemovalNote(edits.removeSeats, parent.proposal.seats?.keys ?? parent.proposal.helpers?.seats ?? [], workers, (k) => ctx.roster.find((s) => s.key === k)?.name ?? k);
     // (crew#1884) The consent holds only for the job the question was asked on: the same catalog and the same resolved
     // option. A job that changed since (a catalog refresh, a setting) is asked again at its Start.
-    const consented = standIns && candidate.catalogRev === parent.proposal.catalogRev && candidate.resolution === parent.proposal.resolution;
+    // Its checks too: a daemon setting (QE acceptance) changes them without a catalog revision (codex r2).
+    const sameList = (a: readonly string[] | undefined, b: readonly string[] | undefined): boolean => JSON.stringify([...(a ?? [])].sort()) === JSON.stringify([...(b ?? [])].sort());
+    const consented = standIns && candidate.catalogRev === parent.proposal.catalogRev && candidate.resolution === parent.proposal.resolution
+      && sameList(candidate.gate, parent.proposal.gate) && sameList(candidate.seatRules, parent.proposal.seatRules);
     const consentNotes = consented ? [STAND_IN_CONSENT_NOTE] : standIns ? ['Not changed: this job changed since wicked asked about stand-ins. Press Start and it asks again.'] : [];
     const notes = [...removal, ...consentNotes];
-    const noted = notes.length === 0 || candidate.sentence === undefined ? candidate : { ...candidate, sentence: { ...candidate.sentence, notes: [...candidate.sentence.notes, ...notes] } };
+    // The choice's note replaces the one that said the Start would ask.
+    const kept = (candidate.sentence?.notes ?? []).filter((n) => !(consented && n === STAND_IN_PENDING_NOTE));
+    const noted = notes.length === 0 || candidate.sentence === undefined ? candidate : { ...candidate, sentence: { ...candidate.sentence, notes: [...kept, ...notes] } };
     const proposal: ArtifactProposal = consented ? { ...noted, standIns: true } : noted;
     if (!this.write(chatId, { at: this.now(), turnId: src.turnId ?? `person:${src.pid.slice(src.pid.lastIndexOf(':') + 1)}`, kind: 'proposal', proposal }, instance)) return this.gone(chatId);
     const view = foldProposals(this.deps.records(chatId)).get(src.pid);

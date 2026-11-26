@@ -330,15 +330,21 @@ export function seatsNeeded(r: ResolvedOption): number {
   return 1 + (r.resolved.seats.distinctEvaluator ? 1 : 0);
 }
 
-/** (crew#1884) Whether a chat card's Start asks the stand-in choice: every Start but a reshape's, which rejects the held
- *  plan before it launches, so its question would come after the plan it replaces was gone (codex r1 C5). */
-export function chatStartAsksStandIns(p: Pick<ArtifactProposal, 'reshapes'>): boolean {
-  return p.reshapes === undefined;
+/** (crew#1884) The note on a card a builder alone can start, before the person chose stand-ins for it (the choice's
+ *  own note replaces it). */
+export const STAND_IN_PENDING_NOTE = 'Only one helper can work on this now, so its check would be a labelled stand-in, not an independent review: wicked asks you first when you start it, unless stand-ins are on for every job.';
+
+/** (crew#1884) How a chat card's Start meets the stand-in choice. Every Start but a reshape's asks it (`standInChoice`).
+ *  A reshape's Start rejects the held plan before it launches, so a question then would come after the plan it replaces
+ *  was gone (codex r1 C5): it launches stand-in-aware without asking (`standInAware`), and a short role holds at the
+ *  run's stand-in gate, where the person answers (codex r2). */
+export function chatStartStandIns(p: Pick<ArtifactProposal, 'reshapes'>): { standInChoice: true } | { standInAware: true } {
+  return p.reshapes === undefined ? { standInChoice: true } : { standInAware: true };
 }
 
 /** (crew#1884) The seats a card needs before Start: on an engine with stand-ins, a job that can take them needs only a
  *  seat that builds (its Start asks the stand-in choice for a short checker); otherwise {@link seatsNeeded}. */
-export function seatsRequired(r: ResolvedOption, ctx: Pick<JobContext, 'standInsFor'>): number {
+export function seatsRequired(r: ResolvedOption, ctx: { standInsFor?: JobContext['standInsFor'] | undefined }): number {
   const kind = r.resolved.launch.kind;
   return (kind === 'run' || kind === 'compose') && ctx.standInsFor?.(r.workflow) === true ? 1 : seatsNeeded(r);
 }
@@ -635,8 +641,8 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
   // A self-seated workflow picks its own seat at launch: the roster's count is not its requirement (codex r3).
   if (short && coming === undefined && !(r.workflow !== null && SELF_SEATED.has(r.workflow))) blockedBy.push(seatsShortLine(r, seats.keys.length, seatsRequired(r, ctx)));
   // (crew#1884) A builder and no checker on an engine with stand-ins: said before Start, which asks the choice.
-  else if (!short && seats.keys.length < seatsNeeded(r) && !(r.workflow !== null && SELF_SEATED.has(r.workflow))) {
-    notes.push('Only one helper can work on this now, so its check would be a labelled stand-in, not an independent review: wicked asks you first when you start it, unless stand-ins are on for every job.');
+  else if (!short && coming === undefined && seats.keys.length < seatsNeeded(r) && !(r.workflow !== null && SELF_SEATED.has(r.workflow))) {
+    notes.push(STAND_IN_PENDING_NOTE);
   }
   // The one question: the first required need that is missing.
   let question: ProposalQuestion | null = null;
@@ -962,7 +968,7 @@ export function seatProtections(r: ResolvedOption | null): SeatProtection[] {
 export function mergeRevision(
   parent: ArtifactProposal,
   edits: ProposalRevisionEdits,
-  ctx: { chat: JobChat; served: ServedState; roster: ReadonlyArray<{ key: string; name: string }>; pool?: JobContext['pool']; jobSources?: JobContext['jobSources'] },
+  ctx: { chat: JobChat; served: ServedState; roster: ReadonlyArray<{ key: string; name: string }>; pool?: JobContext['pool']; jobSources?: JobContext['jobSources']; standInsFor?: JobContext['standInsFor'] },
 ): MergeResult {
   const notes: string[] = [];
   const refusedInputs: string[] = [];
@@ -1049,7 +1055,8 @@ export function mergeRevision(
   }
   if (edits.removeSeats !== undefined && edits.removeSeats.length > 0) {
     const r = resolveOption(facts.card, optionFor(CATALOG_V2_CARDS.find((c) => c.id === facts.card)!, facts.option), ctx.served);
-    const need = r !== null && proposalKindOf(r) === 'create' ? 2 : r === null ? 1 : seatsNeeded(r);
+    // (crew#1884) A card that can take stand-ins needs only its builder, as when it was drawn (codex r2).
+    const need = r !== null && proposalKindOf(r) === 'create' ? 2 : r === null ? 1 : seatsRequired(r, ctx);
     const current = facts.seats ?? drawOrder(facts.lead, ctx).filter((k) => can.has(k));
     // (F1/F2) A removal is applied or refused in the card's words; what WAS applied is said from the published card
     // (`seatRemovalNote`), never from this intermediate merge. The count reads only the seats that can work now.

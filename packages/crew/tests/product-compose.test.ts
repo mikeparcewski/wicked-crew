@@ -92,9 +92,18 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
     const chat = await composeLaunch(adapterRef, async (raw, ctx) => {
       launched.push({ body: raw as Record<string, unknown>, auth: undefined, standInChoice: (ctx as { standInChoice?: boolean }).standInChoice });
       return { statusCode: 201, payload: { runId: 'run-compose-2' } };
-    }, 'p1', { requirements: [{ repoId: 'alpha', key: 'billing::r1' }] }, { actor: { id: 'ann', kind: 'human', trust: 'operator' }, log: console }, { fromProposal: 'chat-1:p:x', standInChoice: true });
+    }, 'p1', { requirements: [{ repoId: 'alpha', key: 'billing::r1' }] }, { actor: { id: 'ann', kind: 'human', trust: 'operator' }, log: console }, { fromProposal: 'chat-1:p:x', standIns: { standInChoice: true } });
     expect(chat.code).toBe(202);
     expect(launched[2]!.standInChoice).toBe(true);
+    // A reshape's compose does not ask (it rejects the held plan first) but launches aware (codex r2 C5).
+    let aware: unknown;
+    const reshape = await composeLaunch(adapterRef, async (_raw, ctx) => {
+      aware = ctx;
+      return { statusCode: 201, payload: { runId: 'run-compose-3' } };
+    }, 'p1', { requirements: [{ repoId: 'alpha', key: 'billing::r1' }] }, { actor: { id: 'ann', kind: 'human', trust: 'operator' }, log: console }, { fromProposal: 'chat-1:p:y', standIns: { standInAware: true } });
+    expect(reshape.code).toBe(202);
+    expect(aware).toMatchObject({ standInAware: true });
+    expect((aware as { standInChoice?: unknown }).standInChoice).toBeUndefined();
   });
 
   it('a requirement of a member with no repo-graph root answers 503 with the diagnosis, and nothing launches', async () => {

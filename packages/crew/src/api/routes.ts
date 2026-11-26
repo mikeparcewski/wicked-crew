@@ -327,7 +327,7 @@ const BRIEF_COPY_MAX = 512 * 1024;
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
 import { registerInteractiveDocChecks } from '../interactive/doc-checks-routes.js';
 import { crewStateHome, stateHomeOfDb, wickedWorkRoot } from '../projects/state-home.js';
-import { chatStartAsksStandIns, demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, jobLaunchRoster, jobRevisionLaunch, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
+import { chatStartStandIns, demoShowOf, factsOf, inputLines, jobInputsOfProposal, jobLaunchCommon, jobLaunchRoster, jobRevisionLaunch, personPid, requestDigest, SELF_SEATED, type JobFacts } from './chat-jobs.js';
 import { DocumentsRefused, documentsClause, RUN_DOCS_TOKENS_MAX, removeStagedDocuments, stagedDocumentsRemoved, stagedDocumentsOf, stageRunDocuments, type StagedDocuments } from './run-documents.js';
 import { checkSourcePick, projectSources, RUN_SOURCES_MAX, runSourcesDeps, type RunSourcePicks, webScopeReason } from './run-sources.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
@@ -634,6 +634,9 @@ export interface LaunchContext {
    *  `409 stand_in_choice` / `no_usable_helper` before anything is written (`POST /runs`; its callers draw the choice).
    *  Without it a launch takes stand-ins only on the consent a person already gave (the `standInReview` setting). */
   standInChoice?: boolean;
+  /** (crew#1884) Launch stand-in-aware without asking (a chat reshape's Start, which cannot ask before it rejects the
+   *  held plan): a role the roster is short of holds at the run's stand-in gate, where the person answers. */
+  standInAware?: boolean;
 }
 
 /**
@@ -4056,8 +4059,8 @@ export function registerRoutes(
       if (consent !== null) {
         input.standInAware = true;
         input.standIn = consent;
-      } else if (preflight !== null) {
-        // Not short: launched aware, so a seat lost mid-run holds at the stand-in gate instead of failing.
+      } else if (preflight !== null || ctx.standInAware === true) {
+        // Not short (or not asked): launched aware, so a short or lost seat holds at the stand-in gate instead of failing.
         input.standInAware = true;
       }
     }
@@ -4792,7 +4795,7 @@ export function registerRoutes(
           // (crew#1884) A person's Start asks the stand-in choice, as studio's Start on POST /runs does: a short roster
           // with no consent reopens the card with the stand_in question. A reshape does not ask: its Start rejects the
           // held plan first, so the question would come after the plan it replaces was gone.
-          { ...ctx, fromProposal: d.pid, ...(chatStartAsksStandIns(p) ? { standInChoice: true } : {}), ...(d.power === true ? { powerRequired: true } : {}) },
+          { ...ctx, fromProposal: d.pid, ...chatStartStandIns(p), ...(d.power === true ? { powerRequired: true } : {}) },
         );
         if (out.statusCode !== 201) throw jobRefusal(out.statusCode, out.payload);
         return;
@@ -4805,7 +4808,7 @@ export function registerRoutes(
           humanConfirm: 'before:1',
           common,
           // (crew#1884) The card draws the stand-in question; a reshape does not ask (as above).
-          standInChoice: chatStartAsksStandIns(p),
+          standIns: chatStartStandIns(p),
         });
         if (out.code !== 202) throw jobRefusal(out.code, out.body);
         return;

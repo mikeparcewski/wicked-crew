@@ -18,7 +18,7 @@ import type { CoreEvent, LaunchRunInput } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 import { STAND_IN_CONSENT_NOTE } from '../src/api/chat-proposals.js';
-import { chatStartAsksStandIns } from '../src/api/chat-jobs.js';
+import { STAND_IN_PENDING_NOTE, chatStartStandIns } from '../src/api/chat-jobs.js';
 
 /** The engine's own preflight for a one-CLI roster (`tests/fixtures/stand-in-preflight-one-helper.json`, written by
  *  wicked-core `src/independence.rs` `t_r2_one_signed_in_cli_is_short_for_every_independent_role`). */
@@ -39,13 +39,15 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
   let standInsOn = true;
   /** A saved preset appears (the served catalog changes). */
   let extraPreset = false;
+  /** The daemon's QE acceptance setting is off. */
+  let qeOff = false;
   const preflights: LaunchRunInput[] = [];
   const listeners: Array<(e: CoreEvent) => void> = [];
 
   const adapter = (): CoreAdapter => ({
     dbPath: join(home, 'core.db'),
     projectsSupported: () => true,
-    getSettings: async () => ({}),
+    getSettings: async () => (qeOff ? { qeAcceptance: 'off' } : {}),
     ping: async () => 'ok',
     onLaunch: (): (() => void) => () => undefined,
     onEvent: (fn: (e: CoreEvent) => void): (() => void) => {
@@ -114,6 +116,7 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
     onlyClaude = false;
     standInsOn = true;
     extraPreset = false;
+    qeOff = false;
   });
 
   let n = 0;
@@ -223,6 +226,9 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
     expect(revised.statusCode, revised.body).toBe(201);
     const next = (revised.json() as { view: ChatProposalView }).view.proposal;
     expect(next.blocked).toBeNull();
+    // The choice's note replaces the one that said Start would ask (codex r2).
+    expect(next.sentence?.notes).toContain(STAND_IN_CONSENT_NOTE);
+    expect(next.sentence?.notes).not.toContain(STAND_IN_PENDING_NOTE);
     const go = await start(chatId, next.pid, { edits: undefined });
     expect(go.statusCode, go.body).toBe(200);
     const input = launches.at(-1)!;
@@ -246,6 +252,38 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
     expect((revised.json() as { view: ChatProposalView }).view.proposal.standIns).toBeUndefined();
   });
 
+  it('the press with a confirmLoss beside it consents to nothing (codex r2)', async () => {
+    const { chatId, pid } = await proposed();
+    await start(chatId, pid, {});
+    const revised = await revise(chatId, pid, { standIns: true, confirmLoss: true }, `loss-${pid}`);
+    expect(revised.statusCode, revised.body).toBe(201);
+    expect((revised.json() as { view: ChatProposalView }).view.proposal.standIns).toBeUndefined();
+  });
+
+  it('a question answered after the job\'s checks changed (a QE setting) consents to nothing (codex r2)', async () => {
+    qeOff = true;
+    const { chatId, pid } = await proposed();
+    await start(chatId, pid, {});
+    qeOff = false;
+    const revised = await revise(chatId, pid, { standIns: true }, `qe-${pid}`);
+    expect(revised.statusCode, revised.body).toBe(201);
+    const next = (revised.json() as { view: ChatProposalView }).view.proposal;
+    expect(next.gate).toContain('qe-acceptance');
+    expect(next.standIns).toBeUndefined();
+  });
+
+  it('removing the checker from a two-helper card leaves a builder alone that can start (codex r2 C1)', async () => {
+    const { chatId, pid, view } = await proposed();
+    expect(view.proposal.seats?.keys.length).toBeGreaterThan(1);
+    const checkers = view.proposal.seats!.keys.slice(1);
+    const revised = await revise(chatId, pid, { removeSeats: checkers }, `rm-${pid}`);
+    expect(revised.statusCode, revised.body).toBe(201);
+    const next = (revised.json() as { view: ChatProposalView }).view.proposal;
+    expect(next.seats?.keys).toEqual([view.proposal.seats!.keys[0]]);
+    expect(next.blocked).toBeNull();
+    expect(next.sentence?.notes).toContain(STAND_IN_PENDING_NOTE);
+  });
+
   it('a question answered after the catalog changed consents to nothing; the Start asks again', async () => {
     const { chatId, pid } = await proposed();
     await start(chatId, pid, {});
@@ -258,6 +296,19 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
     const before = launches.length;
     const again = await start(chatId, next.pid, { edits: undefined });
     expect(again.statusCode, again.body).toBe(409);
+    expect(launches.length).toBe(before);
+  });
+
+  it('the catalog changes after the press and before Start: the Start refuses, nothing is launched (pi r2)', async () => {
+    const { chatId, pid } = await proposed();
+    await start(chatId, pid, {});
+    const revised = await revise(chatId, pid, { standIns: true }, `late-${pid}`);
+    const next = (revised.json() as { view: ChatProposalView }).view.proposal;
+    expect(next.standIns).toBe(true);
+    extraPreset = true;
+    const before = launches.length;
+    const out = await start(chatId, next.pid, { edits: undefined });
+    expect(out.statusCode, out.body).toBe(409);
     expect(launches.length).toBe(before);
   });
 
@@ -302,8 +353,8 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
 // codex r1 C5: a reshape's Start rejects the held plan before it launches, so it does not ask the choice (a question
 // after the held plan was gone could not keep it); it launches as today (the setting, or a mid-run stand-in gate).
 describe('which chat Starts ask the stand-in choice (crew#1884)', () => {
-  it('every Start but a reshape\'s', () => {
-    expect(chatStartAsksStandIns({})).toBe(true);
-    expect(chatStartAsksStandIns({ reshapes: 'held-run' })).toBe(false);
+  it('every Start but a reshape\'s asks; a reshape launches aware, so a short role holds at the stand-in gate', () => {
+    expect(chatStartStandIns({})).toEqual({ standInChoice: true });
+    expect(chatStartStandIns({ reshapes: 'held-run' })).toEqual({ standInAware: true });
   });
 });

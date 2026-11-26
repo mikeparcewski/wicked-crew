@@ -78,12 +78,13 @@ export interface ComposeLaunchExtra {
   fromProposal?: string;
   /** Hold the run at its plan (a chat launch always does). */
   humanConfirm?: string;
-  /** (crew#1884) The caller draws the stand-in choice (a chat card's question): the launch asks it. */
-  standInChoice?: boolean;
+  /** (crew#1884) How the caller meets the stand-in choice (`chatStartStandIns`): asked (a chat card draws the question),
+   *  or launched aware without asking (a reshape). Absent: neither (the route's own caller). */
+  standIns?: { standInChoice: true } | { standInAware: true };
 }
 
 /** The shared launch function's shape here (DES-CHAT-FIRST-001 C3): the routes module passes its own. */
-export type ComposeLaunchRun = (raw: unknown, ctx: { actor: Actor; log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>; fromProposal?: string; target?: 'compose'; compose?: ComposeFacts; standInChoice?: boolean }) => Promise<{ statusCode: number; payload: unknown }>;
+export type ComposeLaunchRun = (raw: unknown, ctx: { actor: Actor; log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>; fromProposal?: string; target?: 'compose'; compose?: ComposeFacts; standInChoice?: boolean; standInAware?: boolean }) => Promise<{ statusCode: number; payload: unknown }>;
 
 const oneLine = (s: string): string => s.replace(/\s+/gu, ' ').trim();
 /** `s` cut to at most `max` UTF-8 bytes on a character boundary, `…` marking a cut. */
@@ -274,7 +275,7 @@ export async function composeLaunch(
         // (crew#1884) A chat Backlog job's Go asks the stand-in choice, as `POST /runs` does: its card reopens with the
         // question. The route's own caller (studio's Draft) does not draw the choice yet, so the route takes `standIns`
         // and the setting but does not ask (studio follow-up).
-        { ...ctx, target: 'compose', ...(extra.standInChoice === true ? { standInChoice: true } : {}), compose: composeFactsOf(id, rows, level, draft, review), ...(extra.fromProposal !== undefined ? { fromProposal: extra.fromProposal } : {}) },
+        { ...ctx, target: 'compose', ...(extra.standIns ?? {}), compose: composeFactsOf(id, rows, level, draft, review), ...(extra.fromProposal !== undefined ? { fromProposal: extra.fromProposal } : {}) },
       );
       // POST /runs' own refusal (no eligible seat, a busy engine, an archived project, …) is
       // relayed as it answered; its 201 `{runId}` becomes this route's 202.
