@@ -248,7 +248,7 @@ describe('auth: the daemon route table, each route under other spellings', () =>
     removeScratch(scratch);
   });
 
-  const UNIT = new Set(['POST /api/v1/mcp/call', 'POST /api/v1/mcp/tools', 'POST /api/v1/mcp/ask', 'GET /api/v1/mcp/ask', 'DELETE /api/v1/mcp/ask', 'POST /api/v1/apps/check', 'POST /api/v1/apps/produce', 'POST /api/v1/insights/facts']);
+  const UNIT = new Set(['POST /api/v1/mcp/call', 'POST /api/v1/mcp/tools', 'POST /api/v1/mcp/ask', 'GET /api/v1/mcp/ask', 'DELETE /api/v1/mcp/ask', 'POST /api/v1/apps/check', 'POST /api/v1/apps/produce', 'POST /api/v1/insights/facts', 'POST /api/v1/deliver/text']);
   const respell = (path: string): string => `/%61${path.slice(2)}`; // the prefix's first letter, percent-encoded
   const abs = (path: string): string => `http://127.0.0.1${path}`;
   const concrete = (path: string): string => path.replace(/:[A-Za-z0-9_]+/g, 'x1').replace(/\*$/, 'x1');

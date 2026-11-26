@@ -31,10 +31,12 @@
  *  (e) `gh pr create --head <branch> --title … --body-file …`, with gh's output and exit status
  *      captured SEPARATELY so a gh failure fails the phase carrying gh's own message. The title
  *      and body are COMPOSED FROM THE RUN (crew#524 / F-3R2-014, `core/deliver-text.ts`): the
- *      script asks the daemon that launched it (`GET /runs/:id/deliver-text`) for the text derived
- *      from the persisted run record — intent, `Fixes #N`, run link, phases + seats + gate
- *      outcomes, repo checks with exit codes, the evaluator verdict — and falls back to the same
- *      composer's launch-time text (embedded in the script) when the daemon cannot answer. The
+ *      script asks the daemon that launched it (`POST /deliver/text`, crew#1885, with the read key
+ *      in the 0600 file its script names, `core/deliver-key.ts`, never a value on its command line) for the text derived from the persisted run record — intent,
+ *      `Fixes #N`, run link, phases + seats + gate outcomes, repo checks with exit codes, the
+ *      evaluator verdict, the assurance lines — and refuses, nothing pushed, when that daemon
+ *      cannot answer; the same composer's launch-time text (embedded in the script) is used only
+ *      when no daemon origin was known. The
  *      commit the phase makes for uncommitted work carries that same text (`git commit -F`), so
  *      ITS subject is the PR title; a run that committed incrementally keeps its own commits;
  *  (f) the PR URL is the last line of the phase output.
@@ -91,6 +93,7 @@ import { randomBytes } from 'node:crypto';
 import { devNull } from 'node:os';
 import type { GitIdent } from '../setup/known.js';
 import { childEnvWithBootEstateDb } from './governance-store.js';
+import { DELIVER_KEY_FILE_VAR, mintDeliverKey } from './deliver-key.js';
 import { ADO_RAW_ENV, FSMONITOR_OFF_PARAMETER, gitChildEnv, withAdoCredential } from './exec.js';
 import type { PhaseDef, WorkflowDef } from './types.js';
 import { ADO_HELPER_JS } from './ado-deliver-helper.js';
@@ -278,6 +281,9 @@ export interface DeliverScriptOptions {
   /** (crew#739) The sentinel nonce (16-64 hex digits). Absent ⇒ a fresh one per composition; a
    *  test passes one to read the sentinel deterministically. Refused at compose time otherwise. */
   nonce?: string;
+  /** (crew#1885) The read key file the script names (`core/deliver-key.ts`). Absent ⇒ one is minted for this
+   *  composition whenever a daemon origin is known; a post-hoc delivery mints its own to grant and drop it. */
+  keyFile?: string;
   /** (crew#720) The Azure DevOps repository this delivery goes to. Absent ⇒ derived from
    *  `originUrl` ({@link adoRepoOf}); a test passes one to point the push and the REST calls at a
    *  local git server and a mocked API. `null` ⇒ not an Azure DevOps delivery. */
@@ -946,6 +952,11 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
   // reference written past the cap still reaches the PR body (wave-3 isolation review).
   const fallback = composeEmbeddedDeliverText(facts);
   const api = apiOriginLiteral(opts.apiOrigin);
+  // (crew#1885) The read key for `POST /deliver/text`: a file only the daemon's user can read, named here by path. The
+  // key itself is never in this text, which is the shell's argv while the script runs (`bash -lc`).
+  const keyFile = api === '' ? '' : (opts.keyFile ?? mintDeliverKey());
+  // A quote is shell-quoted below; a line break would split the line the route reads the key's id from.
+  if (/[\r\n]/.test(keyFile)) throw new Error('deliver read key: the key file path holds a line break');
   const fallbackLines = heredocLines(framedDeliverText(fallback));
   const heredoc = heredocDelimiter(fallbackLines);
   // crew#550: the PR title may run to GitHub's 256 characters, the commit subject stays at git's 72.
@@ -1003,6 +1014,9 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
   }
   return [
     'set -euo pipefail',
+    // (crew#1885, codex r2) A login profile (`bash -lc`) may have turned tracing on; the trace would print the read key
+    // into the captured output. Off before anything else runs; the group's own stderr keeps the `set +x` line quiet.
+    '{ set +x; } 2>/dev/null',
     // The engine concatenates the child's stdout and THEN its stderr, so anything git writes to
     // stderr would land after the PR URL and break "(f) the URL is the last line". Folding stderr
     // into stdout for the whole phase keeps the output in true chronological order and makes the
@@ -1310,11 +1324,12 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     //
     // (c1-text) THE PR TITLE + BODY AND THE COMMIT MESSAGE (crew#524 / F-3R2-014). `--fill` gave
     // wicked-studio#249 a title cut mid-word and an EMPTY body. The text now comes from the run:
-    // the script asks the daemon that launched it for `GET /runs/<id>/deliver-text` — composed from
-    // the persisted run record (phases + seats + gate outcomes, repo checks with exit codes, the
-    // evaluator verdict, the run link) — and falls back to the launch-time composition embedded
-    // below (intent, `Fixes #N`, run id, phase list) when the daemon cannot answer: no origin
-    // known, no `curl`, an auth-required daemon (401), a daemon that went away. Either way the text
+    // the script asks the daemon that launched it for its text (`POST /deliver/text`, crew#1885),
+    // composed from the persisted run record (phases + seats + gate outcomes, repo checks with exit
+    // codes, the evaluator verdict, the run link). The launch-time composition embedded below
+    // (intent, `Fixes #N`, run id, phase list) is used only when no daemon origin was known (a
+    // CLI-driven launch); a known daemon that does not answer with the record refuses the delivery
+    // (crew#1885: the embedded text knows none of the run's assurance lines). Either way the text
     // is FRAMED the same (line 1 title, line 2 blank, then the body), it is the commit message
     // verbatim (`git commit -F`: git takes the first paragraph as the subject), and the PR is
     // opened with `--title` + `--body-file` from it. WHICH text was used is always said in the
@@ -1335,19 +1350,31 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // and must not become the PR text (Copilot on #525).
     "_framed() { [ -s \"$1\" ] && [ -n \"$(sed -n 1p \"$1\")\" ] && [ -z \"$(sed -n 2p \"$1\")\" ] && [ -n \"$(sed -n '3,$p' \"$1\" | tr -d '[:space:]' | head -c 1)\" ]; }",
     `API='${api}'`,
+    `${DELIVER_KEY_FILE_VAR}=${shellSingleQuote(keyFile)}`,
     // (e2e-1105 F4c) Set only when the text below is the run record: only that text may replace an
     // existing PR's description (the launch-time fallback knows no correction given since).
     "FROMRUN=''",
+    // (crew#1885) With a daemon known, the text MUST be the run record's: only it carries the run's assurance lines
+    // (stand-ins, reduced assurance, the QE decision, floor overrides), and the launch-time text cannot know them. So
+    // a record this script cannot read refuses here, before anything is staged, committed or pushed, as a refused
+    // push does (`rejected`, the work kept, approve to retry). The script asks with its read key (`POST /deliver/text`),
+    // which needs no operator bearer, so `auth: required` reads it too. The key is read from its 0600 file by the
+    // shell's own `read` and reaches curl's stdin from the shell's own `printf`: no program started here has it in its
+    // arguments (the script text is `bash -lc`'s argv, so it names only the file).
+    `_norecord() { VERDICT=rejected; : > ${DELIVER_STRANDED_SENTINEL} || true; echo "deliver: $1, so the pull request could not say how this run was checked (stand-ins, reduced assurance, the QE decision, floor overrides); a PR without that is not opened. Nothing was staged, committed or pushed and the work stays in the worktree; once the daemon at $API answers, approve to retry the deliver phase, or, if the run has already ended, deliver it again from its run page (a post-hoc delivery, which reads the record itself). ${DELIVER_PUSH_REJECTED_MARKER}"; exit 1; }`,
     'if [ -z "$API" ]; then',
     '  echo "deliver: no daemon origin was known when this run launched — using the launch-time PR text"',
     'elif ! command -v curl >/dev/null 2>&1; then',
-    '  echo "deliver: curl is not available in this shell — using the launch-time PR text"',
-    // `--noproxy "*"`: the daemon is loopback; an operator shell's http_proxy must not swallow it.
-    'elif curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" "$API/api/v1/runs/$RUNID/deliver-text" -o "$TD/text" 2>/dev/null && _framed "$TD/text"; then',
+    '  _norecord "curl is not available in this shell to read the run record"',
+    `elif ! { [ -n "$${DELIVER_KEY_FILE_VAR}" ] && IFS= builtin read -r DKEY < "$${DELIVER_KEY_FILE_VAR}"; } 2>/dev/null; then`,
+    '  _norecord "this script\'s read key for the daemon could not be read"',
+    // `--noproxy "*"`: the daemon is loopback; an operator shell's http_proxy must not swallow it. The body is JSON
+    // as written (RUNID is one percent-encoded segment, `[A-Za-z0-9._~%-]`, and the key is hex).
+    `elif builtin printf '{"run":"%s","key":"%s"}' "$RUNID" "$DKEY" | curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" -H "Content-Type: application/json" --data-binary @- "$API/api/v1/deliver/text" -o "$TD/text" 2>/dev/null && _framed "$TD/text"; then`,
     '  echo "deliver: PR text composed from the run record ($API)"; FROMRUN=1',
     'else',
     '  rm -f "$TD/text"',
-    '  echo "deliver: the daemon at $API did not answer with the run record — using the launch-time PR text"',
+    '  _norecord "the daemon at $API did not answer with the run record"',
     'fi',
     'if [ ! -s "$TD/text" ]; then',
     // The delimiter is chosen so no line of the text equals it (heredocDelimiter) — the text,

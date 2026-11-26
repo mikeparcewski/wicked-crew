@@ -13,7 +13,7 @@
 // prepends the fake bin, which is sourced AFTER path_helper and does win.
 
 import { execFile, execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,6 +33,7 @@ import {
 } from '../src/core/deliver.js';
 import { deliveryRecordFrom } from '../src/api/delivery-index.js';
 import { DELIVER_CREDENTIALS_MISSING_MARKER } from '../src/core/deliver-credentials.js';
+import { deliverKeyDir, deliverKeyMatches, dropDeliverKey, mintDeliverKey, readDeliverKey } from '../src/core/deliver-key.js';
 import { triageDeliverFailure, trustedDeliverOutcome, trustedOutcomeIn } from '../src/core/deliver-triage.js';
 
 /** (crew#739) The sentinel nonce every composed script in this file carries. */
@@ -184,6 +185,8 @@ async function runDeliver(
     gh?: GhStub;
     env?: Record<string, string>;
     script?: DeliverScriptOptions;
+    /** (crew#1885) Extra lines for the login profile `bash -lc` sources before the script. */
+    profile?: string;
     /** R1: what `git remote get-url --push origin` answers inside the script (a `git` shim; every
      *  other git call reaches the real git, so the push still lands on the bare fixture). */
     originPushUrl?: string;
@@ -203,7 +206,7 @@ async function runDeliver(
   if (!existsSync(bin)) mkdirSync(bin, { recursive: true });
   if (!existsSync(home)) mkdirSync(home, { recursive: true });
   // Sourced after /etc/profile's path_helper, so this prepend is the one that survives.
-  writeFileSync(join(home, '.bash_profile'), `export PATH="${bin}:$PATH"\n`);
+  writeFileSync(join(home, '.bash_profile'), `export PATH="${bin}:$PATH"\n${opts.profile ?? ''}`);
   // A real `gh` would talk to GitHub; this one reports what the test needs and nothing else.
   writeFileSync(
     join(bin, 'gh'),
@@ -386,24 +389,56 @@ interface PrCreateCall {
   argv: string;
 }
 
+/** (crew#1885) The read key files composed scripts in this process have minted (`core/deliver-key.ts`). */
+function heldKeyFiles(): string[] {
+  if (!existsSync(deliverKeyDir())) return [];
+  return readdirSync(deliverKeyDir()).map((n) => join(deliverKeyDir(), n));
+}
+
 /** A stand-in daemon answering `GET /api/v1/runs/:id/deliver-text` (crew#524). */
-async function fakeDaemon(handler: (runId: string) => { status: number; body: string } | null): Promise<{
+async function fakeDaemon(
+  handler: (runId: string) => { status: number; body: string } | null,
+  opts: { required?: boolean; refuseKey?: boolean } = {},
+): Promise<{
   origin: string;
   close: () => Promise<void>;
   requests: string[];
 }> {
   const requests: string[] = [];
   const server: Server = createServer((req, res) => {
-    requests.push(`${req.method} ${req.url}`);
-    const m = /^\/api\/v1\/runs\/([^/]+)\/deliver-text$/.exec(req.url ?? '');
-    const answer = m ? handler(decodeURIComponent(m[1]!)) : null;
-    if (answer === null) {
-      res.writeHead(404, { 'content-type': 'application/json' });
-      res.end('{"error":"Run not found"}');
-      return;
-    }
-    res.writeHead(answer.status, { 'content-type': 'text/plain; charset=utf-8' });
-    res.end(answer.body);
+    let raw = '';
+    req.on('data', (c: Buffer) => { raw += c.toString('utf8'); });
+    req.on('end', () => {
+      requests.push(`${req.method} ${req.url}`);
+      // (crew#1885) A daemon under `auth: required` refuses the bearer route to a script that holds no operator token…
+      const m = /^\/api\/v1\/runs\/([^/]+)\/deliver-text$/.exec(req.url ?? '');
+      if (m && opts.required === true) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end('{"error":"Authentication required: send Authorization: Bearer <token>"}');
+        return;
+      }
+      // …and answers `POST /deliver/text {run, key}` only for a key in one of crew's key files, as crew's route does.
+      let answer: { status: number; body: string } | null = null;
+      if (m) answer = handler(decodeURIComponent(m[1]!));
+      else if (req.method === 'POST' && req.url === '/api/v1/deliver/text') {
+        let body: { run?: unknown; key?: unknown } = {};
+        try { body = JSON.parse(raw) as typeof body; } catch { /* not JSON: refused below */ }
+        const key = body.key;
+        if (typeof body.run !== 'string' || typeof key !== 'string' || opts.refuseKey === true || !heldKeyFiles().some((f) => deliverKeyMatches(f, key))) {
+          res.writeHead(403, { 'content-type': 'application/json' });
+          res.end('{"code":"not_the_deliver_script"}');
+          return;
+        }
+        answer = handler(decodeURIComponent(body.run));
+      }
+      if (answer === null) {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end('{"error":"Run not found"}');
+        return;
+      }
+      res.writeHead(answer.status, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end(answer.body);
+    });
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const addr = server.address();
@@ -1576,6 +1611,104 @@ describe('deliver script — composed PR text (crew#524)', () => {
     for (const d of daemons.splice(0)) await d.close();
   });
 
+  // crew#1885: under `auth: required` the bearer route answered the script 401, and the PR went out with the launch-time
+  // text: a stand-in run, a reduced run, a QE skip or a floor override went unmentioned.
+  it('crew#1885: under required auth the script reads its run record with the key in its own key file, assurance lines included', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    const runText = framedDeliverText({
+      title: 'Archive/Restore reachable from the project shell',
+      body: '## Intent\n\nfix issue #214\n\n## Assurance\n\n- **Reduced assurance**: the run was launched in reduced-assurance mode.\n',
+    });
+    const daemon = await fakeDaemon((id) => (id === RUN_ID ? { status: 200, body: runText } : null), { required: true });
+    daemons.push(daemon);
+
+    const r = await runDeliver(fx, { intent: INTENT, script: { runId: RUN_ID, apiOrigin: daemon.origin } });
+
+    expect(r.status, r.output).toBe(0);
+    expect(daemon.requests).toEqual(['POST /api/v1/deliver/text']);
+    expect(r.output).toContain(`deliver: PR text composed from the run record (${daemon.origin})`);
+    expect(r.pr!.title).toBe('Archive/Restore reachable from the project shell');
+    expect(r.pr!.body).toContain('**Reduced assurance**');
+  }, 60_000);
+
+  it('crew#1885: a known daemon that does not answer with the record refuses: no launch-time PR, nothing staged, committed or pushed', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    // A daemon that refuses the script's key: the record cannot be read.
+    const daemon = await fakeDaemon(() => ({ status: 200, body: 'never\n\nread\n' }), { refuseKey: true });
+    daemons.push(daemon);
+
+    const head = git(fx.workdir, 'rev-parse', 'HEAD').trim();
+
+    const r = await runDeliver(fx, { intent: INTENT, script: { runId: RUN_ID, apiOrigin: daemon.origin } });
+
+    expect(r.status).not.toBe(0);
+    expect(r.outcome).toBe('rejected');
+    // Nothing staged or committed (codex r1): HEAD and the index are as they were, the change still untracked.
+    expect(git(fx.workdir, 'rev-parse', 'HEAD').trim()).toBe(head);
+    expect(git(fx.workdir, 'diff', '--cached', '--name-only').trim()).toBe('');
+    expect(git(fx.workdir, 'status', '--porcelain', '--', 'fix.ts').trim()).toBe('?? fix.ts');
+    expect(r.output).toContain(`deliver: the daemon at ${daemon.origin} did not answer with the run record, so the pull request could not say how this run was checked`);
+    expect(r.output).not.toContain('using the launch-time PR text');
+    expect(r.pr).toBeNull();
+    expect(originBranches(fx)).not.toContain(`wicked/${RUN_ID}`);
+  }, 60_000);
+
+  it('crew#1885 (codex r2): a login profile that turns tracing on and wraps read and printf never sees the key, nor does the output', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    const runText = framedDeliverText({ title: 'Archive/Restore reachable', body: '## Intent\n\nfix issue #214\n' });
+    const daemon = await fakeDaemon((id) => (id === RUN_ID ? { status: 200, body: runText } : null), { required: true });
+    daemons.push(daemon);
+    const keyFile = mintDeliverKey();
+    const key = readDeliverKey(keyFile)!;
+    const seen = join(fx.root, 'profile-seen');
+    const trace = join(fx.root, 'xtrace');
+    // Tracing on, with the shell's whole stderr (the trace's own stream on every bash, 3.2 included: BASH_XTRACEFD is 4.1+)
+    // in a file the test reads, so every traced line is kept. A profile function shadows a builtin of the same name;
+    // these log every argument, then do the work.
+    const profile = [
+      `exec 2>>'${trace}'`,
+      'set -x',
+      `printf() { echo "printf-fn $*" >> '${seen}'; command printf "$@"; }`,
+      `read() { echo "read-fn $*" >> '${seen}'; command read "$@"; }`,
+      '',
+    ].join('\n');
+
+    const r = await runDeliver(fx, { intent: INTENT, profile, script: { runId: RUN_ID, apiOrigin: daemon.origin, keyFile } });
+
+    // The script's own stderr is in the trace file now: read the two together.
+    const traced = readFileSync(trace, 'utf8');
+    expect(r.status, `${r.output}\n${traced}`).toBe(0);
+    expect(daemon.requests).toEqual(['POST /api/v1/deliver/text']);
+    expect(`${r.output}\n${traced}`).toContain(`deliver: PR text composed from the run record (${daemon.origin})`);
+    // Neither the trace nor a profile function saw the key.
+    expect(traced).toContain('set -euo pipefail'); // tracing was on when the script began
+    expect(traced).not.toContain(key);
+    expect(r.output).not.toContain(key);
+    expect(existsSync(seen) ? readFileSync(seen, 'utf8') : '').not.toContain(key);
+  }, 60_000);
+
+  it('crew#1885: a script whose key file cannot be read refuses before asking: nothing staged, committed or pushed', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    const daemon = await fakeDaemon(() => ({ status: 200, body: 'never\n\nread\n' }));
+    daemons.push(daemon);
+    const head = git(fx.workdir, 'rev-parse', 'HEAD').trim();
+    const gone = mintDeliverKey();
+    dropDeliverKey(gone);
+
+    const r = await runDeliver(fx, { intent: INTENT, script: { runId: RUN_ID, apiOrigin: daemon.origin, keyFile: gone } });
+
+    expect(r.outcome).toBe('rejected');
+    expect(daemon.requests).toEqual([]);
+    expect(r.output).toContain("deliver: this script's read key for the daemon could not be read, so the pull request could not say how this run was checked");
+    expect(git(fx.workdir, 'rev-parse', 'HEAD').trim()).toBe(head);
+    expect(git(fx.workdir, 'status', '--porcelain', '--', 'fix.ts').trim()).toBe('?? fix.ts');
+    expect(r.pr).toBeNull();
+  }, 60_000);
+
   it('opens the PR with the RUN-DERIVED text the daemon answers, and commits the same text', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
@@ -1590,8 +1723,8 @@ describe('deliver script — composed PR text (crew#524)', () => {
 
     expect(r.status).toBe(0);
     expect(r.lastLine).toBe('https://github.com/o/r/pull/7');
-    // The script asked THIS daemon for THIS run's text, exactly once, by the run id from the branch.
-    expect(daemon.requests).toEqual([`GET /api/v1/runs/${RUN_ID}/deliver-text`]);
+    // The script asked THIS daemon for THIS run's text, exactly once, with its own key (crew#1885).
+    expect(daemon.requests).toEqual(['POST /api/v1/deliver/text']);
     expect(r.output).toContain(`deliver: PR text composed from the run record (${daemon.origin})`);
     // …and opened the PR with it: title from line 1, body from line 3 on — the checks table included.
     expect(r.pr!.title).toBe('Archive/Restore reachable from the project shell');
@@ -1628,25 +1761,25 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(body).toContain('Fixes #214');
   }, 60_000);
 
-  it('falls back to the launch-time text — and SAYS so — when the daemon does not know the run', async () => {
+  // crew#1885: the launch-time text is used only when no daemon origin was known; a known daemon that does not answer
+  // refuses (below).
+  it('uses the launch-time text — and SAYS so — when no daemon origin was known, composed from the launch facts', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
-    const daemon = await fakeDaemon(() => null); // 404 for every run
-    daemons.push(daemon);
+    const runUrl = `https://wc.example.test/s/run%3A${RUN_ID}`;
     const facts = factsFromWorkflow({
       runId: RUN_ID,
       intent: INTENT,
       workflowId: 'bug',
       repoRef: 'wicked-studio',
       phases: [],
-      runUrl: `${daemon.origin}/s/run%3A${RUN_ID}`,
+      runUrl,
     });
 
-    const r = await runDeliver(fx, { intent: INTENT, script: { runId: RUN_ID, apiOrigin: daemon.origin, facts } });
+    const r = await runDeliver(fx, { intent: INTENT, script: { runId: RUN_ID, facts } });
 
     expect(r.status).toBe(0);
-    expect(daemon.requests).toHaveLength(1);
-    expect(r.output).toContain(`deliver: the daemon at ${daemon.origin} did not answer with the run record — using the launch-time PR text`);
+    expect(r.output).toContain('deliver: no daemon origin was known when this run launched — using the launch-time PR text');
     const expected = composeDeliverText(facts);
     expect(r.pr!.title).toBe(expected.title);
     // BC-72: the `bug` workflow's conventional prefix rides the fallback title too.
@@ -1658,7 +1791,7 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(r.pr!.body).toBe(`${expected.body}\n`);
     expect(r.pr!.body).toContain('Fixes #214');
     expect(r.pr!.body).toContain('Refs: #211'); // `wicked-studio#211` on a wicked-studio delivery (W3-K2)
-    expect(r.pr!.body).toContain(`- Run: [\`${RUN_ID}\`](${daemon.origin}/s/run%3A${RUN_ID})`);
+    expect(r.pr!.body).toContain(`- Run: [\`${RUN_ID}\`](${runUrl})`);
     expect(r.pr!.body).toContain('workflow `bug` · repo `wicked-studio`');
     expect(r.pr!.body).toContain('Not available at composition time');
     // The commit subject is the composed 72-column cut (word boundary, never `…aga`), the body the full title.
@@ -1669,21 +1802,26 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(git(fx.origin, 'log', '-1', '--format=%b', `wicked/${RUN_ID}`).split('\n')[0]).toBe(expected.title);
   }, 60_000);
 
-  it('REJECTS a 200 that is not framed as title / blank / body and falls back, saying so (Copilot on #525)', async () => {
-    for (const bogus of ['{"error":"stale endpoint"}\n', 'title only\n', 'title\nno blank line\nbody\n', 'title\n\n\n   \n']) {
+  it('REJECTS a 200 that is not framed as title / blank / body, and a run the daemon does not know, refusing the delivery and saying so (Copilot on #525, crew#1885)', async () => {
+    const answers: Array<{ status: number; body: string } | null> = [
+      ...['{"error":"stale endpoint"}\n', 'title only\n', 'title\nno blank line\nbody\n', 'title\n\n\n   \n'].map((body) => ({ status: 200, body })),
+      null, // 404: the daemon does not know the run
+    ];
+    for (const answer of answers) {
       const fx = fixture();
       writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
-      const daemon = await fakeDaemon(() => ({ status: 200, body: bogus }));
+      const daemon = await fakeDaemon(() => answer);
       daemons.push(daemon);
 
       const r = await runDeliver(fx, { intent: 'ship it', script: { runId: RUN_ID, apiOrigin: daemon.origin } });
 
-      expect(r.status).toBe(0);
+      expect(r.status, JSON.stringify(answer)).not.toBe(0);
+      expect(r.outcome).toBe('rejected');
       expect(daemon.requests).toHaveLength(1);
-      expect(r.output).toContain('did not answer with the run record — using the launch-time PR text');
-      expect(r.pr!.title).toBe('ship it'); // the embedded fallback, not the bogus answer
-      expect(r.pr!.body).not.toContain('stale endpoint');
-      expect(r.pr!.body).toContain(`- Run: \`${RUN_ID}\``);
+      expect(r.output).toContain(`deliver: the daemon at ${daemon.origin} did not answer with the run record, so the pull request could not say how this run was checked`);
+      expect(r.output).not.toContain('stale endpoint');
+      expect(r.pr).toBeNull(); // neither the bogus answer nor the launch-time text was opened as a PR
+      expect(originBranches(fx)).not.toContain(`wicked/${RUN_ID}`);
     }
   }, 120_000);
 
@@ -1698,7 +1836,8 @@ describe('deliver script — composed PR text (crew#524)', () => {
     const r = await runDeliver(fx, { intent: 'x', script: { runId: "odd/id#1?x='y'", apiOrigin: daemon.origin } });
 
     expect(r.status).toBe(0);
-    expect(daemon.requests).toEqual(["GET /api/v1/runs/odd%2Fid%231%3Fx%3D%27y%27/deliver-text"]);
+    // (crew#1885) Sent as one percent-encoded segment in the JSON body; the daemon decodes it to the launch id.
+    expect(daemon.requests).toEqual(['POST /api/v1/deliver/text']);
     expect(r.pr!.title).toBe('Odd id delivered');
   }, 60_000);
 

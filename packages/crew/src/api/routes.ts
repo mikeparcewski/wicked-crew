@@ -442,6 +442,7 @@ import {
   type VacuityProbes,
   type DeliveryResolver,
 } from './delivery-index.js';
+import { deliverTextAllowed, postHocDeliverText } from '../core/deliver-grants.js';
 import { REVIEW_CHANGE_WORKFLOW, reviewChangeExclusion, type ReviewChangeDeps } from './review-change.js';
 import { rosterWithout } from '../interactive/review-events.js';
 import { DeliveryDerivationCache } from './delivery-cache.js';
@@ -5121,6 +5122,26 @@ export function registerRoutes(
   // title, line 2 blank, then the body — the same shape the script's embedded fallback has, so the
   // script parses exactly one thing. Read-only; the run's `deliver` unit is still running when it
   // asks, and is listed as `this PR`.
+  const deliverTextOf = async (run: SessionView, id: string): Promise<string> => {
+    const followUps = await evaluatorFollowUps(run);
+    const reports = await seatReports(run);
+    // crew#1192: the QE check the deliver gate reads, so a required QE that passed says so.
+    const qeAcceptance = await qeAcceptanceCheckFor(run);
+    // (DES-PM-001 §6 step 3) Each addressed issue links back in its tracker's own form.
+    const trackerRefs = ((await runtime.trackerAddresses?.of(id).catch(() => [])) ?? []).map((a) => ({ system: a.system, ref: a.ref, ...(a.asked !== undefined ? { asked: a.asked } : {}) }));
+    // The run's preset or workflow NAME, as the engine recorded it (seam X2).
+    const text = composeDeliverText(
+      factsFromRun(decorateRun(run), runUrlFor(configuredPublicOrigin(), id), {
+        ...(trackerRefs.length > 0 ? { trackerRefs } : {}),
+        workflowId: runIdentityOf(run).name,
+        revisesPr: retryIndex.revisesPrFor(id) ?? null,
+        ...(followUps !== undefined ? { followUps } : {}),
+        ...(reports !== undefined ? { reports } : {}),
+        qeAcceptance,
+      }),
+    );
+    return framedDeliverText(text);
+  };
   app.get(
     `${V}/runs/:id/deliver-text`,
     { config: { manifest: { statusCodes: [200, 404] } } },
@@ -5128,24 +5149,38 @@ export function registerRoutes(
       const { id } = req.params as { id: string };
       const run = await adapter.runView(id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
-      const followUps = await evaluatorFollowUps(run);
-      const reports = await seatReports(run);
-      // crew#1192: the QE check the deliver gate reads, so a required QE that passed says so.
-      const qeAcceptance = await qeAcceptanceCheckFor(run);
-      // (DES-PM-001 §6 step 3) Each addressed issue links back in its tracker's own form.
-      const trackerRefs = ((await runtime.trackerAddresses?.of(id).catch(() => [])) ?? []).map((a) => ({ system: a.system, ref: a.ref, ...(a.asked !== undefined ? { asked: a.asked } : {}) }));
-      // The run's preset or workflow NAME, as the engine recorded it (seam X2).
-      const text = composeDeliverText(
-        factsFromRun(decorateRun(run), runUrlFor(configuredPublicOrigin(), id), {
-          ...(trackerRefs.length > 0 ? { trackerRefs } : {}),
-          workflowId: runIdentityOf(run).name,
-          revisesPr: retryIndex.revisesPrFor(id) ?? null,
-          ...(followUps !== undefined ? { followUps } : {}),
-          ...(reports !== undefined ? { reports } : {}),
-          qeAcceptance,
-        }),
-      );
-      return reply.type('text/plain; charset=utf-8').send(framedDeliverText(text));
+      return reply.type('text/plain; charset=utf-8').send(await deliverTextOf(run, id));
+    },
+  );
+  // (crew#1885) The same text for the run's OWN deliver script, in every auth mode. The script holds no operator
+  // bearer, so under `auth: required` the route above answered it 401 and the PR went out with the launch-time text,
+  // none of the run's assurance lines on it. Bearer-exempt (`auth.ts` UNIT_TOKEN_ROUTES): the body's key is the
+  // credential, checked against the 0600 key file the run's deliver unit's script names while that unit can be running,
+  // or a post-hoc delivery's running now, which answers the text composed for it (`core/deliver-grants.ts`,
+  // `core/deliver-key.ts`). The key is on no command line (codex-check on crew#1946). No answer or log line carries it.
+  // An unknown run and a wrong key get the same 403, so the route says nothing of which runs exist. `run` is the run id
+  // as the script holds it, one percent-encoded path segment.
+  const DeliverTextBody = z.strictObject({ run: z.string().min(1).max(1024), key: z.string().regex(/^[0-9a-fA-F]{64}$/) });
+  app.post(
+    `${V}/deliver/text`,
+    { config: { manifest: { statusCodes: [200, 400, 403] } } },
+    async (req, reply) => {
+      const parsed = DeliverTextBody.safeParse(req.body);
+      if (!parsed.success) return reply.code(400).send({ error: "body must be { run: <the run id, percent-encoded>, key: <the deliver script's read key> }" });
+      let id: string;
+      try {
+        id = decodeURIComponent(parsed.data.run);
+      } catch {
+        return reply.code(400).send({ error: 'run is not a percent-encoded run id' });
+      }
+      // A post-hoc delivery the daemon is running now: the text composed for it, with the QE check it was approved on.
+      const posted = postHocDeliverText(id, parsed.data.key);
+      if (posted !== null) return reply.type('text/plain; charset=utf-8').send(posted);
+      const run = await adapter.runView(id);
+      if (!run || !deliverTextAllowed(run.units, parsed.data.key, TERMINAL_RUN_STATUSES.has(run.session.status))) {
+        return reply.code(403).send({ code: 'not_the_deliver_script', error: "only this run's own deliver script can read its delivery text here" });
+      }
+      return reply.type('text/plain; charset=utf-8').send(await deliverTextOf(run, id));
     },
   );
 
