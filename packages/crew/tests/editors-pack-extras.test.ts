@@ -13,7 +13,7 @@
 // (b) every phase of a block's preset must be a catalog phase, else that block is refused naming the phase and the
 //     catalog phases it could use, and nothing installs.
 
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -245,6 +245,38 @@ describe('crew#1703: an editor pack with skills and a block', () => {
     expect((await r.sc.store.readFile('wicked-garden-acme-terms-checker', 'SKILL.md')).content).toMatch(/One more line\./);
     // A phase named twice gets its own step id.
     expect(r.presets.presets.get('acme-terms-review')?.steps).toEqual([{ catalog: 'critique', id: 'critique' }, { catalog: 'review', id: 'review' }, { catalog: 'critique', id: 'critique-2' }]);
+  });
+
+  it('crew#1881: a pack skill\'s executable script stays executable in the skills root and the published generation, special bits never kept; an update that drops the bit drops it', async () => {
+    const r = rig();
+    const root = pack(['critique']);
+    const scripts = join(root, 'skills', 'acme-terms-checker', 'scripts');
+    mkdirSync(scripts, { recursive: true });
+    writeFileSync(join(scripts, 'check.sh'), '#!/bin/sh\necho checked\n');
+    chmodSync(join(scripts, 'check.sh'), 0o4755); // setuid on the source: never carried
+    writeFileSync(join(scripts, 'notes.md'), 'not a program\n');
+    chmodSync(join(scripts, 'notes.md'), 0o644);
+    await installPack(root, undefined, r.deps, await approvalFor(root, r.deps));
+    const key = 'wicked-garden-acme-terms-checker';
+    const modeOf = (abs: string): number => statSync(abs).mode & 0o7777;
+    const effective = (rel: string): string => r.sc.store.resolveSkillFile(key, rel).abs;
+    expect(modeOf(effective('scripts/check.sh')) & 0o100).toBe(0o100); // owner execute (the umask may take the rest)
+    expect(modeOf(effective('scripts/check.sh')) & 0o7000).toBe(0);
+    expect(modeOf(effective('scripts/notes.md')) & 0o111).toBe(0);
+    // The generation seats are handed: the script runs directly (`./scripts/check.sh`), not only through `sh`.
+    const snap = r.sc.store.currentSnapshot()!;
+    const dir = r.sc.store.manifest().skills[key]!.dir;
+    const published = join(snap.path, ...dir.split('/'), 'scripts', 'check.sh');
+    expect(modeOf(published) & 0o100).toBe(0o100); // owner execute (the umask may take the rest)
+    expect(modeOf(published) & 0o7000).toBe(0);
+    expect(modeOf(join(snap.path, ...dir.split('/'), 'scripts', 'notes.md')) & 0o111).toBe(0);
+    // An update whose script is no longer executable: the root follows the pack.
+    const again = pack(['critique']);
+    mkdirSync(join(again, 'skills', 'acme-terms-checker', 'scripts'), { recursive: true });
+    writeFileSync(join(again, 'skills', 'acme-terms-checker', 'scripts', 'check.sh'), '#!/bin/sh\necho checked again\n');
+    chmodSync(join(again, 'skills', 'acme-terms-checker', 'scripts', 'check.sh'), 0o644);
+    await installPack(again, undefined, r.deps, await approvalFor(again, r.deps));
+    expect(modeOf(effective('scripts/check.sh')) & 0o111).toBe(0);
   });
 
   it("a skill or preset name another pack or the operator already holds is refused (409); nothing is written", async () => {
