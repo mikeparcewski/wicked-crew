@@ -8187,8 +8187,11 @@ export interface DomainStatement {
   id: string;
   /** What a ruling names ({@link DomainRulingBody.expect}). */
   key: string;
-  /** The requirement the statement is a rule of (`<domain>::<reqId>`, the list's `key`). */
-  requirementKey: string;
+  /** The requirement the statement is a rule of (`<domain>::<reqId>`, the list's `key`). (api-types 0.234.0,
+   *  garden#1545) `null` when no requirement holds it: no shown sentence of a business group cites it (a
+   *  housekeeping group does, only a withheld sentence does, or none does). It is still a statement: a group cites
+   *  it and a ruling names its key. */
+  requirementKey: string | null;
   status: 'Checked' | 'open' | 'confirmed' | 'stale';
   text: string;
   /** Its anchor names a repository-relative file and positive lines (core does not check each claim's lines, nor
@@ -8275,6 +8278,8 @@ export interface DomainModel {
   schemaVersion: string;
   /** `open` counts open and rejected statements (a reject waits for the next run). */
   accounting: { targets: number; accounted: number; open: number; stale: number };
+  /** Every statement: the requirements' first, then (api-types 0.234.0, garden#1545) the ones no requirement holds
+   *  (`requirementKey: null`). */
   statements: DomainStatement[];
   ruleGroups: DomainRuleGroup[];
   followups: DomainFollowup[];
