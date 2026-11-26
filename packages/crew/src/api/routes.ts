@@ -7591,24 +7591,25 @@ export function registerRoutes(
    * `'no-log'` = this build cannot read the log, so nothing can be said; `'unstable'` = live gate
    * events kept landing while the record was read, so nothing was verified (retry).
    */
-  /** (crew#1950) The parts of each run's in-flight gate hydration, so every GET that waits on it (whoever started it,
-   *  a POST decision too) can name them. Held only while the hydration runs. */
-  const hydrationParts = new Map<string, GateReadTimer>();
+  /** (crew#1950) The parts of each gate hydration, keyed by the cache's own promise for it (one per hydration), so
+   *  every GET that waits on it (whoever started it, a POST decision too) names that hydration's parts and no other's. */
+  const hydrationParts = new WeakMap<Promise<GateResolution>, GateReadTimer>();
   async function resolveOpenGate(id: string, timer?: GateReadTimer): Promise<GateResolution> {
+    // A fresh timer per hydration this call starts, kept across that hydration's re-reads.
     let started: GateReadTimer | undefined;
     const resolution = gateCache.resolve(id, () => {
-      // Per hydration, across its re-reads.
-      started ??= hydrationParts.get(id) ?? new GateReadTimer();
-      hydrationParts.set(id, started);
+      started ??= new GateReadTimer();
       return readOpenGate(id, started.time);
     });
-    // The hydration this call started or joined (set synchronously when it began); none when served from the cache.
-    const parts = hydrationParts.get(id);
+    // The hydration this call started or joined, known synchronously (`resolve` starts or finds it before its first
+    // await); none when the cache served the gate.
+    const hydration = gateCache.inflightOf(id);
+    if (hydration !== undefined && started !== undefined && !hydrationParts.has(hydration)) hydrationParts.set(hydration, started);
+    const parts = hydration === undefined ? undefined : hydrationParts.get(hydration);
     try {
       return await resolution;
     } finally {
       if (parts !== undefined) timer?.absorb(parts);
-      if (started !== undefined && hydrationParts.get(id) === started) hydrationParts.delete(id);
     }
   }
 

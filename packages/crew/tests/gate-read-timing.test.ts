@@ -1,7 +1,8 @@
 // crew#1950: GET /runs/:id/gate took 36-52 s on a loaded host while the run's view took 0.08 s, and nothing said which
 // part was slow. Each answer names its parts (Server-Timing), and a slow read logs one line naming each part.
 import { Writable } from 'node:stream';
-import Fastify from 'fastify';
+import Fastify, { type FastifyInstance } from 'fastify';
+import type { Response as LightMyRequestResponse } from 'light-my-request';
 import { describe, expect, it, vi } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
@@ -22,6 +23,8 @@ const actions = [
   { action: 'reassign', intent: 'reseat_and_retry', note: 'optional', seats: ['pi', 'copilot'] },
   { action: 'reject', intent: 'stop', note: 'optional' },
 ];
+/** The same gate as the engine's event log records it (the replay path, no durable row). */
+const frame = { type: 'awaitingHuman', session: id, ord, reviewingOrd: ord, gateKind: 'escalation', prompt: 'the QE reviewer could not run', ts: 1_785_614_004_730 };
 const row = { kind: 'gate', ord, prompt: 'the QE reviewer could not run', gate_kind: 'escalation', created_at: 1_785_614_004_730 };
 /** Every part name the route may serve: anything else in the header is a leak. */
 const PARTS = new Set(['record', 'view', 'resolve', 'events', 'actions', 'crew-actions', 'rejudge', 'deliver-qe', 'total']);
@@ -34,6 +37,13 @@ interface Setup {
   gateActions?: () => Promise<unknown>;
   cached?: boolean;
   throwingLog?: boolean;
+  /** The engine keeps no durable gate row: the gate comes from the event log's replay. */
+  noRow?: boolean;
+  /** The event log per read (1-based call number); else `[]` after `eventsDelayMs`. */
+  events?: (call: number) => Promise<unknown[]>;
+  cache?: GateCache;
+  /** Sends the requests itself (in a controlled order); its answers are `all`. */
+  drive?: (app: FastifyInstance, adapter: { runEvents: ReturnType<typeof vi.fn> }) => Promise<LightMyRequestResponse[]>;
 }
 
 async function gateRead(o: Setup = {}) {
@@ -47,15 +57,17 @@ async function gateRead(o: Setup = {}) {
   const adapter = {
     runView: vi.fn(async () => o.run ?? parked),
     gateActions: vi.fn(o.gateActions ?? (async () => ({ ord, gateKind: 'escalation', actions }))),
-    interactionRequests: vi.fn(async () => [row]),
+    interactionRequests: vi.fn(async () => (o.noRow === true ? [] : [row])),
     runEvents: vi.fn(async () => {
+      if (o.events !== undefined) return o.events(adapter.runEvents.mock.calls.length);
       if (o.eventsDelayMs !== undefined) await new Promise((r) => setTimeout(r, o.eventsDelayMs));
       return [];
     }),
+    confirmGate: vi.fn(async () => 'executing'),
     listWorkflows: () => BUILTIN_WORKFLOWS,
     listConformanceClaims: vi.fn(async () => []),
   };
-  const cache = new GateCache();
+  const cache = o.cache ?? new GateCache();
   if (o.cached === true) {
     cache.adopt(id, { ord, prompt: row.prompt, lifecycle: 'open', receivedAt: new Date(row.created_at).toISOString(), gateKind: 'escalation' });
   }
@@ -71,7 +83,9 @@ async function gateRead(o: Setup = {}) {
   await app.ready();
   try {
     const url = `/api/v1/runs/${id}/gate`;
-    const all = await Promise.all((o.requests ?? [{ method: 'GET' }]).map((r) => app.inject({ method: r.method, url, ...(r.payload !== undefined ? { payload: r.payload } : {}) })));
+    const all = o.drive !== undefined
+      ? await o.drive(app, adapter)
+      : await Promise.all((o.requests ?? [{ method: 'GET' }]).map((r) => app.inject({ method: r.method, url, ...(r.payload !== undefined ? { payload: r.payload } : {}) })));
     return { res: all[0]!, all, lines, adapter };
   } finally {
     await app.close();
@@ -105,7 +119,8 @@ describe('GET /runs/:id/gate names the time of each part (crew#1950)', () => {
     expect(parts.get('actions')).toBeGreaterThanOrEqual(55);
     for (const name of ['record', 'view', 'resolve', 'events', 'crew-actions', 'total']) expect(parts.has(name), name).toBe(true);
     expect(parts.get('total')).toBeGreaterThanOrEqual(parts.get('actions')!);
-    expect(lines.filter((l) => l.msg.includes('/gate took'))).toEqual([]);
+    // The slow line's threshold is tested with an injected clock below, not against this host's wall clock (codex r3).
+    void lines;
   });
 
   it('a GET that joins a gate read another request started names that read\'s parts too (codex r2)', async () => {
@@ -116,11 +131,76 @@ describe('GET /runs/:id/gate names the time of each part (crew#1950)', () => {
       expect(r.statusCode, r.body).toBe(200);
       expect(partsOf(r.headers['server-timing']).get('events')).toBeGreaterThanOrEqual(70);
     }
-    // A decision (POST, untimed) that starts the read first: the GET waiting on it still names the event-log read.
-    const joined = await gateRead({ eventsDelayMs: 80, requests: [{ method: 'POST', payload: { approve: true, ord } }, { method: 'GET' }] });
-    expect(joined.adapter.runEvents).toHaveBeenCalledTimes(1);
-    expect(joined.all[1]!.statusCode, joined.all[1]!.body).toBe(200);
-    expect(partsOf(joined.all[1]!.headers['server-timing']).get('events')).toBeGreaterThanOrEqual(70);
+  });
+
+  it('a GET that joins the gate read a decision (POST) started names that read\'s parts (codex r3)', async () => {
+    // No durable row and no ord named: the POST resolves the gate from the event log, and the GET joins that read.
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    const { all, adapter } = await gateRead({
+      noRow: true,
+      events: async () => {
+        await held;
+        await new Promise((r) => setTimeout(r, 80));
+        return [frame];
+      },
+      drive: async (app, a) => {
+        const url = `/api/v1/runs/${id}/gate`;
+        const post = app.inject({ method: 'POST', url, payload: { approve: true } });
+        await vi.waitFor(() => expect(a.runEvents).toHaveBeenCalledTimes(1));
+        const get = app.inject({ method: 'GET', url });
+        await new Promise((r) => setTimeout(r, 20));
+        release();
+        return Promise.all([post, get]);
+      },
+    });
+    expect(adapter.runEvents).toHaveBeenCalledTimes(1);
+    expect(all[0]!.statusCode, all[0]!.body).toBe(200);
+    expect(adapter.confirmGate).toHaveBeenCalledTimes(1);
+    expect(all[1]!.statusCode, all[1]!.body).toBe(200);
+    expect(all[1]!.json()).toMatchObject({ runId: id, ord });
+    expect(partsOf(all[1]!.headers['server-timing']).get('events')).toBeGreaterThanOrEqual(70);
+  });
+
+  it('a hydration started after another settled gets its own parts, never the last one\'s (codex + agy r3)', async () => {
+    // Hydration 1 (slow, no open gate) settles; before its GET finishes, a second GET starts hydration 2 (fast).
+    const second: { res?: Promise<LightMyRequestResponse> } = {};
+    let app!: FastifyInstance;
+    let calls!: { runEvents: ReturnType<typeof vi.fn> };
+    class Interleaved extends GateCache {
+      private first = true;
+      override resolve(runId: string, read: Parameters<GateCache['resolve']>[1]): ReturnType<GateCache['resolve']> {
+        const r = super.resolve(runId, read);
+        if (!this.first) return r;
+        this.first = false;
+        return r.then(async (v) => {
+          second.res = app.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` });
+          await vi.waitFor(() => expect(calls.runEvents).toHaveBeenCalledTimes(2));
+          return v;
+        });
+      }
+    }
+    const { all } = await gateRead({
+      noRow: true,
+      cache: new Interleaved(),
+      events: async (call) => {
+        if (call === 1) {
+          await new Promise((r) => setTimeout(r, 300));
+          return [];
+        }
+        return [frame];
+      },
+      drive: async (a, adapter) => {
+        app = a;
+        calls = adapter;
+        const firstRes = await a.inject({ method: 'GET', url: `/api/v1/runs/${id}/gate` });
+        return [firstRes, await second.res!];
+      },
+    });
+    expect(all[0]!.statusCode).toBe(404);
+    expect(partsOf(all[0]!.headers['server-timing']).get('events')).toBeGreaterThanOrEqual(290);
+    expect(all[1]!.statusCode, all[1]!.body).toBe(200);
+    expect(partsOf(all[1]!.headers['server-timing']).get('events')).toBeLessThan(290);
   });
 
   it('the cache path is timed too, and serves the same answer', async () => {
