@@ -24,6 +24,7 @@ import { runFactOf, type LooseEvent, type RunFact } from './run-facts.js';
 import type { InsightsStore, Recommendation, Review } from './store.js';
 import { REVIEW_WORKFLOW } from './workflow.js';
 import { rosterWithout, seatKey as cliOf } from '../interactive/review-events.js';
+import { noStandInsWhy } from '../core/stand-in.js';
 
 export const HANDOFF_FILE = 'handoff.json';
 /** The seat's ONLY write root inside its review directory: the snapshot and the numbers beside it stay out of reach. */
@@ -107,7 +108,7 @@ export class NoIndependentReviewer extends ReviewPreparationRefused {
     super(
       `${NO_INDEPENDENT_REVIEWER_LEAD}(${excluded.join(', ')}) ran some of the work it reviews, so none can ` +
         'review it independently. Sign in another seat, or start it again in reduced assurance (a seat that ran the work ' +
-        'interprets it, said in its brief and on the run)',
+        `interprets it, said in its brief and on the run). ${noStandInsWhy('review')}`,
     );
   }
 }

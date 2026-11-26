@@ -60,6 +60,9 @@ export const CaptureSchema = z.strictObject({
   files: z.array(z.union([CaptureTextFileSchema, CaptureImageFileSchema])).max(CAPTURE_MAX_FILES).optional(),
   /** wicked-core#850 — the explicit reduced-assurance opt-in, forwarded to `POST /runs` only when `true`. */
   reducedAssurance: z.boolean().optional(),
+  /** (crew#1884) The person's stand-in choice, forwarded to `POST /runs` (which asks it and refuses it with
+   *  `reducedAssurance` or from a worker's bearer). */
+  standIns: z.literal(true).optional(),
 });
 
 /** `POST /proposals/:id/approve` body — present only for an accept WITH an edit. */
@@ -202,7 +205,7 @@ export function registerCaptureRoutes(app: FastifyInstance): void {
           responseType: 'CaptureResponse',
           // Every non-201 besides the body 400s is POST /runs' own answer, passed through.
           // 413: a body past CAPTURE_BODY_LIMIT, refused by the framework before the handler.
-          statusCodes: [201, 400, 404, 409, 413, 422, 501],
+          statusCodes: [201, 400, 403, 404, 409, 413, 422, 501],
         },
       },
     },
@@ -239,6 +242,7 @@ export function registerCaptureRoutes(app: FastifyInstance): void {
           plan: { steps: [{ catalog: 'understand', id: 'capture' }] },
           deliver: 'none',
           ...(parsed.data.reducedAssurance === true ? { reducedAssurance: true } : {}),
+          ...(parsed.data.standIns === true ? { standIns: true } : {}),
         },
       }).finally(() => captureLaunchRoots.delete(runId));
       if (launched.statusCode !== 201) {

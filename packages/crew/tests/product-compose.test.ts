@@ -9,12 +9,12 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CoreAdapter } from '../src/core/adapter.js';
-import { COMPOSE_MAX_REQUIREMENTS, ComposeSelectionTooLargeError, composeInstructions, composePreflight, registerProductRoutes, reviewInstructions } from '../src/api/product.js';
+import { COMPOSE_MAX_REQUIREMENTS, ComposeSelectionTooLargeError, composeInstructions, composeLaunch, composePreflight, registerProductRoutes, reviewInstructions } from '../src/api/product.js';
 
 describe('POST /projects/:id/product/compose (crew#372)', () => {
   let base: string;
   let app: FastifyInstance;
-  const launched: Array<{ body: Record<string, unknown>; auth: string | undefined; compose?: unknown }> = [];
+  const launched: Array<{ body: Record<string, unknown>; auth: string | undefined; compose?: unknown; standInChoice?: boolean | undefined }> = [];
   let runsAnswer: { status: number; body: unknown } = { status: 201, body: { runId: 'run-compose-1' } };
   let adapterRef: CoreAdapter;
 
@@ -62,7 +62,7 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
     app = Fastify({ logger: false });
     // DES-CHAT-FIRST-001 C3: the compose launches through the shared launch function, as the caller.
     registerProductRoutes(app, adapter as unknown as CoreAdapter, async (raw, ctx) => {
-      launched.push({ body: raw as Record<string, unknown>, auth: `${ctx.actor.id}:${ctx.target ?? ''}`, compose: ctx.compose });
+      launched.push({ body: raw as Record<string, unknown>, auth: `${ctx.actor.id}:${ctx.target ?? ''}`, compose: ctx.compose, standInChoice: (ctx as { standInChoice?: boolean }).standInChoice });
       return { statusCode: runsAnswer.status, payload: runsAnswer.body };
     });
     await app.ready();
@@ -78,6 +78,33 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
 
   const compose = (payload: unknown, headers: Record<string, string> = {}) =>
     app.inject({ method: 'POST', url: '/api/v1/projects/p1/product/compose', payload: payload as Record<string, unknown>, headers });
+
+  // crew#1884: the person's answer (`standIns: true`) reaches the launch. The route's own caller (studio's Draft) does
+  // not draw the choice yet, so the route does not ask it (codex r1 C2); a chat Backlog job's Go does.
+  it('takes standIns to the launch; the route does not ask the choice, a chat job\'s compose does (crew#1884)', async () => {
+    const res = await compose({ requirements: [{ repoId: 'alpha', key: 'billing::r1' }], standIns: true });
+    expect(res.statusCode, res.body).toBe(202);
+    expect(launched[0]!.body['standIns']).toBe(true);
+    expect(launched[0]!.standInChoice).toBeUndefined();
+    const plain = await compose({ requirements: [{ repoId: 'alpha', key: 'billing::r1' }] });
+    expect(plain.statusCode, plain.body).toBe(202);
+    expect(launched[1]!.standInChoice).toBeUndefined();
+    const chat = await composeLaunch(adapterRef, async (raw, ctx) => {
+      launched.push({ body: raw as Record<string, unknown>, auth: undefined, standInChoice: (ctx as { standInChoice?: boolean }).standInChoice });
+      return { statusCode: 201, payload: { runId: 'run-compose-2' } };
+    }, 'p1', { requirements: [{ repoId: 'alpha', key: 'billing::r1' }] }, { actor: { id: 'ann', kind: 'human', trust: 'operator' }, log: console }, { fromProposal: 'chat-1:p:x', standIns: { standInChoice: true } });
+    expect(chat.code).toBe(202);
+    expect(launched[2]!.standInChoice).toBe(true);
+    // A reshape's compose does not ask (it rejects the held plan first) but launches aware (codex r2 C5).
+    let aware: unknown;
+    const reshape = await composeLaunch(adapterRef, async (_raw, ctx) => {
+      aware = ctx;
+      return { statusCode: 201, payload: { runId: 'run-compose-3' } };
+    }, 'p1', { requirements: [{ repoId: 'alpha', key: 'billing::r1' }] }, { actor: { id: 'ann', kind: 'human', trust: 'operator' }, log: console }, { fromProposal: 'chat-1:p:y', standIns: { standInAware: true } });
+    expect(reshape.code).toBe(202);
+    expect(aware).toMatchObject({ standInAware: true });
+    expect((aware as { standInChoice?: unknown }).standInChoice).toBeUndefined();
+  });
 
   it('a requirement of a member with no repo-graph root answers 503 with the diagnosis, and nothing launches', async () => {
     const res = await compose({ requirements: [{ repoId: 'rootless', key: 'billing::r1' }] });

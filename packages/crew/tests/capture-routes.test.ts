@@ -422,3 +422,59 @@ describe('POST /proposals/:id/approve {content?, reach?} — accept with an edit
     expect(estate).not.toHaveBeenCalled();
   });
 });
+
+// crew#1884: a capture launches through `POST /runs`, which asks the stand-in choice; the person's answer must reach it.
+describe('POST /projects/:id/capture: the stand-in choice (crew#1884)', () => {
+  const ONE_HELPER = readFileSync(new URL('./fixtures/stand-in-preflight-one-helper.json', import.meta.url), 'utf8');
+  let inbox: string;
+  let app: FastifyInstance;
+  let launchRun: Mock;
+  const prevInbox = process.env.WICKED_CAPTURE_INBOX_DIR;
+
+  beforeEach(async () => {
+    inbox = mkdtempSync(join(tmpdir(), 'capture-inbox-'));
+    process.env.WICKED_CAPTURE_INBOX_DIR = inbox;
+    launchRun = vi.fn(async (input: LaunchRunInput) => input.sessionId);
+    app = buildApp(
+      {
+        launchRun,
+        sessionsDetail: vi.fn().mockResolvedValue([]),
+        listRepos: vi.fn().mockResolvedValue([]),
+        projectMembers: vi.fn().mockResolvedValue([]),
+        getSettings: vi.fn().mockResolvedValue({}),
+        supportsStandIns: () => true,
+        independencePreflight: vi.fn(async () => ONE_HELPER),
+      },
+      vi.fn(),
+    );
+    await app.ready();
+  });
+
+  afterEach(async () => {
+    await app.close();
+    if (prevInbox === undefined) delete process.env.WICKED_CAPTURE_INBOX_DIR;
+    else process.env.WICKED_CAPTURE_INBOX_DIR = prevInbox;
+    removeScratch(inbox);
+  });
+
+  it('a short roster with no consent answers the choice and launches nothing; standIns: true launches with stand-ins for this job', async () => {
+    const asked = await app.inject({ method: 'POST', url: '/api/v1/projects/proj-1/capture', payload: { notes: 'we chose Postgres' } });
+    expect(asked.statusCode, asked.body).toBe(409);
+    expect(asked.json()).toMatchObject({ code: 'stand_in_choice', retryWith: { standIns: true } });
+    expect(launchRun).not.toHaveBeenCalled();
+    // Nothing staged: the refused capture leaves no run inbox behind (T-K1).
+    expect(readdirSync(inbox)).toEqual([]);
+    const res = await app.inject({ method: 'POST', url: '/api/v1/projects/proj-1/capture', payload: { notes: 'we chose Postgres', standIns: true } });
+    expect(res.statusCode, res.body).toBe(201);
+    expect(launchRun).toHaveBeenCalledTimes(1);
+    const input = launchRun.mock.calls[0]![0] as LaunchRunInput;
+    expect(input.standInAware).toBe(true);
+    expect(input.standIn).toMatchObject({ scope: 'job', via: 'launch' });
+  });
+
+  it('standIns with reducedAssurance is refused (400), as on POST /runs', async () => {
+    const res = await app.inject({ method: 'POST', url: '/api/v1/projects/proj-1/capture', payload: { notes: 'x', standIns: true, reducedAssurance: true } });
+    expect(res.statusCode, res.body).toBe(400);
+    expect(launchRun).not.toHaveBeenCalled();
+  });
+});
