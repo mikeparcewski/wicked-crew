@@ -1998,13 +1998,18 @@ export class ChatProposals {
   private reopenLaunch(chatId: string, folded: FoldedProposal, resolution: ArtifactProposal, instance: string | null, ask: ProposalQuestion | null = null): FoldedProposal | null {
     const proposal = { ...resolution };
     // The stand-in question belongs to the refusal that asked it: another refusal reopens the card without it.
-    if (ask !== null) proposal.question = ask;
-    else if (proposal.question?.kind === 'stand_in') proposal.question = null;
+    if (proposal.question?.kind === 'stand_in') proposal.question = null;
     // A Go-only opt-in belongs to that attempt; a reshape card keeps its own prior choice.
     if (folded.proposal.reducedAssurance === true) proposal.reducedAssurance = true;
     else delete proposal.reducedAssurance;
     if (!this.write(chatId, { at: this.now(), turnId: folded.turnId, kind: 'proposal', proposal }, instance)) return null;
-    return foldProposals(this.deps.records(chatId)).get(resolution.pid) ?? null;
+    if (ask === null) return foldProposals(this.deps.records(chatId)).get(resolution.pid) ?? null;
+    // (crew#1884) The question comes as the job's next version, revising the refused one: a reader that keeps a card it
+    // saw accepting as accepting (studio's job thread) draws a new version, and so the question and its choices.
+    const pid = `${resolution.pid.replace(/(?::s:[0-9a-z]+)+$/u, '')}:s:${this.now().toString(36)}`;
+    const asked: ArtifactProposal = { ...proposal, pid, revises: resolution.pid, lineage: resolution.lineage ?? resolution.pid, question: ask };
+    if (!this.write(chatId, { at: this.now(), turnId: folded.turnId, kind: 'proposal', proposal: asked }, instance)) return null;
+    return foldProposals(this.deps.records(chatId)).get(pid) ?? null;
   }
 
   /** Record the answer (and audit exactly what was answered); `false` when the chat is no longer this instance. */

@@ -142,6 +142,12 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
 
   const revise = (chatId: string, pid: string, edits: Record<string, unknown>, requestId: string) =>
     app.inject({ method: 'POST', url: `/api/v1/chats/${chatId}/proposals`, payload: { revises: pid, edits, source: 'question', requestId } });
+  /** Start a card on the short roster: the 409 asks, and the question is the job's next version (its pid). */
+  const askedPid = async (chatId: string, pid: string): Promise<string> => {
+    const out = await start(chatId, pid, {});
+    expect(out.statusCode, out.body).toBe(409);
+    return (out.json() as { view: ChatProposalView }).view.proposal.pid;
+  };
 
   it('a short roster with no consent: 409 stand_in_choice, nothing started, the card reopened with the stand_in question', async () => {
     const { chatId, pid } = await proposed();
@@ -153,6 +159,10 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
     expect(body.retryWith).toEqual({ standIns: true });
     expect(launches.length).toBe(before);
     expect(body.view.state).toBe('open');
+    // The question is the job's next version (a reader that keeps a card it saw accepting draws a new version).
+    expect(body.view.proposal.pid).not.toBe(pid);
+    expect(body.view.proposal.revises).toBe(pid);
+    expect(body.view.proposal.lineage ?? pid).toBe(pid);
     const q = body.view.proposal.question;
     expect(q?.kind).toBe('stand_in');
     expect(q?.text).toContain('stand-ins');
@@ -166,8 +176,9 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
   it('the person presses the choice: the revised card\'s Start launches with stand-ins for this job, consent theirs', async () => {
     const { chatId, pid } = await proposed();
     const refused = await start(chatId, pid, {});
+    const aPid = (refused.json() as { view: ChatProposalView }).view.proposal.pid;
     expect(refused.statusCode, refused.body).toBe(409);
-    const revised = await revise(chatId, pid, { standIns: true }, `si-${pid}`);
+    const revised = await revise(chatId, aPid, { standIns: true }, `si-${pid}`);
     expect(revised.statusCode, revised.body).toBe(201);
     const view = (revised.json() as { view: ChatProposalView }).view;
     expect(view.proposal.question ?? null).toBeNull();
@@ -200,8 +211,9 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
   it('Back to the job: the card returns to Start without stand-ins, and a roster no longer short starts it', async () => {
     const { chatId, pid } = await proposed();
     const refused = await start(chatId, pid, {});
+    const aPid = (refused.json() as { view: ChatProposalView }).view.proposal.pid;
     const q = (refused.json() as { view: ChatProposalView }).view.proposal.question!;
-    const back = await revise(chatId, pid, q.choices[1]!.edit as Record<string, unknown>, `back-${pid}`);
+    const back = await revise(chatId, aPid, q.choices[1]!.edit as Record<string, unknown>, `back-${pid}`);
     expect(back.statusCode, back.body).toBe(201);
     const view = (back.json() as { view: ChatProposalView }).view;
     expect(view.proposal.question ?? null).toBeNull();
@@ -220,9 +232,10 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
     expect(view.proposal.seats?.keys).toEqual(['claude']);
     expect(view.proposal.sentence?.notes.join(' ')).toContain('its check would be a labelled stand-in');
     const refused = await start(chatId, pid, { edits: undefined });
+    const aPid = (refused.json() as { view: ChatProposalView }).view.proposal.pid;
     expect(refused.statusCode, refused.body).toBe(409);
     expect((refused.json() as { view: ChatProposalView }).view.proposal.question?.kind).toBe('stand_in');
-    const revised = await revise(chatId, pid, { standIns: true }, `one-${pid}`);
+    const revised = await revise(chatId, aPid, { standIns: true }, `one-${pid}`);
     expect(revised.statusCode, revised.body).toBe(201);
     const next = (revised.json() as { view: ChatProposalView }).view.proposal;
     expect(next.blocked).toBeNull();
@@ -246,16 +259,16 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
   // codex r1 S1: the press consents to exactly the job it was asked on.
   it('the press with another change bundled consents to nothing', async () => {
     const { chatId, pid } = await proposed();
-    await start(chatId, pid, {});
-    const revised = await revise(chatId, pid, { standIns: true, lead: 'codex' }, `bundle-${pid}`);
+    const aPid = await askedPid(chatId, pid);
+    const revised = await revise(chatId, aPid, { standIns: true, lead: 'codex' }, `bundle-${pid}`);
     expect(revised.statusCode, revised.body).toBe(201);
     expect((revised.json() as { view: ChatProposalView }).view.proposal.standIns).toBeUndefined();
   });
 
   it('the press with a confirmLoss beside it consents to nothing (codex r2)', async () => {
     const { chatId, pid } = await proposed();
-    await start(chatId, pid, {});
-    const revised = await revise(chatId, pid, { standIns: true, confirmLoss: true }, `loss-${pid}`);
+    const aPid = await askedPid(chatId, pid);
+    const revised = await revise(chatId, aPid, { standIns: true, confirmLoss: true }, `loss-${pid}`);
     expect(revised.statusCode, revised.body).toBe(201);
     expect((revised.json() as { view: ChatProposalView }).view.proposal.standIns).toBeUndefined();
   });
@@ -263,9 +276,9 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
   it('a question answered after the job\'s checks changed (a QE setting) consents to nothing (codex r2)', async () => {
     qeOff = true;
     const { chatId, pid } = await proposed();
-    await start(chatId, pid, {});
+    const aPid = await askedPid(chatId, pid);
     qeOff = false;
-    const revised = await revise(chatId, pid, { standIns: true }, `qe-${pid}`);
+    const revised = await revise(chatId, aPid, { standIns: true }, `qe-${pid}`);
     expect(revised.statusCode, revised.body).toBe(201);
     const next = (revised.json() as { view: ChatProposalView }).view.proposal;
     expect(next.gate).toContain('qe-acceptance');
@@ -275,8 +288,8 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
   it('the checks change after the press and before Start (QE turned on): the Start refuses and asks again (codex-check)', async () => {
     qeOff = true;
     const { chatId, pid } = await proposed();
-    await start(chatId, pid, {});
-    const revised = await revise(chatId, pid, { standIns: true }, `qe-late-${pid}`);
+    const aPid = await askedPid(chatId, pid);
+    const revised = await revise(chatId, aPid, { standIns: true }, `qe-late-${pid}`);
     const consented = (revised.json() as { view: ChatProposalView }).view.proposal;
     expect(consented.standIns).toBe(true);
     qeOff = false;
@@ -296,8 +309,8 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
 
   it('the checks change after the press and before Start (QE turned off): the card keeps QE and asks about the loss', async () => {
     const { chatId, pid } = await proposed();
-    await start(chatId, pid, {});
-    const revised = await revise(chatId, pid, { standIns: true }, `qe-off-${pid}`);
+    const aPid = await askedPid(chatId, pid);
+    const revised = await revise(chatId, aPid, { standIns: true }, `qe-off-${pid}`);
     const consented = (revised.json() as { view: ChatProposalView }).view.proposal;
     expect(consented.gate).toContain('qe-acceptance');
     qeOff = true;
@@ -324,9 +337,9 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
 
   it('a question answered after the catalog changed consents to nothing; the Start asks again', async () => {
     const { chatId, pid } = await proposed();
-    await start(chatId, pid, {});
+    const aPid = await askedPid(chatId, pid);
     extraPreset = true;
-    const revised = await revise(chatId, pid, { standIns: true }, `stale-${pid}`);
+    const revised = await revise(chatId, aPid, { standIns: true }, `stale-${pid}`);
     expect(revised.statusCode, revised.body).toBe(201);
     const next = (revised.json() as { view: ChatProposalView }).view.proposal;
     expect(next.standIns).toBeUndefined();
@@ -339,8 +352,8 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
 
   it('the catalog changes after the press and before Start: the Start refuses, nothing is launched (pi r2)', async () => {
     const { chatId, pid } = await proposed();
-    await start(chatId, pid, {});
-    const revised = await revise(chatId, pid, { standIns: true }, `late-${pid}`);
+    const aPid = await askedPid(chatId, pid);
+    const revised = await revise(chatId, aPid, { standIns: true }, `late-${pid}`);
     const next = (revised.json() as { view: ChatProposalView }).view.proposal;
     expect(next.standIns).toBe(true);
     extraPreset = true;
@@ -353,8 +366,8 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
   // codex r1 S2: a Go that changes the job does not carry the choice made on the card.
   it('a Go with edits on a consented card asks again; nothing is launched and the reopened card holds no consent', async () => {
     const { chatId, pid } = await proposed();
-    await start(chatId, pid, {});
-    const revised = await revise(chatId, pid, { standIns: true }, `go-edits-${pid}`);
+    const aPid = await askedPid(chatId, pid);
+    const revised = await revise(chatId, aPid, { standIns: true }, `go-edits-${pid}`);
     const next = (revised.json() as { view: ChatProposalView }).view.proposal;
     const before = launches.length;
     const out = await start(chatId, next.pid, { edits: { seats: ['claude', 'codex'] } });
@@ -367,8 +380,8 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
   // codex r1 C4: reduced assurance and stand-ins are exclusive; the person's reduced Start drops the card's choice.
   it('a reduced Go on a consented card launches reduced, without stand-ins', async () => {
     const { chatId, pid } = await proposed();
-    await start(chatId, pid, {});
-    const revised = await revise(chatId, pid, { standIns: true }, `reduced-${pid}`);
+    const aPid = await askedPid(chatId, pid);
+    const revised = await revise(chatId, aPid, { standIns: true }, `reduced-${pid}`);
     const next = (revised.json() as { view: ChatProposalView }).view.proposal;
     const out = await start(chatId, next.pid, { edits: undefined, reducedAssurance: true });
     expect(out.statusCode, out.body).toBe(200);
