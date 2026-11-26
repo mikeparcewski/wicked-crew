@@ -21,7 +21,9 @@
 
 import Fastify from 'fastify';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -32,6 +34,8 @@ import { MembershipIndex } from '../src/projects/membership-index.js';
 import { DeliveryIndex } from '../src/api/delivery-index.js';
 import { AuditLog } from '../src/api/audit.js';
 import { runDeliverScript } from '../src/api/post-hoc-deliver.js';
+import { postHocDeliverText } from '../src/core/deliver-grants.js';
+import { deliverKeyDir, readDeliverKey } from '../src/core/deliver-key.js';
 import { RetryIndex } from '../src/api/retry-index.js';
 import type { RuntimeDeps } from '../src/api/routes.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
@@ -548,7 +552,7 @@ describe('POST /runs/:id/deliver — a stranded REVISION re-pushes onto the PR b
     return { ...fx, prHead };
   }
 
-  function buildRevisionApp(fx: Fixture, resolve: NonNullable<RuntimeDeps['resolvePullRequest']>): FastifyInstance {
+  function buildRevisionApp(fx: Fixture, resolve: NonNullable<RuntimeDeps['resolvePullRequest']>, exec?: RuntimeDeps['deliverExec']): FastifyInstance {
     const retryIndex = new RetryIndex();
     retryIndex.setRevisesPr(RUN_ID, { number: 273, headRef: PR_BRANCH, url: PR_URL });
     const views = [view(RUN_ID, { repo_ref: 'repo-1', workdir: fx.workdir })];
@@ -578,11 +582,62 @@ describe('POST /runs/:id/deliver — a stranded REVISION re-pushes onto the PR b
         retryIndex,
         resolvePullRequest: resolve,
         // The revision target rides `opts` — this harness passes it through (the crew#393 one drops it).
-        deliverExec: (workdir, intent, opts) => runDeliverScript(workdir, intent, opts, fx.env),
+        deliverExec: exec ?? ((workdir, intent, opts) => runDeliverScript(workdir, intent, opts, fx.env)),
       },
     );
     return app;
   }
+
+  // crew#1885: no unit carries a post-hoc delivery's script, so its read key file is registered for the run while the
+  // daemon runs it: the key in that file is the script's credential for its run's PR text (`POST /deliver/text`), under
+  // required auth too. The file is dropped once the script exits.
+  it('crew#1885: the post-hoc script reads its run record with a key file registered only while it runs', async () => {
+    const fx = revisionFixture();
+    const seen: Array<{ run: string; allowed: boolean }> = [];
+    const served: string[] = [];
+    const keys: string[] = [];
+    const daemon = createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c: Buffer) => { raw += c.toString('utf8'); });
+      req.on('end', () => {
+        const body = JSON.parse(raw) as { run: string; key: string };
+        const run = decodeURIComponent(body.run);
+        keys.push(body.key);
+        // What crew's route answers first: the text this post-hoc delivery registered with its key file.
+        const text = postHocDeliverText(run, body.key);
+        seen.push({ run, allowed: text !== null });
+        if (text !== null) served.push(text);
+        res.writeHead(text !== null ? 200 : 403, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end(text ?? 'refused');
+      });
+    });
+    await new Promise<void>((r) => daemon.listen(0, '127.0.0.1', r));
+    const addr = daemon.address() as AddressInfo;
+    const origin = `http://127.0.0.1:${addr.port}`;
+    try {
+      const app = buildRevisionApp(fx, async () => ({ ok: true, pr: { number: 273, headRef: PR_BRANCH, url: PR_URL, state: 'OPEN' } }), (workdir, intent, opts) =>
+        runDeliverScript(workdir, intent, { ...opts, apiOrigin: origin }, fx.env));
+      apps.push(app);
+      await app.ready();
+
+      const res = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN_ID}/deliver` });
+
+      expect(res.statusCode, res.body).toBe(200);
+      // The script asked once, for this run, and was allowed while it ran (the revision's work was committed by the
+      // run, so its commit keeps the run's own subject; the text rides the PR comment).
+      expect(seen).toEqual([{ run: RUN_ID, allowed: true }]);
+      // The text the route composed for this delivery, from the facts it was approved on.
+      expect(served).toHaveLength(1);
+      expect(served[0]).toContain(`Delivered by [wicked-crew](https://wc.wickedagile.com) run \`${RUN_ID}\``);
+      // Released once the script exited: the same key no longer reads the text, and its file is gone.
+      expect(keys).toHaveLength(1);
+      expect(keys[0]).toMatch(/^[0-9a-f]{64}$/);
+      expect(postHocDeliverText(RUN_ID, keys[0]!)).toBeNull();
+      expect(existsSync(deliverKeyDir()) ? readdirSync(deliverKeyDir()).filter((n) => readDeliverKey(join(deliverKeyDir(), n)) === keys[0]) : []).toEqual([]);
+    } finally {
+      await new Promise<void>((r) => daemon.close(() => r()));
+    }
+  }, 60_000);
 
   it('re-checks the PR is OPEN, pushes exactly the run’s commit onto its branch, answers the PR URL — no new PR', async () => {
     const fx = revisionFixture();

@@ -642,6 +642,17 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/api/v1/deliver/text",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [
+        200,
+        400,
+        403
+      ]
+    },
+    {
       "method": "GET",
       "path": "/api/v1/deliveries/freeze",
       "requestType": null,
