@@ -18,6 +18,11 @@
  *   POST /skills/publish               validate → immutable snapshot → flip `current`
  *   POST /skills/analyze               dry-run of the publish validation
  *
+ * Every write (PUT, and every POST but analyze) is a human operator's only (crew#1890): 403 `human_only` for an agent,
+ * plugin or system actor (an actor below operator trust gets the daemon's own trust 403 first, `auth.ts`), and under
+ * auth off 403 `seat_token` for a request carrying a governed unit's token (503 when crew cannot tell), checked before
+ * the body (`api/seat-token.ts`).
+ *
  * Guard results ALWAYS return 2xx `{verdict, findings[], revision}` — studio's `apiFetch` throws
  * on non-2xx, so a `blocked` verdict is a normal 200 with nothing written; that includes a
  * containment refusal on a WRITE (the store answers `path-invalid`), a publish refused because one
@@ -60,6 +65,8 @@ import {
 } from '../skills/store.js';
 import { API_PREFIX } from './api-prefix.js';
 import type { AuditLog } from './audit.js';
+import { trustAtLeast } from './auth.js';
+import { seatTokenClear, type UnitTokenProbe } from './seat-token.js';
 import { FILE_CONTENT_CAP_BYTES, NotARegularFileError } from './run-files.js';
 
 const V = API_PREFIX;
@@ -96,6 +103,10 @@ export interface SkillsRouteDeps {
   usage?: Pick<SkillUsageRecorder, 'report' | 'noteGeneration'>;
   audit: AuditLog;
   actorOf: (req: FastifyRequest) => Actor;
+  /** (crew#1890) The seat-token tripwire on every write: is this bearer a governed unit's token? Absent = no engine to
+   *  ask, so a bearer the local actor of auth off sends cannot be cleared (503). */
+  isUnitToken?: UnitTokenProbe;
+  log?: (msg: string) => void;
 }
 
 /** The zod failure → 400 shape every route here shares (unknown keys are named by zod itself). */
@@ -174,6 +185,18 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
     if (!parsed.success) return invalidBody(reply, parsed.error);
     return parsed.data.side ?? 'effective';
   };
+  // (crew#1890) Every write to the skills root is a human operator's: the root is what every seat is handed, so an
+  // agent, plugin or system actor is refused (403 human_only), and under auth off a request carrying a governed unit's
+  // token is refused too (403 seat_token, the editor writes' tripwire). Checked before the body, so nothing is read or
+  // written for a refused caller. Reads and the dry-run analyze stay open.
+  const personOnly = async (req: FastifyRequest, reply: FastifyReply): Promise<boolean> => {
+    const actor = actorOf(req);
+    if (!(actor.kind === 'human' && trustAtLeast(actor, 'operator'))) {
+      void reply.code(403).send({ code: 'human_only', error: `only a human operator can change the skills root (you are ${actor.kind}/${actor.trust})` });
+      return false;
+    }
+    return seatTokenClear(req, reply, actor, deps.isUnitToken, 'a governed worker cannot change the skills root; only the person can, in studio', (m) => deps.log?.(`[skills] ${m}`));
+  };
   const recordMutation = (req: FastifyRequest, action: string, detail: Record<string, unknown>): void => {
     audit.record(action, actorOf(req), { detail });
   };
@@ -234,8 +257,9 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
 
   app.put(
     `${V}/skills/:name/files/*`,
-    { config: { manifest: { requestType: 'PutSkillFileBody', responseType: 'SkillMutationResult', statusCodes: [200, 400, 404, 409, 503] } } },
+    { config: { manifest: { requestType: 'PutSkillFileBody', responseType: 'SkillMutationResult', statusCodes: [200, 400, 403, 404, 409, 503] } } },
     async (req, reply) => {
+      if (!(await personOnly(req, reply))) return reply;
       const parsed = PutSkillFileSchema.safeParse(req.body);
       if (!parsed.success) return invalidBody(reply, parsed.error);
       const { name } = req.params as { name: string };
@@ -261,8 +285,9 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
 
   app.put(
     `${V}/skills/support/*`,
-    { config: { manifest: { requestType: 'PutSkillFileBody', responseType: 'SkillMutationResult', statusCodes: [200, 400, 409, 503] } } },
+    { config: { manifest: { requestType: 'PutSkillFileBody', responseType: 'SkillMutationResult', statusCodes: [200, 400, 403, 409, 503] } } },
     async (req, reply) => {
+      if (!(await personOnly(req, reply))) return reply;
       const parsed = PutSkillFileSchema.safeParse(req.body);
       if (!parsed.success) return invalidBody(reply, parsed.error);
       return guarded(reply, () => {
@@ -275,8 +300,9 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
 
   app.post(
     `${V}/skills`,
-    { config: { manifest: { requestType: 'AddSkillBody', responseType: 'SkillMutationResult', statusCodes: [200, 400, 409, 503] } } },
+    { config: { manifest: { requestType: 'AddSkillBody', responseType: 'SkillMutationResult', statusCodes: [200, 400, 403, 409, 503] } } },
     async (req, reply) => {
+      if (!(await personOnly(req, reply))) return reply;
       const parsed = AddSkillSchema.safeParse(req.body);
       if (!parsed.success) return invalidBody(reply, parsed.error);
       return guarded(reply, () => {
@@ -290,8 +316,9 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
   for (const op of ['enable', 'disable', 'reset'] as const) {
     app.post(
       `${V}/skills/:name/${op}`,
-      { config: { manifest: { requestType: 'SkillRevisionBody', responseType: 'SkillMutationResult', statusCodes: [200, 400, 404, 409, 503] } } },
+      { config: { manifest: { requestType: 'SkillRevisionBody', responseType: 'SkillMutationResult', statusCodes: [200, 400, 403, 404, 409, 503] } } },
       async (req, reply) => {
+        if (!(await personOnly(req, reply))) return reply;
         const parsed = SkillRevisionSchema.safeParse(req.body);
         if (!parsed.success) return invalidBody(reply, parsed.error);
         const { name } = req.params as { name: string };
@@ -306,8 +333,9 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
 
   app.post(
     `${V}/skills/:name/replace`,
-    { config: { manifest: { requestType: 'ReplaceSkillBody', responseType: 'SkillMutationResult', statusCodes: [200, 400, 404, 409, 503] } } },
+    { config: { manifest: { requestType: 'ReplaceSkillBody', responseType: 'SkillMutationResult', statusCodes: [200, 400, 403, 404, 409, 503] } } },
     async (req, reply) => {
+      if (!(await personOnly(req, reply))) return reply;
       const parsed = ReplaceSkillSchema.safeParse(req.body);
       if (!parsed.success) return invalidBody(reply, parsed.error);
       const { name } = req.params as { name: string };
@@ -321,8 +349,9 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
 
   app.post(
     `${V}/skills/refresh-baseline`,
-    { config: { manifest: { requestType: 'SkillRevisionBody', responseType: 'SkillRefreshResult', statusCodes: [200, 400, 409, 502, 503] } } },
+    { config: { manifest: { requestType: 'SkillRevisionBody', responseType: 'SkillRefreshResult', statusCodes: [200, 400, 403, 409, 502, 503] } } },
     async (req, reply) => {
+      if (!(await personOnly(req, reply))) return reply;
       const parsed = SkillRevisionSchema.safeParse(req.body);
       if (!parsed.success) return invalidBody(reply, parsed.error);
       return guarded(reply, () => {
@@ -348,8 +377,9 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
 
   app.post(
     `${V}/skills/publish`,
-    { config: { manifest: { requestType: 'SkillRevisionBody', responseType: 'SkillPublishResult', statusCodes: [200, 400, 409, 503] } } },
+    { config: { manifest: { requestType: 'SkillRevisionBody', responseType: 'SkillPublishResult', statusCodes: [200, 400, 403, 409, 503] } } },
     async (req, reply) => {
+      if (!(await personOnly(req, reply))) return reply;
       const parsed = SkillRevisionSchema.safeParse(req.body);
       if (!parsed.success) return invalidBody(reply, parsed.error);
       return guarded(reply, async () => {
