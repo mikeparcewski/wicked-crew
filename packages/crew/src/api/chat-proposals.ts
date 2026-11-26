@@ -997,6 +997,17 @@ export interface DecideResult {
 export const STAND_IN_CHOICE_LABEL = 'Use stand-ins for this job';
 
 /** (crew#1884) The note a card carries once the person chose stand-ins for it. */
+/** The note on a card refreshed because the catalog moved under it. */
+const CATALOG_CHANGED_NOTE = 'The catalog changed since this was proposed: check it again before starting.';
+/** (crew#1884) The note on a card whose stand-in choice was dropped at Start because its checks changed. */
+export const STAND_IN_CHECKS_CHANGED_NOTE = 'Not started: this job\'s checks changed since you chose stand-ins for it. Press Start and it asks again.';
+
+/** (crew#1884) Whether two versions of a card carry the same checks and seat protections (order aside). */
+function sameChecks(a: Pick<ArtifactProposal, 'gate' | 'seatRules'>, b: Pick<ArtifactProposal, 'gate' | 'seatRules'>): boolean {
+  const same = (x: readonly string[] | undefined, y: readonly string[] | undefined): boolean => JSON.stringify([...(x ?? [])].sort()) === JSON.stringify([...(y ?? [])].sort());
+  return same(a.gate, b.gate) && same(a.seatRules, b.seatRules);
+}
+
 export const STAND_IN_CONSENT_NOTE = 'Stand-ins for this job: a role its helpers are short of is filled by a labelled stand-in, not an independent review.';
 
 /** (crew#1884) The question a job's card asks when its Start was refused `409 stand_in_choice`: the refusal's own words
@@ -3267,9 +3278,8 @@ export class ChatProposals {
     // (crew#1884) The consent holds only for the job the question was asked on: the same catalog and the same resolved
     // option. A job that changed since (a catalog refresh, a setting) is asked again at its Start.
     // Its checks too: a daemon setting (QE acceptance) changes them without a catalog revision (codex r2).
-    const sameList = (a: readonly string[] | undefined, b: readonly string[] | undefined): boolean => JSON.stringify([...(a ?? [])].sort()) === JSON.stringify([...(b ?? [])].sort());
     const consented = standIns && candidate.catalogRev === parent.proposal.catalogRev && candidate.resolution === parent.proposal.resolution
-      && sameList(candidate.gate, parent.proposal.gate) && sameList(candidate.seatRules, parent.proposal.seatRules);
+      && sameChecks(candidate, parent.proposal);
     const consentNotes = consented ? [STAND_IN_CONSENT_NOTE] : standIns ? ['Not changed: this job changed since wicked asked about stand-ins. Press Start and it asks again.'] : [];
     const notes = [...removal, ...consentNotes];
     // The choice's note replaces the one that said the Start would ask.
@@ -3502,7 +3512,7 @@ export class ChatProposals {
     const pid = `${p.pid.replace(/(?::c:[0-9a-z]+)+$/u, '')}:c:${this.now().toString(36)}`;
     let ctx: JobContext;
     try {
-      ctx = await this.jobContext(chatId, pid, p.turnId, p.seat, chat, { revises: p.pid, lineage: p.lineage ?? p.pid, notes: ['The catalog changed since this was proposed: check it again before starting.'] });
+      ctx = await this.jobContext(chatId, pid, p.turnId, p.seat, chat, { revises: p.pid, lineage: p.lineage ?? p.pid, notes: [CATALOG_CHANGED_NOTE] });
       await this.loadJobSources(factsOf(p), ctx);
     } catch (err) {
       const refused = this.refusalOf(err);
@@ -3511,7 +3521,10 @@ export class ChatProposals {
     }
     const card = CATALOG_V2_CARDS.find((c) => c.id === p.shape!.card);
     const r = card === undefined ? null : resolveOption(card.id, optionFor(card, p.shape.option), ctx.served);
-    if (r !== null && ctx.served.rev === p.catalogRev && r.resolved.resolution === p.resolution) return null;
+    const sameCatalog = r !== null && ctx.served.rev === p.catalogRev && r.resolved.resolution === p.resolution;
+    // (crew#1884) A card carrying the person's stand-in choice is also checked for its checks (a daemon setting, QE
+    // acceptance, changes them with no catalog revision): consent given on one set of checks never launches another.
+    if (sameCatalog && p.standIns !== true) return null;
     let fresh: ArtifactProposal;
     try {
       fresh = keepReshape(await this.proposalOf(chatId, pid, factsOf(p), ctx, this.deps.records(chatId), true, p), p);
@@ -3519,6 +3532,12 @@ export class ChatProposals {
       const refused = this.refusalOf(err);
       if (refused !== null) return { code: 409, body: { code: 'catalog_changed', error: `the catalog changed since this was proposed: ${String(refused.body['error'])}`, view: viewOf(f) } };
       throw err;
+    }
+    if (sameCatalog) {
+      if (sameChecks(fresh, p)) return null;
+      // The refreshed card carries no choice (`factsOf` keeps none), so its Start asks again.
+      const notes = [...(fresh.sentence?.notes ?? []).filter((n) => n !== CATALOG_CHANGED_NOTE), STAND_IN_CHECKS_CHANGED_NOTE];
+      fresh = { ...fresh, ...(fresh.sentence !== undefined ? { sentence: { ...fresh.sentence, notes } } : {}) };
     }
     // A refresh that would carry fewer checks (or seat protections) than the proposal on screen is not startable until
     // the person presses the question naming what changed (codex r1).
@@ -3532,7 +3551,10 @@ export class ChatProposals {
     }
     if (!this.write(chatId, { at: this.now(), turnId: f.turnId, kind: 'proposal', proposal: fresh }, instance)) return this.gone(chatId);
     const after = foldProposals(this.deps.records(chatId)).get(pid);
-    return { code: 409, body: { code: 'catalog_changed', error: 'the catalog changed since this was proposed; check the job again and press Start', ...(after !== undefined ? { view: viewOf(after) } : {}) } };
+    const error = sameCatalog
+      ? 'this job\'s checks changed since you chose stand-ins for it; check the job again and press Start (it asks again)'
+      : 'the catalog changed since this was proposed; check the job again and press Start';
+    return { code: 409, body: { code: 'catalog_changed', error, ...(after !== undefined ? { view: viewOf(after) } : {}) } };
   }
 
   /**

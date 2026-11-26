@@ -17,7 +17,7 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, LaunchRunInput } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
-import { STAND_IN_CONSENT_NOTE } from '../src/api/chat-proposals.js';
+import { STAND_IN_CHECKS_CHANGED_NOTE, STAND_IN_CONSENT_NOTE } from '../src/api/chat-proposals.js';
 import { STAND_IN_PENDING_NOTE, chatStartStandIns } from '../src/api/chat-jobs.js';
 
 /** The engine's own preflight for a one-CLI roster (`tests/fixtures/stand-in-preflight-one-helper.json`, written by
@@ -270,6 +270,44 @@ describe('a chat job Start asks the stand-in choice (crew#1884, server, real job
     const next = (revised.json() as { view: ChatProposalView }).view.proposal;
     expect(next.gate).toContain('qe-acceptance');
     expect(next.standIns).toBeUndefined();
+  });
+
+  it('the checks change after the press and before Start (QE turned on): the Start refuses and asks again (codex-check)', async () => {
+    qeOff = true;
+    const { chatId, pid } = await proposed();
+    await start(chatId, pid, {});
+    const revised = await revise(chatId, pid, { standIns: true }, `qe-late-${pid}`);
+    const consented = (revised.json() as { view: ChatProposalView }).view.proposal;
+    expect(consented.standIns).toBe(true);
+    qeOff = false;
+    const before = launches.length;
+    const out = await start(chatId, consented.pid, { edits: undefined });
+    expect(out.statusCode, out.body).toBe(409);
+    expect(launches.length).toBe(before);
+    const fresh = (out.json() as { view: ChatProposalView }).view.proposal;
+    expect(fresh.gate).toContain('qe-acceptance');
+    expect(fresh.standIns).toBeUndefined();
+    expect(fresh.sentence?.notes).toContain(STAND_IN_CHECKS_CHANGED_NOTE);
+    // Its Start asks the choice again, on the job as it is now.
+    const again = await start(chatId, fresh.pid, {});
+    expect(again.statusCode, again.body).toBe(409);
+    expect((again.json() as { view: ChatProposalView }).view.proposal.question?.kind).toBe('stand_in');
+  });
+
+  it('the checks change after the press and before Start (QE turned off): the card keeps QE and asks about the loss', async () => {
+    const { chatId, pid } = await proposed();
+    await start(chatId, pid, {});
+    const revised = await revise(chatId, pid, { standIns: true }, `qe-off-${pid}`);
+    const consented = (revised.json() as { view: ChatProposalView }).view.proposal;
+    expect(consented.gate).toContain('qe-acceptance');
+    qeOff = true;
+    const before = launches.length;
+    const out = await start(chatId, consented.pid, { edits: undefined });
+    expect(out.statusCode, out.body).toBe(409);
+    expect(launches.length).toBe(before);
+    const fresh = (out.json() as { view: ChatProposalView }).view.proposal;
+    expect(fresh.standIns).toBeUndefined();
+    expect(fresh.question?.kind).toBe('lost_check');
   });
 
   it('removing the checker from a two-helper card leaves a builder alone that can start (codex r2 C1)', async () => {
