@@ -26,7 +26,7 @@ jobs:
     permissions:
       contents: read
       checks: write
-    uses: mikeparcewski/wicked-ci/.github/workflows/selftest.yml@07b13bbc0373f05c3799adbbb6ae4295de1414c8
+    uses: mikeparcewski/wicked-ci/.github/workflows/selftest.yml@615510380d708c0fe317f45c8bde0840dfc7db9c
     with:
       under_test: crew
-      wicked_ci_ref: 07b13bbc0373f05c3799adbbb6ae4295de1414c8
+      wicked_ci_ref: 615510380d708c0fe317f45c8bde0840dfc7db9c
