@@ -53,10 +53,17 @@ describe('the runner files a build copies', () => {
     }
   });
 
-  it('fails on a load it cannot follow: require() or a computed import()', () => {
-    for (const load of ["const r = createRequire(import.meta.url); r('./x.mjs');", "const m = './x.mjs'; await import(m);"]) {
-      const dir = fixture({ 'sqlite-runner.mjs': `import { createRequire } from 'node:module';\n${load}\n`, 'x.mjs': '' });
-      expect(() => runnerFiles(dir)).toThrow(/use a static import so the build can copy it/);
+  it('fails on a load it cannot follow: require, createRequire (aliased too), or an import() that is not one literal', () => {
+    for (const load of [
+      "import { createRequire } from 'node:module';\nconst r = createRequire(import.meta.url); r('./x.mjs');",
+      "import * as m from 'node:module';\nconst cr = m.createRequire; cr(import.meta.url)('./x.mjs');",
+      "const r = require; r('./x.mjs');",
+      "const m = './x.mjs'; await import(m);",
+      "await import('' + './x.mjs');",
+      "await import(`./x.mjs`);",
+    ]) {
+      const dir = fixture({ 'sqlite-runner.mjs': `${load}\n`, 'x.mjs': '' });
+      expect(() => runnerFiles(dir), load).toThrow(/use a static import so the build can copy it/);
     }
   });
 
