@@ -6,7 +6,8 @@
  *
  * Parts may overlap (the offers are read together), so their sum can exceed the total; a part read more than once
  * (a retried engine read) adds up. The total starts when the handler does, after the auth and other request hooks.
- * Only part names (fixed literals at each call site) and durations are ever served or logged.
+ * The header carries only part names (fixed literals at each call site) and durations. The slow line carries those
+ * plus the run id from the request's own path and the answer's HTTP status, so an operator can find the run.
  */
 import { performance } from 'node:perf_hooks';
 
