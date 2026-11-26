@@ -768,10 +768,10 @@ export const PLAIN_FILE_MODE = 0o644;
 
 /**
  * (crew#1881) The modes `swapOwnFiles` writes, keyed `<skill dir>/<rel>`, from a caller's modes keyed by the path
- * relative to the skill: a pack's normalized modes, or a put-back's exact earlier ones. Only the permission bits are
+ * relative to the skill: a pack's normalized modes, or a put-back's recorded earlier ones. Only the permission bits are
  * kept (`& 0o777`), so no setuid, setgid or sticky bit ever lands; a file the caller gives no mode gets
- * {@link PLAIN_FILE_MODE}. As every skills write, the daemon's umask applies. Absent = an empty map (each file the
- * default mode).
+ * {@link PLAIN_FILE_MODE}. As every skills write, the daemon's umask applies (a stricter umask lands narrower modes:
+ * crew#1955). Absent = an empty map (each file the default mode).
  */
 function sourceModes(dir: string, files: Readonly<Record<string, string>>, modes: Readonly<Record<string, number>> | undefined): Map<string, number> {
   const out = new Map<string, number>();

@@ -469,7 +469,7 @@ function preImage(store: PackSkillsPort['store'], key: string): PreImage | null 
     for (const f of tree.files) {
       const abs = store.resolveSkillFile(key, f.path).abs;
       files[f.path] = utf8.decode(readFileSync(abs));
-      modes[f.path] = lstatSync(abs).mode & 0o777; // crew#1881: a put-back restores each file's mode exactly
+      modes[f.path] = lstatSync(abs).mode & 0o777; // crew#1881: a put-back writes each recorded mode back, through the umask (crew#1955)
     }
     return { files, modes, enabled: tree.enabled };
   } catch {
