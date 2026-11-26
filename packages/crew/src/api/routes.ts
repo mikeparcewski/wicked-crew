@@ -5175,7 +5175,7 @@ export function registerRoutes(
       const posted = postHocDeliverText(id, parsed.data.nonce);
       if (posted !== null) return reply.type('text/plain; charset=utf-8').send(posted);
       const run = await adapter.runView(id);
-      if (!run || !deliverTextAllowed(run.units, parsed.data.nonce)) {
+      if (!run || !deliverTextAllowed(run.units, parsed.data.nonce, TERMINAL_RUN_STATUSES.has(run.session.status))) {
         return reply.code(403).send({ code: 'not_the_deliver_script', error: "only this run's own deliver script can read its delivery text here" });
       }
       return reply.type('text/plain; charset=utf-8').send(await deliverTextOf(run, id));

@@ -23,17 +23,23 @@ function deliverUnit(status: string | null | undefined, nonce = NONCE) {
 describe('deliver text grants (crew#1885)', () => {
   it('allows the nonce of the dispatched deliver unit\'s script, in either case, and no other', () => {
     const units = [{ id: `${RUN}:fix`, status: 'done', tool_cmd: null }, deliverUnit('distributed')];
-    expect(deliverTextAllowed(units, NONCE)).toBe(true);
-    expect(deliverTextAllowed(units, NONCE.toUpperCase())).toBe(true);
-    expect(deliverTextAllowed(units, OTHER)).toBe(false);
-    expect(deliverTextAllowed(units, NONCE.slice(0, 16))).toBe(false);
+    expect(deliverTextAllowed(units, NONCE, false)).toBe(true);
+    expect(deliverTextAllowed(units, NONCE.toUpperCase(), false)).toBe(true);
+    expect(deliverTextAllowed(units, OTHER, false)).toBe(false);
+    expect(deliverTextAllowed(units, NONCE.slice(0, 16), false)).toBe(false);
     // Found by catalog entry too, as deliverUnitOf finds a deliver phase under another id.
-    expect(deliverTextAllowed([{ ...deliverUnit('distributed'), id: `${RUN}:ship`, catalog: 'deliver' }], NONCE)).toBe(true);
+    expect(deliverTextAllowed([{ ...deliverUnit('distributed'), id: `${RUN}:ship`, catalog: 'deliver' }], NONCE, false)).toBe(true);
   });
 
-  it('counts only while the unit is dispatched: not before (pending from composition) and not once it is done (its exit sentinel printed the nonce, crew#739)', () => {
-    for (const status of ['pending', 'done', 'rejected', 'failed', 'cancelled', null, undefined]) {
-      expect(deliverTextAllowed([deliverUnit(status)], NONCE), String(status)).toBe(false);
+  it('counts only while the script can be running: dispatched, or refused on a live run (the gate retry re-runs it); not pending from composition, not done (its exit sentinel printed the nonce, crew#739), and never once the run has ended', () => {
+    expect(deliverTextAllowed([deliverUnit('distributed')], NONCE, false)).toBe(true);
+    // Approving the deliver-refusal gate re-runs the same script while the engine still marks the unit rejected.
+    expect(deliverTextAllowed([deliverUnit('rejected')], NONCE, false)).toBe(true);
+    for (const status of ['pending', 'done', 'failed', 'cancelled', null, undefined]) {
+      expect(deliverTextAllowed([deliverUnit(status)], NONCE, false), String(status)).toBe(false);
+    }
+    for (const status of ['distributed', 'rejected']) {
+      expect(deliverTextAllowed([deliverUnit(status)], NONCE, true), `${status}, run ended`).toBe(false);
     }
   });
 
@@ -42,13 +48,13 @@ describe('deliver text grants (crew#1885)', () => {
     const floor = deliverableFloorPhase([`/tmp/DELIVER_NONCE=${NONCE}`, `DELIVER_NONCE='${NONCE}'`], 1).executor;
     const floorCmd = floor !== undefined && floor.type === 'tool' ? floor.cmd : [];
     expect(floorCmd.join(' ')).toContain(`DELIVER_NONCE=${NONCE}`);
-    expect(deliverTextAllowed([{ id: `${RUN}:verify-deliverables`, status: 'distributed', tool_cmd: floorCmd }], NONCE)).toBe(false);
+    expect(deliverTextAllowed([{ id: `${RUN}:verify-deliverables`, status: 'distributed', tool_cmd: floorCmd }], NONCE, false)).toBe(false);
     // The deliver unit, but not crew's script shape (another program, or the nonce not on a line of its own).
-    expect(deliverTextAllowed([{ id: `${RUN}:deliver`, status: 'distributed', tool_cmd: floorCmd }], NONCE)).toBe(false);
-    expect(deliverTextAllowed([{ id: `${RUN}:deliver`, status: 'distributed', tool_cmd: ['bash', '-lc', `echo DELIVER_NONCE='${NONCE}'`] }], NONCE)).toBe(false);
-    expect(deliverTextAllowed([{ id: `${RUN}:deliver`, status: 'distributed', tool_cmd: ['sh', '-c', deliverUnit('distributed').tool_cmd[2]!] }], NONCE)).toBe(false);
+    expect(deliverTextAllowed([{ id: `${RUN}:deliver`, status: 'distributed', tool_cmd: floorCmd }], NONCE, false)).toBe(false);
+    expect(deliverTextAllowed([{ id: `${RUN}:deliver`, status: 'distributed', tool_cmd: ['bash', '-lc', `echo DELIVER_NONCE='${NONCE}'`] }], NONCE, false)).toBe(false);
+    expect(deliverTextAllowed([{ id: `${RUN}:deliver`, status: 'distributed', tool_cmd: ['sh', '-c', deliverUnit('distributed').tool_cmd[2]!] }], NONCE, false)).toBe(false);
     // Crew's script on a unit that is not the deliver phase.
-    expect(deliverTextAllowed([{ ...deliverUnit('distributed'), id: `${RUN}:build` }], NONCE)).toBe(false);
+    expect(deliverTextAllowed([{ ...deliverUnit('distributed'), id: `${RUN}:build` }], NONCE, false)).toBe(false);
   });
 
   it('answers a post-hoc delivery\'s own text for its run only, while it is held, counting overlapping holds', () => {

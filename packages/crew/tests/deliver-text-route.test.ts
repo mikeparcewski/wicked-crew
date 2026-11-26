@@ -242,12 +242,20 @@ describe('POST /deliver/text (crew#1885)', () => {
     const finished = delivering();
     finished.session = { ...finished.session, id: 'finished-run' };
     finished.units = finished.units.map((u) => (u.id.endsWith(':deliver') ? { ...u, status: 'done' } : u));
-    const { app } = await buildApp([delivering(), other, finished], [], REQUIRED);
+    // Approving the deliver-refusal gate re-runs the same script while the engine still marks the unit rejected (the
+    // integration test's escalation retry): it reads its text. The same unit on a run that has ended reads nothing.
+    const retrying = delivering();
+    retrying.session = { ...retrying.session, id: 'retrying-run', status: 'awaiting_human' as const };
+    retrying.units = retrying.units.map((u) => (u.id.endsWith(':deliver') ? { ...u, status: 'rejected' } : u));
+    const ended = { ...retrying, session: { ...retrying.session, id: 'ended-run', status: 'failed' as const } };
+    const { app } = await buildApp([delivering(), other, finished, retrying, ended], [], REQUIRED);
     expect((await post(app, { run: 'other-run', nonce: OTHER_NONCE })).statusCode).toBe(200); // the other run's own script
+    expect((await post(app, { run: 'retrying-run', nonce: NONCE })).statusCode).toBe(200);
     for (const body of [
       { run: RUN_ID, nonce: OTHER_NONCE }, // another run's deliver nonce
       { run: 'other-run', nonce: NONCE }, // this run's nonce on another run
       { run: 'finished-run', nonce: NONCE }, // a finished deliver unit
+      { run: 'ended-run', nonce: NONCE }, // a refused deliver unit on a run that has ended
       { run: 'nope', nonce: NONCE }, // an unknown run
     ]) {
       const res = await post(app, body);

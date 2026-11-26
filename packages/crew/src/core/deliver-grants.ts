@@ -9,9 +9,11 @@
  *
  *  - for the engine-run deliver phase: the nonce that run's DELIVER unit declares, read only from the script crew
  *    composes (`bash -lc` of a script opening `set -euo pipefail` with a `DELIVER_NONCE='<hex>'` line), and only while
- *    that unit is dispatched (`distributed`). A nonce named in any other command, a declared deliverable path for
- *    instance, never counts; nor does a deliver unit not yet dispatched, or one that is done (its script printed the
- *    nonce in its exit sentinel, crew#739);
+ *    that script can be running: the unit dispatched (`distributed`), or refused (`rejected`) while its run has not
+ *    ended, since approving the deliver-refusal gate re-runs the same script with the unit still marked `rejected`
+ *    (seen in `tests/integration/deliver-revision-e2e.test.ts`). A nonce named in any other command, a declared
+ *    deliverable path for instance, never counts; nor does a deliver unit not yet dispatched (`pending`), one that is
+ *    done (its script printed the nonce in its exit sentinel, crew#739), or any unit of a run that has ended;
  *  - for a post-hoc delivery: the text the daemon composed for it, registered here with its nonce while its script
  *    runs, so the PR says what that delivery was approved on (its own QE check).
  *
@@ -74,11 +76,13 @@ export interface DeliverTextUnit {
 const SCRIPT_NONCE_LINE = new RegExp(`^${DELIVER_NONCE_VAR}='([0-9a-fA-F]{16,64})'$`, 'm');
 
 /**
- * The nonce of a dispatched deliver unit's script, or null: the run's deliver unit (by id or catalog entry, as
- * `deliverUnitOf` finds it), running crew's script exactly as composed (`['bash', '-lc', <script>]`).
+ * The nonce of a deliver unit's script that can be running now, or null: the run's deliver unit (by id or catalog
+ * entry, as `deliverUnitOf` finds it), running crew's script exactly as composed (`['bash', '-lc', <script>]`), either
+ * dispatched or (the gate retry) refused while its run has not ended.
  */
-function dispatchedDeliverNonce(u: DeliverTextUnit): string | null {
-  if (u.status !== 'distributed') return null;
+function liveDeliverNonce(u: DeliverTextUnit, runEnded: boolean): string | null {
+  if (runEnded) return null;
+  if (u.status !== 'distributed' && u.status !== 'rejected') return null;
   if (!((u.id ?? '').endsWith(`:${DELIVER_PHASE_ID}`) || u.catalog === DELIVER_PHASE_ID)) return null;
   const cmd = u.tool_cmd;
   if (cmd == null || cmd.length !== 3 || cmd[0] !== 'bash' || cmd[1] !== '-lc') return null;
@@ -87,10 +91,13 @@ function dispatchedDeliverNonce(u: DeliverTextUnit): string | null {
   return SCRIPT_NONCE_LINE.exec(script)?.[1] ?? null;
 }
 
-/** Whether `nonce` is the one a dispatched deliver unit among `units` (one run's) declares in its script. */
-export function deliverTextAllowed(units: ReadonlyArray<DeliverTextUnit>, nonce: string): boolean {
+/**
+ * Whether `nonce` is the one a deliver unit among `units` (one run's) declares in its script, while that script can be
+ * running. `runEnded`: the run is completed, failed or cancelled (then nothing counts).
+ */
+export function deliverTextAllowed(units: ReadonlyArray<DeliverTextUnit>, nonce: string, runEnded: boolean): boolean {
   for (const u of units) {
-    const declared = dispatchedDeliverNonce(u);
+    const declared = liveDeliverNonce(u, runEnded);
     if (declared !== null && sameNonce(declared, nonce)) return true;
   }
   return false;

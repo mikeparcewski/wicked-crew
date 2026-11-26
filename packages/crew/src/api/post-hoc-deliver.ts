@@ -173,6 +173,17 @@ export function deliverShellEnv(env?: Record<string, string>, adoOrigin = false)
 }
 
 /**
+ * (crew#1885) No unit carries a post-hoc delivery's script, so its nonce is registered for the run while it runs, with
+ * the text composed from the facts this delivery was approved on (its own QE check): the script reads that text back
+ * with the nonce (`POST /deliver/text`, `core/deliver-grants.ts`). Returns the release.
+ */
+function grantPostHocText(opts: DeliverScriptOptions | undefined, nonce: string): () => void {
+  const runId = opts?.runId ?? opts?.facts?.runId ?? '';
+  if (runId === '' || opts?.facts === undefined) return () => {};
+  return grantPostHocDeliverText(runId, nonce, framedDeliverText(composeDeliverText(opts.facts)));
+}
+
+/**
  * The production {@link DeliverExec}: `bash -lc <script>` in the run's worktree — the exact
  * invocation core's `run_tool_cmd` uses for the deliver phase (login shell, so the operator's
  * PATH — where `gh` lives — is loaded). `opts` is the PR/commit text context (crew#524). `env`
@@ -185,6 +196,8 @@ export function runDeliverScript(
   opts?: DeliverScriptOptions,
   env?: Record<string, string>,
 ): Promise<DeliverScriptResult> {
+  const nonce = opts?.nonce ?? mintDeliverNonce();
+  const release = grantPostHocText(opts, nonce); // (crew#1885) held while the script runs
   // Only an Azure DevOps delivery needs the raw credential (review r1 on #1869), and it is the one the script itself
   // targets (`deliverAdoTarget`, from the same options), so the env never disagrees with the push (review r1 delta).
   const shellEnv = deliverShellEnv(env, deliverAdoTarget(opts) !== null);
@@ -197,14 +210,6 @@ export function runDeliverScript(
   // tracked files and deliver them (disclosed) instead of refusing as an engine-driven Tool unit
   // must (wicked-core#433 review addendum — there is no verified tree here to weaken).
   shellEnv[DELIVER_POSTHOC_ENV] = '1';
-  // (crew#1885) No unit carries this script, so its nonce is registered for the run while it runs, with the text
-  // composed from the facts this delivery was approved on (its own QE check): the script reads that text back with the
-  // nonce (`POST /deliver/text`, `core/deliver-grants.ts`).
-  const nonce = opts?.nonce ?? mintDeliverNonce();
-  const runId = opts?.runId ?? opts?.facts?.runId ?? '';
-  const release = runId === '' || opts?.facts === undefined
-    ? () => {}
-    : grantPostHocDeliverText(runId, nonce, framedDeliverText(composeDeliverText(opts.facts)));
   return new Promise<DeliverScriptResult>((resolve) => {
     execFile(
       'bash',
