@@ -17,7 +17,8 @@ import { registerFrameGuard } from '../src/api/frame-guard.js';
 import { BUNDLE_CSP_BASE, bundleHeaders, requestOrigin, shellCsp } from '../src/editors/csp.js';
 import { CONFORMANCE_CASES, gardenPackCheck, installPack, PackInstallError, type ConformanceRunner, type PackCheckRunner } from '../src/editors/pack-install.js';
 import { EditorRegistry, EDITORS_STATE_FILENAME, discoverStudioEditors, externalReferences, readCapped, sha256Of } from '../src/editors/registry.js';
-import { registerEditorRoutes, serveBundle, unitTokenProbe, type UnitTokenVerdict } from '../src/editors/routes.js';
+import { registerEditorRoutes, serveBundle } from '../src/editors/routes.js';
+import { unitTokenProbe, type UnitTokenVerdict } from '../src/api/seat-token.js';
 import { readNoFollow } from '../src/editors/visuals.js';
 import { guardBundle } from '../src/editors/webrtc-guard.js';
 

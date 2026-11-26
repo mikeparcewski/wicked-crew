@@ -469,7 +469,8 @@ import { engineConformance, gardenPackCheck, type ConformanceRunner, type PackCh
 import { conformanceProvisioner, conformanceRuntimeReady, conformanceRuntimeRoot, conformanceVenvDir, editorPluginLaunchListener, venvPython } from '../editors/conformance-runtime.js';
 import { EditorRegistry } from '../editors/registry.js';
 import { packSkillsPort } from '../editors/pack-extras.js';
-import { registerEditorRoutes, unitTokenProbe, type UnitTokenVerdict } from '../editors/routes.js';
+import { registerEditorRoutes } from '../editors/routes.js';
+import { unitTokenProbe, type UnitTokenProbe } from './seat-token.js';
 import { broadcast } from '../events/bus.js';
 import type { AppActionStore } from '../apps/actions/store.js';
 import { AppWritePath } from '../apps/actions/write-path.js';
@@ -1718,8 +1719,9 @@ interface RuntimeServices {
   packCheck?: PackCheckRunner;
   /** (tests) the install-time conformance run `POST /editors` uses; default = garden's runner as a child. */
   editorConformance?: ConformanceRunner;
-  /** F37 (tests): is a bearer a governed unit's token (the grant write's tripwire); default = the engine's `resolveEstateScope`. */
-  editorUnitTokenProbe?: (token: string) => Promise<UnitTokenVerdict>;
+  /** F37 (tests): is a bearer a governed unit's token (the tripwire on the editor and skills writes, `seat-token.ts`);
+   *  default = the engine's `resolveEstateScope`. */
+  editorUnitTokenProbe?: UnitTokenProbe;
   /** EP-C1 (tests): where `daemon-editors.json` lives; default = the crew state home. */
   editorsStateHome?: string;
   /** (DES-APPS-001 K5) A unit token → its run and step, for `POST /apps/check`; absent = that route answers 503. */
@@ -2247,6 +2249,8 @@ export function registerRoutes(
       off();
     });
   }
+  // The seat-token tripwire's probe (F37 §6.4; crew#1890), shared by the editor writes and the skills writes.
+  const seatProbe = runtime.editorUnitTokenProbe !== undefined ? runtime.editorUnitTokenProbe : unitTokenProbe(CoreAdapter.estateScopeResolver());
   registerEditorRoutes(app, {
     registry: editorRegistry,
     adapter,
@@ -2257,11 +2261,8 @@ export function registerRoutes(
     presets: adapter,
     packCheck: runtime.packCheck ?? gardenPackCheck(discoverLivePlugin()?.path ?? null),
     conformance: runtime.editorConformance ?? engineConformance({ provision: editorConformanceRuntime }),
-    // F37: the grant write's §6.4 tripwire asks the engine whether a bearer is a governed unit's token.
-    ...(() => {
-      const probe = runtime.editorUnitTokenProbe !== undefined ? runtime.editorUnitTokenProbe : unitTokenProbe(CoreAdapter.estateScopeResolver());
-      return probe !== undefined ? { isUnitToken: probe } : {};
-    })(),
+    // F37: the §6.4 tripwire on the editor writes asks the engine whether a bearer is a governed unit's token.
+    ...(seatProbe !== undefined ? { isUnitToken: seatProbe } : {}),
     log: (m) => app.log.warn(m),
   });
   // DES-APPS-001 §7.6 (K2a): the app store's routes, when this daemon has a store.
@@ -12301,8 +12302,10 @@ export function registerRoutes(
   registerSkillsRoutes(app, {
     ...(runtime.skills !== undefined ? { runtime: runtime.skills } : {}),
     ...(runtime.skillUsage !== undefined ? { usage: runtime.skillUsage } : {}),
+    ...(seatProbe !== undefined ? { isUnitToken: seatProbe } : {}),
     audit,
     actorOf,
+    log: (m) => app.log.warn(m),
   });
 
   // ── MCP tools registry (DES-MCP-TOOLS-001 S2) — upstream servers, their tools, their secrets ─

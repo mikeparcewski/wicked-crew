@@ -28,6 +28,7 @@ const adapter = { getSettings: async () => ({ graphNodeLimit: 150 }), listWorkfl
 /** The engine's word on a bearer, as `unitTokenProbe` gives it: one unit token, one fault, the rest no unit's. */
 const probe = async (token: string): Promise<'unit' | 'not_unit' | 'unknown'> => {
   seen.push(token);
+  if (token === 'boom') throw new Error('the resolver is down');
   return token === 'unit-tok-1' ? 'unit' : token === 'flaky' ? 'unknown' : 'not_unit';
 };
 
@@ -86,11 +87,14 @@ describe('skills writes: a person only (crew#1890)', () => {
       const unsure = await app.inject({ ...w, headers: { authorization: 'Bearer flaky' } });
       expect(unsure.statusCode, `${w.method} ${w.url}: ${unsure.body}`).toBe(503);
     }
+    // A probe that throws fails closed as well (503, not a 500).
+    const thrown = await app.inject({ ...writes(before.revision)[0]!, headers: { authorization: 'Bearer boom' } });
+    expect(thrown.statusCode, thrown.body).toBe(503);
     const after = await manifest();
     expect(after.revision).toBe(before.revision);
     expect(after.manifest).toEqual(before.manifest);
     expect(after.current).toBeNull();
-    expect(seen).toEqual(writes(0).flatMap(() => ['unit-tok-1', 'flaky']));
+    expect(seen).toEqual([...writes(0).flatMap(() => ['unit-tok-1', 'flaky']), 'boom']);
   });
 
   it('under auth off, a bearer that is no unit\'s token and a request with no bearer still write; reads and analyze are never probed', async () => {
@@ -100,17 +104,24 @@ describe('skills writes: a person only (crew#1890)', () => {
     expect(seen).toEqual([]);
     const added = await app.inject({ method: 'POST', url: '/api/v1/skills', headers: { authorization: 'Bearer person-tok' }, payload: { name: 'wicked-garden-seat', files: { 'SKILL.md': SKILL }, expectedRevision: rev } });
     expect(added.statusCode, added.body).toBe(200);
-    const disabled = await app.inject({ method: 'POST', url: '/api/v1/skills/wicked-garden-gamma/disable', payload: { expectedRevision: (await manifest()).revision } });
+    expect(added.json()).toMatchObject({ verdict: 'clear', revision: rev + 1 });
+    const disabled = await app.inject({ method: 'POST', url: '/api/v1/skills/wicked-garden-seat/disable', payload: { expectedRevision: rev + 1 } });
     expect(disabled.statusCode, disabled.body).toBe(200);
+    expect(disabled.json()).toMatchObject({ verdict: 'clear', revision: rev + 2 });
+    // Read back: the skill is in the root, now switched off (a 200 alone could be a `blocked` envelope).
+    const after = await manifest();
+    expect(after.revision).toBe(rev + 2);
+    expect(after.manifest.skills['wicked-garden-seat']).toMatchObject({ enabled: false, provenance: 'user-added' });
     expect(seen).toEqual(['person-tok']);
   });
 
-  it('under auth required, an agent, plugin or system actor is 403 human_only on every write and the root is unchanged; a human operator writes', async () => {
+  it('under auth required, an agent, plugin or system actor is 403 human_only on every write, an observer 403, and the root is unchanged; a human operator writes', async () => {
     const actors = {
       'agent-tok': { id: 'a', kind: 'agent', trust: 'admin' },
       'plugin-tok': { id: 'p', kind: 'plugin', trust: 'admin' },
       'system-tok': { id: 's', kind: 'system', trust: 'admin' },
-      'person-tok': { id: 'h', kind: 'human', trust: 'admin' },
+      'observer-tok': { id: 'o', kind: 'human', trust: 'observer' },
+      'person-tok': { id: 'h', kind: 'human', trust: 'operator' },
     } as const;
     app = await build({
       mode: 'required',
@@ -128,12 +139,18 @@ describe('skills writes: a person only (crew#1890)', () => {
       // Reads stay open to every operator-trusted actor.
       expect((await app.inject({ method: 'GET', url: '/api/v1/skills', headers: { authorization: `Bearer ${token}` } })).statusCode).toBe(200);
     }
+    // A person below operator is refused by the daemon's trust boundary first (its plain 403, auth.ts), before the route.
+    for (const w of writes(before.revision)) {
+      expect((await app.inject({ ...w, headers: { authorization: 'Bearer observer-tok' } })).statusCode, `observer ${w.method} ${w.url}`).toBe(403);
+    }
     const after = await manifest(PERSON);
     expect(after.revision).toBe(before.revision);
     expect(after.manifest).toEqual(before.manifest);
     // A verified human operator is not probed (a unit token is no identity under required auth: 401).
     const added = await app.inject({ method: 'POST', url: '/api/v1/skills', headers: PERSON, payload: { name: 'wicked-garden-seat', files: { 'SKILL.md': SKILL }, expectedRevision: after.revision } });
     expect(added.statusCode, added.body).toBe(200);
+    expect(added.json()).toMatchObject({ verdict: 'clear', revision: after.revision + 1 });
+    expect((await manifest(PERSON)).manifest.skills['wicked-garden-seat']).toMatchObject({ enabled: true });
     expect(seen).toEqual([]);
     expect((await app.inject({ method: 'POST', url: '/api/v1/skills/publish', headers: { authorization: 'Bearer unit-tok-1' }, payload: { expectedRevision: after.revision } })).statusCode).toBe(401);
   });
