@@ -10,6 +10,24 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.20.1] — 2026-11-27
+
+Patch release on main 5a881a24 (train 18), carrying 11 PRs since the 0.20.0 cut 993a5051: #1962, #1963, #1967, #1968, #1971, #1973, #1975, #1976, #1977, #1979 and #1980. The entries below come from each PR's changelog entry; #1963 and #1971 are CI only and have no entry.
+
+Ships with wicked-crew-api-types 0.235.0 (tag api-types-v0.235.0), pins wicked-core-ts ^0.16.2 and bundles wicked-studio 0.17.2. #1973 needs wicked-core's core#2015 fix (#2018, core-ts 0.16.2): the engine marks an abandoned stand-in reservation, and api-types adds `abandoned?: true` to the stand-in row.
+
+### Fixed
+
+- **crew**: `POST /projects/:id/product/compose` asks a person the stand-in choice, as `POST /runs` does. A short roster with no consent answers `409 stand_in_choice`, and `standIns: true` launches with the person's consent. Agent and system callers launch as before (crew#1884, #1968).
+- **crew**: the delivery text no longer lists a stand-in reservation that was abandoned before it ran as a stand-in that "did not answer" (crew#1966, #1973).
+- **crew**: a delivery PR body no longer says "only X was signed in" for a run that picked one helper while others were signed in. Stand-in reasons now say "picked for this job", as the engine does (crew#1952, #1977).
+- **crew**: a chat answer run that a daemon restart left waiting at its turn gate is ended at the next boot, as a chat close would end it, so it no longer counts as waiting forever (crew#1960, #1975).
+- **apps**: publishing an app checks that its base image is on the container engine before building. If it is missing, the publish stops and names the image, plus the one command that pulls it, instead of downloading it unasked (crew#1972, #1976).
+- **apps**: a failed app publish image step now names its cause in plain words: the engine was unreachable, out of disk, refused permission, missing an image, or which Dockerfile step failed. Otherwise it says where the engine's reason is logged. The engine's own output never leaves the machine (crew#1978, #1980).
+- **crew**: a demo of a published app's site running on this machine, when that site serves queries, is refused at launch. The refusal says why and points to the same app inside crew, instead of the run failing at its probe step (crew#1957, #1979).
+- **crew**: skills files keep exact modes under any daemon umask: an executable script `0755`, other files `0644`, never wider than `0755`. Before, a stricter umask (`077`) narrowed them (crew#1955, #1962). Directories still follow the umask (crew#1965).
+- **crew** (docs): the README states that skills directories follow the daemon's umask, and how to let another user read published skills: umask `022` from the start, or `chmod -R go+rX` on an existing root (crew#1965, #1967).
+
 ## [0.20.0] — 2026-11-27
 
 Minor release on the train-17 cut 993a5051, carrying 6 PRs since 0.19.0: #1946, #1947, #1959, #1958, #1954 and #1961. The minor bump is for #1961, a new read in the domain model (api-types `DomainStatement.requirementKey` may now be `null`).
