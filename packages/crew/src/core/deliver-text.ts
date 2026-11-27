@@ -983,17 +983,19 @@ function standInLines(f: DeliverStandInFact): string[] {
 }
 
 /** A stand-in's reason (`StandInReason`, tagged by `kind`) in a person's words, as the engine says it
- *  (wicked-core `standin::Reason::words`); `null` for a kind this daemon does not know. */
+ *  (wicked-core `standin::Reason::words`); `null` for a kind this daemon does not know. (crew#1952, after wicked-core
+ *  #1985) The engine counts the launch's own seats and never knew which other helpers are signed in, so the words say
+ *  "picked for this job", not "signed in". The `signed_in` field keeps its wire name. */
 function standInReasonWords(r: unknown): string | null {
   if (r === null || typeof r !== 'object') return null;
   const o = r as Record<string, unknown>;
   const str = (v: unknown): string => (typeof v === 'string' ? v : '');
   switch (o['kind']) {
-    case 'only_one_helper': return `only ${str(o['cli'])} was signed in`;
-    case 'all_parties': return `every signed-in helper (${(Array.isArray(o['seats']) ? o['seats'] : []).map(str).join(', ')}) built or reviewed this work`;
+    case 'only_one_helper': return `only ${str(o['cli'])} was picked for this job`;
+    case 'all_parties': return `every helper picked for this job (${(Array.isArray(o['seats']) ? o['seats'] : []).map(str).join(', ')}) built or reviewed this work`;
     case 'helpers_short': {
       const n = num0(o['signed_in']);
-      return `${n} helper${n === 1 ? ' is' : 's are'} signed in: ${num0(o['have'])} can check this job independently and it needs ${num0(o['need'])}`;
+      return `${n} helper${n === 1 ? ' is' : 's are'} picked for this job: ${num0(o['have'])} can check this job independently and it needs ${num0(o['need'])}`;
     }
     case 'lost_mid_run': return `${str(o['seat'])} stopped mid-run (${str(o['cause'])})`;
     case 'shares_provider': return `${str(o['seat'])} calls the same provider (${str(o['provider'])}) as the work it would check`;
@@ -1004,13 +1006,15 @@ function standInReasonWords(r: unknown): string | null {
 /** (DES-STANDIN-001 §6, K6) The stand-ins from `session.assurance` (`standIns`, `standInLabel`) and the role records
  *  (`roles`): the session's, and every unit's gate receipt (`unit.assurance.roles`), where the engine writes the
  *  answered roles (the session's list starts empty). Absent when none took part. A stand-in is `failed` when its
- *  binding, or a receipt's record of its seat, says so (codex r1 on b7-standin). */
+ *  binding, or a receipt's record of its seat, says so (codex r1 on b7-standin). An abandoned reservation is left out. */
 function standInsOf(a: Record<string, unknown>, units: WorkUnit[] = []): DeliverStandInFact | undefined {
   const bindings = (Array.isArray(a['standIns']) ? a['standIns'] : []) as Array<Record<string, unknown>>;
-  const took = bindings.filter((b) => typeof b['role'] === 'string' && typeof b['key'] === 'string');
+  // (crew#1966) A reservation its asker let go before anything ran on it (`abandoned: true`, always `failed`; wicked-core
+  // #2015) took no part: it is not a stand-in that "did not answer".
+  const took = bindings.filter((b) => typeof b['role'] === 'string' && typeof b['key'] === 'string' && b['abandoned'] !== true);
   if (took.length === 0) return undefined;
   const label = typeof a['standInLabel'] === 'string' ? a['standInLabel'].trim() : '';
-  const reason = standInReasonWords(took[0]!['reason']) ?? (label !== '' ? label : 'too few helpers were signed in');
+  const reason = standInReasonWords(took[0]!['reason']) ?? (label !== '' ? label : 'too few helpers were picked for this job');
   const rolesOf = (v: unknown): Array<Record<string, unknown>> =>
     (Array.isArray(v) ? v : []).filter((r): r is Record<string, unknown> => typeof r === 'object' && r !== null);
   const records = [

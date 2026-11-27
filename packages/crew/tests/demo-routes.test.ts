@@ -10,7 +10,7 @@
 // Fastify inject() with a mock adapter — no engine.
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
@@ -19,7 +19,7 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { AuditLog } from '../src/api/audit.js';
-import { crewAppOf, crewAppRowsMayReachModels, demoAppTarget, demoRootDir, demoRootsBesideStateHome, demoStage, existingDemoRootDir, legacyDemoRootDir, parseRange, parseReview } from '../src/api/recording.js';
+import { crewAppOf, crewAppRowsMayReachModels, demoAppTarget, demoLaunch, demoRootDir, demoRootsBesideStateHome, demoStage, existingDemoRootDir, legacyDemoRootDir, parseRange, parseReview, publishedAppOf, siteHealthOf } from '../src/api/recording.js';
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { LaunchRunInput } from '../src/core/types.js';
@@ -184,6 +184,53 @@ describe('the Demo experience routes', () => {
         target: { kind: 'crew_app', id: 'escalations' },
         live_data_to_models: false,
       });
+    } finally {
+      if (prevUrl === undefined) delete process.env.WICKED_CREW_URL;
+      else process.env.WICKED_CREW_URL = prevUrl;
+    }
+  });
+
+  it("(crew#1957) a demo of crew's own published site is refused with the reason and the way that works; another app on its port is not", async () => {
+    // What AppStore.publishedSites returns (tests/apps-publish-run.test.ts reads it off a real produced publish).
+    const sites = [
+      { slug: 'rules-app', version: 2, origin: 'http://localhost:7861', queries: 2 },
+      { slug: 'notice', version: 1, origin: 'http://localhost:8080', queries: 0 },
+    ];
+    // The running site's answer (apps-server GET /healthz).
+    const siteHealth = async (origin: string) => (origin.endsWith(':8080') ? { app: 'notice', version: 1 } : { app: 'rules-app', version: 2 });
+    const log = { info: () => {}, warn: () => {}, error: () => {} };
+    const prevUrl = process.env.WICKED_CREW_URL;
+    process.env.WICKED_CREW_URL = 'http://127.0.0.1:7721';
+    const go = async (url: string, deps: Parameters<typeof demoLaunch>[5]) => {
+      const run = vi.fn(async (raw: unknown) => ({ statusCode: 201, payload: { runId: (raw as { sessionId: string }).sessionId } }));
+      const out = await demoLaunch(run, 'proj-1', { url, audience: 'a', show: 'b' }, { actor: { kind: 'human', id: 'priya' } as never, log }, {}, deps);
+      const id = (run.mock.calls[0]?.[0] as { sessionId: string } | undefined)?.sessionId;
+      return { out, launched: run.mock.calls.length, manifest: id === undefined ? null : (JSON.parse(readFileSync(join(demos, id, 'launch.json'), 'utf8')) as { target: unknown }) };
+    };
+    try {
+      const refused = await go('http://127.0.0.1:7861/', { publishedSites: () => sites, siteHealth });
+      expect(refused.out.code).toBe(409);
+      expect(refused.out.body).toMatchObject({ code: 'published_app_not_recordable', app: 'rules-app' });
+      expect((refused.out.body as { error: string }).error).toContain('Record the same app inside crew instead: http://127.0.0.1:7721/apps/rules-app');
+      // Nothing is minted or launched for it.
+      expect(refused.launched).toBe(0);
+      expect(readdirSync(demos)).toEqual([]);
+      // Another app now on the published app's port, another port, no publish seam, or seams that throw: a plain
+      // loopback app (the recorder refuses every POST, as before).
+      for (const [url, deps] of [
+        ['http://localhost:7861/', { publishedSites: () => sites, siteHealth: async () => null }],
+        ['http://localhost:7861/', { publishedSites: () => sites, siteHealth: async () => ({ app: 'rules-app', version: 3 }) }],
+        ['http://localhost:5173/', { publishedSites: () => sites, siteHealth }],
+        ['http://localhost:7861/', {}],
+        ['http://localhost:7861/', { publishedSites: () => { throw new Error('store down'); }, siteHealth }],
+        ['http://localhost:7861/', { publishedSites: () => sites, siteHealth: async () => { throw new Error('down'); } }],
+        // A published version with no query loads by GET alone: it records as any loopback app (main's behaviour).
+        ['http://localhost:8080/', { publishedSites: () => sites, siteHealth }],
+      ] as Array<[string, Parameters<typeof demoLaunch>[5]]>) {
+        const r = await go(url, deps);
+        expect(r.out.code, JSON.stringify(r.out.body)).toBe(201);
+        expect(r.manifest?.target).toEqual({ kind: 'loopback_app' });
+      }
     } finally {
       if (prevUrl === undefined) delete process.env.WICKED_CREW_URL;
       else process.env.WICKED_CREW_URL = prevUrl;
@@ -677,6 +724,56 @@ describe('the demo target (DES-DEMO-RECORD-001 §3.7)', () => {
     // A default port, written out on one side and dropped by the URL API on the other.
     expect(crewAppOf('http://127.0.0.1:80', '/apps/esc', 'http://127.0.0.1')).toBe('esc');
     expect(crewAppOf(demoAppTarget('http://localhost/apps/esc')!.appOrigin, '/apps/esc', 'http://127.0.0.1:80')).toBe('esc');
+  });
+
+  it('(crew#1957) names the published app only when the running site says it is that app and version', async () => {
+    const site = (slug: string, origin: string, version = 1) => ({ slug, version, origin, queries: 1 });
+    const says = (app: string, version = 1) => vi.fn(async () => ({ app, version }));
+    expect(await publishedAppOf('http://localhost:7861', [site('rules', 'http://localhost:7861')], says('rules'))).toEqual({ id: 'rules', version: 1, queries: 1 });
+    // Loopback names are one machine; a default port is written out on one side only.
+    expect((await publishedAppOf('http://127.0.0.1:7861', [site('rules', 'http://localhost:7861')], says('rules')))?.id).toBe('rules');
+    expect((await publishedAppOf('http://localhost:80', [site('rules', 'http://localhost')], says('rules')))?.id).toBe('rules');
+    // Nothing published there: the site is never asked.
+    const unasked = says('rules');
+    for (const origin of ['http://localhost:7862', 'https://localhost:7861', 'http://apps.example.com:7861', 'not a url']) {
+      expect(await publishedAppOf('http://localhost:7861', [site('rules', origin)], unasked)).toBeNull();
+    }
+    expect(unasked).not.toHaveBeenCalled();
+    // The running site is another app, another version, or not an apps site at all.
+    expect(await publishedAppOf('http://localhost:7861', [site('rules', 'http://localhost:7861')], says('other'))).toBeNull();
+    expect(await publishedAppOf('http://localhost:7861', [site('rules', 'http://localhost:7861', 2)], says('rules', 3))).toBeNull();
+    expect(await publishedAppOf('http://localhost:7861', [site('rules', 'http://localhost:7861')], async () => null)).toBeNull();
+    // Two apps (or two versions) published to one origin: the running site picks which.
+    const two = [site('a', 'http://localhost:7861', 1), site('b', 'http://127.0.0.1:7861', 4), site('b', 'http://localhost:7861', 5)];
+    expect(await publishedAppOf('http://localhost:7861', two, says('b', 4))).toEqual({ id: 'b', version: 4, queries: 1 });
+    expect(await publishedAppOf('http://localhost:7861', two, says('a', 1))).toEqual({ id: 'a', version: 1, queries: 1 });
+  });
+
+  it("(crew#1957) reads a site's identity from its GET /healthz, and nothing else counts", async () => {
+    const { createServer } = await import('node:http');
+    const serve = async (handler: (url: string, res: import('node:http').ServerResponse) => void) => {
+      const server = createServer((req, res) => handler(req.url ?? '/', res));
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      return { origin: `http://127.0.0.1:${(server.address() as { port: number }).port}`, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
+    };
+    const json = (res: import('node:http').ServerResponse, code: number, body: unknown) => {
+      res.writeHead(code, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(body));
+    };
+    // apps-server's own answer (packages/apps-server/src/server.ts `health()`: AppSiteHealth).
+    const apps = await serve((url, res) => (url === '/healthz' ? json(res, 200, { ok: true, app: 'rules-app', version: 2, refused: [], actions: false }) : json(res, 404, {})));
+    const other = await serve((url, res) => (url === '/healthz' ? json(res, 200, { status: 'ok' }) : json(res, 404, {})));
+    const page = await serve((_url, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html>'); });
+    const moved = await serve((_url, res) => { res.writeHead(302, { location: `${apps.origin}/healthz` }); res.end(); });
+    try {
+      expect(await siteHealthOf(apps.origin)).toEqual({ app: 'rules-app', version: 2 });
+      expect(await siteHealthOf(other.origin)).toBeNull();
+      expect(await siteHealthOf(page.origin)).toBeNull();
+      expect(await siteHealthOf(moved.origin)).toBeNull();
+      expect(await siteHealthOf('http://127.0.0.1:1')).toBeNull();
+    } finally {
+      for (const s of [apps, other, page, moved]) await s.close();
+    }
   });
 
   it("lets a crew app's rows reach a model only when every source it reads lets agents query it", async () => {

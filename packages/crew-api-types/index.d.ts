@@ -3684,6 +3684,10 @@ export interface StandInBinding {
   /** `seated` | `answered` | `failed`. */
   state: 'seated' | 'answered' | 'failed' | (string & {});
   display: string | null;
+  /** (api-types next, wicked-core#2015, crew#1966) A reservation its asker let go before anything ran on it: always
+   *  with `state: 'failed'`, its key stays taken. It took no part, so crew's delivery text leaves it out. Absent on the
+   *  wire unless set. */
+  abandoned?: true;
 }
 
 /** (api-types 0.231.0, §5.1) A stand-in's stamp on a role record. */
