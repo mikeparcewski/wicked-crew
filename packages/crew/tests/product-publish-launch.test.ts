@@ -51,7 +51,9 @@ afterAll(async () => {
 
 describe('compose facts through the real launch', () => {
   it('run.launched carries them, a fresh index hydrates them, and publish reads the run as a compose', async () => {
-    const res = await app.inject({ method: 'POST', url: `/api/v1/projects/${projectId}/product/compose`, payload: { requirements: [{ repoId: 'alpha', key: 'billing::r1' }] } });
+    // The stub roster is short, so a person's compose meets the stand-in question (crew#1884); this suite is about the
+    // launch's recorded facts, so it answers it as a person does ("this job").
+    const res = await app.inject({ method: 'POST', url: `/api/v1/projects/${projectId}/product/compose`, payload: { requirements: [{ repoId: 'alpha', key: 'billing::r1' }], standIns: true } });
     expect(res.statusCode, res.body).toBe(202);
     const runId = (res.json() as { runId: string }).runId;
     // The daemon's trail is written behind the answer: wait for its launch entry.
