@@ -556,6 +556,9 @@ describe('the run and its plan', () => {
     type Fix = typeof FIX;
     const EDITED_FIX = JSON.parse(readFileSync(join(HERE, 'fixtures', 'product', 'compose-run-view-edited.json'), 'utf8')) as Fix;
     const NOTE_FIX = JSON.parse(readFileSync(join(HERE, 'fixtures', 'product', 'compose-run-view-edited-note.json'), 'utf8')) as Fix;
+    // tests/fixtures/product/compose-run-view-review-edited-note.json (codex on #1988): only the REVIEW was edited at the
+    // gate, with a note; the engine put the note on the unchanged DRAFT's description (its instructions are the launch's).
+    const REVIEW_NOTE_FIX = JSON.parse(readFileSync(join(HERE, 'fixtures', 'product', 'compose-run-view-review-edited-note.json'), 'utf8')) as Fix;
     type Accepted = { rev: number; by: string; proposal_id: string; steps: { steps: Array<Record<string, unknown>> } };
     const acceptedOf = (v: SessionView) => (v.session as unknown as { team_plan: { accepted: Accepted } }).team_plan.accepted;
     const unitOf = (v: SessionView, id: string) => v.units.find((u) => u.id === `${v.session.id}:${id}`)! as SessionView['units'][number] & { plan_rev?: number };
@@ -677,8 +680,15 @@ describe('the run and its plan', () => {
     });
 
     it('a gate edit that carried a note is refused in its own words (coord Q1; crew#1983)', async () => {
-      await withRun(NOTE_FIX, () => {}, (runId) =>
-        refusedWith(runId, /^the draft step carries a note from its gate$/, "this plan was edited at its gate with a note; publishing an edited plan with a note isn't supported yet: edit it without a note, or compose again to publish"));
+      const words = "this plan was edited at its gate with a note; publishing an edited plan with a note isn't supported yet: edit it without a note, or compose again to publish";
+      await withRun(NOTE_FIX, () => {}, (runId) => refusedWith(runId, /^the draft step carries a note from its gate$/, words));
+      // codex on #1988: the note lands on the step the plan releases next, not the edited one. Only the review was edited;
+      // the draft, unchanged, carries the note: still refused.
+      const d = unitOf(REVIEW_NOTE_FIX.view, 'draft');
+      expect(d.instructions).toBe(REVIEW_NOTE_FIX.draft);
+      expect(d.description.endsWith(' (operator amendment: Keep billing small.)')).toBe(true);
+      expect(unitOf(REVIEW_NOTE_FIX.view, 'review').instructions).not.toBe(REVIEW_NOTE_FIX.review);
+      await withRun(REVIEW_NOTE_FIX, () => {}, (runId) => refusedWith(runId, /^the draft step carries a note from its gate$/, words));
     });
 
     it('UNTRUSTED TEXT OUT: the edited instructions reach neither the card nor a refusal', async () => {

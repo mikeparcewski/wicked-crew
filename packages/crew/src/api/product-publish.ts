@@ -149,10 +149,10 @@ const GATE_SEQ_MAX = 1_000;
  *  - that revision's proposal is a person's edit AT A GATE: its id is the one the engine mints for a gate edit
  *    (`mint_proposal_id(run, "human", Gate{gate_id})`, gate ids `g-<run>-<n>` for each gate the run opened). A plan a
  *    person changed through the mid-run edit route (`Edit{request_id}`) or a seat's plan never has that id;
- *  - that revision's step with the unit's id is the unit: the same catalog and the same instructions;
- *  - the note a gate edit may carry is not on the step (its description ends with its instructions).
+ *  - that revision's step with the unit's id is the unit: the same catalog and the same instructions.
+ * The note a gate edit may carry is checked on every step once any step is edited ({@link composedPlan}).
  */
-function gateEditOf(view: SessionView, runId: string, id: string, u: SessionView['units'][number]): { ok: true; rev: number } | { ok: false; detail: string; note?: boolean } {
+function gateEditOf(view: SessionView, runId: string, id: string, u: SessionView['units'][number]): { ok: true; rev: number } | { ok: false; detail: string } {
   const session = view.session as unknown as { team_plan?: { accepted?: unknown } | null; team?: { gate_seq?: unknown } | null };
   const rev = (u as { plan_rev?: unknown }).plan_rev;
   if (typeof rev !== 'number' || !Number.isInteger(rev) || rev < 1) return { ok: false, detail: `the engine did not record which plan revision the ${id} step ran under` };
@@ -170,7 +170,6 @@ function gateEditOf(view: SessionView, runId: string, id: string, u: SessionView
   if (step === undefined || step['catalog'] !== u.catalog || typeof step['instructions'] !== 'string' || sha256Hex(step['instructions']) !== sha256Hex(u.instructions ?? '')) {
     return { ok: false, detail: `the ${id} step is not the one plan revision ${rev} accepted` };
   }
-  if (typeof u.description !== 'string' || !u.description.endsWith(u.instructions ?? '')) return { ok: false, detail: `the ${id} step carries a note from its gate`, note: true };
   return { ok: true, rev };
 }
 
@@ -366,12 +365,20 @@ export async function composedPlan(deps: Pick<ProductPublishDeps, 'composeOf' | 
     if (u.structured_description !== true || typeof u.instructions !== 'string') return unverified(`the engine did not record the ${id} step's instructions`);
     if (sha256Hex(u.instructions) !== step.instructionsSha) {
       const g = gateEditOf(view, runId, id, u);
-      if (!g.ok) {
-        return refuse(409, 'compose_unverified', g.note === true ? EDITED_WITH_NOTE : `crew cannot confirm this plan's change was a person's edit at its gate (${g.detail}); compose again to publish`, { detail: g.detail });
-      }
+      if (!g.ok) return refuse(409, 'compose_unverified', `crew cannot confirm this plan's change was a person's edit at its gate (${g.detail}); compose again to publish`, { detail: g.detail });
       edited = Math.max(edited ?? 0, g.rev);
     }
     if ((u.amendments ?? []).length > 0) return unverified(`the ${id} step was amended`, true);
+  }
+  // (crew#1902, coord Q1) A gate edit's note lands on the description of the step the plan releases next (` (operator
+  // amendment: …)`), which need not be the step the person edited (codex on #1988: an edit of the review alone put its
+  // note on the unchanged draft). So once any step is a gate edit, NEITHER step may carry text after its instructions.
+  if (edited !== null) {
+    for (const [u, id] of [[d, 'draft'], [r, 'review']] as const) {
+      if (typeof u.description !== 'string' || !u.description.endsWith(u.instructions ?? '')) {
+        return refuse(409, 'compose_unverified', EDITED_WITH_NOTE, { detail: `the ${id} step carries a note from its gate` });
+      }
+    }
   }
   if (r.role !== 'evaluator' || !sameGate(r.gate)) return unverified("the review step is not the evaluator behind a person's confirmation", true);
   if (d.status !== 'done' || r.status !== 'done') return unverified('the draft or its review did not finish');
