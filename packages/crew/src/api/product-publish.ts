@@ -11,7 +11,8 @@
  *                                                                  of the run, read back as `readBackOf` allows (crew#1911)
  *
  * The plan is read only from a run whose launch recorded compose facts ({@link ComposeFacts}) and whose draft and
- * review units still match them: a plan edited at its gate is refused, in plain words. The repository is the project's
+ * review units still match them, or ran a plan a person edited at its gate (crew#1902, proven from the run view and
+ * said on the card); any other change is refused, in plain words. The repository is the project's
  * own GitHub tracker ({@link projectGithubTracker}); the write is the tracker write path's (`vendorRead` as the person,
  * admission re-read before each call, the credential the card was read with pinned). Each item is journaled, flushed,
  * before and after it is sent (`<mcp state>/product-publish/<sha256(runId)>/<publication>.ndjson`), so a crash never
@@ -23,6 +24,7 @@
  * daemon per home, and a second daemon on the same state home is not covered here either.
  */
 
+import { createHash } from 'node:crypto';
 import { mkdir, open, readdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
@@ -118,7 +120,72 @@ type Refusal = { ok: false; status: number; code: string; error: string; extra?:
 const refuse = (status: number, code: string, error: string, extra?: Record<string, unknown>): Refusal => ({ ok: false, status, code, error, ...(extra !== undefined ? { extra } : {}) });
 
 /** The plain-words refusal of a run whose plan crew cannot take as the compose launched it (coord ruling, 2026-11-24). */
-const EDITED = "this plan was edited at its gate; publishing an edited plan isn't supported yet, compose again to publish";
+const EDITED = "this plan was changed in a way publishing doesn't support (a step's kind, its review or an amendment); compose again to publish";
+/** (crew#1902, coord ruling Q1) A gate edit that carried a note: the engine appends the note to the step's description
+ *  (` (operator amendment: …)`), never to its instructions, so it is refused in its own words (crew#1983). */
+const EDITED_WITH_NOTE = "this plan was edited at its gate with a note; publishing an edited plan with a note isn't supported yet: edit it without a note, or compose again to publish";
+
+/** wicked-core's `mint_proposal_id`: `"p-" + deterministic_key([run, by, source])` (team/events.rs), where
+ *  `deterministic_key` is the first 16 bytes of sha256 over each part followed by a NUL, in hex (bus.rs). */
+export function mintProposalId(runId: string, by: string, source: string): string {
+  const h = createHash('sha256');
+  for (const p of [runId, by, source]) {
+    h.update(p, 'utf8');
+    h.update(Buffer.from([0]));
+  }
+  return `p-${h.digest('hex').slice(0, 32)}`;
+}
+
+/** wicked-core's `INSTRUCTION_SEP` (plan.rs): a structured description is `<step> ||| <instructions>`. */
+const INSTRUCTION_SEP = ' ||| ';
+
+/** The most gates one run's counter is searched across (a run opens a handful). */
+const GATE_SEQ_MAX = 1_000;
+
+/**
+ * (crew#1902) The plan revision a person's edit at the plan gate gave `u` (a draft or review step whose instructions are
+ * not the ones Compose wrote), or why crew cannot confirm one. Proven from the run view the engine serves, never
+ * assumed (wicked-core#1929: a person's edit at the gate amends the held steps it restates; the PA's and the members'
+ * changes only add steps):
+ *  - the unit says which accepted revision it last ran under (`plan_rev`, core#1925), and it is the run's accepted plan
+ *    (an older revision is not on the view, so it is not confirmed);
+ *  - that revision's proposal is a person's edit AT A GATE: its id is the one the engine mints for a gate edit
+ *    (`mint_proposal_id(run, "human", Gate{gate_id})`, gate ids `g-<run>-<n>` for each gate the run opened). A plan a
+ *    person changed through the mid-run edit route (`Edit{request_id}`) or a seat's plan never has that id;
+ *  - that revision's step with the unit's id is the unit: the same catalog and the same instructions.
+ * The note a gate edit may carry is checked on every step once any step is edited ({@link composedPlan}).
+ */
+function gateEditOf(view: SessionView, runId: string, id: string, u: SessionView['units'][number]): { ok: true; rev: number } | { ok: false; detail: string } {
+  const session = view.session as unknown as { team_plan?: { accepted?: unknown } | null; team?: { gate_seq?: unknown } | null };
+  const rev = (u as { plan_rev?: unknown }).plan_rev;
+  if (typeof rev !== 'number' || !Number.isInteger(rev) || rev < 1) return { ok: false, detail: `the engine did not record which plan revision the ${id} step ran under` };
+  const accepted = session.team_plan?.accepted;
+  const a = typeof accepted === 'object' && accepted !== null ? (accepted as Record<string, unknown>) : null;
+  if (a === null || a['rev'] !== rev) return { ok: false, detail: `the ${id} step ran under plan revision ${rev}, which is not the run's accepted plan` };
+  const seq = session.team?.gate_seq;
+  const pid = a['proposal_id'];
+  const gates = typeof seq === 'number' && Number.isInteger(seq) && seq > 0 ? Math.min(seq, GATE_SEQ_MAX) : 0;
+  let atGate = false;
+  for (let n = 1; n <= gates && !atGate; n++) atGate = typeof pid === 'string' && pid === mintProposalId(runId, 'human', `g-${runId}-${n}`);
+  if (!atGate) return { ok: false, detail: `plan revision ${rev} was not a person's edit at the plan's gate` };
+  if (!acceptedStepIs(view, id, u)) return { ok: false, detail: `the ${id} step is not the one plan revision ${rev} accepted` };
+  return { ok: true, rev };
+}
+
+/** Whether the run's accepted plan has a step `id` with `u`'s catalog and instructions (sha256). */
+function acceptedStepIs(view: SessionView, id: string, u: SessionView['units'][number]): boolean {
+  const accepted = (view.session as unknown as { team_plan?: { accepted?: unknown } | null }).team_plan?.accepted;
+  const steps = typeof accepted === 'object' && accepted !== null ? ((accepted as Record<string, unknown>)['steps'] as { steps?: unknown } | null | undefined)?.steps : undefined;
+  const step = Array.isArray(steps) ? (steps as unknown[]).find((x) => typeof x === 'object' && x !== null && (x as Record<string, unknown>)['id'] === id) as Record<string, unknown> | undefined : undefined;
+  return step !== undefined && step['catalog'] === u.catalog && typeof step['instructions'] === 'string' && sha256Hex(step['instructions']) === sha256Hex(u.instructions ?? '');
+}
+
+/** Whether a structured description is exactly `<step> ||| <instructions>`: the engine splits it at the FIRST separator
+ *  (wicked-core plan.rs `INSTRUCTION_SEP`, `split_once`), and a gate's note is appended after the instructions. */
+function noNoteOn(u: SessionView['units'][number]): boolean {
+  const at = typeof u.description === 'string' ? u.description.indexOf(INSTRUCTION_SEP) : -1;
+  return at >= 0 && u.description.slice(at + INSTRUCTION_SEP.length) === u.instructions;
+}
 
 /** The last fenced ```json block of a draft's output, or `null`. */
 export function lastJsonBlock(text: string): string | null {
@@ -283,9 +350,11 @@ const sameGate = (g: unknown): boolean => typeof g === 'object' && g !== null &&
 /**
  * The run's plan as the compose launched it, or why not. Its draft and review units must be the steps the compose
  * recorded (same catalog, same instructions, no amendments), the review the evaluator behind an unconditional human
- * gate; the engine's own units around them (scope, test plan, design) are its to add.
+ * gate; the engine's own units around them (scope, test plan, design) are its to add. (crew#1902) A step whose
+ * instructions a person changed at the plan's gate is taken as edited when {@link gateEditOf} proves it; `edited`
+ * names the revision.
  */
-export async function composedPlan(deps: Pick<ProductPublishDeps, 'composeOf' | 'runView' | 'workOutput'>, projectId: string, runId: string): Promise<{ ok: true; facts: ComposeFacts; items: PublishItem[] } | Refusal> {
+export async function composedPlan(deps: Pick<ProductPublishDeps, 'composeOf' | 'runView' | 'workOutput'>, projectId: string, runId: string): Promise<{ ok: true; facts: ComposeFacts; items: PublishItem[]; edited: { planRev: number } | null } | Refusal> {
   const view = await deps.runView(runId);
   if (view === undefined) return refuse(404, 'run_not_found', `no run ${runId}`);
   const facts = deps.composeOf(runId);
@@ -302,12 +371,33 @@ export async function composedPlan(deps: Pick<ProductPublishDeps, 'composeOf' | 
   const d = draft[0]!;
   const r = review[0]!;
   if (d.ord > r.ord) return unverified('the review step runs before the draft step');
+  // (crew#1902) The plan revision a person's gate edit gave the steps, when one did; else the launch's own steps.
+  let edited: number | null = null;
   for (const [u, id] of [[d, 'draft'], [r, 'review']] as const) {
     const step = facts.steps.find((s) => s.id === id);
     if (step === undefined || u.catalog !== step.catalog) return unverified(`the ${id} step is not the ${step?.catalog ?? id} step Compose launched`, true);
     if (u.structured_description !== true || typeof u.instructions !== 'string') return unverified(`the engine did not record the ${id} step's instructions`);
-    if (sha256Hex(u.instructions) !== step.instructionsSha) return unverified(`the ${id} step's instructions are not the ones Compose wrote`, true);
+    if (sha256Hex(u.instructions) !== step.instructionsSha) {
+      const g = gateEditOf(view, runId, id, u);
+      if (!g.ok) return refuse(409, 'compose_unverified', `crew cannot confirm this plan's change was a person's edit at its gate (${g.detail}); compose again to publish`, { detail: g.detail });
+      edited = Math.max(edited ?? 0, g.rev);
+    }
     if ((u.amendments ?? []).length > 0) return unverified(`the ${id} step was amended`, true);
+  }
+  // (crew#1902, coord Q1) A gate edit's note lands on the description of the step the plan releases next (` (operator
+  // amendment: …)`), which need not be the step the person edited (codex on #1988: an edit of the review alone put its
+  // note on the unchanged draft). So once any step is a gate edit, NEITHER step may carry text after its instructions.
+  // The published plan is the accepted revision as a whole (agy on #1988): a step left as launched must still be that
+  // revision's step too, so a revision that changed a step which had already run never stands behind the card.
+  if (edited !== null) {
+    for (const [u, id] of [[d, 'draft'], [r, 'review']] as const) {
+      if (!acceptedStepIs(view, id, u)) {
+        const detail = `the ${id} step is not the one plan revision ${edited} accepted`;
+        return refuse(409, 'compose_unverified', `crew cannot confirm this plan's change was a person's edit at its gate (${detail}); compose again to publish`, { detail });
+      }
+      // The note comes after `<step> ||| <instructions>` (codex r2, agy: an exact split, never a suffix match).
+      if (!noNoteOn(u)) return refuse(409, 'compose_unverified', EDITED_WITH_NOTE, { detail: `the ${id} step carries a note from its gate` });
+    }
   }
   if (r.role !== 'evaluator' || !sameGate(r.gate)) return unverified("the review step is not the evaluator behind a person's confirmation", true);
   if (d.status !== 'done' || r.status !== 'done') return unverified('the draft or its review did not finish');
@@ -328,13 +418,13 @@ export async function composedPlan(deps: Pick<ProductPublishDeps, 'composeOf' | 
   }
   const items = publishItems(runId, parsed.data, facts);
   if (!items.ok) return refuse(409, 'plan_unreadable', items.error);
-  return { ok: true, facts, items: items.items };
+  return { ok: true, facts, items: items.items, edited: edited === null ? null : { planRev: edited } };
 }
 
 // ── The journal ────────────────────────────────────────────────────────────────────────────────────────
 
 const ItemSchema = z.strictObject({ key: z.string().min(1).max(40), kind: z.enum(['epic', 'feature', 'story']), title: z.string(), body: z.string(), parentKey: z.string().nullable() });
-const CardSchema = z.strictObject({ runId: z.string(), projectId: z.string(), repo: z.string(), source: z.string(), identity: z.string(), items: z.array(ItemSchema).min(1).max(PUBLISH_ITEMS_MAX) });
+const CardSchema = z.strictObject({ runId: z.string(), projectId: z.string(), repo: z.string(), source: z.string(), identity: z.string(), items: z.array(ItemSchema).min(1).max(PUBLISH_ITEMS_MAX), edited: z.strictObject({ planRev: z.number().int().positive() }).optional() });
 const Envelope = { v: z.literal(1), publication: z.string(), runId: z.string(), projectId: z.string(), repo: z.string(), at: z.string(), by: z.string() };
 const LineSchema = z.discriminatedUnion('kind', [
   z.strictObject({ ...Envelope, kind: z.literal('approved'), publishHash: z.string(), contentSha: z.string(), card: CardSchema, sourceId: z.string(), trackerId: z.string(), descriptor: z.string(), principal: z.string() }),
@@ -635,7 +725,9 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
     if (identity === null || !who.ok) return refuse(503, 'source_unavailable', `${e.name} could not say which account it posts as now, so no card is offered`);
     if (who.credential === null) return refuse(409, 'credential_unpinned', `${e.name} has no credential of its own to pin, so crew cannot be sure which account would post; give the source its own credential`);
     const principal = String(m!['id'] ?? identity);
-    const card: ProductPublishCard = { runId, projectId, repo: t.key.toLowerCase(), source: e.name, identity, items: plan.items };
+    // (crew#1902) An edited plan says so on the card, and so in the hash a person confirms. An unedited card is the same
+    // object as before (no key), so its hash does not move.
+    const card: ProductPublishCard = { runId, projectId, repo: t.key.toLowerCase(), source: e.name, identity, items: plan.items, ...(plan.edited !== null ? { edited: plan.edited } : {}) };
     const descriptor = pmDescriptorHash(configOf(e.record));
     const publishHash = sha256Hex(canonicalJson({ v: 1, card, contentSha, sourceId: e.id, trackerId: t.trackerId, descriptor, principal, credential: who.credential }));
     return { ok: true, b: { card, publishHash, contentSha, e, t, descriptor, principal, credential: who.credential, es, f, publication, path } };
@@ -788,7 +880,8 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
     }
     deps.audit.record('product.publish.resolve', actor, { runId, detail: { projectId, repo: f.first.card.repo, key: it.key, issue: want.issue } });
     const after = await fold(path, publication, () => false);
-    return { ok: true, body: { done: true, card: after.last!.card, publication: await stateOf(after, projectId, sel, es, 'owner') } };
+    const { edited, ...kept } = after.last!.card;
+    return { ok: true, body: { done: true, card: edited === undefined ? kept : { ...kept, edited }, publication: await stateOf(after, projectId, sel, es, 'owner') } };
   }
 
   app.post<{ Params: { id: string } }>(

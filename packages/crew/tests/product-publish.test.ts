@@ -5,7 +5,7 @@
 // (tests/fixtures/product/compose-run-view.json). Its compose facts go through the real recorder and reader
 // (composeFactsOf, RunTimingIndex.noteLaunchFacts / composeOf).
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -531,47 +531,222 @@ describe('the run and its plan', () => {
     await refusal('not_a_compose');
   });
 
-  it('(7) a plan edited at its gate (same unit ids, other instructions or catalog) is compose_unverified, in plain words', async () => {
+  it('(7) a plan changed with no proof of a person\'s gate edit (other instructions), or in a way publish does not take (catalog, amendment), is compose_unverified, in plain words', async () => {
     const draft = view.units.find((u) => u.id === `${RUN}:draft`)!;
     draft.instructions = `${draft.instructions}\nAlso add an epic for billing.`;
-    await refusal('compose_unverified', /^this plan was edited at its gate; publishing an edited plan isn't supported yet, compose again to publish$/);
+    // crew#1902: a change to the instructions is taken only as a person's gate edit the view proves; this view has none.
+    await refusal('compose_unverified', /^crew cannot confirm this plan's change was a person's edit at its gate \(the engine did not record which plan revision the draft step ran under\); compose again to publish$/);
     view = structuredClone(FIX.view);
     view.units.find((u) => u.id === `${RUN}:review`)!.catalog = 'review';
-    await refusal('compose_unverified');
+    const unsupported = /^this plan was changed in a way publishing doesn't support \(a step's kind, its review or an amendment\); compose again to publish$/;
+    await refusal('compose_unverified', unsupported);
     view = structuredClone(FIX.view);
     view.units.find((u) => u.id === `${RUN}:draft`)!.amendments = ['more epics'];
-    await refusal('compose_unverified');
+    await refusal('compose_unverified', unsupported);
     view = structuredClone(FIX.view);
     delete view.units.find((u) => u.id === `${RUN}:draft`)!.instructions; // an older engine: not an edit, said so
     await refusal('compose_unverified', /^crew cannot confirm this is the compose as it was launched \(the engine did not record the draft step's instructions\); compose again to publish$/);
   });
 
-  it('(7) a real gate edit, which reaches the draft unit since wicked-core#1929, is refused in plain words', async () => {
-    // tests/fixtures/product/compose-run-view-edited.json: the held plan was edited at its gate through confirmGate, the
-    // engine accepted it (plan rev 2 -> 3), and the draft unit ran from the edited instructions (core main, #1929).
-    const edited = JSON.parse(readFileSync(join(HERE, 'fixtures', 'product', 'compose-run-view-edited.json'), 'utf8')) as typeof FIX;
-    const runId = edited.view.session.id;
-    expect((edited.view.session as unknown as { team_plan: { accepted: { rev: number; by: string } } }).team_plan.accepted).toMatchObject({ rev: 3, by: 'human' });
-    const draftUnit = edited.view.units.find((u) => u.id === `${runId}:draft`)!;
-    expect(draftUnit.instructions).toBe(`${edited.draft}\n\nAlso add an epic for billing.`);
-    view = edited.view;
-    index = new RunTimingIndex();
-    index.noteLaunchFacts(runId, { compose: composeFactsOf(PID, REFS, 'stories', edited.draft, edited.review) });
-    const before = deps.runView;
-    const beforeOut = deps.workOutput;
-    deps.runView = async (id) => (id === runId ? view : undefined);
-    deps.workOutput = async (id) => (id === `${runId}:draft` ? output : null);
-    try {
-      const e = await app.inject({ method: 'POST', url: `/api/v1/projects/${PID}/product/publish`, payload: { runId, repo: 'owner/app' } });
-      expect(e.json()).toMatchObject({ code: 'compose_unverified', error: "this plan was edited at its gate; publishing an edited plan isn't supported yet, compose again to publish" });
-      // The same run, had its units run the launched instructions, is the compose and publishes.
-      draftUnit.instructions = edited.draft;
-      const r = await app.inject({ method: 'POST', url: `/api/v1/projects/${PID}/product/publish`, payload: { runId, repo: 'owner/app' } });
-      expect(r.statusCode, r.body).toBe(200);
-    } finally {
-      deps.runView = before;
-      deps.workOutput = beforeOut;
+  describe('crew#1902: a plan a person edited at its gate', () => {
+    // tests/fixtures/product/compose-run-view-edited.json: wicked-crew CI on core main (#1912, after wicked-core#1929): a
+    // compose held at its plan gate, EDITED there through adapter.confirmGate(plan) (the draft's instructions changed,
+    // both step ids kept), accepted (plan rev 2 -> 3), and confirmed to completion. The draft unit ran the edited text.
+    // tests/fixtures/product/compose-run-view-edited-note.json: the same through the crew#1902 probe (#1986, CI on core
+    // main), the edit carrying the note "Keep billing small.".
+    type Fix = typeof FIX;
+    const EDITED_FIX = JSON.parse(readFileSync(join(HERE, 'fixtures', 'product', 'compose-run-view-edited.json'), 'utf8')) as Fix;
+    const NOTE_FIX = JSON.parse(readFileSync(join(HERE, 'fixtures', 'product', 'compose-run-view-edited-note.json'), 'utf8')) as Fix;
+    // tests/fixtures/product/compose-run-view-review-edited-note.json (codex on #1988): only the REVIEW was edited at the
+    // gate, with a note; the engine put the note on the unchanged DRAFT's description (its instructions are the launch's).
+    const REVIEW_NOTE_FIX = JSON.parse(readFileSync(join(HERE, 'fixtures', 'product', 'compose-run-view-review-edited-note.json'), 'utf8')) as Fix;
+    type Accepted = { rev: number; by: string; proposal_id: string; steps: { steps: Array<Record<string, unknown>> } };
+    const acceptedOf = (v: SessionView) => (v.session as unknown as { team_plan: { accepted: Accepted } }).team_plan.accepted;
+    const unitOf = (v: SessionView, id: string) => v.units.find((u) => u.id === `${v.session.id}:${id}`)! as SessionView['units'][number] & { plan_rev?: number };
+    /** An independent spelling of wicked-core's mint_proposal_id (team/events.rs, bus.rs deterministic_key). */
+    const mint = (run: string, by: string, source: string): string => {
+      const h = createHash('sha256');
+      for (const part of [run, by, source]) { h.update(part, 'utf8'); h.update(Buffer.from([0])); }
+      return `p-${h.digest('hex').slice(0, 32)}`;
+    };
+    async function withRun<T>(fix: Fix, mutate: (v: SessionView, runId: string) => void, fn: (runId: string) => Promise<T>): Promise<T> {
+      const ed = structuredClone(fix);
+      const runId = ed.view.session.id;
+      mutate(ed.view, runId);
+      view = ed.view;
+      index = new RunTimingIndex();
+      index.noteLaunchFacts(runId, { compose: composeFactsOf(PID, REFS, 'stories', ed.draft, ed.review) });
+      const before = deps.runView;
+      const beforeOut = deps.workOutput;
+      deps.runView = async (id) => (id === runId ? view : undefined);
+      deps.workOutput = async (id) => (id === `${runId}:draft` ? output : null);
+      try {
+        return await fn(runId);
+      } finally {
+        deps.runView = before;
+        deps.workOutput = beforeOut;
+      }
     }
+    const postRun = (runId: string, payload: Record<string, unknown> = {}) => app.inject({ method: 'POST', url: `/api/v1/projects/${PID}/product/publish`, payload: { runId, repo: 'owner/app', ...payload } });
+    const getRun = (runId: string) => app.inject({ method: 'GET', url: `/api/v1/projects/${PID}/product/publish/${runId}` });
+    const refusedWith = async (runId: string, detail: RegExp, error?: RegExp | string): Promise<Record<string, unknown>> => {
+      const r = await postRun(runId);
+      expect(r.statusCode, r.body).toBe(409);
+      const body = r.json() as Record<string, unknown>;
+      expect(body['code']).toBe('compose_unverified');
+      expect(String(body['detail'])).toMatch(detail);
+      if (error !== undefined) expect(body['error']).toEqual(typeof error === 'string' ? error : expect.stringMatching(error));
+      const g = (await getRun(runId)).json() as ProductPublicationsResponse;
+      expect(g.publishable).toMatchObject({ ok: false, code: 'compose_unverified' });
+      expect(creates()).toEqual([]);
+      return body;
+    };
+
+    it('the fixtures are the engine\'s: the accepted rev 3 is the gate edit\'s proposal, minted from gate 1', () => {
+      for (const fix of [EDITED_FIX, NOTE_FIX]) {
+        const runId = fix.view.session.id;
+        const a = acceptedOf(fix.view);
+        expect(a).toMatchObject({ rev: 3, by: 'human' });
+        expect(a.proposal_id).toBe(mint(runId, 'human', `g-${runId}-1`));
+        expect(unitOf(fix.view, 'draft').plan_rev).toBe(3);
+        expect(unitOf(fix.view, 'draft').instructions).not.toBe(fix.draft);
+      }
+      // The note is on the description only: never in amendments, never in the instructions.
+      const d = unitOf(NOTE_FIX.view, 'draft');
+      expect(d.amendments ?? []).toEqual([]);
+      expect(d.description.endsWith(' (operator amendment: Keep billing small.)')).toBe(true);
+      expect(d.instructions).not.toContain('Keep billing small.');
+    });
+
+    it('publishes, and the card says it is the plan as edited at its gate (rev 3); the GET agrees before the click', async () => {
+      await withRun(EDITED_FIX, () => {}, async (runId) => {
+        const g = (await getRun(runId)).json() as ProductPublicationsResponse;
+        expect(g.publishable).toMatchObject({ ok: true });
+        const c = await postRun(runId);
+        expect(c.statusCode, c.body).toBe(200);
+        const shown = c.json() as { publishHash: string; card: { edited?: unknown; items: unknown[] } };
+        expect(shown.card.edited).toEqual({ planRev: 3 });
+        const r = await postRun(runId, { confirm: shown.publishHash });
+        expect(r.statusCode, r.body).toBe(200);
+        expect(creates()).toHaveLength(KEYS.length);
+        // The journal keeps the card the person confirmed, edited flag and all.
+        expect(journal().find((l) => l['kind'] === 'approved')!['card']).toMatchObject({ edited: { planRev: 3 } });
+      });
+    });
+
+    it('a review-only gate edit with no note publishes as edited (rev 3); the draft ran as launched', async () => {
+      // REVIEW_NOTE_FIX without its note: the engine's view of the same edit had the person added none.
+      await withRun(REVIEW_NOTE_FIX, (v) => {
+        const d = unitOf(v, 'draft');
+        d.description = `${d.description.split(' ||| ')[0]} ||| ${d.instructions!}`;
+      }, async (runId) => {
+        const c = await postRun(runId);
+        expect(c.statusCode, c.body).toBe(200);
+        expect((c.json() as { card: { edited?: unknown } }).card.edited).toEqual({ planRev: 3 });
+      });
+    });
+
+    it('an unedited compose\'s card has no edited flag (its hash does not move)', async () => {
+      const c = await card();
+      expect('edited' in (c.card as Record<string, unknown>)).toBe(false);
+    });
+
+    it('STALE READS: the revision published is the one the draft ran under; a card read before the view changed is card_changed', async () => {
+      // The draft ran under rev 2 while the run's accepted plan is rev 3: rev 2 is not on the view, so it is not confirmed.
+      await withRun(EDITED_FIX, (v) => { unitOf(v, 'draft').plan_rev = 2; }, async (runId) => {
+        await refusedWith(runId, /^the draft step ran under plan revision 2, which is not the run's accepted plan$/, /^crew cannot confirm this plan's change was a person's edit at its gate \(the draft step ran under plan revision 2/);
+      });
+      // A card shown as edited, then a view where the draft ran the launched text: the hash the person saw is refused.
+      await withRun(EDITED_FIX, () => {}, async (runId) => {
+        const shown = (await postRun(runId)).json() as { publishHash: string };
+        unitOf(view, 'draft').instructions = EDITED_FIX.draft;
+        const r = await postRun(runId, { confirm: shown.publishHash });
+        expect(r.json()).toMatchObject({ code: 'card_changed' });
+        expect(creates()).toEqual([]);
+      });
+    });
+
+    it('IDENTITY REUSE: a change that is not a person\'s edit at a gate, or a step the revision did not accept, is refused', async () => {
+      const notGate = /^plan revision 3 was not a person's edit at the plan's gate$/;
+      // A person's change through the mid-run edit route (source Edit{request_id}).
+      await withRun(EDITED_FIX, (v, runId) => { acceptedOf(v).proposal_id = mint(runId, 'human', 'req-7'); }, (runId) => refusedWith(runId, notGate));
+      // A seat's plan (by a seat, even from a gate's id).
+      await withRun(EDITED_FIX, (v, runId) => { acceptedOf(v).proposal_id = mint(runId, 'claude#1', `g-${runId}-1`); }, (runId) => refusedWith(runId, notGate));
+      // A gate the run never opened (its counter says 1).
+      await withRun(EDITED_FIX, (v, runId) => { acceptedOf(v).proposal_id = mint(runId, 'human', `g-${runId}-2`); }, (runId) => refusedWith(runId, notGate));
+      // Rev 3's draft step is other text than the draft ran.
+      await withRun(EDITED_FIX, (v) => { acceptedOf(v).steps.steps.find((x) => x['id'] === 'draft')!['instructions'] = 'Something else.'; },
+        (runId) => refusedWith(runId, /^the draft step is not the one plan revision 3 accepted$/));
+      // Rev 3 names the draft under another catalog than the unit's.
+      await withRun(EDITED_FIX, (v) => { acceptedOf(v).steps.steps.find((x) => x['id'] === 'draft')!['catalog'] = 'understand'; },
+        (runId) => refusedWith(runId, /^the draft step is not the one plan revision 3 accepted$/));
+      // The unit's catalog is no longer Compose's: refused as before, whatever the revision says.
+      await withRun(EDITED_FIX, (v) => { unitOf(v, 'draft').catalog = 'understand'; acceptedOf(v).steps.steps.find((x) => x['id'] === 'draft')!['catalog'] = 'understand'; },
+        (runId) => refusedWith(runId, /^the draft step is not the produce step Compose launched$/, "this plan was changed in a way publishing doesn't support (a step's kind, its review or an amendment); compose again to publish"));
+      // agy on #1988: the published plan is the accepted revision as a whole. Only the review was edited; the draft ran
+      // as launched, but the revision names other draft text (a change to a step that had already run): refused.
+      await withRun(REVIEW_NOTE_FIX, (v) => {
+        const d = unitOf(v, 'draft');
+        d.description = `${d.description.split(' ||| ')[0]} ||| ${d.instructions!}`;
+        acceptedOf(v).steps.steps.find((x) => x['id'] === 'draft')!['instructions'] = `${d.instructions!}\n\nAnother epic.`;
+      }, (runId) => refusedWith(runId, /^the draft step is not the one plan revision 3 accepted$/));
+    });
+
+    it('PARTIAL FAILURE: no plan_rev, no accepted plan, no gate counter or no accepted steps on the view is not confirmed', async () => {
+      await withRun(EDITED_FIX, (v) => { delete unitOf(v, 'draft').plan_rev; }, (runId) => refusedWith(runId, /^the engine did not record which plan revision the draft step ran under$/));
+      await withRun(EDITED_FIX, (v) => { (v.session as unknown as { team_plan: unknown }).team_plan = null; }, (runId) => refusedWith(runId, /^the draft step ran under plan revision 3, which is not the run's accepted plan$/));
+      await withRun(EDITED_FIX, (v) => { delete (v.session as unknown as { team: Record<string, unknown> }).team['gate_seq']; }, (runId) => refusedWith(runId, /^plan revision 3 was not a person's edit at the plan's gate$/));
+      await withRun(EDITED_FIX, (v) => { (acceptedOf(v) as unknown as Record<string, unknown>)['steps'] = null; }, (runId) => refusedWith(runId, /^the draft step is not the one plan revision 3 accepted$/));
+    });
+
+    it('a gate edit that carried a note is refused in its own words (coord Q1; crew#1983)', async () => {
+      const words = "this plan was edited at its gate with a note; publishing an edited plan with a note isn't supported yet: edit it without a note, or compose again to publish";
+      await withRun(NOTE_FIX, () => {}, (runId) => refusedWith(runId, /^the draft step carries a note from its gate$/, words));
+      // codex on #1988: the note lands on the step the plan releases next, not the edited one. Only the review was edited;
+      // the draft, unchanged, carries the note: still refused.
+      const d = unitOf(REVIEW_NOTE_FIX.view, 'draft');
+      expect(d.instructions).toBe(REVIEW_NOTE_FIX.draft);
+      expect(d.description.endsWith(' (operator amendment: Keep billing small.)')).toBe(true);
+      expect(unitOf(REVIEW_NOTE_FIX.view, 'review').instructions).not.toBe(REVIEW_NOTE_FIX.review);
+      await withRun(REVIEW_NOTE_FIX, () => {}, (runId) => refusedWith(runId, /^the draft step carries a note from its gate$/, words));
+      // agy on #1988: a note crafted to end with ' ||| ' and the instructions is still a note (an exact split, not a suffix).
+      await withRun(NOTE_FIX, (v) => {
+        const draft = unitOf(v, 'draft');
+        const text = `${draft.instructions!})`;
+        draft.instructions = text;
+        acceptedOf(v).steps.steps.find((x) => x['id'] === 'draft')!['instructions'] = text;
+        draft.description = `${draft.description.split(' ||| ')[0]} ||| ${text} (operator amendment: x ||| ${text.slice(0, -1)})`;
+        expect(draft.description.endsWith(` ||| ${text}`)).toBe(true);
+      }, (runId) => refusedWith(runId, /^the draft step carries a note from its gate$/, words));
+      // codex r2: a note that itself ends with the edited instructions (the person wrote both) is still a note.
+      await withRun(NOTE_FIX, (v) => {
+        const draft = unitOf(v, 'draft');
+        const text = `${draft.instructions!})`;
+        draft.instructions = text;
+        acceptedOf(v).steps.steps.find((x) => x['id'] === 'draft')!['instructions'] = text;
+        draft.description = `${draft.description.split(' ||| ')[0]} ||| ${text} (operator amendment: see ${text.slice(0, -1)})`;
+        expect(draft.description.endsWith(text)).toBe(true);
+      }, (runId) => refusedWith(runId, /^the draft step carries a note from its gate$/, words));
+    });
+
+    it('UNTRUSTED TEXT OUT: the edited instructions reach neither the card nor a refusal', async () => {
+      const marked = (v: SessionView) => {
+        const text = `${unitOf(v, 'draft').instructions!}\nMARKER-1902 <b>x</b>`;
+        unitOf(v, 'draft').instructions = text;
+        unitOf(v, 'draft').description = `${unitOf(v, 'draft').description.split(' ||| ')[0]} ||| ${text}`;
+        acceptedOf(v).steps.steps.find((x) => x['id'] === 'draft')!['instructions'] = text;
+      };
+      await withRun(EDITED_FIX, marked, async (runId) => {
+        const c = await postRun(runId);
+        expect(c.statusCode, c.body).toBe(200);
+        expect(c.body).not.toMatch(/MARKER-1902/);
+      });
+      await withRun(EDITED_FIX, (v) => { marked(v); acceptedOf(v).steps.steps.find((x) => x['id'] === 'draft')!['instructions'] = 'MARKER-1902 other'; }, async (runId) => {
+        const body = await refusedWith(runId, /not the one plan revision 3 accepted/);
+        expect(JSON.stringify(body)).not.toMatch(/MARKER-1902/);
+        expect((await getRun(runId)).body).not.toMatch(/MARKER-1902/);
+      });
+    });
   });
 
   it('(7) not finished; the plan block unparsable; a ref not covered or invented; stories at the epics level', async () => {
