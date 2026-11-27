@@ -1,23 +1,38 @@
-// crew#1978: a failed image step carries the engine's own last words, so the produce step shows WHY it failed.
+// crew#1978: a failed image step says WHY, in crew's own closed words; the engine's text never leaves the machine.
 //
-// Before, `run.ts` mapped an ImageBuildError to its code and crew's sentence ("the image build failed (exit 1)") and
-// the engine output (ImageBuildError.log) was dropped. The produce step prints the refusal's error sliced to 600
-// characters (src/cli/apps-produce.ts), so the excerpt is bounded to fit beside crew's sentence.
+// Before, `run.ts` mapped an ImageBuildError to crew's bare sentence ("the image build failed (exit 1)") and the engine
+// output was dropped. Carrying a redacted excerpt leaked (codex-check r1 and r2 on #1980: cert paths, socket URLs,
+// quoted tokens, JSON passwords), so coord ruled the cut: the refusal names a cause from a fixed set, else it points at
+// the daemon log, where the engine's output goes (keyed by run), never into the run record or a PR.
 //
-// The engine is a fake `docker` on disk that fails its build the way BuildKit does (its last lines name the step).
+// The engine is a fake `docker` on disk that fails its build the way BuildKit does.
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { buildImage, engineExcerpt, ImageBuildError, redactEngineOutput } from '../src/apps/publish/image.js';
+import { buildImage, engineCause, ImageBuildError } from '../src/apps/publish/image.js';
+import { imageRefusalWords } from '../src/apps/publish/run.js';
+
+// Synthetic leak probes from codex-check r1 and r2 on #1980 (made-up values, no real credential).
+const PROBES = [
+  'open /var/folders/review-sentinel/T/client-certs/ca.pem',
+  'unix:///opt/review-sentinel/private/docker.sock',
+  '/Volumes/My Disk/review sentinel/certs',
+  'token="synthetic-review-secret"', // ggignore: a made-up probe value
+  '{"password": "synthetic-review-password"}', // ggignore: a made-up probe value
+  'authorization: bearer synthetic-review-bearer', // ggignore: a made-up probe value
+];
+const SECRETS = ['review-sentinel', 'review sentinel', 'synthetic-review-secret', 'synthetic-review-password', 'synthetic-review-bearer', '/var/folders', '/opt/', '/Volumes'];
 
 let dir: string;
 let ctx: string;
 let bin: string;
-const fake = (script: string): void => {
-  writeFileSync(bin, `#!/bin/sh\n${script}\n`);
+const fake = (lines: string[], exit = 1): void => {
+  writeFileSync(join(dir, 'out.txt'), lines.join('\n') + '\n');
+  writeFileSync(bin, `#!/bin/sh\ncat "${join(dir, 'out.txt')}" >&2\nexit ${exit}\n`);
   chmodSync(bin, 0o755);
 };
+const refusal = async (): Promise<ImageBuildError> => (await buildImage(ctx, 'wicked-apps/desk:v1', {}, { bin, env: { PATH: process.env['PATH'] } }).catch((e: unknown) => e)) as ImageBuildError;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'crew-1978-'));
@@ -27,62 +42,47 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-const refusal = async (): Promise<ImageBuildError> => (await buildImage(ctx, 'wicked-apps/desk:v1', {}, { bin, env: { PATH: process.env['PATH'] } }).catch((e: unknown) => e)) as ImageBuildError;
-
-describe('crew#1978: the engine\'s own words on a failed image step', () => {
-  it('a failed build says what the engine said, last lines first-fit, with the build context path hidden', async () => {
-    fake(`echo "#5 [2/4] COPY server /srv"
-echo "#5 ERROR: failed to calculate checksum: \\"/server\\": not found in ${ctx}" >&2
-echo "ERROR: failed to solve: failed to compute cache key" >&2
-exit 1`);
+describe('crew#1978: a failed image step names its cause in crew\'s words only', () => {
+  it('a failed Dockerfile step is named by its number, and nothing the engine printed is carried', async () => {
+    fake(['#5 [2/4] COPY server /srv', `#5 ERROR: failed to calculate checksum: "/server": not found in ${ctx}`, ...PROBES, 'ERROR: failed to solve: failed to compute cache key']);
     const err = await refusal();
     expect(err.code).toBe('build_failed');
-    expect(err.message).toBe('the image build failed (exit 1). The engine said: #5 [2/4] COPY server /srv | #5 ERROR: failed to calculate checksum: "/server": not found in <build context> | ERROR: failed to solve: failed to compute cache key');
-    expect(err.message).not.toContain(dir);
+    expect(err.message).toBe('the image build failed (exit 1): Dockerfile step 2 of 4 failed');
+    expect(err.reason).toBe('Dockerfile step 2 of 4 failed');
+    for (const s of [...SECRETS, ctx, 'COPY', '/srv', 'checksum']) expect(err.message).not.toContain(s);
   });
 
-  it('an engine that said nothing leaves the sentence bare (no dangling words)', async () => {
-    fake('printf "  \\n\\n"; exit 2');
-    expect((await refusal()).message).toBe('the image build failed (exit 2)');
+  it.each([
+    ['Cannot connect to the Docker daemon at unix:///opt/review-sentinel/docker.sock. Is the docker daemon running?', 'crew could not reach the container engine'],
+    ['ERROR: failed to copy: write /var/lib/docker/tmp/x: no space left on device', 'the container engine ran out of disk space'],
+    ['open /var/folders/review-sentinel/T/client-certs/ca.pem: permission denied', 'the container engine was refused permission'],
+    ['ERROR: failed to solve: node:24: pull access denied, repository does not exist', 'an image the build needs is not on the container engine'],
+  ])('a recognised cause is said in crew\'s fixed words (%s)', (line, words) => {
+    expect(engineCause(`#1 [internal] load build definition\n${line}\n`)).toBe(words);
+  });
+
+  it('an unrecognised failure carries no engine text and points at the daemon log, keyed by run', async () => {
+    fake(PROBES);
+    const err = await refusal();
+    expect(err.reason).toBeNull();
+    expect(err.message).toBe('the image build failed (exit 1)');
+    const words = imageRefusalWords(err, 'run-1');
+    expect(words).toBe("the image build failed (exit 1); the engine's reason is in the daemon log (run run-1)");
+    for (const s of SECRETS) expect(words).not.toContain(s);
+    // The engine's output stays on the error, for the daemon's local log only.
+    expect(err.log).toContain('synthetic-review-secret');
+  });
+
+  it('an engine that said nothing leaves the sentence bare (no pointer to an empty log)', async () => {
+    fake([''], 2);
+    const err = await refusal();
+    expect(imageRefusalWords(err, 'run-1')).toBe('the image build failed (exit 2)');
   });
 
   it('an engine that cannot be started keeps its own sentence', async () => {
     bin = join(dir, 'no-such-docker');
     const err = await refusal();
     expect(err.code).toBe('no_engine');
-    expect(err.message).toMatch(/^the container engine \(.*\) could not be started: ENOENT$/);
-  });
-
-  it('the excerpt is bounded to fit the printed refusal, keeps the newest lines, and hides the home directory', () => {
-    const log = [...Array.from({ length: 50 }, (_, i) => `#${i} step ${'.'.repeat(30)}`), `ERROR: read ${join(homedir(), '.docker', 'config.json')}: denied`].join('\n');
-    const said = engineExcerpt(log, [[homedir(), '~']]);
-    expect(said.length).toBeLessThanOrEqual(400);
-    expect(said.endsWith('ERROR: read ~/.docker/config.json: denied')).toBe(true);
-    expect(said).not.toContain(homedir());
-    expect(`the image build failed (exit 1). The engine said: ${said}`.length + 'apps_produce: refused: build_failed: '.length).toBeLessThanOrEqual(600);
-    // One line longer than the bound keeps its end.
-    const long = engineExcerpt(`ERROR: ${'x'.repeat(1000)} the end`, []);
-    expect(long.length).toBe(400);
-    expect(long.startsWith('…') && long.endsWith('the end')).toBe(true);
-  });
-
-  it('no host path or credential leaves: any absolute path, URL user information and token shapes are redacted (codex-check r1 W20)', () => {
-    const sentinel = 'ghp_' + 'A'.repeat(36); // ggignore: a made-up token shape, not a real credential
-    const log = [
-      'error during connect: open /var/folders/review-sentinel/T/client-certs/ca.pem: no such file or directory',
-      'dial unix /run/user/1000/docker.sock: connect: permission denied',
-      `failed to authorize: https://robot:hunter2@registry.example.com/v2/token: Authorization: Bearer ${'x'.repeat(24)}`,
-      `token=${sentinel} C:\\Users\\someone\\certs\\key.pem`,
-      '#5 [2/4] COPY server /srv',
-    ].join('\n');
-    const out = redactEngineOutput(log, []);
-    for (const leaked of ['/var/folders', 'review-sentinel', '/run/user', 'hunter2', 'robot', sentinel, 'someone', 'x'.repeat(24)]) expect(out).not.toContain(leaked);
-    // A path under a root crew knows reads as its stand-in (`<tmp>/…`, redactHostPaths); any other one is `<path>`.
-    expect(out).toMatch(/open (<path>|<tmp>\/client-certs\/ca\.pem): no such file or directory/);
-    expect(out).toContain('dial unix <path>: connect: permission denied');
-    expect(out).toContain('https://<redacted>@registry.example.com');
-    // A one-segment path and a stand-in path stay readable.
-    expect(out).toContain('COPY server /srv');
-    expect(redactEngineOutput('not found in <build context>/server/x and ~/x/y', [])).toBe('not found in <build context>/server/x and ~/x/y');
+    expect(imageRefusalWords(err, 'run-1')).toMatch(/^the container engine \(.*\) could not be started: ENOENT$/);
   });
 });

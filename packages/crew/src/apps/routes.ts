@@ -590,7 +590,8 @@ export function registerAppRoutes(app: FastifyInstance, deps: AppRoutesDeps): vo
       return reply.code(403).send({ code: 'not_the_produce', error: 'only a publish run\'s produce step can produce its image' });
     }
     try {
-      const published = await produce({ store }, { runId: unit.runId });
+      // (crew#1978) A failed image step's engine output goes to this daemon's own log only, keyed by run.
+      const published = await produce({ store, engineLog: (f) => req.log.warn(f, 'apps publish: the image step failed') }, { runId: unit.runId });
       // The consequential step of a publish is on the audit trail too (review r1), not only its launch.
       deps.audit.record('apps.publish.produced', published.actor, { runId: unit.runId, detail: { app: store.publishRunApp(unit.runId), version: published.version, manifestDigest: published.manifestDigest, image: published.image.id } });
       return { ok: true, published };
