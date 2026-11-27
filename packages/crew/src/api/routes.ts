@@ -84,6 +84,7 @@ type RecordedOpenGate =
   | { state: 'ambiguous'; ords: number[] }
   | { state: 'open'; ord: number; row: InteractionRequest };
 import { GateReadTimer, untimed, type TimePart } from './gate-timing.js';
+import { SharedGateReads } from './gate-actions-shared.js';
 import { detectRefusal, gateSeqOf, isOpenGate, offeredChoices, replayOpenGate, type GateCache, type GateRead, type GateResolution } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
 import { acceptanceRequirementOf, buildAcceptanceView } from '../qe/acceptance.js';
@@ -7863,6 +7864,9 @@ export function registerRoutes(
 
   /** Per run: the tail of the decisions queued by {@link decideExclusively}. Never rejects. */
   const gateDecisionTails = new Map<string, Promise<unknown>>();
+  // (crew#1950) At most one engine gateActions read running per run's open gate; GET /runs/:id/gate requests that arrive
+  // while it runs share the next one.
+  const gateActionReads = new SharedGateReads<Awaited<ReturnType<NonNullable<CoreAdapter['gateActions']>>>>((runId) => gateCache.revisionOf(runId));
 
   /**
    * Run `fn` alone for the run (crew#1083 round 4; the `McpPolicies.exclusive` pattern of #1082):
@@ -7873,7 +7877,8 @@ export function registerRoutes(
    * the cursor before reassigning, so it cannot re-seat a unit between these checks and confirm.
    */
   function decideExclusively<T>(runId: string, fn: () => Promise<T>): Promise<T> {
-    const result = (gateDecisionTails.get(runId) ?? Promise.resolve()).then(fn);
+    // (crew#1950) Once a decision settles, no gate read begun before it is shared with a later request.
+    const result = (gateDecisionTails.get(runId) ?? Promise.resolve()).then(fn).finally(() => gateActionReads.decided(runId));
     const tail = result.catch(() => undefined);
     gateDecisionTails.set(runId, tail);
     void tail.then(() => {
@@ -9190,13 +9195,15 @@ export function registerRoutes(
     // crew#1634: a mismatch that cannot heal is not retryable: with no open gate row the ord comes from the
     // cache or the log while the engine names its cursor's (or 0), and an unknown run has no engine list at
     // all. Those answer the gate without `actions` (the old fallback); a thrown read stays a 503.
-    const actionsAt = async (ord: number, run: SessionView | undefined): Promise<{ actions?: GateAction[]; planRev?: number } | null> => {
+    const actionsAt = async (ord: number, run: SessionView | undefined, gateSeq: number | undefined): Promise<{ actions?: GateAction[]; planRev?: number } | null> => {
       if (typeof adapter.gateActions !== 'function') return {};
       let threw = false;
       for (let attempt = 0; attempt < 2; attempt++) {
         let listed: Awaited<ReturnType<CoreAdapter['gateActions']>>;
         try {
-          listed = await timer.time('actions', () => adapter.gateActions!(id));
+          // (crew#1950) Its own read when none runs for this gate, else the next one (shared; it starts after this request).
+          const shared = gateActionReads.read(id, { ord, gateSeq }, () => adapter.gateActions!(id));
+          listed = await timer.time(shared.queued ? 'actions-next' : 'actions', () => shared.read);
         } catch {
           threw = true;
           continue;
@@ -9222,9 +9229,9 @@ export function registerRoutes(
     const unavailable503 = () => reply.header('Retry-After', '1').code(503).send(actionsUnavailable);
     // crew#1629: start the engine's action read immediately, alongside the other offers. Every
     // offer and the receipt use the run already in hand; the record/cache overlap reads stay separate.
-    const offersAt = async (ord: number, run: SessionView | undefined) => {
+    const offersAt = async (ord: number, run: SessionView | undefined, gateSeq: number | undefined) => {
       const gated = run?.units?.find((u) => u.ord === ord);
-      const actions = actionsAt(ord, run);
+      const actions = actionsAt(ord, run, gateSeq);
       const [rejudge, skipQe, listed] = await Promise.all([rejudgeAt(ord, run), skipQeAt(ord, run), actions]);
       if (listed === null) return null;
       return { assurance: receiptOf(gated), ...rejudge, ...skipQe, ...listed };
@@ -9255,7 +9262,7 @@ export function registerRoutes(
           && (gateSeqOf(recorded.row['gate_seq']) === undefined || cached.gateSeq === gateSeqOf(recorded.row['gate_seq'])))
         || (recorded.state === 'none' && run?.session.status === 'awaiting_human');
       if (servable) {
-        const offers = await offersAt(cached.ord, run);
+        const offers = await offersAt(cached.ord, run, recorded?.state === 'open' ? gateSeqOf(recorded.row['gate_seq']) ?? cached.gateSeq : cached.gateSeq);
         if (offers === null) return unavailable503();
         // (crew#1698, codex delta) Beside an open durable row the opening is the ROW's only: a frame's number beside
         // an unnumbered row is one no answer could name (POST checks the row).
@@ -9340,7 +9347,7 @@ export function registerRoutes(
       // genuinely lost), as does a gate whose `awaitingHuman` predates the log's retention.
       return reply.code(404).send({ error: 'No open gate for this run' });
     }
-    const offers = await offersAt(open.ord, run);
+    const offers = await offersAt(open.ord, run, open.gateSeq);
     if (offers === null) return unavailable503();
     // (crew#1698, codex delta) Beside an open durable row, its opening only (see the cache-hit path above).
     if (record?.state === 'open') {

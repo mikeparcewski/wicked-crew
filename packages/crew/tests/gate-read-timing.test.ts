@@ -8,6 +8,7 @@ import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { GATE_READ_SLOW_MS, GateReadTimer } from '../src/api/gate-timing.js';
+import { GATE_READ_STALL_MS } from '../src/api/gate-actions-shared.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { BUILTIN_WORKFLOWS } from './support/builtin-fixtures.js';
 
@@ -27,7 +28,7 @@ const actions = [
 const frame = { type: 'awaitingHuman', session: id, ord, reviewingOrd: ord, gateKind: 'escalation', prompt: 'the QE reviewer could not run', ts: 1_785_614_004_730 };
 const row = { kind: 'gate', ord, prompt: 'the QE reviewer could not run', gate_kind: 'escalation', created_at: 1_785_614_004_730 };
 /** Every part name the route may serve: anything else in the header is a leak. */
-const PARTS = new Set(['record', 'view', 'resolve', 'events', 'actions', 'crew-actions', 'rejudge', 'deliver-qe', 'total']);
+const PARTS = new Set(['record', 'view', 'resolve', 'events', 'actions', 'actions-next', 'crew-actions', 'rejudge', 'deliver-qe', 'total']);
 
 interface Setup {
   run?: unknown;
@@ -39,6 +40,8 @@ interface Setup {
   throwingLog?: boolean;
   /** The engine keeps no durable gate row: the gate comes from the event log's replay. */
   noRow?: boolean;
+  /** The durable gate rows per read (overrides `noRow`). */
+  rows?: () => unknown[];
   /** The event log per read (1-based call number); else `[]` after `eventsDelayMs`. */
   events?: (call: number) => Promise<unknown[]>;
   cache?: GateCache;
@@ -57,7 +60,7 @@ async function gateRead(o: Setup = {}) {
   const adapter = {
     runView: vi.fn(async () => o.run ?? parked),
     gateActions: vi.fn(o.gateActions ?? (async () => ({ ord, gateKind: 'escalation', actions }))),
-    interactionRequests: vi.fn(async () => (o.noRow === true ? [] : [row])),
+    interactionRequests: vi.fn(async () => (o.rows !== undefined ? o.rows() : o.noRow === true ? [] : [row])),
     runEvents: vi.fn(async () => {
       if (o.events !== undefined) return o.events(adapter.runEvents.mock.calls.length);
       if (o.eventsDelayMs !== undefined) await new Promise((r) => setTimeout(r, o.eventsDelayMs));
@@ -260,5 +263,200 @@ describe('GateReadTimer (crew#1950)', () => {
     })).rejects.toThrow('engine read failed');
     expect(timer.header()).toBe('view;dur=3.0, total;dur=3.0');
     expect(timer.slowLine(id, 404)).toBeNull();
+  });
+});
+
+// crew#1950 step 2: at most one engine gateActions read runs per open gate (measured on a live daemon: 0.65-0.94 s
+// alone, 2.86 s each at 8 at once); requests that arrive while it runs share the NEXT read, which starts after them.
+describe('one engine gateActions read running per open gate (crew#1950)', () => {
+  const url = `/api/v1/runs/${id}/gate`;
+  const gate = (o: { held?: Promise<void>; throwFirst?: boolean } = {}) => {
+    const counter = { calls: 0 };
+    const read = async () => {
+      counter.calls += 1;
+      const first = counter.calls === 1;
+      if (first && o.held !== undefined) await o.held;
+      if (first && o.throwFirst === true) throw new Error('engine read failed');
+      return { ord, gateKind: 'escalation', actions };
+    };
+    return { counter, read };
+  };
+  const hold = () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    return { held, release };
+  };
+  const actionNames = (r: LightMyRequestResponse) => (r.json() as { actions: Array<{ action: string }> }).actions.map((a) => a.action);
+  const viewCalls = (a: unknown) => (a as { runView: ReturnType<typeof vi.fn> }).runView.mock.calls.length;
+
+  it('8 GETs at once cost two engine reads (the running one and the next), and every one answers with the actions', async () => {
+    const h = hold();
+    const g = gate({ held: h.held });
+    const { all } = await gateRead({
+      gateActions: g.read,
+      drive: async (app, a) => {
+        const gets = Array.from({ length: 8 }, () => app.inject({ method: 'GET', url }));
+        // Every request has its run in hand (the last step before the offers) while the first read is held.
+        await vi.waitFor(() => expect(viewCalls(a)).toBeGreaterThanOrEqual(8));
+        await new Promise((r) => setTimeout(r, 30));
+        expect(g.counter.calls).toBe(1);
+        const released = Date.now();
+        h.release();
+        const answers = await Promise.all(gets);
+        // The next read starts as the first settles, not at the stall bound.
+        expect(Date.now() - released).toBeLessThan(2_000);
+        return answers;
+      },
+    });
+    expect(g.counter.calls).toBe(2);
+    for (const r of all) {
+      expect(r.statusCode, r.body).toBe(200);
+      expect(actionNames(r)).toEqual(['approve', 'reassign', 'reject']);
+    }
+    // One request ran the first read; the other seven waited for, and shared, the next.
+    const named = all.map((r) => (partsOf(r.headers['server-timing']).has('actions') ? 'actions' : 'actions-next'));
+    expect(named.filter((n) => n === 'actions')).toHaveLength(1);
+    expect(named.filter((n) => n === 'actions-next')).toHaveLength(7);
+  });
+
+  it('STALE READS: a GET that arrives while a read runs sees an engine-side change made during it (no crew event)', async () => {
+    const h = hold();
+    let calls = 0;
+    let seatSignedIn = false;
+    const { all } = await gateRead({
+      gateActions: async () => {
+        calls += 1;
+        // The engine's answer is as of when the read began.
+        const offered = seatSignedIn ? actions : actions.filter((a) => a.action !== 'reassign');
+        if (calls === 1) await h.held;
+        return { ord, gateKind: 'escalation', actions: offered };
+      },
+      drive: async (app, a) => {
+        const first = app.inject({ method: 'GET', url });
+        await vi.waitFor(() => expect(calls).toBe(1));
+        // A seat signs in while the first read runs: the engine now offers the reassign, and no gate event says so.
+        seatSignedIn = true;
+        const later = app.inject({ method: 'GET', url });
+        await vi.waitFor(() => expect(viewCalls(a)).toBeGreaterThanOrEqual(2));
+        await new Promise((r) => setTimeout(r, 30));
+        h.release();
+        return Promise.all([first, later]);
+      },
+    });
+    expect(actionNames(all[0]!)).toEqual(['approve', 'reject']);
+    expect(actionNames(all[1]!)).toEqual(['approve', 'reassign', 'reject']);
+    expect(calls).toBe(2);
+  });
+
+  it('STALE READS: a GET after a live gate event reads the engine at once (another generation never queues)', async () => {
+    const h = hold();
+    const g = gate({ held: h.held });
+    const cache = new GateCache();
+    const { all } = await gateRead({
+      cache,
+      gateActions: g.read,
+      drive: async (app) => {
+        const first = app.inject({ method: 'GET', url });
+        await vi.waitFor(() => expect(g.counter.calls).toBe(1));
+        // The same gate's frame lands (a re-sent awaitingHuman): the run's gate generation moves on.
+        cache.ingest({ type: 'awaitingHuman', session: id, ord, prompt: row.prompt, gateKind: 'escalation' } as never);
+        const second = app.inject({ method: 'GET', url });
+        await vi.waitFor(() => expect(g.counter.calls).toBe(2));
+        h.release();
+        return Promise.all([first, second]);
+      },
+    });
+    expect(all.map((r) => r.statusCode)).toEqual([200, 200]);
+  });
+
+  it('STALE READS: a GET after a gate decision settles reads the engine at once', async () => {
+    const h = hold();
+    const g = gate({ held: h.held });
+    const { all } = await gateRead({
+      gateActions: g.read,
+      drive: async (app) => {
+        const first = app.inject({ method: 'GET', url });
+        await vi.waitFor(() => expect(g.counter.calls).toBe(1));
+        const post = await app.inject({ method: 'POST', url, payload: { approve: true, ord } });
+        expect(post.statusCode, post.body).toBe(200);
+        const before = g.counter.calls;
+        const second = app.inject({ method: 'GET', url });
+        await vi.waitFor(() => expect(g.counter.calls).toBe(before + 1));
+        h.release();
+        return Promise.all([first, second]);
+      },
+    });
+    expect(all.map((r) => r.statusCode)).toEqual([200, 200]);
+  });
+
+  it('IDENTITY REUSE: a gate re-opened at the same ord (a new gateSeq) reads the engine at once, never queued behind the old opening', async () => {
+    const h = hold();
+    const g = gate({ held: h.held });
+    let seq = 1;
+    const { all } = await gateRead({
+      gateActions: g.read,
+      // The engine's durable row; the re-opening's live frame has not arrived (the pump is behind).
+      rows: () => [{ ...row, gate_seq: seq }],
+      drive: async (app) => {
+        const first = app.inject({ method: 'GET', url });
+        await vi.waitFor(() => expect(g.counter.calls).toBe(1));
+        seq = 2;
+        const second = app.inject({ method: 'GET', url });
+        await vi.waitFor(() => expect(g.counter.calls).toBe(2));
+        h.release();
+        return Promise.all([first, second]);
+      },
+    });
+    expect(all[1]!.statusCode, all[1]!.body).toBe(200);
+    expect(all[1]!.json()).toMatchObject({ ord, gateSeq: 2 });
+  });
+
+  it('PARTIAL FAILURE: a stalled read releases its waiters at GATE_READ_STALL_MS; it is not cancelled', async () => {
+    const h = hold();
+    const g = gate({ held: h.held });
+    const { all } = await gateRead({
+      gateActions: g.read,
+      drive: async (app) => {
+        const stalled = app.inject({ method: 'GET', url });
+        await vi.waitFor(() => expect(g.counter.calls).toBe(1));
+        const at = Date.now();
+        const waiter = await app.inject({ method: 'GET', url });
+        const waited = Date.now() - at;
+        // Its read started once the stalled one passed the bound, and answered while that one still hung.
+        expect(waited).toBeGreaterThanOrEqual(GATE_READ_STALL_MS - 200);
+        expect(g.counter.calls).toBe(2);
+        h.release();
+        return [waiter, await stalled];
+      },
+    });
+    expect(all.map((r) => r.statusCode)).toEqual([200, 200]);
+  }, 30_000);
+
+  it('PARTIAL FAILURE: a read that throws fails only its own request (on its own path); the queued read still runs', async () => {
+    const h = hold();
+    const g = gate({ held: h.held, throwFirst: true });
+    const { all } = await gateRead({
+      gateActions: g.read,
+      drive: async (app, a) => {
+        const gets = Array.from({ length: 3 }, () => app.inject({ method: 'GET', url }));
+        await vi.waitFor(() => expect(viewCalls(a)).toBeGreaterThanOrEqual(3));
+        await new Promise((r) => setTimeout(r, 30));
+        h.release();
+        const three = await Promise.all(gets);
+        // Read 1 threw for the request that ran it; the two queued requests shared read 2; the first request's own
+        // retry came while read 2 ran, so it took read 3. Nothing is kept: a later GET reads the engine again.
+        expect(g.counter.calls).toBe(3);
+        const asked = Date.now();
+        const later = await app.inject({ method: 'GET', url });
+        // It read the engine itself at once: no settled read is left holding it until the stall bound.
+        expect(Date.now() - asked).toBeLessThan(2_000);
+        expect(g.counter.calls).toBe(4);
+        return [...three, later];
+      },
+    });
+    for (const r of all) {
+      expect(r.statusCode, r.body).toBe(200);
+      expect(actionNames(r)).toEqual(['approve', 'reassign', 'reject']);
+    }
   });
 });
