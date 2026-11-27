@@ -98,6 +98,17 @@ At boot, the daemon also appends existing `$XDG_BIN_HOME`, `~/.local/bin` and `~
 own PATH, so it finds the installer's tools even before your shell does. Commands already on your PATH take
 precedence.
 
+Crew copies the skills into its own skills root, `<state home>/skills` (`~/.wicked-crew/skills` by default), and
+hands each governed worker a read-only published generation from it. Skill files keep their source file's mode, at
+most `0755`, whatever the daemon's umask: an executable script stays executable, and a new file is `0644` (crew#1955).
+Publishing a generation then takes the write bits off its files and directories. The directories crew creates follow
+the daemon's umask, as directories do in general: under umask `077` they are `0700`, and `0500` once published, so
+only the daemon's own user can read the skills. If a seat or tool runs as another user and reads the published
+skills, start the daemon under umask `022` before it first creates the skills root. Directories created earlier keep
+their modes, because crew reuses a published generation at restart. To open an existing root, stop the daemon and
+run `chmod -R go+rX ~/.wicked-crew/skills`; the published generation still verifies afterwards. Every directory
+above the root, the state home included, must also let that user through (crew#1965).
+
 Studio's Nerve Center names whichever requirement is missing on a fresh install.
 
 `serve` starts the daemon on `http://127.0.0.1:7701` (override with `--port` or `CREW_PORT`) and
