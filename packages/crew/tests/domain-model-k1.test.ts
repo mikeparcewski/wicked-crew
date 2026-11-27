@@ -100,6 +100,62 @@ describe('domainModelOf: the model core built', () => {
   });
 });
 
+describe('domainModelOf: the statements no requirement holds (garden#1545)', () => {
+  // model-cert.json: core's own build of the train-16 cert's shape. MAIN-PARA's file open is cited only by a housekeeping
+  // rule the prose check withheld, its file close only by a shown housekeeping rule, READ-PARA's plain-rate statement
+  // only by a business detail the prose check withheld, its open statement by nothing; core keeps all four out of the
+  // requirements, in `metadata.statements`.
+  const cert = (): Record<string, unknown> => fixture('model-cert.json') as Record<string, unknown>;
+  const MAIN = 'ts-cobol . . . app/cbl/PAYCALC1/PAYCALC1#MAIN-PARA().';
+  const READ = 'ts-cobol . . . app/cbl/PAYCALC1/PAYCALC1#READ-PARA().';
+
+  it('reads them after the requirements\' statements, with no requirement', () => {
+    const m = domainModelOf(cert())!;
+    expect(m.statements.map((s) => [s.id, s.requirementKey, s.status])).toEqual([
+      [`${READ}#0`, 'app/cbl/PAYCALC1.cbl::REQ-001', 'Checked'],
+      [`${MAIN}#0`, null, 'Checked'],
+      [`${MAIN}#1`, null, 'Checked'],
+      [`${READ}#1`, null, 'open'],
+      [`${READ}#2`, null, 'Checked'],
+    ]);
+    for (const s of m.statements) expect(s.key).toMatch(/^v1:[0-9a-f]{64}$/u);
+    expect(m.statements[1]!.claims.length).toBeGreaterThan(0);
+  });
+
+  it('resolves every cite of every group sentence, shown or withheld, and every follow-up (the Rules tab and Follow-ups read them by id)', () => {
+    const m = domainModelOf(cert())!;
+    const byId = new Map(m.statements.map((s) => [s.id, s]));
+    expect(m.ruleGroups.map((g) => [g.kind, g.rule === null, g.withheld.length])).toEqual([
+      ['business', false, 1], ['housekeeping', true, 1], ['housekeeping', false, 0],
+    ]);
+    const cites = m.ruleGroups.flatMap((g) => [...(g.rule ? [g.rule] : []), ...g.details, ...g.withheld]).flatMap((s) => s.cites);
+    expect(cites).toEqual([`${READ}#0`, `${READ}#2`, `${MAIN}#0`, `${MAIN}#1`]);
+    for (const c of cites) expect(byId.has(c), c).toBe(true);
+    const open = m.followups.filter((f) => f.statement !== null);
+    expect(open.map((f) => f.statement)).toEqual([`${READ}#1`]);
+    for (const f of open) expect(byId.get(f.statement!)?.key).toMatch(/^v1:/u);
+  });
+
+  it('a follow-up on one of them takes a ruling from the document alone: its key and its target\'s hash', () => {
+    const m = domainModelOf(cert())!;
+    const st = m.statements.find((s) => s.id === m.followups.find((f) => f.statement !== null)!.statement)!;
+    const target = m.targets.find((t) => t.id === st.target)!;
+    expect(JSON.parse(rulingRequestOf({ statement: st.id, expect: st.key, expectTarget: target.targetHash, action: 'confirm' }, 'ana'))).toEqual({
+      statement: st.id, expect_key: st.key, expect_target_hash: target.targetHash, action: 'confirm', by: 'ana',
+    });
+  });
+
+  it('a document built before the list reads exactly as it did: every statement has its requirement', () => {
+    const doc = fixture('model-built.json') as { metadata: Record<string, unknown> };
+    expect(doc.metadata['statements']).toBeUndefined();
+    const m = domainModelOf(doc)!;
+    expect(m.statements).toHaveLength(4);
+    expect(m.statements.every((s) => s.requirementKey === 'app/cbl/PAYCALC1.cbl::REQ-001')).toBe(true);
+    // a list that is not one is no statements, never an error
+    expect(domainModelOf({ ...doc, metadata: { ...doc.metadata, statements: 'x' } })).toEqual(m);
+  });
+});
+
 describe('rulings: the request core reads and the answer it gives', () => {
   it('the doc gives every value a ruling names: the recorded commands used the same key and hash', () => {
     const m = domainModelOf(fixture('model-built.json'))!;
@@ -505,6 +561,15 @@ describe('GET /repos/:id/requirements and POST …/rulings', () => {
     const res = await app.inject({ method: 'GET', url: '/api/v1/repos/repo-1/requirements' });
     expect(res.statusCode).toBe(200);
     expect(res.json().model).toEqual(domainModelOf(graph));
+  });
+
+  it('lists only the requirements, and carries every statement on the page (garden#1545)', async () => {
+    const graph = fixture('model-cert.json');
+    const { app } = await daemon({ getRequirementsGraphForRepo: vi.fn().mockResolvedValue({ graph, coverage: null }) });
+    const page = (await app.inject({ method: 'GET', url: '/api/v1/repos/repo-1/requirements' })).json();
+    expect(page.items.map((i: { key: string; title: string }) => [i.key, i.title])).toEqual([['app/cbl/PAYCALC1.cbl::REQ-001', 'Overtime pay']]);
+    expect(page.model.statements).toHaveLength(5);
+    expect(page.model).toEqual(domainModelOf(graph));
   });
 
   it('records a ruling through the engine, and the next read rebuilds from the new document', async () => {

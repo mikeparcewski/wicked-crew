@@ -78,7 +78,7 @@ function claimOf(v: unknown): DomainClaim | null {
 
 const STATUSES = new Set(['Checked', 'open', 'confirmed', 'stale']);
 
-function statementOf(v: unknown, requirementKey: string): DomainStatement | null {
+function statementOf(v: unknown, requirementKey: string | null): DomainStatement | null {
   if (!isObj(v)) return null;
   const id = str(v['id']);
   const key = str(v['statement_key']);
@@ -197,6 +197,14 @@ export function domainModelOf(graph: unknown): DomainModel | null {
         if (st !== null) statements.push(st);
       }
     }
+  }
+  // The statements no requirement holds (wicked-core garden#1545: no business sentence cites them, shown or withheld
+  // only because the code changed since),
+  // after the requirements'. A group cites them and a follow-up's ruling names their key, so they are read the same
+  // way. A document built before the list has none.
+  for (const r of arr(m['statements'])) {
+    const st = statementOf(r, null);
+    if (st !== null) statements.push(st);
   }
   return {
     schemaVersion: DOMAIN_MODEL_V3,
