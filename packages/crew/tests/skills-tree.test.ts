@@ -418,15 +418,35 @@ describe('skills file modes are exact under a strict umask (crew#1955)', () => {
     expect(modeOf(join(base, 'private', 'state.json'))).toBe(0o600);
   });
 
+  it('mkdirExact sets no mode under a parent another user can write (a swapped directory could redirect the chmod)', () => {
+    if (process.platform === 'win32') return;
+    const shared = join(base, 'shared');
+    mkdirSync(shared);
+    chmodSync(shared, 0o777);
+    const sticky = join(base, 'sticky');
+    mkdirSync(sticky);
+    chmodSync(sticky, 0o1777);
+    strict(() => {
+      mkdirExact(join(shared, 'a', 'b'));
+      mkdirExact(join(sticky, 'c'));
+    });
+    for (const d of ['shared/a', 'shared/a/b', 'sticky/c']) expect([d, modeOf(join(base, d))]).toEqual([d, 0o700]);
+    expect(modeOf(shared)).toBe(0o777);
+    // Under an owner-only parent the same call sets 0755.
+    strict(() => mkdirExact(join(base, 'own', 'd')));
+    expect(modeOf(join(base, 'own'))).toBe(0o755);
+    expect(modeOf(join(base, 'own', 'd'))).toBe(0o755);
+  });
+
   it('mkdirExact sets the mode only of what it created; a link it passes through keeps its target as it was', () => {
     if (process.platform === 'win32') return;
     const outside = join(base, 'outside');
     mkdirSync(outside);
     chmodSync(outside, 0o700);
     symlinkSync(outside, join(base, 'link'));
-    expect(() => mkdirExact(join(base, 'link', 'sub'))).not.toThrow(); // the link existed: mkdir -p goes through it, no mode set on it
+    strict(() => mkdirExact(join(base, 'link', 'sub'))); // the link existed: mkdir -p goes through it
     expect(modeOf(outside)).toBe(0o700);
-    expect(modeOf(join(outside, 'sub'))).toBe(0o755);
+    expect(modeOf(join(outside, 'sub'))).toBe(0o700); // the created dir's parent is a link, not a directory we own: no mode set
     expect(() => mkdirExact(join(base, 'link'))).not.toThrow();
     expect(modeOf(outside)).toBe(0o700);
   });

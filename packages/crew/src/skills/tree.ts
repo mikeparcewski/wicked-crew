@@ -670,13 +670,21 @@ function exactFileMode(fd: number, mode: number): void {
 
 /**
  * (crew#1955) `mkdir -p dir`, where every directory this call creates gets {@link SKILL_DIR_MODE} exactly, whatever
- * the daemon's umask; a directory that already existed is left as it is. Each mode is set through a descriptor opened
- * `O_DIRECTORY | O_NOFOLLOW`, so a created directory swapped for a link fails the open instead of the chmod following
- * it. A no-op past the mkdir on Windows, where modes are advisory.
+ * the daemon's umask; a directory that already existed is left as it is. A no-op past the mkdir on Windows, where
+ * modes are advisory.
+ *
+ * Only the path's last component is opened no-follow, so the walk is safe only while nobody else can swap a directory
+ * on it. It goes top-down: each created directory is opened `O_DIRECTORY | O_NOFOLLOW` (a link there fails the open)
+ * and set 0755 before its child is opened, so once set, only the owner can rename inside it. The first created
+ * directory's parent already existed. When that parent is not ours, or another user can write it, a created
+ * directory could be swapped for a link between two opens and a later chmod would land outside the tree (the codex
+ * check on crew#1962). So the modes are then not set, and the created directories keep the umask's modes, as before.
  */
 export function mkdirExact(dir: string): void {
   const first = mkdirSync(dir, { recursive: true });
   if (first === undefined || process.platform === 'win32') return;
+  const parent = lstatSync(dirname(first));
+  if (!parent.isDirectory() || (parent.mode & 0o022) !== 0 || (typeof process.getuid === 'function' && parent.uid !== process.getuid())) return;
   let cur = first;
   for (const seg of ['', ...relative(first, dir).split(sep).filter((x) => x !== '')]) {
     if (seg !== '') cur = join(cur, seg);
