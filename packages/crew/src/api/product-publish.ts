@@ -168,12 +168,23 @@ function gateEditOf(view: SessionView, runId: string, id: string, u: SessionView
   let atGate = false;
   for (let n = 1; n <= gates && !atGate; n++) atGate = typeof pid === 'string' && pid === mintProposalId(runId, 'human', `g-${runId}-${n}`);
   if (!atGate) return { ok: false, detail: `plan revision ${rev} was not a person's edit at the plan's gate` };
-  const steps = (a['steps'] as { steps?: unknown } | null | undefined)?.steps;
-  const step = Array.isArray(steps) ? (steps as unknown[]).find((x) => typeof x === 'object' && x !== null && (x as Record<string, unknown>)['id'] === id) as Record<string, unknown> | undefined : undefined;
-  if (step === undefined || step['catalog'] !== u.catalog || typeof step['instructions'] !== 'string' || sha256Hex(step['instructions']) !== sha256Hex(u.instructions ?? '')) {
-    return { ok: false, detail: `the ${id} step is not the one plan revision ${rev} accepted` };
-  }
+  if (!acceptedStepIs(view, id, u)) return { ok: false, detail: `the ${id} step is not the one plan revision ${rev} accepted` };
   return { ok: true, rev };
+}
+
+/** Whether the run's accepted plan has a step `id` with `u`'s catalog and instructions (sha256). */
+function acceptedStepIs(view: SessionView, id: string, u: SessionView['units'][number]): boolean {
+  const accepted = (view.session as unknown as { team_plan?: { accepted?: unknown } | null }).team_plan?.accepted;
+  const steps = typeof accepted === 'object' && accepted !== null ? ((accepted as Record<string, unknown>)['steps'] as { steps?: unknown } | null | undefined)?.steps : undefined;
+  const step = Array.isArray(steps) ? (steps as unknown[]).find((x) => typeof x === 'object' && x !== null && (x as Record<string, unknown>)['id'] === id) as Record<string, unknown> | undefined : undefined;
+  return step !== undefined && step['catalog'] === u.catalog && typeof step['instructions'] === 'string' && sha256Hex(step['instructions']) === sha256Hex(u.instructions ?? '');
+}
+
+/** Whether a structured description is exactly `<step> ||| <instructions>`: the engine splits it at the FIRST separator
+ *  (wicked-core plan.rs `INSTRUCTION_SEP`, `split_once`), and a gate's note is appended after the instructions. */
+function noNoteOn(u: SessionView['units'][number]): boolean {
+  const at = typeof u.description === 'string' ? u.description.indexOf(INSTRUCTION_SEP) : -1;
+  return at >= 0 && u.description.slice(at + INSTRUCTION_SEP.length) === u.instructions;
 }
 
 /** The last fenced ```json block of a draft's output, or `null`. */
@@ -376,14 +387,16 @@ export async function composedPlan(deps: Pick<ProductPublishDeps, 'composeOf' | 
   // (crew#1902, coord Q1) A gate edit's note lands on the description of the step the plan releases next (` (operator
   // amendment: …)`), which need not be the step the person edited (codex on #1988: an edit of the review alone put its
   // note on the unchanged draft). So once any step is a gate edit, NEITHER step may carry text after its instructions.
+  // The published plan is the accepted revision as a whole (agy on #1988): a step left as launched must still be that
+  // revision's step too, so a revision that changed a step which had already run never stands behind the card.
   if (edited !== null) {
     for (const [u, id] of [[d, 'draft'], [r, 'review']] as const) {
-      // The engine writes a structured description as `<step> ||| <instructions>` (wicked-core plan.rs INSTRUCTION_SEP),
-      // the note after it; so the separator is part of the match (codex r2: a bare suffix match let a note that itself
-      // ends with the instructions through).
-      if (typeof u.description !== 'string' || !u.description.endsWith(`${INSTRUCTION_SEP}${u.instructions ?? ''}`)) {
-        return refuse(409, 'compose_unverified', EDITED_WITH_NOTE, { detail: `the ${id} step carries a note from its gate` });
+      if (!acceptedStepIs(view, id, u)) {
+        const detail = `the ${id} step is not the one plan revision ${edited} accepted`;
+        return refuse(409, 'compose_unverified', `crew cannot confirm this plan's change was a person's edit at its gate (${detail}); compose again to publish`, { detail });
       }
+      // The note comes after `<step> ||| <instructions>` (codex r2, agy: an exact split, never a suffix match).
+      if (!noNoteOn(u)) return refuse(409, 'compose_unverified', EDITED_WITH_NOTE, { detail: `the ${id} step carries a note from its gate` });
     }
   }
   if (r.role !== 'evaluator' || !sameGate(r.gate)) return unverified("the review step is not the evaluator behind a person's confirmation", true);

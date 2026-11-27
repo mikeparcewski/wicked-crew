@@ -17831,9 +17831,10 @@ export interface ProductPublishCard {
   identity: string;
   items: PublishItem[];
   /**
-   * (wicked-crew#1902) Present when a person edited the compose's plan at its gate and its draft and review ran the
-   * edited plan: `planRev` is the accepted plan revision they ran under. Absent for a plan published as Compose
-   * launched it. A person sees it on the card, and it is part of the hash they confirm.
+   * (wicked-crew#1902) Present when a person edited the compose's plan at its gate: the draft and/or the review ran
+   * steps that edit changed, and `planRev` is the accepted plan revision the edited step(s) ran under (a step the edit
+   * left alone may have run under an earlier one, with the same text). Absent for a plan published as Compose launched
+   * it. A person sees it on the card, and it is part of the hash they confirm.
    */
   edited?: { planRev: number };
 }

@@ -531,17 +531,18 @@ describe('the run and its plan', () => {
     await refusal('not_a_compose');
   });
 
-  it('(7) a plan edited at its gate (same unit ids, other instructions or catalog) is compose_unverified, in plain words', async () => {
+  it('(7) a plan changed with no proof of a person\'s gate edit (other instructions), or in a way publish does not take (catalog, amendment), is compose_unverified, in plain words', async () => {
     const draft = view.units.find((u) => u.id === `${RUN}:draft`)!;
     draft.instructions = `${draft.instructions}\nAlso add an epic for billing.`;
     // crew#1902: a change to the instructions is taken only as a person's gate edit the view proves; this view has none.
     await refusal('compose_unverified', /^crew cannot confirm this plan's change was a person's edit at its gate \(the engine did not record which plan revision the draft step ran under\); compose again to publish$/);
     view = structuredClone(FIX.view);
     view.units.find((u) => u.id === `${RUN}:review`)!.catalog = 'review';
-    await refusal('compose_unverified');
+    const unsupported = /^this plan was changed in a way publishing doesn't support \(a step's kind, its review or an amendment\); compose again to publish$/;
+    await refusal('compose_unverified', unsupported);
     view = structuredClone(FIX.view);
     view.units.find((u) => u.id === `${RUN}:draft`)!.amendments = ['more epics'];
-    await refusal('compose_unverified');
+    await refusal('compose_unverified', unsupported);
     view = structuredClone(FIX.view);
     delete view.units.find((u) => u.id === `${RUN}:draft`)!.instructions; // an older engine: not an edit, said so
     await refusal('compose_unverified', /^crew cannot confirm this is the compose as it was launched \(the engine did not record the draft step's instructions\); compose again to publish$/);
@@ -633,6 +634,18 @@ describe('the run and its plan', () => {
       });
     });
 
+    it('a review-only gate edit with no note publishes as edited (rev 3); the draft ran as launched', async () => {
+      // REVIEW_NOTE_FIX without its note: the engine's view of the same edit had the person added none.
+      await withRun(REVIEW_NOTE_FIX, (v) => {
+        const d = unitOf(v, 'draft');
+        d.description = `${d.description.split(' ||| ')[0]} ||| ${d.instructions!}`;
+      }, async (runId) => {
+        const c = await postRun(runId);
+        expect(c.statusCode, c.body).toBe(200);
+        expect((c.json() as { card: { edited?: unknown } }).card.edited).toEqual({ planRev: 3 });
+      });
+    });
+
     it('an unedited compose\'s card has no edited flag (its hash does not move)', async () => {
       const c = await card();
       expect('edited' in (c.card as Record<string, unknown>)).toBe(false);
@@ -669,7 +682,14 @@ describe('the run and its plan', () => {
         (runId) => refusedWith(runId, /^the draft step is not the one plan revision 3 accepted$/));
       // The unit's catalog is no longer Compose's: refused as before, whatever the revision says.
       await withRun(EDITED_FIX, (v) => { unitOf(v, 'draft').catalog = 'understand'; acceptedOf(v).steps.steps.find((x) => x['id'] === 'draft')!['catalog'] = 'understand'; },
-        (runId) => refusedWith(runId, /^the draft step is not the produce step Compose launched$/));
+        (runId) => refusedWith(runId, /^the draft step is not the produce step Compose launched$/, "this plan was changed in a way publishing doesn't support (a step's kind, its review or an amendment); compose again to publish"));
+      // agy on #1988: the published plan is the accepted revision as a whole. Only the review was edited; the draft ran
+      // as launched, but the revision names other draft text (a change to a step that had already run): refused.
+      await withRun(REVIEW_NOTE_FIX, (v) => {
+        const d = unitOf(v, 'draft');
+        d.description = `${d.description.split(' ||| ')[0]} ||| ${d.instructions!}`;
+        acceptedOf(v).steps.steps.find((x) => x['id'] === 'draft')!['instructions'] = `${d.instructions!}\n\nAnother epic.`;
+      }, (runId) => refusedWith(runId, /^the draft step is not the one plan revision 3 accepted$/));
     });
 
     it('PARTIAL FAILURE: no plan_rev, no accepted plan, no gate counter or no accepted steps on the view is not confirmed', async () => {
@@ -689,6 +709,15 @@ describe('the run and its plan', () => {
       expect(d.description.endsWith(' (operator amendment: Keep billing small.)')).toBe(true);
       expect(unitOf(REVIEW_NOTE_FIX.view, 'review').instructions).not.toBe(REVIEW_NOTE_FIX.review);
       await withRun(REVIEW_NOTE_FIX, () => {}, (runId) => refusedWith(runId, /^the draft step carries a note from its gate$/, words));
+      // agy on #1988: a note crafted to end with ' ||| ' and the instructions is still a note (an exact split, not a suffix).
+      await withRun(NOTE_FIX, (v) => {
+        const draft = unitOf(v, 'draft');
+        const text = `${draft.instructions!})`;
+        draft.instructions = text;
+        acceptedOf(v).steps.steps.find((x) => x['id'] === 'draft')!['instructions'] = text;
+        draft.description = `${draft.description.split(' ||| ')[0]} ||| ${text} (operator amendment: x ||| ${text.slice(0, -1)})`;
+        expect(draft.description.endsWith(` ||| ${text}`)).toBe(true);
+      }, (runId) => refusedWith(runId, /^the draft step carries a note from its gate$/, words));
       // codex r2: a note that itself ends with the edited instructions (the person wrote both) is still a note.
       await withRun(NOTE_FIX, (v) => {
         const draft = unitOf(v, 'draft');
