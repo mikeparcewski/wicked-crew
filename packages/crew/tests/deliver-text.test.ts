@@ -1207,6 +1207,31 @@ describe('the run\'s assurance labels (crew#1186)', () => {
     expect(composeDeliverText(factsFromRun(skipped, null, { qeAcceptance: pass })).body).toContain('- **QE acceptance skipped by operator**');
   });
 
+  // crew#1952 (the crew half of wicked-core#1985): the reason words say what the engine counts, the helpers picked for
+  // this job, never "signed in". Each kind is the engine's serialized `StandInReason` on the real session's binding;
+  // the expected words are wicked-core `standin::Reason::words` after #1985 (src/standin.rs tests).
+  it('says a stand-in\'s reason as the helpers picked for this job, never as who is signed in (crew#1952)', () => {
+    const engine = JSON.parse(readFileSync(new URL('./fixtures/stand-in-session.json', import.meta.url), 'utf8')) as { assurance: Record<string, unknown> };
+    const withReason = (reason: unknown, label?: string): string => {
+      const bindings = (engine.assurance['standIns'] as Array<Record<string, unknown>>).map((b) => ({ ...b, reason }));
+      const a = { ...engine.assurance, standIns: bindings, ...(label !== undefined ? { standInLabel: label } : {}) };
+      return composeDeliverText(factsFromRun(withAssurance(a), null)).body;
+    };
+    const line = (body: string): string => body.split('\n').find((l) => l.startsWith('- **Checked by stand-ins**')) ?? '';
+    expect(line(withReason({ kind: 'only_one_helper', cli: 'Claude Code' }))).toContain(': only Claude Code was picked for this job.');
+    expect(line(withReason({ kind: 'all_parties', seats: ['Claude Code', 'Codex'] })))
+      .toContain(': every helper picked for this job (Claude Code, Codex) built or reviewed this work.');
+    expect(line(withReason({ kind: 'helpers_short', signed_in: 2, have: 1, need: 2 })))
+      .toContain(': 2 helpers are picked for this job: 1 can check this job independently and it needs 2.');
+    expect(line(withReason({ kind: 'helpers_short', signed_in: 1, have: 0, need: 1 })))
+      .toContain(': 1 helper is picked for this job: 0 can check this job independently and it needs 1.');
+    // No reason the daemon can read and no engine label: the fallback says the same thing.
+    expect(line(withReason({ kind: 'from_a_newer_engine' }, ''))).toContain(': too few helpers were picked for this job.');
+    for (const r of [{ kind: 'only_one_helper', cli: 'Claude Code' }, { kind: 'all_parties', seats: ['Claude Code'] }, { kind: 'helpers_short', signed_in: 2, have: 1, need: 2 }]) {
+      expect(line(withReason(r))).not.toMatch(/signed[ -]in/);
+    }
+  });
+
   // (DES-STANDIN-001 §6, T-K6) The stand-in line, from the engine's own serialized session: `stand-in-session.json` is
   // the AgentSession wicked-core persisted for a one-seat, consented, stand-in-aware run (its test
   // `tests/stand_in_review.rs` `a_one_seat_aware_run_with_consent_reviews_on_a_stand_in`), copied verbatim.
@@ -1214,7 +1239,7 @@ describe('the run\'s assurance labels (crew#1186)', () => {
     const engine = JSON.parse(readFileSync(new URL('./fixtures/stand-in-session.json', import.meta.url), 'utf8')) as { assurance: Record<string, unknown> };
     const body = composeDeliverText(factsFromRun(withAssurance(engine.assurance), null)).body;
     expect(body).toContain(
-      "- **Checked by stand-ins**: only Claude Code was signed in. A stand-in is a fresh session of the same tool that sees "
+      "- **Checked by stand-ins**: only Claude Code was picked for this job. A stand-in is a fresh session of the same tool that sees "
       + "the work but none of the builder's reasoning; it is not an independent review. Stood in: reviewer (Claude Code).",
     );
     expect(body).not.toMatch(/independently/i);
@@ -1238,7 +1263,7 @@ describe('the run\'s assurance labels (crew#1186)', () => {
       ],
     };
     const mixedBody = composeDeliverText(factsFromRun(mixedView, null)).body;
-    expect(mixedBody).toContain('- **Checked partly by stand-ins**: only Claude Code was signed in.');
+    expect(mixedBody).toContain('- **Checked partly by stand-ins**: only Claude Code was picked for this job.');
     expect(mixedBody).toContain('Stood in: reviewer (Claude Code), QE reviewer (Claude Code, did not answer).');
     // A run no stand-in took part in says nothing about stand-ins.
     const none = composeDeliverText(factsFromRun(withAssurance({ ...engine.assurance, standIns: [] }), null)).body;
