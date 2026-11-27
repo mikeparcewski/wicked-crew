@@ -285,3 +285,73 @@ describe('crew#1880: a terminal run log is read once, and never again after a re
     expect(existsSync(factsPath()) ? readFileSync(factsPath(), 'utf8') : '').not.toContain('"done"');
   });
 });
+
+// crew#1891: the kept facts were bound to a run only by its `problem`, so a DIFFERENT store copied over the live file in
+// place (same inode and birth time, so the header still matched) that reused a run id with the same problem served the
+// old run's launch name and `ended_at`. Each line is now bound to the terminal run's own engine record too: its
+// `finished_at` (engine unix millis at terminal). A file started over says why, once.
+describe('crew#1891: a store copied over the live file in place never serves another run\'s kept facts', () => {
+  const finished = (v: { session: Record<string, unknown>; units: unknown[] }, at: number) => ({ ...v, session: { ...v.session, finished_at: at } });
+
+  it('the same id and problem with another finished_at is read again: its own launch name and ended_at are served', async () => {
+    store = store.map((v, i) => finished(v, T0 + 1_000 * (i + 1)));
+    await list(newAdapter());
+    // Another store's run, copied over in place: the same id and the same problem, another launch and another end.
+    store[0] = finished(run('done', 'completed'), T0 + 77_000);
+    logs.set('done', log('done', 'bugfix', T0 + 99_000));
+    reads.clear();
+    const runs = await list(newAdapter());
+    expect(Object.fromEntries(reads)).toEqual({ done: 1 });
+    expect(byId(runs, 'done')).toMatchObject({ workflow_id: 'bugfix', ended_at: (T0 + 99_000) / 1000 });
+    // Its own facts are kept in turn: the next start reads nothing.
+    reads.clear();
+    await list(newAdapter());
+    expect(totalReads()).toBe(0);
+  });
+
+  it('a file in the older format (bound by the problem alone) is started over, once, and says why', async () => {
+    store = store.map((v, i) => finished(v, T0 + 1_000 * (i + 1)));
+    const { statSync } = await import('node:fs');
+    const { createHash } = await import('node:crypto');
+    const s = statSync(dbPath);
+    const fp = createHash('sha256').update('problem done').digest('hex').slice(0, 16);
+    // The exact shape main's RunFactsFile wrote (run-log-facts.ts bind() and put()), with a stale launch name.
+    writeFileSync(factsPath(), `${JSON.stringify({ v: 1, store: { dev: s.dev, ino: s.ino, birth: Math.round(s.birthtimeMs) } })}\n${JSON.stringify({ v: 1, run: 'done', fp, launched: 'stale-name', endedAt: T0 + 5 })}\n`);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const runs = await list(newAdapter());
+      expect(byId(runs, 'done')).toMatchObject({ workflow_id: 'feature', ended_at: (T0 + 60_000) / 1000 });
+      const said = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('run-facts'));
+      expect(said).toHaveLength(1);
+      expect(said[0]).toMatch(/started over: older format/);
+      // Closed-set words and the sidecar's own path only: no run text.
+      expect(said[0]).not.toContain('problem');
+      warn.mockClear();
+      reads.clear();
+      await list(newAdapter());
+      expect(totalReads()).toBe(0);
+      expect(warn.mock.calls.filter((c) => String(c[0]).includes('run-facts'))).toHaveLength(0);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a file bound to another store file is started over with one line naming why; a missing file says nothing', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await list(newAdapter());
+      expect(warn.mock.calls.filter((c) => String(c[0]).includes('run-facts'))).toHaveLength(0);
+      const [header, ...rest] = readFileSync(factsPath(), 'utf8').split('\n');
+      const h = JSON.parse(header!) as { v: number; store: { ino: number } };
+      writeFileSync(factsPath(), [JSON.stringify({ ...h, store: { ...h.store, ino: h.store.ino + 1 } }), ...rest].join('\n'));
+      reads.clear();
+      await list(newAdapter());
+      expect(Object.fromEntries(reads)).toEqual({ done: 1, free: 1, stopped: 1 });
+      const said = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('run-facts'));
+      expect(said).toHaveLength(1);
+      expect(said[0]).toMatch(/started over: another store file \(inode\)/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
