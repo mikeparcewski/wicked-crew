@@ -1246,14 +1246,20 @@ describe('the run\'s assurance labels (crew#1186)', () => {
   });
 
   // crew#1966 (the crew half of wicked-core#2015): a team stand-in reservation its asker let go before anything ran on it
-  // stays on the record `failed` with `abandoned: true`. The binding is the engine's own (stand-in-session.json) as
-  // wicked-core's `abandon_team` leaves it (`src/actor/stand_in_gate.rs` sets `state: failed` and `abandoned = true`;
+  // stays on the record `failed` with `abandoned: true`. The binding is DERIVED from the engine's own
+  // (stand-in-session.json, a reviewer binding): the fields a team reservation differs in are set as core sets them
+  // (`src/actor/stand_in_gate.rs` `reserve_team`: `lens_at(i)`, a fresh invocation), then as `abandon_team` leaves it (`src/actor/stand_in_gate.rs` sets `state: failed` and `abandoned = true`;
   // `src/standin.rs` `StandInBinding.abandoned` serializes last, and only when true; test
   // `reservations_let_go_are_failed_and_abandoned_2015`).
   it('an abandoned stand-in reservation is not listed as a stand-in that took part (crew#1966)', () => {
     const engine = JSON.parse(readFileSync(new URL('./fixtures/stand-in-session.json', import.meta.url), 'utf8')) as { assurance: Record<string, unknown> };
     const seated = (engine.assurance['standIns'] as Array<Record<string, unknown>>)[0]!;
-    const abandoned = { ...seated, key: 'claude~2', slot: 2, role: 'monitor', state: 'failed', abandoned: true };
+    // A team reservation as core's `reserve_team` makes one (its own lens by position, `lens_at(0)`, and a fresh
+    // invocation id), then as `abandon_team` leaves it.
+    const abandoned = {
+      ...seated, key: 'claude~2', slot: 2, role: 'monitor', lens: 'correctness',
+      invocation: '0b9d3c51-7a3e-4c55-9f0e-2d61c4a8e7f2', state: 'failed', abandoned: true,
+    };
     const alone = composeDeliverText(factsFromRun(withAssurance(engine.assurance), null)).body;
     const beside = composeDeliverText(factsFromRun(withAssurance({ ...engine.assurance, standIns: [seated, abandoned] }), null)).body;
     expect(beside).toBe(alone);
