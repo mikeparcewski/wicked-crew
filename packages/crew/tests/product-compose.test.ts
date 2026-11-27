@@ -79,8 +79,8 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
   const compose = (payload: unknown, headers: Record<string, string> = {}) =>
     app.inject({ method: 'POST', url: '/api/v1/projects/p1/product/compose', payload: payload as Record<string, unknown>, headers });
 
-  // crew#1884: the person's answer (`standIns: true`) reaches the launch, and the route asks the choice as `POST /runs`
-  // does (studio's Draft draws it, studio#1468); a chat Backlog job's Go asks it too, a reshape's does not.
+  // crew#1884: the person's answer (`standIns: true`) reaches the launch, and the route asks a person the choice as
+  // `POST /runs` does (studio's Draft is to draw it, studio#1468); a chat Backlog job's Go asks it too, a reshape's does not.
   it('takes standIns to the launch; the route and a chat job\'s compose ask the choice (crew#1884)', async () => {
     const res = await compose({ requirements: [{ repoId: 'alpha', key: 'billing::r1' }], standIns: true });
     expect(res.statusCode, res.body).toBe(202);

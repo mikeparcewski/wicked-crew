@@ -534,8 +534,23 @@ describe('POST /projects/:id/product/compose asks the stand-in question (crew#18
   });
   beforeEach(() => { launched.length = 0; preflights.length = 0; });
 
-  const compose = (body: Record<string, unknown>) =>
-    app.inject({ method: 'POST', url: '/api/v1/projects/p1/product/compose', headers: { 'x-test-actor': 'human/operator' }, payload: { requirements: [{ repoId: 'alpha', key: 'billing::r1' }], ...body } });
+  const compose = (body: Record<string, unknown>, actor = 'human/operator') =>
+    app.inject({ method: 'POST', url: '/api/v1/projects/p1/product/compose', headers: { 'x-test-actor': actor }, payload: { requirements: [{ repoId: 'alpha', key: 'billing::r1' }], ...body } });
+
+  // codex round 1: an agent or system caller cannot consent (`standIns` is the launcher's 403 for it), so it is never
+  // asked: its compose launches as it did before the route asked anyone.
+  it('an agent or system caller is not asked a choice it cannot answer: it launches as before, not aware', async () => {
+    for (const actor of ['agent/operator', 'system/admin']) {
+      const res = await compose({}, actor);
+      expect(res.statusCode, res.body).toBe(202);
+    }
+    expect(preflights).toEqual([]);
+    expect(launched).toHaveLength(2);
+    for (const input of launched) {
+      expect(input.standInAware).toBeUndefined();
+      expect(input.standIn).toBeUndefined();
+    }
+  });
 
   it('a one-CLI roster with no consent is 409 stand_in_choice, the shape POST /runs answers, and nothing launches', async () => {
     const res = await compose({});

@@ -26,6 +26,7 @@ import type { Actor } from '../core/types.js';
 import { CATALOG_V2_CARDS } from '../workflow-catalog/catalog-data-v2.js';
 import { LaunchShapeSchema } from '../workflow-catalog/shape.js';
 import { LOCAL_ACTOR } from './auth.js';
+import { isHumanOperator } from './watch-routes.js';
 import { codeGraphErrorStatus } from '../core/repoPaths.js';
 import { AggregateHttpError, membersOf } from './project-aggregates.js';
 import { getRequirement } from './requirements.js';
@@ -272,8 +273,8 @@ export async function composeLaunch(
             ],
           },
         },
-        // (crew#1884) Every compose a person starts asks the stand-in choice, as `POST /runs` does: the route's own
-        // caller (studio's Draft) gets `409 stand_in_choice` and sends again with `standIns: true` (studio#1468), and a
+        // (crew#1884) A compose a person starts asks the stand-in choice, as `POST /runs` does: on the route, a person's
+        // short roster with no consent answers `409 stand_in_choice` (studio's Draft is to draw it, studio#1468), and a
         // chat Backlog job's card reopens with the question. A reshape's compose launches aware without asking.
         { ...ctx, target: 'compose', ...(extra.standIns ?? {}), compose: composeFactsOf(id, rows, level, draft, review), ...(extra.fromProposal !== undefined ? { fromProposal: extra.fromProposal } : {}) },
       );
@@ -292,8 +293,10 @@ export function registerProductRoutes(app: FastifyInstance, adapter: CoreAdapter
     { config: { manifest: { requestType: 'ProductComposeBody', responseType: 'ProductComposeResponse', statusCodes: [202, 400, 403, 404, 409, 422, 501, 503] } } },
     async (req: FastifyRequest & { actor?: Actor }, reply) => {
       const { id } = req.params as { id: string };
-      // (crew#1884) A person starts this compose, so it asks the stand-in choice as `POST /runs` does.
-      const out = await composeLaunch(adapter, launchRun, id, req.body, { actor: req.actor ?? LOCAL_ACTOR, log: req.log }, { standIns: { standInChoice: true } });
+      // (crew#1884) A person's compose asks the stand-in choice as `POST /runs` does. Any other caller cannot consent
+      // (`standIns` is a person's, the launcher's 403), so it keeps the launch it had: no question it could not answer.
+      const actor = req.actor ?? LOCAL_ACTOR;
+      const out = await composeLaunch(adapter, launchRun, id, req.body, { actor, log: req.log }, isHumanOperator(actor) ? { standIns: { standInChoice: true } } : {});
       return reply.code(out.code).send(out.body);
     },
   );
