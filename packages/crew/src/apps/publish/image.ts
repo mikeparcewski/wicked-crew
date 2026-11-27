@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 
 import { childEnvWithBootEstateDb } from '../../core/governance-store.js';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 export class ImageBuildError extends Error {
@@ -54,6 +54,40 @@ function run(bin: string, args: string[], deadlineMs: number, env: NodeJS.Proces
   });
 }
 
+/** How much of the engine's own output a refusal carries: it must fit the produce step's printed refusal (600
+ *  characters, `cli/apps-produce.ts`) beside crew's sentence. */
+const EXCERPT_MAX = 400;
+
+/**
+ * (crew#1978) The engine's own last words from a build's output, for a person: its last non-empty lines that fit in
+ * `max` characters (a longer last line keeps its end), joined with " | ". Every `hide` path becomes its stand-in
+ * (the build context, the home directory), so no host path reaches the run's record. `''` when it said nothing.
+ */
+export function engineExcerpt(log: string, hide: ReadonlyArray<readonly [string, string]>, max = EXCERPT_MAX): string {
+  let text = log;
+  for (const [path, standIn] of [...hide].filter(([p]) => p.length > 1).sort((a, b) => b[0].length - a[0].length)) text = text.split(path).join(standIn);
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== '');
+  const kept: string[] = [];
+  let used = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    const cost = line.length + (kept.length > 0 ? 3 : 0);
+    if (used + cost > max) {
+      if (kept.length === 0) kept.unshift(`…${line.slice(-(max - 1))}`);
+      break;
+    }
+    kept.unshift(line);
+    used += cost;
+  }
+  return kept.join(' | ');
+}
+
+/** The same refusal, ending with what the engine said (when it said anything). */
+function withEngineWords(err: ImageBuildError, hide: ReadonlyArray<readonly [string, string]>): ImageBuildError {
+  const said = engineExcerpt(err.log, hide);
+  return said === '' ? err : new ImageBuildError(err.code, `${err.message}. The engine said: ${said}`, err.log);
+}
+
 /**
  * `docker build` over `ctx` with its product Dockerfile, tagged `tag`, labelled with the manifest digest;
  * answers the image id (`sha256:…`). The base image must already be present (`--pull=false` is not set, so
@@ -79,6 +113,10 @@ export async function buildImage(ctx: string, tag: string, labels: Record<string
     }
     if (!/^sha256:[0-9a-f]{64}$/.test(id)) throw new ImageBuildError('build_failed', 'the build wrote no image id', b.out);
     return { id, log: b.out };
+  } catch (err) {
+    // (crew#1978) A refusal carries the engine's own last words, so the produce step shows why, not only that.
+    if (err instanceof ImageBuildError) throw withEngineWords(err, [[ctx, '<build context>'], [iidDir, '<build context>'], [homedir(), '~']]);
+    throw err;
   } finally {
     rmSync(iidDir, { recursive: true, force: true });
   }
