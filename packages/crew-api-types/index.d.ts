@@ -1865,14 +1865,14 @@ export interface RepoEntry {
    */
   findings?: RepoFinding[];
   /**
-   * This repo's own seat base image (wicked-core#2023, core#1043 part 3; api-types 0.235.0): a local
+   * This repo's own seat base image (wicked-core#2023, core#1043 part 3; api-types 0.236.0): a local
    * image its seats are built on instead of the daemon's base. Absent when the repo has none. Set or
    * cleared with `PUT /api/v1/repos/:id/seat-base`. The engine never pulls it: a base the container
    * runtime lacks refuses the unit (`seat_base_missing`).
    */
   seat_base_image?: string;
   /**
-   * The toolchain layers this repo's seats get (wicked-core core#1043 part 2; api-types 0.235.0),
+   * The toolchain layers this repo's seats get (wicked-core core#1043 part 2; api-types 0.236.0),
    * derived by the engine on the reads a person sees (`GET /repos`, and the `PUT .../seat-base`
    * reply): one row per layer detected in the checkout, in catalog order. Absent from an engine
    * predating the field.
@@ -1896,7 +1896,7 @@ export interface RepoSeatLayer {
 }
 
 /**
- * `PUT /api/v1/repos/:id/seat-base` body (api-types 0.235.0): set this repo's own seat base image,
+ * `PUT /api/v1/repos/:id/seat-base` body (api-types 0.236.0): set this repo's own seat base image,
  * or clear it with `null` or an empty string. 200 is the engine's updated `RepoEntry`. Refusals:
  * 400 `{error, details}` (body shape: `image` a string of at most 255 characters, or `null`), 400 `seat_base_invalid` (the engine's words: not a local image
  * name), 404 `repo_not_found`, 501 `repo_seat_base_unsupported` (an engine predating the setting).
@@ -3723,7 +3723,7 @@ export interface StandInBinding {
   /** `seated` | `answered` | `failed`. */
   state: 'seated' | 'answered' | 'failed' | (string & {});
   display: string | null;
-  /** (api-types next, wicked-core#2015, crew#1966) A reservation its asker let go before anything ran on it: always
+  /** (api-types 0.235.0, wicked-core#2015, crew#1966) A reservation its asker let go before anything ran on it: always
    *  with `state: 'failed'`, its key stays taken. It took no part, so crew's delivery text leaves it out. Absent on the
    *  wire unless set. */
   abandoned?: true;
@@ -17800,8 +17800,9 @@ export interface ProductComposeBody {
    *  level (`epics` · `stories` · `tasks`) decides how far down the draft goes. */
   shape?: LaunchShape;
   /** (api-types 0.234.0, crew#1884) A person's stand-in choice for this draft, as `LaunchRunBody.standIns`; the
-   *  `standInReview: 'always'` setting applies as on any launch. This route does not ask the choice itself (its client
-   *  draws no question yet); a chat Backlog job's compose asks it on the card. */
+   *  `standInReview: 'always'` setting applies as on any launch. (api-types 0.235.0) A person's compose on a short roster
+   *  with no consent answers `409 stand_in_choice` (as `POST /runs` does) and is sent again with this; an agent or
+   *  system caller is never asked. A chat Backlog job's compose asks it on the card. */
   standIns?: true;
 }
 
