@@ -629,6 +629,24 @@ describe('the draft read names the gate opening it was read at (crew#1982)', () 
     expect(body).not.toHaveProperty('gateSeq');
   });
 
+  it('an engine that keeps no gate rows names no gate, so kept rules answered on the read still land', async () => {
+    adapter.interactionRequests = async () => [];
+    const RUN = 'draft-opening-5';
+    // The open gate is known only from the event log (no durable row): the record cannot confirm an ord named to it.
+    const events = adapter.runEvents;
+    adapter.runEvents = async () => [{ type: 'awaitingHuman', session: RUN, ord: 2, gateSeq: 3, gateKind: 'phase', prompt: 'Review the drafted rules' }] as unknown as Awaited<ReturnType<typeof adapter.runEvents>>;
+    onConfirm = () => { adapter.runEvents = events; };
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify(TWO));
+    const read = await send('GET', `/governance/steering/author/${RUN}/draft`);
+    expect(read.body['ready']).toBe(true);
+    expect(read.body).not.toHaveProperty('gateOrd');
+    expect(read.body).not.toHaveProperty('gateSeq');
+    const res = await send('POST', `/runs/${RUN}/gate`, { approve: true, keepRules: ['POL-0001'], ...(read.body['gateOrd'] !== undefined ? { ord: read.body['gateOrd'] } : {}) });
+    expect(res.status).toBe(200);
+    expect(upserted.map((r) => r.id)).toEqual(['POL-0001']);
+  });
+
   it('a draft that is not ready names no gate', async () => {
     const RUN = 'draft-opening-4';
     const run = steeringRun(RUN);
