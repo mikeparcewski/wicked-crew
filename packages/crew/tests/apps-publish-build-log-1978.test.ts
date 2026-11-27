@@ -29,7 +29,8 @@ let ctx: string;
 let bin: string;
 const fake = (lines: string[], exit = 1): void => {
   writeFileSync(join(dir, 'out.txt'), lines.join('\n') + '\n');
-  writeFileSync(bin, `#!/bin/sh\ncat "${join(dir, 'out.txt')}" >&2\nexit ${exit}\n`);
+  // The base is on the engine (crew#1972's inspect answers); the build fails with `lines`.
+  writeFileSync(bin, `#!/bin/sh\nif [ "$1" = image ]; then echo sha256:1; exit 0; fi\ncat "${join(dir, 'out.txt')}" >&2\nexit ${exit}\n`);
   chmodSync(bin, 0o755);
 };
 const refusal = async (): Promise<ImageBuildError> => (await buildImage(ctx, 'wicked-apps/desk:v1', {}, { bin, env: { PATH: process.env['PATH'] } }).catch((e: unknown) => e)) as ImageBuildError;
@@ -77,6 +78,15 @@ describe('crew#1978: a failed image step names its cause in crew\'s words only',
     fake([''], 2);
     const err = await refusal();
     expect(imageRefusalWords(err, 'run-1')).toBe('the image build failed (exit 2)');
+  });
+
+  it('a missing base keeps its own sentence (crew#1972): no cause appended, no log pointer', async () => {
+    writeFileSync(bin, '#!/bin/sh\nif [ "$1" = image ]; then echo "Error response from daemon: No such image: node:24" >&2; exit 1; fi\nexit 0\n');
+    chmodSync(bin, 0o755);
+    const err = await refusal();
+    expect(err.code).toBe('base_missing');
+    expect(err.message).toMatch(/Pull it, then publish again: .* pull node:24$/);
+    expect(imageRefusalWords(err, 'run-1')).toBe(err.message);
   });
 
   it('an engine that cannot be started keeps its own sentence', async () => {

@@ -183,7 +183,7 @@ export type EngineLog = (fields: { runId: string; code: string; engineOutput: st
  * log, where the engine's own output is (never in the run record or a PR).
  */
 export function imageRefusalWords(err: ImageBuildError, runId: string): string {
-  return err.reason !== null || err.log.trim() === '' ? err.message : `${err.message}; the engine's reason is in the daemon log (run ${runId})`;
+  return err.reason !== null || err.code === 'base_missing' || err.log.trim() === '' ? err.message : `${err.message}; the engine's reason is in the daemon log (run ${runId})`;
 }
 
 export async function produce(deps: { store: AppStore; engineLog?: EngineLog }, input: { runId: string }): Promise<AppPublished> {

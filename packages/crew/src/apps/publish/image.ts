@@ -153,7 +153,8 @@ export async function buildImage(ctx: string, tag: string, labels: Record<string
     return { id, log: b.out };
   } catch (err) {
     // (crew#1978) The refusal names a closed cause when crew recognises one; the engine's text never rides along.
-    if (err instanceof ImageBuildError && err.reason === null) {
+    // A missing base (crew#1972) already says what it is and the one command that fixes it.
+    if (err instanceof ImageBuildError && err.reason === null && err.code !== 'base_missing') {
       const reason = engineCause(err.log);
       throw new ImageBuildError(err.code, reason === null ? err.message : `${err.message}: ${reason}`, err.log, reason);
     }
