@@ -188,6 +188,21 @@ describe('publish runs', () => {
     expect(buildImage).toHaveBeenCalledTimes(2);
   });
 
+  it('(crew#1957) lists every produced publish with the version it serves, never a running one', async () => {
+    const r = await rig();
+    const first = await r.publish();
+    expect((await r.produce(first.runId)).statusCode).toBe(200);
+    const moved = await r.publish(body(1, { site: { origin: 'http://localhost:9090' } }));
+    // Still running: no image serves it yet.
+    expect(r.h.store.publishedSites()).toEqual([{ slug: 'desk', version: 1, origin: 'http://localhost:8080', queries: 0 }]);
+    expect((await r.produce(moved.runId)).statusCode).toBe(200);
+    expect(r.h.store.publishedSites()).toEqual(expect.arrayContaining([
+      { slug: 'desk', version: 1, origin: 'http://localhost:8080', queries: 0 },
+      { slug: 'desk', version: 1, origin: 'http://localhost:9090', queries: 0 },
+    ]));
+    expect(r.h.store.publishedSites()).toHaveLength(2);
+  });
+
   it('the store hands the real publish check its persisted publish, a no-land recheck and a same-digest rebuild (lane glue)', async () => {
     const r = await rig();
     const p = await r.publish();
@@ -251,6 +266,8 @@ describe('publish runs', () => {
     const r = await rig();
     const p = await r.publish(body(1, { targets: ['site', 'embed'], embedOrigins: ['https://embed.example.com'] }));
     const saved = r.h.store.publishOf(p.runId)!;
+    // A publish that has not produced an image serves nothing yet.
+    expect(r.h.store.publishedSites()).toEqual([]);
     // Worktree text never supplies the build context.
     writeFileSync(join(r.h.dir, 'apps', 'desk', 'apps.json'), 'untrusted worktree text');
     const responses = await Promise.all([r.produce(p.runId), r.produce(p.runId)]);
@@ -262,6 +279,8 @@ describe('publish runs', () => {
     expect(writeImageContext).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ manifest: saved.manifest, sources: saved.sources, specText: expect.stringContaining('wicked.apps/v1'), runtime: { dir: '/product/runtime', js: 'runtime-js', css: 'runtime-css' } }));
     expect(published).toMatchObject({ shareUrl: 'http://localhost:8080/', snippet: '<iframe src="http://localhost:8080/" title="desk"></iframe>', teamsPackage: null, manifestDigest: p.manifestDigest, run: { env: [], volume: null, port: 8080 } });
     expect(r.h.store.list()[0]!.published).toEqual(published);
+    // (crew#1957) The demo launch's view: the produced publish's version and the site origin its manifest names.
+    expect(r.h.store.publishedSites()).toEqual([{ slug: 'desk', version: saved.base, origin: saved.manifest.site.origin, queries: saved.manifest.queries.length }]);
     const state = JSON.parse(readFileSync(r.h.store.stateFile, 'utf8'));
     expect(state.apps.desk.receipts[saved.tree].filter((receipt: { kind: string }) => receipt.kind === 'published')).toEqual([expect.objectContaining({ publish: { runId: p.runId, manifestDigest: p.manifestDigest, artifacts: { image: published.image.id } } })]);
     const reloaded = new AppStore({ stateFile: r.h.store.stateFile, appsRoot: r.h.store.appsRoot, registry: { register: async () => { throw new Error('unused'); }, idTaken: async () => false } });

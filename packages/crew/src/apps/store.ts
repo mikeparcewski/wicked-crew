@@ -332,6 +332,17 @@ export class AppStore {
     return { slug: a.slug, name: a.name, projectId: a.projectId, repoId: a.repoId, createdAt: a.createdAt, head: { version: h.version, tree: h.tree, receipt: h.receipt?.kind ?? null }, turn, archived, published };
   }
 
+  /**
+   * (wicked-crew#1957) Every produced publish: the app, the version its image serves, the site origin its manifest
+   * names (the share link's) and how many named queries it serves (each a `POST /q/<id>`). The demo launch matches one
+   * against what the running site says it is (`GET /healthz`), never against the origin alone.
+   */
+  publishedSites(): Array<{ slug: string; version: number; origin: string; queries: number }> {
+    return Object.values(this.state.apps).flatMap((a) =>
+      Object.values(a.publishes ?? {}).flatMap((p) =>
+        p.published === undefined ? [] : [{ slug: a.slug, version: p.base, origin: p.manifest.site.origin, queries: p.manifest.queries.length }]));
+  }
+
   /** The project an app belongs to, or `null` when there is no such app (a knowledge query reads only its project's). */
   projectOf(slug: string): string | null {
     const a = Object.hasOwn(this.state.apps, slug) ? this.state.apps[slug] : undefined;

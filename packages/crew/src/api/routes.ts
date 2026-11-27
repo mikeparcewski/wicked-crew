@@ -1989,6 +1989,7 @@ export function registerRoutes(
           // Every source any version of the app reads (the head, and every accepted version the page may serve):
           // the person's page picks its version, so the decision covers them all. `null` when the head spec
           // cannot be read (the decision then keeps the rows private).
+          publishedSites: () => runtime.apps!.publishedSites(),
           appSources: async (slug: string) => {
             const store = runtime.apps!;
             const detail = await store.detail(slug);
