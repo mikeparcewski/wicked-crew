@@ -12,7 +12,7 @@ import { recordRunLaunched } from '../src/api/run-timing-index.js';
 import { createServer } from '../src/api/server.js';
 import { CoreAdapter } from '../src/core/adapter.js';
 import type { Actor, AuditEntry } from '../src/core/types.js';
-import { answeredAsk, plainGate } from './fixtures/ask-turn-1960.js';
+import { answeredAsk, plainGate, turnGateRow } from './fixtures/ask-turn-1960.js';
 import { removeScratch } from './setup/scratch.js';
 
 describe('crew#1960 — createServer runs the sweep at boot', () => {
@@ -49,6 +49,7 @@ describe('crew#1960 — createServer runs the sweep at boot', () => {
     adapters.push(adapter);
     const cancelled: string[] = [];
     adapter.sessionsDetail = async () => [answeredAsk('answered'), answeredAsk('escalated', 'rejected'), plainGate('job')];
+    adapter.interactionRequests = async (id?: string) => [turnGateRow(id!)];
     adapter.cancelRun = async (id: string) => {
       cancelled.push(id);
       return 'cancelled';

@@ -9,7 +9,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { endOrphanedAskTurns } from '../src/api/ask-boot-close.js';
 import type { Actor, AuditEntry } from '../src/core/types.js';
-import { answeredAsk, DAEMON, plainGate } from './fixtures/ask-turn-1960.js';
+import { answeredAsk, DAEMON, disputeRow, plainGate, turnGateRow } from './fixtures/ask-turn-1960.js';
 
 function fakeAudit() {
   const entries: AuditEntry[] = [];
@@ -23,6 +23,13 @@ function fakeAudit() {
 }
 
 describe('crew#1960 — endOrphanedAskTurns', () => {
+  it('an engine without the open-row read sweeps nothing (a turn gate cannot be told from a dispute)', async () => {
+    const cancelRun = vi.fn(async () => 'cancelled');
+    const result = await endOrphanedAskTurns({ sessionsDetail: async () => [answeredAsk('a')], cancelRun }, { isAskPath: () => true, heldByChat: () => false, audit: fakeAudit(), actor: DAEMON, log: () => undefined });
+    expect(result).toEqual({ cancelled: [], failed: [] });
+    expect(cancelRun).not.toHaveBeenCalled();
+  });
+
   it('ends only the ask runs parked at their turn gate that no chat of this daemon holds', async () => {
     const cancelled: string[] = [];
     const adapter = {
@@ -33,7 +40,12 @@ describe('crew#1960 — endOrphanedAskTurns', () => {
         answeredAsk('not-ask'), // the shape of an ask, but no ask launched it
         plainGate('job'),
         answeredAsk('ended', 'done', 'completed'),
+        answeredAsk('dispute'), // its answer is done, but a team dispute over a finding waits on a person
+        answeredAsk('dispute-too'), // the turn gate AND a dispute open
+        answeredAsk('no-rows'), // the engine keeps no open row for it
       ],
+      interactionRequests: async (id?: string) =>
+        id === 'dispute' ? [disputeRow(id)] : id === 'dispute-too' ? [turnGateRow(id), disputeRow(id)] : id === 'no-rows' ? [] : [turnGateRow(id!)],
       cancelRun: async (id: string) => {
         cancelled.push(id);
         return 'cancelled';
@@ -58,6 +70,7 @@ describe('crew#1960 — endOrphanedAskTurns', () => {
     const log = vi.fn();
     const adapter = {
       sessionsDetail: async () => [answeredAsk('a'), answeredAsk('b')],
+      interactionRequests: async (id?: string) => [turnGateRow(id!)],
       cancelRun: async (id: string) => {
         if (id === 'a') throw new Error('engine busy');
         return 'cancelled';

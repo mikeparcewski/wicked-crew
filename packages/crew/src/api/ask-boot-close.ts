@@ -11,19 +11,39 @@
  *
  * So at boot the daemon ends each such run the way a chat close ends it (`cancelRun`), once, and
  * audits it `run.cancelled {via: 'boot', reason: 'ask_turn_orphaned'}`. A run qualifies only when
- * the durable launch record says an ask launched it (`run.launched {askPath: true}`), it waits at
- * its turn gate ({@link isAskTurn}: every unit an answer step, every one done), and no chat of this
- * daemon holds it now. An ask held at a real gate (an escalation: its answer is not done) is never
- * touched. A refused cancel is logged and reported, never thrown: boot must finish.
+ * all of these hold:
+ * - the durable launch record says an ask launched it (`run.launched {askPath: true}`);
+ * - every unit is an answer step and every one is done ({@link isAskTurn});
+ * - the engine's durable record of what the run waits on (`interaction_requests`, open rows) is the
+ *   turn gate and nothing else: gate rows only, each `gate_kind: 'terminal'` at the last answer's ord.
+ *   An answer can be done and still wait on a real decision (a team dispute over a reviewer's finding
+ *   opens on a Done unit), and an engine without the read says nothing, so either is left alone;
+ * - no chat of this daemon holds it now.
+ * A refused cancel is logged and reported, never thrown: boot must finish.
  */
 
+import type { InteractionRequest } from 'wicked-crew-api-types';
 import type { Actor, SessionView } from '../core/types.js';
 import { isAskTurn } from './ask-paths.js';
 
-/** The engine calls the sweep needs (the real `CoreAdapter` has both). */
+/** The engine calls the sweep needs (the real `CoreAdapter` has all three). */
 export interface AskBootCloseSurface {
   sessionsDetail(): Promise<SessionView[]>;
   cancelRun(runId: string): Promise<string>;
+  /** `null` = the binding lacks the read: nothing is swept. */
+  interactionRequests?(sessionId?: string, status?: string): Promise<InteractionRequest[] | null>;
+}
+
+/** The turn gate's own kind (the answer step's terminal HumanConfirm: "Approve completion after the final phase"). */
+const TURN_GATE_KIND = 'terminal';
+
+/** Is what the run waits on its turn gate and nothing else (the open rows the engine keeps, read once)? */
+async function waitsOnlyAtTurn(adapter: AskBootCloseSurface, v: SessionView): Promise<boolean> {
+  if (typeof adapter.interactionRequests !== 'function') return false;
+  const rows = await adapter.interactionRequests(v.session.id, 'open').catch(() => null);
+  if (rows === null || rows.length === 0) return false;
+  const lastAnswer = Math.max(...v.units.map((u) => u.ord));
+  return rows.every((r) => r.kind === 'gate' && r.gate_kind === TURN_GATE_KIND && r.ord === lastAnswer);
 }
 
 export interface AskBootCloseDeps {
@@ -44,7 +64,7 @@ export interface AskBootCloseResult {
 /** End every ask run a restart left parked at its turn gate. Never throws. */
 export async function endOrphanedAskTurns(adapter: AskBootCloseSurface, deps: AskBootCloseDeps): Promise<AskBootCloseResult> {
   const result: AskBootCloseResult = { cancelled: [], failed: [] };
-  if (typeof adapter.sessionsDetail !== 'function' || typeof adapter.cancelRun !== 'function') return result;
+  if (typeof adapter.sessionsDetail !== 'function' || typeof adapter.cancelRun !== 'function' || typeof adapter.interactionRequests !== 'function') return result;
   let views: SessionView[];
   try {
     views = await adapter.sessionsDetail();
@@ -55,6 +75,9 @@ export async function endOrphanedAskTurns(adapter: AskBootCloseSurface, deps: As
   for (const v of views) {
     const id = v.session.id;
     if (!deps.isAskPath(id) || !isAskTurn(v) || deps.heldByChat(id)) continue;
+    if (!(await waitsOnlyAtTurn(adapter, v))) continue;
+    // Read again after the await: a chat opened meanwhile may have continued it.
+    if (deps.heldByChat(id)) continue;
     try {
       const status = await adapter.cancelRun(id);
       deps.audit.record('run.cancelled', deps.actor, { runId: id, detail: { status, via: 'boot', reason: 'ask_turn_orphaned' } });

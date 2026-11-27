@@ -3,6 +3,7 @@
 // words `ask_path` / `ask_turn` there (routes.ts, crew#854); the engine's sessionsDetail, which the boot sweep reads,
 // does not, so they are removed here.
 
+import type { InteractionRequest } from 'wicked-crew-api-types';
 import type { Actor, SessionView } from '../../src/core/types.js';
 
 export const DAEMON: Actor = { id: 'daemon', kind: 'system', trust: 'admin' };
@@ -63,3 +64,31 @@ export function plainGate(id: string): SessionView {
   return { ...v, units: [{ ...(v.units[0] as object), id: `${id}:review` }] } as unknown as SessionView;
 }
 
+
+/**
+ * The engine's open `interaction_requests` row for an ask's turn gate. Inverted from the cert daemon's own
+ * `GET /api/v1/runs/a84a3b48…/gate` answer (one of the issue's runs), which crew serves from this row
+ * (routes.ts `readOpenGate`: `gate_kind` → `gateKind`, `gate_seq` → `gateSeq`, `created_at` → `receivedAt`):
+ * gateKind `terminal`, ord 1, gateSeq 1, receivedAt 2026-11-26T18:26:49.519Z, and the prompt below (cut).
+ */
+export function turnGateRow(id: string, ord = 1): InteractionRequest {
+  return {
+    id: `ir_${id}_gate_${ord}`,
+    session_id: id,
+    kind: 'gate',
+    ord,
+    reviewing_ord: ord,
+    prompt: 'Approve completion after the final phase (unit 1): answer-1 — Narrow the domain map to this scope.',
+    gate_kind: 'terminal',
+    gate_seq: 1,
+    status: 'open',
+    answer: null,
+    created_at: Date.parse('2026-11-26T18:26:49.519Z'),
+    resolved_at: null,
+  };
+}
+
+/** A team dispute over a reviewer's finding on the same Done answer unit (wicked-core `team_gate::open_dispute`). */
+export function disputeRow(id: string, ord = 1): InteractionRequest {
+  return { ...turnGateRow(id, ord), id: `ir_${id}_dispute_${ord}`, gate_kind: 'team_dispute', prompt: `Team dispute on unit ${ord}: a finding` };
+}
