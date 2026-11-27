@@ -79,16 +79,16 @@ describe('POST /projects/:id/product/compose (crew#372)', () => {
   const compose = (payload: unknown, headers: Record<string, string> = {}) =>
     app.inject({ method: 'POST', url: '/api/v1/projects/p1/product/compose', payload: payload as Record<string, unknown>, headers });
 
-  // crew#1884: the person's answer (`standIns: true`) reaches the launch. The route's own caller (studio's Draft) does
-  // not draw the choice yet, so the route does not ask it (codex r1 C2); a chat Backlog job's Go does.
-  it('takes standIns to the launch; the route does not ask the choice, a chat job\'s compose does (crew#1884)', async () => {
+  // crew#1884: the person's answer (`standIns: true`) reaches the launch, and the route asks the choice as `POST /runs`
+  // does (studio's Draft draws it, studio#1468); a chat Backlog job's Go asks it too, a reshape's does not.
+  it('takes standIns to the launch; the route and a chat job\'s compose ask the choice (crew#1884)', async () => {
     const res = await compose({ requirements: [{ repoId: 'alpha', key: 'billing::r1' }], standIns: true });
     expect(res.statusCode, res.body).toBe(202);
     expect(launched[0]!.body['standIns']).toBe(true);
-    expect(launched[0]!.standInChoice).toBeUndefined();
+    expect(launched[0]!.standInChoice).toBe(true);
     const plain = await compose({ requirements: [{ repoId: 'alpha', key: 'billing::r1' }] });
     expect(plain.statusCode, plain.body).toBe(202);
-    expect(launched[1]!.standInChoice).toBeUndefined();
+    expect(launched[1]!.standInChoice).toBe(true);
     const chat = await composeLaunch(adapterRef, async (raw, ctx) => {
       launched.push({ body: raw as Record<string, unknown>, auth: undefined, standInChoice: (ctx as { standInChoice?: boolean }).standInChoice });
       return { statusCode: 201, payload: { runId: 'run-compose-2' } };

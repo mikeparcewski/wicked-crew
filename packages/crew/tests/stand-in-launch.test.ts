@@ -2,7 +2,9 @@
 // preflight before anything is written and answers a short roster with no consent `409 stand_in_choice`; a person's
 // `standIns: true` or the `standInReview: 'always'` setting launches stand-in-aware with server-built consent; the
 // `use_stand_ins` gate answer reaches `grantStandIns` with the open gate's opening and the person as actor.
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -488,5 +490,68 @@ describe('POST /runs/:id/gate use_stand_ins → grantStandIns (crew#1856)', () =
     expect(res.statusCode).toBe(409);
     expect(res.json().code).toBe('gate_changed');
     expect(saved).toEqual([]);
+  });
+});
+
+// crew#1884: studio's Draft (`POST /projects/:id/product/compose`) asks the stand-in choice through the shared launcher,
+// so its refusal is `POST /runs`' own shape (`preflightRefusal`), and the person's answer (`standIns: true`) launches.
+describe('POST /projects/:id/product/compose asks the stand-in question (crew#1884)', () => {
+  let app: FastifyInstance;
+  let base: string;
+  const launched: LaunchRunInput[] = [];
+  const preflights: LaunchRunInput[] = [];
+
+  beforeAll(async () => {
+    base = mkdtempSync(join(tmpdir(), 'compose-stand-in-'));
+    writeFileSync(join(base, 'estate.db'), '');
+    const graph = {
+      metadata: { schema_version: '1.0.0', migration_mode: 'x' },
+      domains: { billing: { requirements: { r1: { title: 'Invoices are numbered', description: '', business_rules: [], validations: [], error_paths: [] } }, entities: {} } },
+    };
+    const adapter = {
+      getSettings: async () => ({}),
+      sessions: async () => [], sessionsDetail: async () => [],
+      listRepos: async () => [{ id: 'alpha', name: 'alpha', root_path: base, code_graph_db: join(base, 'estate.db') }],
+      listWorkflows: () => [], getWorkflow: () => null,
+      projectGet: async (id: string) => (id === 'p1' ? { id } : null),
+      projectMembers: async () => [{ member_kind: 'crew.repo', member_ref: 'alpha' }],
+      getRequirementsGraphForRepo: async () => ({ graph, coverage: null }),
+      launchRun: vi.fn(async (input: LaunchRunInput) => { launched.push(input); return input.sessionId; }),
+      supportsStandIns: () => true,
+      isDraining: () => false,
+      independencePreflight: vi.fn(async (input: LaunchRunInput) => { preflights.push(input); return ONE_HELPER; }),
+    };
+    app = Fastify({ logger: false });
+    withActor(app);
+    registerRoutes(app, adapter as unknown as CoreAdapter, new GateCache(), new ElicitationCache(), undefined, {
+      audit: { record: vi.fn(() => Date.now()) } as unknown as AuditLog, authMode: 'off',
+    }, { rosterWithStanding: () => [], judgeCoverage: () => null });
+    await app.ready();
+  });
+  afterAll(async () => {
+    await app.close();
+    rmSync(base, { recursive: true, force: true });
+  });
+  beforeEach(() => { launched.length = 0; preflights.length = 0; });
+
+  const compose = (body: Record<string, unknown>) =>
+    app.inject({ method: 'POST', url: '/api/v1/projects/p1/product/compose', headers: { 'x-test-actor': 'human/operator' }, payload: { requirements: [{ repoId: 'alpha', key: 'billing::r1' }], ...body } });
+
+  it('a one-CLI roster with no consent is 409 stand_in_choice, the shape POST /runs answers, and nothing launches', async () => {
+    const res = await compose({});
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json()).toEqual(JSON.parse(JSON.stringify(preflightRefusal(readPreflight(ONE_HELPER)!))));
+    expect(res.json()).toMatchObject({ code: 'stand_in_choice', retryWith: { standIns: true } });
+    expect(preflights).toHaveLength(1);
+    expect(launched).toEqual([]);
+  });
+
+  it('the answer (standIns: true) launches the compose with the person\'s consent, as the choice says', async () => {
+    const res = await compose({ standIns: true });
+    expect(res.statusCode, res.body).toBe(202);
+    expect(res.json()).toMatchObject({ requirements: 1 });
+    expect(launched).toHaveLength(1);
+    expect(launched[0]!.standInAware).toBe(true);
+    expect(launched[0]!.standIn).toMatchObject({ scope: 'job' });
   });
 });

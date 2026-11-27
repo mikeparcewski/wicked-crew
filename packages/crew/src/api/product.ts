@@ -272,9 +272,9 @@ export async function composeLaunch(
             ],
           },
         },
-        // (crew#1884) A chat Backlog job's Go asks the stand-in choice, as `POST /runs` does: its card reopens with the
-        // question. The route's own caller (studio's Draft) does not draw the choice yet, so the route takes `standIns`
-        // and the setting but does not ask (studio follow-up).
+        // (crew#1884) Every compose a person starts asks the stand-in choice, as `POST /runs` does: the route's own
+        // caller (studio's Draft) gets `409 stand_in_choice` and sends again with `standIns: true` (studio#1468), and a
+        // chat Backlog job's card reopens with the question. A reshape's compose launches aware without asking.
         { ...ctx, target: 'compose', ...(extra.standIns ?? {}), compose: composeFactsOf(id, rows, level, draft, review), ...(extra.fromProposal !== undefined ? { fromProposal: extra.fromProposal } : {}) },
       );
       // POST /runs' own refusal (no eligible seat, a busy engine, an archived project, …) is
@@ -292,7 +292,8 @@ export function registerProductRoutes(app: FastifyInstance, adapter: CoreAdapter
     { config: { manifest: { requestType: 'ProductComposeBody', responseType: 'ProductComposeResponse', statusCodes: [202, 400, 403, 404, 409, 422, 501, 503] } } },
     async (req: FastifyRequest & { actor?: Actor }, reply) => {
       const { id } = req.params as { id: string };
-      const out = await composeLaunch(adapter, launchRun, id, req.body, { actor: req.actor ?? LOCAL_ACTOR, log: req.log });
+      // (crew#1884) A person starts this compose, so it asks the stand-in choice as `POST /runs` does.
+      const out = await composeLaunch(adapter, launchRun, id, req.body, { actor: req.actor ?? LOCAL_ACTOR, log: req.log }, { standIns: { standInChoice: true } });
       return reply.code(out.code).send(out.body);
     },
   );
