@@ -17761,8 +17761,9 @@ export interface ProductComposeBody {
    *  level (`epics` · `stories` · `tasks`) decides how far down the draft goes. */
   shape?: LaunchShape;
   /** (api-types 0.234.0, crew#1884) A person's stand-in choice for this draft, as `LaunchRunBody.standIns`; the
-   *  `standInReview: 'always'` setting applies as on any launch. This route does not ask the choice itself (its client
-   *  draws no question yet); a chat Backlog job's compose asks it on the card. */
+   *  `standInReview: 'always'` setting applies as on any launch. (api-types next) A person's compose on a short roster
+   *  with no consent answers `409 stand_in_choice` (as `POST /runs` does) and is sent again with this; an agent or
+   *  system caller is never asked. A chat Backlog job's compose asks it on the card. */
   standIns?: true;
 }
 
