@@ -245,6 +245,51 @@ export function crewAppOf(appOrigin: string, launchPath: string, crewUrl: string
   return m?.[1] ?? null;
 }
 
+/** What a running site says it is: crew's apps-server answers `GET /healthz` with its app and version, unauthenticated. */
+export type SiteHealth = (origin: string) => Promise<{ app: string; version: number } | null>;
+
+/** (wicked-crew#1957) `GET <origin>/healthz` (apps-server `AppSiteHealth`), or `null` for anything that is not one. */
+export const siteHealthOf: SiteHealth = async (origin) => {
+  try {
+    const res = await fetch(`${origin}/healthz`, { redirect: 'error', signal: AbortSignal.timeout(2000) });
+    if (!res.ok) return null;
+    const text = await res.text();
+    if (text.length > 65536) return null;
+    const body = JSON.parse(text) as { app?: unknown; version?: unknown } | null;
+    return typeof body?.app === 'string' && Number.isInteger(body.version) ? { app: body.app, version: body.version as number } : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * (wicked-crew#1957) The published app serving `appOrigin`, or `null`. A stored publish whose origin matches (same
+ * scheme and port; loopback names are one machine) is only a candidate: the running site must name it (`GET /healthz`:
+ * app and version), so another app later run on that port is never taken for it.
+ */
+export async function publishedAppOf(
+  appOrigin: string,
+  sites: ReadonlyArray<{ slug: string; version: number; origin: string; queries: number }>,
+  health: SiteHealth,
+): Promise<{ id: string; version: number; queries: number } | null> {
+  const app = new URL(appOrigin);
+  const portOf = (u: URL): string => (u.port !== '' ? u.port : u.protocol === 'https:' ? '443' : '80');
+  const here = sites.filter((s) => {
+    let u: URL;
+    try {
+      u = new URL(s.origin);
+    } catch {
+      return false;
+    }
+    return u.protocol === app.protocol && LOOPBACK_HOSTS.has(u.hostname) && portOf(u) === portOf(app);
+  });
+  if (here.length === 0) return null;
+  const running = await health(appOrigin).catch(() => null);
+  if (running === null) return null;
+  const hit = here.find((s) => s.slug === running.app && s.version === running.version);
+  return hit === undefined ? null : { id: hit.slug, version: hit.version, queries: hit.queries };
+}
+
 /** The seams the demo route reads to decide what an app may show a model (DES-APPS-001 S5). Optional: a daemon
  *  without them treats every crew app's rows as private (the safe reading). */
 export interface DemoRouteDeps {
@@ -254,6 +299,10 @@ export interface DemoRouteDeps {
   engineRecordsDemos?: () => Promise<boolean>;
   /** Whether a run filed into `projectId` (null: unfiled) may query a source (the data gate's `agentMay`). */
   agentQueryAllowed?: (source: string, projectId: string | null) => Promise<boolean> | boolean;
+  /** (wicked-crew#1957) Every produced publish (AppStore.publishedSites). Absent: none known. */
+  publishedSites?: () => Array<{ slug: string; version: number; origin: string; queries: number }>;
+  /** (wicked-crew#1957) What the running site says it is. Absent: {@link siteHealthOf}. */
+  siteHealth?: SiteHealth;
 }
 
 /** The built-in sources whose rows are crew's own (its runs, its knowledge): not a person's data source. */
@@ -336,6 +385,30 @@ export async function demoLaunch(
   // apps (its one query and event stream are then the recorder's), and whether its rows may reach a model
   // (DES-APPS-001 S5: every source it reads passes the data gate's predicate for this run's project).
   const crewApp = crewAppOf(target.appOrigin, target.launchPath, process.env['WICKED_CREW_URL']);
+  // (wicked-crew#1957) crew's own published app on another loopback port reads each named query by `POST /q/<id>`,
+  // which the recorder refuses as a write (wicked-crew#565). Its identity could change between a check and each
+  // chapter's browser, so a version that serves queries is refused with the reason and the way that works: the same
+  // app inside crew. A version with no query loads by GET alone and records as any loopback app.
+  if (crewApp === null && deps.publishedSites !== undefined) {
+    let published: { id: string; version: number; queries: number } | null = null;
+    try {
+      published = await publishedAppOf(target.appOrigin, deps.publishedSites(), deps.siteHealth ?? siteHealthOf);
+    } catch {
+      published = null;
+    }
+    if (published !== null && published.queries > 0) {
+      const crewUrl = process.env['WICKED_CREW_URL'];
+      const inside = crewUrl !== undefined && crewUrl !== '' ? `${crewUrl.replace(/\/$/, '')}/apps/${published.id}` : `/apps/${published.id} on crew's own address`;
+      return {
+        code: 409,
+        body: {
+          error: `${target.appOrigin} is the published app "${published.id}" (v${published.version}). Its site reads every row by POST, which a demo recording refuses, so it cannot be recorded there. Record the same app inside crew instead: ${inside}`,
+          code: 'published_app_not_recordable',
+          app: published.id,
+        },
+      };
+    }
+  }
   const live = crewApp === null ? true : await crewAppRowsMayReachModels(crewApp, deps, projectId !== UNFILED_PROJECT ? projectId : null);
   const manifest: DemoLaunchManifest = {
     app_origin: target.appOrigin,
