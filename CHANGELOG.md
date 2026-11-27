@@ -10,10 +10,6 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
-### Fixed
-
-- The release smoke pins wicked-ci aea26cb9 (crew#1970), on both the `uses:` line and `wicked_ci_ref`. The old pin, 4ef53101, predates wicked-ci#91, so crew 0.20.0's tag smoke failed S04 on the stand-in choice that crew#1932 ships. The new harness passed S04 and every other step, apart from S03's expected fail (F-E2E-012), against the published crew 0.20.0 + core-ts 0.16.1 (wicked-ci smoke-selftest run 45947883820).
-
 ## [0.20.0] — 2026-11-27
 
 Minor release on the train-17 cut 993a5051, carrying 6 PRs since 0.19.0: #1946, #1947, #1959, #1958, #1954 and #1961. The minor bump is for #1961, a new read in the domain model (api-types `DomainStatement.requirementKey` may now be `null`).
