@@ -5491,6 +5491,15 @@ export interface SteeringDraftResponse {
   ready: boolean;
   rules: ConformanceRule[];
   source?: SteeringProposalSource;
+  /** (api-types next, crew#1982) When `ready`: the ord of the gate the engine's record shows open, the gate these
+   *  drafts are answered at. Send it as `GateDecision.ord` with `keepRules`. ABSENT when not ready. */
+  gateOrd?: number;
+  /** (api-types next, crew#1982) When `ready`: which OPENING of that gate the drafts were read at (the record's
+   *  `gate_seq`, core#1808). Send it as `GateDecision.gateSeq` with `keepRules`. When the gate has re-opened since (at
+   *  the same ord too), the answer is a **409** `gate_changed` and nothing lands. When it has closed and not re-opened,
+   *  the answer is refused as any answer to a closed gate is (a 409), and nothing lands. ABSENT when not ready, or on an
+   *  engine that does not number openings (never invented). */
+  gateSeq?: number;
 }
 
 // ── Personality (api-types 0.160.0, program DES-LEARN §3.3) ──────────────────────────────────────
