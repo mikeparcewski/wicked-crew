@@ -5089,12 +5089,20 @@ export function registerRoutes(
       const draft = await draftedSteeringRules(adapter, run, prompt);
       if (draft !== null && 'unreadable' in draft) return reply.code(500).send({ error: draft.unreadable });
       const waiting = open !== null && !('refusal' in open) && atProposeGate(run);
+      const ready = draft !== null && waiting;
+      // (crew#1982) The gate these drafts are answered at, as the record shows it: read BEFORE the drafts, so a gate that
+      // re-opens in between names the older opening and an answer on it is refused, never landed on the new one. Only
+      // the record's rows name it: an answer naming an ord the record cannot confirm is refused (gate_unknown), so an
+      // engine without gate rows names none and its answers bind as before.
+      const at = ready && open !== null && !('refusal' in open) && open.recorded === true ? open : null;
       return {
         runId,
-        ready: draft !== null && waiting,
+        ready,
         rules: draft?.rules ?? [],
         ...(draft !== null ? { source: draft.source } : {}),
-      };
+        ...(at?.ord !== undefined ? { gateOrd: at.ord } : {}),
+        ...(at?.gateSeq !== undefined ? { gateSeq: at.gateSeq } : {}),
+      } satisfies import('wicked-crew-api-types').SteeringDraftResponse;
     },
   );
 
@@ -7801,7 +7809,7 @@ export function registerRoutes(
     run: SessionView,
     namedOrd: number | undefined,
     namedSeq?: number,
-  ): Promise<{ refusal: { code: number; body: unknown } } | { ord: number | undefined; gated: WorkUnit | undefined; prompt: string | undefined; gateKind: string | undefined; gateSeq?: number }> {
+  ): Promise<{ refusal: { code: number; body: unknown } } | { ord: number | undefined; gated: WorkUnit | undefined; prompt: string | undefined; gateKind: string | undefined; gateSeq?: number; recorded?: true }> {
     const id = run.session.id;
     const unitAt = (ord: number): WorkUnit | undefined => (run.units ?? []).find((u) => u.ord === ord);
     const unknown = (why: string) => ({ refusal: { code: 409, body: { error: `Gate unknown: ${why} — refresh and decide again.`, code: 'gate_unknown' } } });
@@ -7840,6 +7848,7 @@ export function registerRoutes(
         prompt: recorded.row.prompt,
         gateKind: typeof kind === 'string' && kind !== '' ? kind : undefined,
         ...(openSeq !== undefined ? { gateSeq: openSeq } : {}),
+        recorded: true,
       };
     }
     if (namedOrd !== undefined || namedSeq !== undefined) {

@@ -21,7 +21,7 @@
 
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -566,6 +566,97 @@ describe('steering-author draft read + keepRules (DES-LEARN §3.1)', () => {
     expect(repick.body['landing']).toMatchObject({ outcome: 'landed', ruleIds: ['POL-0002'], declinedIds: ['POL-0001'] });
     expect(repick.body['landing']).not.toHaveProperty('alreadyLanded');
     expect(upserted.map((r) => r.id)).toEqual(['POL-0001', 'POL-0002']);
+  });
+});
+
+// crew#1982: Learn lands kept rules from the DRAFT read, not from a gate read. The draft read names the opening of the
+// gate whose drafts it returns (the record's `gate_seq`, core#1808), so an answer made on it is refused (409
+// gate_changed) once that opening has closed and the gate re-opened, at the same ord too.
+describe('the draft read names the gate opening it was read at (crew#1982)', () => {
+  /** The engine's durable gate row as wicked-core writes it (`src/interaction.rs` `InteractionRequest`: serde
+   *  snake_case, `gate_seq` the opening), the shape tests/gate-seq.test.ts pins; here at the propose unit's ord. */
+  const gateRow = (gateSeq: number | null) => ({ kind: 'gate', ord: 2, gate_kind: 'phase', prompt: 'Review the drafted rules', created_at: 1, ...(gateSeq !== null ? { gate_seq: gateSeq } : {}) });
+  const TWO = [
+    PROPOSAL[0]!,
+    { ...PROPOSAL[0]!, id: 'POL-0002', statement: 'every pull request links an issue', steering_type: 'development' },
+  ];
+  let seq: number | null = 3;
+  let saved: typeof adapter.interactionRequests;
+  beforeEach(() => {
+    seq = 3;
+    saved = adapter.interactionRequests;
+    adapter.interactionRequests = async () => [gateRow(seq)] as unknown as Awaited<ReturnType<typeof adapter.interactionRequests>>;
+  });
+  afterEach(() => { adapter.interactionRequests = saved; });
+
+  it('a ready draft carries the ord and the opening of the gate the record shows open', async () => {
+    const RUN = 'draft-opening-1';
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify(TWO));
+    const { status, body } = await send('GET', `/governance/steering/author/${RUN}/draft`);
+    expect(status).toBe(200);
+    expect(body['ready']).toBe(true);
+    expect(body).toMatchObject({ gateOrd: 2, gateSeq: 3 });
+  });
+
+  it('kept rules answered on that read are refused once the gate closed and re-opened at the same ord: nothing lands', async () => {
+    const RUN = 'draft-opening-2';
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify(TWO));
+    const read = await send('GET', `/governance/steering/author/${RUN}/draft`);
+    // The gate closes and opens again at the same ord before the person decides.
+    seq = 4;
+    const res = await send('POST', `/runs/${RUN}/gate`, { approve: true, keepRules: ['POL-0001'], ord: read.body['gateOrd'], gateSeq: read.body['gateSeq'] });
+    expect(res.status).toBe(409);
+    expect(res.body['code']).toBe('gate_changed');
+    expect(confirmCalls).toHaveLength(0);
+    expect(upserted).toHaveLength(0);
+    // Read again: the new opening is named, and an answer on it lands.
+    const again = await send('GET', `/governance/steering/author/${RUN}/draft`);
+    expect(again.body).toMatchObject({ ready: true, gateOrd: 2, gateSeq: 4 });
+    const ok = await send('POST', `/runs/${RUN}/gate`, { approve: true, keepRules: ['POL-0001'], ord: again.body['gateOrd'], gateSeq: again.body['gateSeq'] });
+    expect(ok.status).toBe(200);
+    expect(upserted.map((r) => r.id)).toEqual(['POL-0001']);
+  });
+
+  it('an engine that does not number openings: the ord is named, no opening is invented', async () => {
+    seq = null;
+    const RUN = 'draft-opening-3';
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify(TWO));
+    const { body } = await send('GET', `/governance/steering/author/${RUN}/draft`);
+    expect(body).toMatchObject({ ready: true, gateOrd: 2 });
+    expect(body).not.toHaveProperty('gateSeq');
+  });
+
+  it('an engine that keeps no gate rows names no gate, so kept rules answered on the read still land', async () => {
+    adapter.interactionRequests = async () => [];
+    const RUN = 'draft-opening-5';
+    // The open gate is known only from the event log (no durable row): the record cannot confirm an ord named to it.
+    const events = adapter.runEvents;
+    adapter.runEvents = async () => [{ type: 'awaitingHuman', session: RUN, ord: 2, gateSeq: 3, gateKind: 'phase', prompt: 'Review the drafted rules' }] as unknown as Awaited<ReturnType<typeof adapter.runEvents>>;
+    onConfirm = () => { adapter.runEvents = events; };
+    views = [steeringRun(RUN)];
+    writeProposalFile(RUN, JSON.stringify(TWO));
+    const read = await send('GET', `/governance/steering/author/${RUN}/draft`);
+    expect(read.body['ready']).toBe(true);
+    expect(read.body).not.toHaveProperty('gateOrd');
+    expect(read.body).not.toHaveProperty('gateSeq');
+    const res = await send('POST', `/runs/${RUN}/gate`, { approve: true, keepRules: ['POL-0001'], ...(read.body['gateOrd'] !== undefined ? { ord: read.body['gateOrd'] } : {}) });
+    expect(res.status).toBe(200);
+    expect(upserted.map((r) => r.id)).toEqual(['POL-0001']);
+  });
+
+  it('a draft that is not ready names no gate', async () => {
+    const RUN = 'draft-opening-4';
+    const run = steeringRun(RUN);
+    run.session.status = 'executing';
+    views = [run];
+    writeProposalFile(RUN, JSON.stringify(TWO));
+    const { body } = await send('GET', `/governance/steering/author/${RUN}/draft`);
+    expect(body['ready']).toBe(false);
+    expect(body).not.toHaveProperty('gateOrd');
+    expect(body).not.toHaveProperty('gateSeq');
   });
 });
 
