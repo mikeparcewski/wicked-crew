@@ -29,7 +29,6 @@ import {
   hashTree,
   impliedDirs,
   makeTreeReadOnly,
-  mkdirExact,
   removeTreeForce,
   SymlinkComponentError,
   UnsafePathSegmentError,
@@ -395,66 +394,5 @@ describe('skills file modes are exact under a strict umask (crew#1955)', () => {
         expect([umask, f, modeOf(join(dir, f))]).toEqual([umask, f, 0o755]);
       }
     }
-  });
-
-  it('the directories created for skill content are 0755; an existing one is left alone; no mode, no change', () => {
-    if (process.platform === 'win32') return;
-    const src = join(base, 'src');
-    mkdirSync(src);
-    writeFileSync(join(src, 'c.md'), 'c');
-    chmodSync(join(src, 'c.md'), 0o644);
-    const kept = join(base, 'kept');
-    mkdirSync(kept);
-    chmodSync(kept, 0o700);
-    strict(() => {
-      copyFiles([{ rel: 'a/b/c.md', abs: join(src, 'c.md') }], join(base, 'gen'));
-      writeFileAtomic(join(kept, 'x', 'y', 'f.md'), 'f', { mode: 0o644 });
-      writeFileAtomic(join(base, 'private', 'state.json'), '{}'); // the store's own file: no mode asked
-    });
-    for (const d of ['gen', 'gen/a', 'gen/a/b', 'kept/x', 'kept/x/y']) expect([d, modeOf(join(base, d))]).toEqual([d, 0o755]);
-    expect(modeOf(join(base, 'gen', 'a', 'b', 'c.md'))).toBe(0o644);
-    expect(modeOf(kept)).toBe(0o700);
-    expect(modeOf(join(base, 'private'))).toBe(0o700);
-    expect(modeOf(join(base, 'private', 'state.json'))).toBe(0o600);
-  });
-
-  it('mkdirExact sets no mode when another user can write the parent or any directory above it', () => {
-    if (process.platform === 'win32') return;
-    const shared = join(base, 'shared');
-    mkdirSync(shared);
-    chmodSync(shared, 0o777);
-    const high = join(base, 'high'); // a writable grandparent above an owner-only parent (codex check 2 on crew#1962)
-    mkdirSync(join(high, 'own'), { recursive: true });
-    chmodSync(join(high, 'own'), 0o700);
-    chmodSync(high, 0o777);
-    strict(() => {
-      mkdirExact(join(shared, 'a', 'b'));
-      mkdirExact(join(high, 'own', 'e'));
-    });
-    for (const d of ['shared/a', 'shared/a/b', 'high/own/e']) expect([d, modeOf(join(base, d))]).toEqual([d, 0o700]);
-    expect(modeOf(shared)).toBe(0o777);
-    // A sticky directory others can write (like /tmp) is safe: they cannot rename what they do not own.
-    const sticky = join(base, 'sticky');
-    mkdirSync(sticky);
-    chmodSync(sticky, 0o1777);
-    strict(() => mkdirExact(join(sticky, 'c')));
-    expect(modeOf(join(sticky, 'c'))).toBe(0o755);
-    // Under an owner-only parent the same call sets 0755.
-    strict(() => mkdirExact(join(base, 'own', 'd')));
-    expect(modeOf(join(base, 'own'))).toBe(0o755);
-    expect(modeOf(join(base, 'own', 'd'))).toBe(0o755);
-  });
-
-  it('mkdirExact sets the mode only of what it created; a link it passes through keeps its target as it was', () => {
-    if (process.platform === 'win32') return;
-    const outside = join(base, 'outside');
-    mkdirSync(outside);
-    chmodSync(outside, 0o700);
-    symlinkSync(outside, join(base, 'link'));
-    strict(() => mkdirExact(join(base, 'link', 'sub'))); // the link existed: mkdir -p goes through it
-    expect(modeOf(outside)).toBe(0o700);
-    expect(modeOf(join(outside, 'sub'))).toBe(0o755); // the link and its target are both ours, owner-only: sub is set
-    expect(() => mkdirExact(join(base, 'link'))).not.toThrow();
-    expect(modeOf(outside)).toBe(0o700);
   });
 });

@@ -3652,10 +3652,10 @@ describe('publish latency (DES-L6 PR-L6-1; crew#547 items 1-3, F-E2E-042): the `
   });
 });
 
-// crew#1955, end to end through the store: under umask 077 an edited skill file, its new directory and the published
-// generation keep group and other read (a 0644 file, 0755 directories; the publish lock then strips the write bits).
+// crew#1955, end to end through the store: under umask 077 an edited skill file and its published copy keep group and
+// other read (0644; the publish lock then strips the write bits). Directories follow the umask.
 describe('skills modes under a strict umask, through the store (crew#1955)', () => {
-  it('a new skill file is 0644 in a 0755 directory, and the published generation stays readable', async () => {
+  it('a new skill file is 0644, and its published copy 0444', async () => {
     if (process.platform === 'win32') return; // modes are advisory there
     s.store.seed();
     const was = process.umask(0o077);
@@ -3664,14 +3664,10 @@ describe('skills modes under a strict umask, through the store (crew#1955)', () 
       expect(w.verdict).toBe('clear');
       const live = s.store.resolveSkillFile('wicked-garden-gamma', 'refs/deep/extra.md').abs;
       expect(lstatSync(live).mode & 0o7777).toBe(0o644);
-      expect(lstatSync(dirname(live)).mode & 0o7777).toBe(0o755);
-      expect(lstatSync(dirname(dirname(live))).mode & 0o7777).toBe(0o755);
       const r = await s.store.publish(w.revision);
       const gen = (r.snapshot as NonNullable<typeof r.snapshot>).path;
       const published = walkFiles(gen).find((f) => f.rel.endsWith('refs/deep/extra.md'));
       expect(published).toBeDefined();
-      expect(lstatSync(gen).mode & 0o7777).toBe(0o555);
-      expect(lstatSync(dirname(published!.abs)).mode & 0o7777).toBe(0o555);
       expect(lstatSync(published!.abs).mode & 0o7777).toBe(0o444);
     } finally {
       process.umask(was);

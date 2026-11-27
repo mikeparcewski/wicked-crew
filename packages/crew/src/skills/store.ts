@@ -260,7 +260,6 @@ import {
   walkFiles,
   walkTree,
   walkTreeSteps,
-  mkdirExact,
   writeFileAtomic,
 } from './tree.js';
 
@@ -3039,7 +3038,7 @@ export class SkillsStore {
       // already created its parent directories before its rename failed.
       for (const p of place) pruneEmptyDirs(dirname(p.dest), effective);
       for (const { from, to } of parked) {
-        mkdirExact(dirname(from));
+        mkdirSync(dirname(from), { recursive: true });
         renameSync(to, from);
       }
     };
@@ -3053,7 +3052,7 @@ export class SkillsStore {
       for (const f of park) pruneEmptyDirs(dirname(f.abs), effective);
       for (const p of place) {
         this.removeEmptyDirTree(p.dest);
-        mkdirExact(dirname(p.dest)); // crew#1955: a new skill directory is 0755 whatever the umask
+        mkdirSync(dirname(p.dest), { recursive: true });
         renameSync(p.src, p.dest);
         placed.push(p.dest);
       }

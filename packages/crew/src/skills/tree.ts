@@ -53,7 +53,6 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
-  realpathSync,
   readFileSync,
   readlinkSync,
   renameSync,
@@ -64,7 +63,7 @@ import {
   type Stats,
 } from 'node:fs';
 import { lstat, open, rm } from 'node:fs/promises';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 
 import { ATOMIC_TMP_INFIX } from './root-names.js';
 
@@ -645,7 +644,7 @@ export function* copyFilesSteps(files: ReadonlyArray<FileRecord>, destRoot: stri
     yield;
   }
   for (const { src, dest } of plan) {
-    mkdirExact(dirname(dest));
+    mkdirSync(dirname(dest), { recursive: true });
     copyFileNoFollow(src, dest);
     yield;
   }
@@ -653,11 +652,8 @@ export function* copyFilesSteps(files: ReadonlyArray<FileRecord>, destRoot: stri
 
 /** (crew#1955) The widest mode a skills file gets: owner rwx, group and other r-x. */
 export const SKILL_FILE_MODE_MAX = 0o755;
-/** (crew#1955) The mode of a directory the skills tree creates for skill content: owner rwx, group and other r-x. */
-export const SKILL_DIR_MODE = 0o755;
 /** (crew#1955) A skills file's mode while its bytes are written: owner read/write only, so nobody else can open it then. */
 const WRITING_FILE_MODE = 0o600;
-const O_DIRECTORY: number = (fsConstants as { O_DIRECTORY?: number }).O_DIRECTORY ?? 0;
 
 /**
  * (crew#1955) Set an open file's mode to `mode` exactly, so the daemon's umask does not narrow it (under umask 077 a
@@ -669,68 +665,11 @@ function exactFileMode(fd: number, mode: number): void {
   fchmodSync(fd, mode & SKILL_FILE_MODE_MAX);
 }
 
-/**
- * (crew#1955) True when no user other than the daemon's (or root) can rename an entry in `dir` or in any directory
- * above it: each is a real directory (not a link), owned by the daemon user or root, and either has no group or other
- * write bit or has the sticky bit (others then cannot rename what they do not own). A static check of directories that
- * already exist: no other user can change what it read, since none of them can write there.
- */
-function noOtherUserCanSwap(dir: string): boolean {
-  // Both the path as given (a link on it, like macOS's /var, is only as safe as the directory holding it, which the
-  // walk checks next) and the directories it resolves to.
-  return chainOwnedSafely(resolve(dir), true) && chainOwnedSafely(realpathSync(dir), false);
-}
-
-function chainOwnedSafely(start: string, linksAllowed: boolean): boolean {
-  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
-  for (let d = start; ; d = dirname(d)) {
-    const st = lstatSync(d);
-    if (st.isSymbolicLink()) {
-      if (!linksAllowed) return false;
-    } else {
-      if (!st.isDirectory()) return false;
-      if (uid !== null && st.uid !== uid && st.uid !== 0) return false;
-      if ((st.mode & 0o022) !== 0 && (st.mode & 0o1000) === 0) return false;
-    }
-    if (dirname(d) === d) return true;
-  }
-}
-
-/**
- * (crew#1955) `mkdir -p dir`, where every directory this call creates gets {@link SKILL_DIR_MODE} exactly, whatever
- * the daemon's umask; a directory that already existed is left as it is. A no-op past the mkdir on Windows, where
- * modes are advisory.
- *
- * Only the path's last component is opened no-follow, so the walk is safe only while nobody else can swap a directory
- * on it. It goes top-down: each created directory is opened `O_DIRECTORY | O_NOFOLLOW` (a link there fails the open)
- * and set 0755 before its child is opened, so once set, only the owner can rename inside it. The directories above
- * the first created one already existed. If another user could rename an entry in any of them, a directory on the
- * path could be swapped for a link between two opens and a later chmod would land outside the tree (the codex checks
- * on crew#1962). So the modes are set only when {@link noOtherUserCanSwap} holds for the first created directory's
- * parent; otherwise the created directories keep the umask's modes, as before.
- */
-export function mkdirExact(dir: string): void {
-  const first = mkdirSync(dir, { recursive: true });
-  if (first === undefined || process.platform === 'win32') return;
-  if (!noOtherUserCanSwap(dirname(first))) return;
-  let cur = first;
-  for (const seg of ['', ...relative(first, dir).split(sep).filter((x) => x !== '')]) {
-    if (seg !== '') cur = join(cur, seg);
-    const fd = openSync(cur, fsConstants.O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
-    try {
-      fchmodSync(fd, SKILL_DIR_MODE);
-    } finally {
-      closeSync(fd);
-    }
-  }
-}
-
 export interface AtomicWriteOptions {
   /**
    * Mode bits for a NEW file. An existing regular file's mode takes precedence over it. Either is set exactly but
-   * masked to at most 0755 (crew#1955), so an existing 0775 file is rewritten 0755. With a mode known, the parent
-   * directories this write creates get 0755 too; with none (no option and no existing file), the platform default and
-   * the umask apply to the file and its parents.
+   * masked to at most 0755 (crew#1955), so an existing 0775 file is rewritten 0755. With neither (no option and no
+   * existing file), the platform default and the umask apply. Parent directories always follow the umask.
    */
   mode?: number;
 }
@@ -751,6 +690,7 @@ export interface AtomicWriteOptions {
  *     (`exactFileMode`, crew#1955); the platform default still follows the umask.
  */
 export function writeFileAtomic(path: string, content: string | Buffer, opts: AtomicWriteOptions = {}): void {
+  mkdirSync(dirname(path), { recursive: true });
   let mode = opts.mode;
   try {
     const st = lstatSync(path);
@@ -759,8 +699,6 @@ export function writeFileAtomic(path: string, content: string | Buffer, opts: At
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
-  if (mode === undefined) mkdirSync(dirname(path), { recursive: true });
-  else mkdirExact(dirname(path));
   const tmp = `${path}${ATOMIC_TMP_INFIX}${randomBytes(8).toString('hex')}`;
   const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | O_NOFOLLOW;
   const fd = mode === undefined ? openSync(tmp, flags) : openSync(tmp, flags, WRITING_FILE_MODE);
