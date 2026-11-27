@@ -157,6 +157,7 @@ import { ChatHistoryStore } from './chat-history.js';
 import { RunLivenessSampler } from './run-liveness.js';
 import { resumeRunningCampaigns } from '../campaign/boot-resume.js';
 import { resumeOrphanedRuns } from '../core/run-boot-resume.js';
+import { endOrphanedAskTurns } from './ask-boot-close.js';
 import { StandingOrderStore } from '../standing-orders/store.js';
 import { StandingOrderEvaluator, type GateFact } from '../standing-orders/evaluator.js';
 import { registerStandingOrderRoutes } from '../standing-orders/routes.js';
@@ -3294,6 +3295,15 @@ export async function createServer(
   void reconcileProposalRuns()
     .catch((err: unknown) => app.log.warn(`[proposals] boot reconcile failed: ${err instanceof Error ? err.message : String(err)}`))
     .finally(() => void resumeOrphanedRuns(adapter, audit, DAEMON_ACTOR, (m) => app.log.warn(m), (runId) => docBindings.isBound(runId)));
+  // crew#1960: a chat's answer run left at its turn gate by the restart can no longer be continued or closed from its
+  // chat (ask paths are in memory), so it is ended once, as a chat close ends it, and audited run.cancelled {via: boot}.
+  void endOrphanedAskTurns(adapter, {
+    isAskPath: (runId) => runTimingIndex.isAskPath(runId),
+    heldByChat: (runId) => askPaths.chatOf(runId) !== undefined,
+    audit,
+    actor: DAEMON_ACTOR,
+    log: (m) => app.log.warn(m),
+  });
   function reconcileProposalRuns(): Promise<void> {
     return reconcileBoundAttempts({
       bindings: docBindings,
