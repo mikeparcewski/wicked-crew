@@ -47,6 +47,7 @@ import {
   chmodSync,
   closeSync,
   constants as fsConstants,
+  fchmodSync,
   fstatSync,
   lstatSync,
   mkdirSync,
@@ -536,7 +537,9 @@ export async function hashFileSetAsync(files: ReadonlyArray<FileRecord>): Promis
  * path — a source swapped for a link between enumeration and copy is refused), the destination is
  * created `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW` with the source's mode bits (an executable
  * baseline script lands executable), so a pre-planted destination entry — a link included — fails
- * the open instead of being written through.
+ * the open instead of being written through. It is created owner read/write only while its bytes are
+ * written, then given the source's mode exactly, at most 0755, whatever the daemon's umask
+ * (`exactFileMode`, crew#1955).
  */
 export function copyFileNoFollow(src: string, dest: string): void {
   const { fd: inFd, stat } = openRegularNoFollow(src);
@@ -546,10 +549,11 @@ export function copyFileNoFollow(src: string, dest: string): void {
   } finally {
     closeSync(inFd);
   }
-  const outFd = openSync(dest, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | O_NOFOLLOW, stat.mode & 0o777);
+  const outFd = openSync(dest, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | O_NOFOLLOW, WRITING_FILE_MODE);
   try {
     let off = 0;
     while (off < buf.length) off += writeSync(outFd, buf, off, buf.length - off);
+    exactFileMode(outFd, stat.mode);
   } catch (err) {
     closeSync(outFd);
     rmSync(dest, { force: true });
@@ -646,8 +650,27 @@ export function* copyFilesSteps(files: ReadonlyArray<FileRecord>, destRoot: stri
   }
 }
 
+/** (crew#1955) The widest mode a skills file gets: owner rwx, group and other r-x. */
+export const SKILL_FILE_MODE_MAX = 0o755;
+/** (crew#1955) A skills file's mode while its bytes are written: owner read/write only, so nobody else can open it then. */
+const WRITING_FILE_MODE = 0o600;
+
+/**
+ * (crew#1955) Set an open file's mode to `mode` exactly, so the daemon's umask does not narrow it (under umask 077 a
+ * requested 0755 used to land 0700). It never widens past {@link SKILL_FILE_MODE_MAX}: no group or other write, no
+ * setuid, setgid or sticky bit. Called on the descriptor after the last byte is written and before the close (the file
+ * was created {@link WRITING_FILE_MODE}), so no path is re-resolved and nobody else could open it while it was written.
+ */
+function exactFileMode(fd: number, mode: number): void {
+  fchmodSync(fd, mode & SKILL_FILE_MODE_MAX);
+}
+
 export interface AtomicWriteOptions {
-  /** Mode bits for a NEW file; an existing regular file's mode is preserved regardless. */
+  /**
+   * Mode bits for a NEW file. An existing regular file's mode takes precedence over it. Either is set exactly but
+   * masked to at most 0755 (crew#1955), so an existing 0775 file is rewritten 0755. With neither (no option and no
+   * existing file), the platform default and the umask apply. Parent directories always follow the umask.
+   */
   mode?: number;
 }
 
@@ -662,7 +685,9 @@ export interface AtomicWriteOptions {
  *     cannot redirect the bytes; the name carries 64 random bits so it cannot be pre-planted by
  *     guessing either;
  *   - the target's mode bits survive (an in-place edit of an executable support script keeps
- *     it executable); a new file takes `opts.mode` or the platform default.
+ *     it executable); a new file takes `opts.mode` or the platform default. A known mode (the
+ *     target's or `opts.mode`) is set exactly, at most 0755, whatever the daemon's umask
+ *     (`exactFileMode`, crew#1955); the platform default still follows the umask.
  */
 export function writeFileAtomic(path: string, content: string | Buffer, opts: AtomicWriteOptions = {}): void {
   mkdirSync(dirname(path), { recursive: true });
@@ -676,11 +701,12 @@ export function writeFileAtomic(path: string, content: string | Buffer, opts: At
   }
   const tmp = `${path}${ATOMIC_TMP_INFIX}${randomBytes(8).toString('hex')}`;
   const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | O_NOFOLLOW;
-  const fd = mode === undefined ? openSync(tmp, flags) : openSync(tmp, flags, mode);
+  const fd = mode === undefined ? openSync(tmp, flags) : openSync(tmp, flags, WRITING_FILE_MODE);
   try {
     const buf = typeof content === 'string' ? Buffer.from(content, 'utf8') : content;
     let off = 0;
     while (off < buf.length) off += writeSync(fd, buf, off, buf.length - off);
+    if (mode !== undefined) exactFileMode(fd, mode);
   } catch (err) {
     closeSync(fd);
     rmSync(tmp, { force: true });
