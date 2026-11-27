@@ -238,6 +238,11 @@ export class GateCache {
     return this.revisions.get(runId) ?? 0;
   }
 
+  /** (crew#1950) The run's live gate-event count: a read shared across requests is never joined across a change. */
+  revisionOf(runId: string): number {
+    return this.revision(runId);
+  }
+
   /**
    * The run's open gate: the cached entry, else what `read` finds in the record — the durable row,
    * the log — adopted and returned once a read completes with no live gate event of the run's
