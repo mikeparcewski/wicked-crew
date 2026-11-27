@@ -14,7 +14,7 @@ import { join } from 'node:path';
 
 export class ImageBuildError extends Error {
   constructor(
-    readonly code: 'no_engine' | 'build_failed' | 'timeout',
+    readonly code: 'no_engine' | 'base_missing' | 'build_failed' | 'timeout',
     message: string,
     /** The engine's own output (its last characters). Never shown or recorded: only the daemon's local log gets it. */
     readonly log: string,
@@ -77,10 +77,58 @@ function run(bin: string, args: string[], deadlineMs: number, env: NodeJS.Proces
   });
 }
 
+/** Deadline for one local `image inspect` (no network: it reads the engine's own image store). */
+const INSPECT_DEADLINE_MS = 60 * 1000;
+
+/**
+ * The base images a Dockerfile builds FROM, in order: each `FROM [--platform=…] <ref> [AS <stage>]` (a line continued
+ * with `\` read whole), without `scratch` and without a reference to an earlier stage of the same file. The one
+ * Dockerfile a publish builds is crew's own product file (`pack.ts` `writeImageContext`), never the app's.
+ */
+export function baseImagesOf(dockerfile: string): string[] {
+  const stages = new Set<string>();
+  const bases: string[] = [];
+  for (const line of dockerfile.replace(/\\[ \t]*\r?\n/g, ' ').split(/\r?\n/)) {
+    const m = /^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?\s*$/i.exec(line);
+    if (m === null) continue;
+    const ref = m[1]!;
+    if (ref.toLowerCase() !== 'scratch' && !stages.has(ref.toLowerCase()) && !bases.includes(ref)) bases.push(ref);
+    if (m[2] !== undefined) stages.add(m[2].toLowerCase());
+  }
+  return bases;
+}
+
+/**
+ * (crew#1972) Refuse a build whose base image is not on this engine. A build resolves a missing base from its
+ * registry on its own (BuildKit pulls it whatever `--pull` says), so it would download it without asking; a host
+ * that forbids unasked downloads keeps control only if crew checks first. The check reads the engine's own image
+ * store (`image inspect`), never the network. The refusal names the image and the one command that pulls it.
+ */
+async function requireBases(bin: string, ctx: string, deadlineMs: number, env: NodeJS.ProcessEnv): Promise<void> {
+  let dockerfile: string;
+  try {
+    dockerfile = readFileSync(join(ctx, 'Dockerfile'), 'utf8');
+  } catch {
+    throw new ImageBuildError('build_failed', 'the build context has no Dockerfile', '');
+  }
+  for (const ref of baseImagesOf(dockerfile)) {
+    // A base named through a build argument cannot be checked before the build resolves it: refused, never pulled.
+    if (ref.includes('$')) throw new ImageBuildError('build_failed', `the Dockerfile names its base image through a build argument (${ref}), which crew cannot check is on this engine before building`, '');
+    const r = await run(bin, ['image', 'inspect', '--format', '{{.Id}}', ref], Math.min(deadlineMs, INSPECT_DEADLINE_MS), env);
+    if (r.code === 0) continue;
+    // The engine's own words for an image it does not hold ("Error response from daemon: No such image: …"); any other
+    // failure (a missing context, a stopped engine) is the engine's, not a missing base.
+    if (/\bno such (image|object)\b/i.test(r.out)) {
+      throw new ImageBuildError('base_missing', `the app's base image is not on this container engine, and publishing never downloads it on its own. Pull it, then publish again: ${bin} pull ${ref}`, r.out);
+    }
+    throw new ImageBuildError('no_engine', `the container engine (${bin}) could not say whether the base image ${ref} is present (exit ${r.code ?? 'signal'})`, r.out);
+  }
+}
+
 /**
  * `docker build` over `ctx` with its product Dockerfile, tagged `tag`, labelled with the manifest digest;
- * answers the image id (`sha256:…`). The base image must already be present (`--pull=false` is not set, so
- * the engine pulls the pinned digest when it is missing; it never pushes).
+ * answers the image id (`sha256:…`). Every base image must already be on the engine ({@link requireBases}):
+ * a missing one is refused, never pulled. The build itself asks for no pull (`--pull=false`) and never pushes.
  */
 export async function buildImage(ctx: string, tag: string, labels: Record<string, string>, opts: { bin?: string; env?: NodeJS.ProcessEnv; deadlineMs?: number } = {}): Promise<{ id: string; log: string }> {
   const bin = opts.bin ?? 'docker';
@@ -89,7 +137,8 @@ export async function buildImage(ctx: string, tag: string, labels: Record<string
   const iidDir = mkdtempSync(join(tmpdir(), 'wicked-apps-iid-'));
   const iidFile = join(iidDir, 'iid');
   try {
-    const args = ['build', '--tag', tag, '--iidfile', iidFile, '--file', `${ctx}/Dockerfile`];
+    await requireBases(bin, ctx, opts.deadlineMs ?? BUILD_DEADLINE_MS, env);
+    const args = ['build', '--pull=false', '--tag', tag, '--iidfile', iidFile, '--file', `${ctx}/Dockerfile`];
     for (const [k, v] of Object.entries(labels)) args.push('--label', `${k}=${v}`);
     args.push(ctx);
     const b = await run(bin, args, opts.deadlineMs ?? BUILD_DEADLINE_MS, env);
