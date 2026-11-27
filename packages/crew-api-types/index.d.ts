@@ -3684,7 +3684,7 @@ export interface StandInBinding {
   /** `seated` | `answered` | `failed`. */
   state: 'seated' | 'answered' | 'failed' | (string & {});
   display: string | null;
-  /** (api-types next, wicked-core#2015, crew#1966) A reservation its asker let go before anything ran on it: always
+  /** (api-types 0.235.0, wicked-core#2015, crew#1966) A reservation its asker let go before anything ran on it: always
    *  with `state: 'failed'`, its key stays taken. It took no part, so crew's delivery text leaves it out. Absent on the
    *  wire unless set. */
   abandoned?: true;
@@ -17761,7 +17761,7 @@ export interface ProductComposeBody {
    *  level (`epics` · `stories` · `tasks`) decides how far down the draft goes. */
   shape?: LaunchShape;
   /** (api-types 0.234.0, crew#1884) A person's stand-in choice for this draft, as `LaunchRunBody.standIns`; the
-   *  `standInReview: 'always'` setting applies as on any launch. (api-types next) A person's compose on a short roster
+   *  `standInReview: 'always'` setting applies as on any launch. (api-types 0.235.0) A person's compose on a short roster
    *  with no consent answers `409 stand_in_choice` (as `POST /runs` does) and is sent again with this; an agent or
    *  system caller is never asked. A chat Backlog job's compose asks it on the card. */
   standIns?: true;
