@@ -10,6 +10,25 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-11-27
+
+Minor release on the train-17 cut 993a5051, carrying 6 PRs since 0.19.0: #1946, #1947, #1959, #1958, #1954 and #1961. The minor bump is for #1961, a new read in the domain model (api-types `DomainStatement.requirementKey` may now be `null`).
+
+Ships with wicked-crew-api-types 0.234.0 (tag api-types-v0.234.0), pins wicked-core-ts ^0.16.1 and bundles wicked-studio 0.17.1. #1961 needs wicked-core's core#2007 (core-ts 0.16.1). The entries below were written from each PR's changelog entry (the PR title where it had none).
+
+### Added
+
+- **domain model**: the model also reads the statements no requirement holds (`metadata.statements`, wicked-core garden#1545), so a rule-group cite and a follow-up ruling resolve for statements that are not requirements. `DomainStatement.requirementKey` is `null` for them (api-types) (#1961).
+
+### Fixed
+
+- **Delivery under required auth carries the run's assurance lines** (crew#1885, #1946). The deliver script reads its run's PR text through `POST /api/v1/deliver/text {run, key}`. The credential is a read key in a 0600 file under the crew state home (`artifacts/deliver-keys/`), minted per composition, which the script names by path and reads with shell builtins, so it is in no process's argv. It is compared in constant time, and it counts only while that run's deliver script can be running, a gate retry included. A post-hoc delivery mints its own key, with the text composed for it. Before, `auth: required` answered the script 401 and the PR went out with the launch-time text, which carries no stand-in, reduced-assurance, QE or floor-override line. A daemon-launched delivery whose daemon cannot answer with the run record now refuses before anything is staged, committed or pushed (the work kept; approve to retry, or deliver again from the run page) instead of opening a PR without those lines. The launch-time text is used only when no daemon origin was known.
+- **A pack skill's executable script stays executable** (crew#1881, #1947). An editor pack's skill files keep the pack's execute bit, through the skills root into the published generation (no special bit, no write bit for others). The bit is part of the install approval, and a change of modes alone publishes a new generation.
+- **Skills writes and editor installs are a person's only** (crew#1890, #1947). Every write to the daemon skills root (add, edit, enable, disable, reset, replace, refresh, publish) answers 403 `human_only` to an agent, plugin or system actor. Under `auth: off`, a skills write or an editor install, removal, enable or grant that carries a governed unit's token answers 403 `seat_token` (503 when crew cannot tell), the check the editor grant write already had. Reads and the dry-run analyze are unchanged.
+- **apps**: the published image carries every module the SQLite runner imports, so a published app's queries answer again (crew#1956, #1959).
+- **crew**: `GET /runs/:id/gate` answers carry a `Server-Timing` header naming the time of each part of the read, and a read slower than 2 s logs one line naming them (crew#1950 step 1, #1958).
+- **crew**: a chat job's Start asks the stand-in choice on the card's next version, as `POST /runs` does (one helper can start a card that takes stand-ins); capture and the product-plan compose take `standIns` (the compose route does not ask yet: studio#1468). Schedules launch with stand-ins under the `standInReview: 'always'` setting. A review says why it takes no stand-ins (crew#1884, #1954). api-types: `ProposalQuestion.kind` `'stand_in'`; `standIns` on `ProposalRevisionEdits`, `ArtifactProposal`, `CaptureBody` and `ProductComposeBody`. Tests: T-X1 (a stand-in receipt compat test against a frozen copy of studio's reader) and T-K6 (a leak grep on the stand-in PR body, crew#1940).
+
 ## [0.19.0] — 2026-11-26
 
 Minor release on the train-16 cut e89f0613, carrying 5 PRs since 0.18.23: #1943, #1944, #1930, #1945, and #1951 (merged after the cut as a train-16 blocker fix). The minor bump is for #1930's breaking removals (the requirements minimum's route, api-types and Settings key).
