@@ -16,10 +16,33 @@ export class ImageBuildError extends Error {
   constructor(
     readonly code: 'no_engine' | 'base_missing' | 'build_failed' | 'timeout',
     message: string,
+    /** The engine's own output (its last characters). Never shown or recorded: only the daemon's local log gets it. */
     readonly log: string,
+    /** (crew#1978) Crew's own words for the cause, from a closed set ({@link engineCause}); `null` when none matched. */
+    readonly reason: string | null = null,
   ) {
     super(message);
   }
+}
+
+/**
+ * (crew#1978) The cause of a failed engine call, in crew's OWN fixed words, recognised in the engine's output. Nothing
+ * the engine printed is carried: its output can hold host paths and credentials (a cert directory, a socket, a
+ * registry token), and a deny-list over free text kept leaking (codex-check r1 and r2 on #1980). So the cause comes
+ * from a closed set; a failed Dockerfile step is named by its NUMBER only. `null` when no cause is recognised.
+ */
+export function engineCause(log: string): string | null {
+  if (/cannot connect to the docker daemon|error during connect|is the docker daemon running|connection refused/i.test(log)) return 'crew could not reach the container engine';
+  if (/no space left on device/i.test(log)) return 'the container engine ran out of disk space';
+  if (/permission denied/i.test(log)) return 'the container engine was refused permission';
+  if (/\bno such (image|object)\b|pull access denied|manifest unknown/i.test(log)) return 'an image the build needs is not on the container engine';
+  if (/\bERROR\b/.test(log)) {
+    // BuildKit numbers each Dockerfile step "[<n>/<total>]" (a stage name may come first); the last one before the error.
+    const steps = [...log.matchAll(/\[(?:[\w.-]+ )?(\d{1,3})\/(\d{1,3})\]/g)];
+    const last = steps.at(-1);
+    if (last !== undefined) return `Dockerfile step ${last[1]} of ${last[2]} failed`;
+  }
+  return null;
 }
 
 /** The only variables the engine CLI sees (where it is and which engine); never the daemon's own. */
@@ -128,6 +151,14 @@ export async function buildImage(ctx: string, tag: string, labels: Record<string
     }
     if (!/^sha256:[0-9a-f]{64}$/.test(id)) throw new ImageBuildError('build_failed', 'the build wrote no image id', b.out);
     return { id, log: b.out };
+  } catch (err) {
+    // (crew#1978) The refusal names a closed cause when crew recognises one; the engine's text never rides along.
+    // A missing base (crew#1972) already says what it is and the one command that fixes it.
+    if (err instanceof ImageBuildError && err.reason === null && err.code !== 'base_missing') {
+      const reason = engineCause(err.log);
+      throw new ImageBuildError(err.code, reason === null ? err.message : `${err.message}: ${reason}`, err.log, reason);
+    }
+    throw err;
   } finally {
     rmSync(iidDir, { recursive: true, force: true });
   }

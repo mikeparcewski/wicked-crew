@@ -175,7 +175,18 @@ export class PublishService implements AppPublisher {
 
 const html = (s: string): string => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-export async function produce(deps: { store: AppStore }, input: { runId: string }): Promise<AppPublished> {
+/** Where a failed image step's engine output goes: the daemon's own local log, keyed by run (crew#1978). */
+export type EngineLog = (fields: { runId: string; code: string; engineOutput: string }) => void;
+
+/**
+ * (crew#1978) A failed image step's refusal words: crew's sentence with its closed cause, else a pointer to the daemon
+ * log, where the engine's own output is (never in the run record or a PR).
+ */
+export function imageRefusalWords(err: ImageBuildError, runId: string): string {
+  return err.reason !== null || err.code === 'base_missing' || err.log.trim() === '' ? err.message : `${err.message}; the engine's reason is in the daemon log (run ${runId})`;
+}
+
+export async function produce(deps: { store: AppStore; engineLog?: EngineLog }, input: { runId: string }): Promise<AppPublished> {
   return deps.store.producePublish(input.runId, async (p, files, git) => {
     const serverArtifact = appsServerArtifact();
     const runtime = appsRuntime();
@@ -200,7 +211,10 @@ export async function produce(deps: { store: AppStore }, input: { runId: string 
       };
     } catch (err) {
       if (err instanceof PackError) throw new AppStoreError(503, err.code, err.message);
-      if (err instanceof ImageBuildError) throw new AppStoreError(503, err.code, err.message);
+      if (err instanceof ImageBuildError) {
+        deps.engineLog?.({ runId: input.runId, code: err.code, engineOutput: err.log });
+        throw new AppStoreError(503, err.code, imageRefusalWords(err, input.runId));
+      }
       throw err;
     } finally {
       rmSync(ctx, { recursive: true, force: true });
