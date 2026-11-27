@@ -3016,7 +3016,7 @@ export class CoreAdapter {
       const facts = { ...factsFromEvents(events), final };
       if (final) {
         this.runFactsMemo.set(id, facts);
-        this.runFactsFile?.put(id, runFingerprint(view.session.problem), facts);
+        this.runFactsFile?.put(id, runFingerprint(view.session.problem, view.session.finished_at), facts);
       } else if (facts.launched !== undefined && this.runFactsMemo.get(id)?.final !== true) {
         this.runFactsMemo.set(id, facts);
       }
@@ -3034,7 +3034,7 @@ export class CoreAdapter {
    *  memo (so later folds skip the hash); the memo is FINAL only when both facts were kept (a negative never is). */
   private keptRunFacts(view: SessionView): KeptFacts | undefined {
     if (this.runFactsFile === null) return undefined;
-    const kept = this.runFactsFile.get(view.session.id, runFingerprint(view.session.problem));
+    const kept = this.runFactsFile.get(view.session.id, runFingerprint(view.session.problem, view.session.finished_at));
     if (kept?.launched !== undefined) {
       this.runFactsMemo.set(view.session.id, {
         launched: kept.launched,
