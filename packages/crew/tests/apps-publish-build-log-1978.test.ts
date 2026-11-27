@@ -9,7 +9,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { buildImage, engineExcerpt, ImageBuildError } from '../src/apps/publish/image.js';
+import { buildImage, engineExcerpt, ImageBuildError, redactEngineOutput } from '../src/apps/publish/image.js';
 
 let dir: string;
 let ctx: string;
@@ -64,5 +64,25 @@ exit 1`);
     const long = engineExcerpt(`ERROR: ${'x'.repeat(1000)} the end`, []);
     expect(long.length).toBe(400);
     expect(long.startsWith('…') && long.endsWith('the end')).toBe(true);
+  });
+
+  it('no host path or credential leaves: any absolute path, URL user information and token shapes are redacted (codex-check r1 W20)', () => {
+    const sentinel = 'ghp_' + 'A'.repeat(36); // ggignore: a made-up token shape, not a real credential
+    const log = [
+      'error during connect: open /var/folders/review-sentinel/T/client-certs/ca.pem: no such file or directory',
+      'dial unix /run/user/1000/docker.sock: connect: permission denied',
+      `failed to authorize: https://robot:hunter2@registry.example.com/v2/token: Authorization: Bearer ${'x'.repeat(24)}`,
+      `token=${sentinel} C:\\Users\\someone\\certs\\key.pem`,
+      '#5 [2/4] COPY server /srv',
+    ].join('\n');
+    const out = redactEngineOutput(log, []);
+    for (const leaked of ['/var/folders', 'review-sentinel', '/run/user', 'hunter2', 'robot', sentinel, 'someone', 'x'.repeat(24)]) expect(out).not.toContain(leaked);
+    // A path under a root crew knows reads as its stand-in (`<tmp>/…`, redactHostPaths); any other one is `<path>`.
+    expect(out).toMatch(/open (<path>|<tmp>\/client-certs\/ca\.pem): no such file or directory/);
+    expect(out).toContain('dial unix <path>: connect: permission denied');
+    expect(out).toContain('https://<redacted>@registry.example.com');
+    // A one-segment path and a stand-in path stay readable.
+    expect(out).toContain('COPY server /srv');
+    expect(redactEngineOutput('not found in <build context>/server/x and ~/x/y', [])).toBe('not found in <build context>/server/x and ~/x/y');
   });
 });

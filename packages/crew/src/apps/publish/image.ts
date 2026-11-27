@@ -8,8 +8,10 @@
 import { spawn } from 'node:child_process';
 
 import { childEnvWithBootEstateDb } from '../../core/governance-store.js';
+import { redactHostPaths } from '../../core/deliver-text.js';
+import { redactString } from '../../mcp/redact.js';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 export class ImageBuildError extends Error {
@@ -58,14 +60,33 @@ function run(bin: string, args: string[], deadlineMs: number, env: NodeJS.Proces
  *  characters, `cli/apps-produce.ts`) beside crew's sentence. */
 const EXCERPT_MAX = 400;
 
+/** Any absolute path left after the named roots are rewritten (a cert directory, a socket, a Windows path), unless it
+ *  follows a stand-in (`<build context>/x`, `~/x`) or a URL's scheme. Fail closed: the path becomes `<path>`. */
+const ABSOLUTE_PATH = /(?<![^\s"'(=,[])(?:[A-Za-z]:)?(?:[\\/][^\s"'`:;,|()<>[\]{}\\/]+){2,}[\\/]?/g;
+/** A URL's user information (`https://user:secret@host`). */
+const URL_USERINFO = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi;
+
+/**
+ * (crew#1978) The engine's own output made safe to leave the machine: the named roots become their stand-ins (the
+ * build context), every host root crew knows becomes its stand-in (home `~`, the temp directory, the state home:
+ * `redactHostPaths`, the PR body's rewrite), any other absolute path becomes `<path>`, a URL's user information is
+ * dropped, and credential-shaped values are redacted (`redactString`, the MCP result scrubber's patterns).
+ */
+export function redactEngineOutput(text: string, hide: ReadonlyArray<readonly [string, string]>): string {
+  let out = text;
+  for (const [path, standIn] of [...hide].filter(([p]) => p.length > 1).sort((a, b) => b[0].length - a[0].length)) out = out.split(path).join(standIn);
+  out = redactHostPaths(out);
+  out = out.replace(ABSOLUTE_PATH, '<path>').replace(URL_USERINFO, '$1<redacted>@');
+  return redactString(out);
+}
+
 /**
  * (crew#1978) The engine's own last words from a build's output, for a person: its last non-empty lines that fit in
- * `max` characters (a longer last line keeps its end), joined with " | ". Every `hide` path becomes its stand-in
- * (the build context, the home directory), so no host path reaches the run's record. `''` when it said nothing.
+ * `max` characters (a longer last line keeps its end), joined with " | ", redacted first ({@link redactEngineOutput}).
+ * `''` when it said nothing.
  */
 export function engineExcerpt(log: string, hide: ReadonlyArray<readonly [string, string]>, max = EXCERPT_MAX): string {
-  let text = log;
-  for (const [path, standIn] of [...hide].filter(([p]) => p.length > 1).sort((a, b) => b[0].length - a[0].length)) text = text.split(path).join(standIn);
+  const text = redactEngineOutput(log, hide);
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== '');
   const kept: string[] = [];
   let used = 0;
@@ -115,7 +136,7 @@ export async function buildImage(ctx: string, tag: string, labels: Record<string
     return { id, log: b.out };
   } catch (err) {
     // (crew#1978) A refusal carries the engine's own last words, so the produce step shows why, not only that.
-    if (err instanceof ImageBuildError) throw withEngineWords(err, [[ctx, '<build context>'], [iidDir, '<build context>'], [homedir(), '~']]);
+    if (err instanceof ImageBuildError) throw withEngineWords(err, [[ctx, '<build context>'], [iidDir, '<build context>']]);
     throw err;
   } finally {
     rmSync(iidDir, { recursive: true, force: true });
