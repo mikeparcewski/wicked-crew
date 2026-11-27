@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.235.0",
+  "apiTypesVersion": "0.236.0",
   "endpoints": [
     {
       "method": "GET",
@@ -2234,6 +2234,18 @@
         404,
         409,
         500,
+        501
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/repos/:id/seat-base",
+      "requestType": "SetRepoSeatBaseRequest",
+      "responseType": "RepoEntry",
+      "statusCodes": [
+        200,
+        400,
+        404,
         501
       ]
     },
