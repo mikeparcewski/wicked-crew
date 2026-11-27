@@ -12,7 +12,7 @@ mentioned only where a daemon release depends on them.
 
 ### Fixed
 
-- The release smoke pins wicked-ci aea26cb9 (crew#1970), on both the `uses:` line and `wicked_ci_ref`. The old pin, 4ef53101, predates wicked-ci#91, so crew 0.20.0's tag smoke failed S04 on the stand-in choice that crew#1932 ships. The new harness passed every step against the published crew 0.20.0 + core-ts 0.16.1 (wicked-ci smoke-selftest run 45947883820).
+- The release smoke pins wicked-ci aea26cb9 (crew#1970), on both the `uses:` line and `wicked_ci_ref`. The old pin, 4ef53101, predates wicked-ci#91, so crew 0.20.0's tag smoke failed S04 on the stand-in choice that crew#1932 ships. The new harness passed S04 and every other step, apart from S03's expected fail (F-E2E-012), against the published crew 0.20.0 + core-ts 0.16.1 (wicked-ci smoke-selftest run 45947883820).
 
 ## [0.19.0] — 2026-11-26
 
