@@ -136,6 +136,9 @@ export function mintProposalId(runId: string, by: string, source: string): strin
   return `p-${h.digest('hex').slice(0, 32)}`;
 }
 
+/** wicked-core's `INSTRUCTION_SEP` (plan.rs): a structured description is `<step> ||| <instructions>`. */
+const INSTRUCTION_SEP = ' ||| ';
+
 /** The most gates one run's counter is searched across (a run opens a handful). */
 const GATE_SEQ_MAX = 1_000;
 
@@ -375,7 +378,10 @@ export async function composedPlan(deps: Pick<ProductPublishDeps, 'composeOf' | 
   // note on the unchanged draft). So once any step is a gate edit, NEITHER step may carry text after its instructions.
   if (edited !== null) {
     for (const [u, id] of [[d, 'draft'], [r, 'review']] as const) {
-      if (typeof u.description !== 'string' || !u.description.endsWith(u.instructions ?? '')) {
+      // The engine writes a structured description as `<step> ||| <instructions>` (wicked-core plan.rs INSTRUCTION_SEP),
+      // the note after it; so the separator is part of the match (codex r2: a bare suffix match let a note that itself
+      // ends with the instructions through).
+      if (typeof u.description !== 'string' || !u.description.endsWith(`${INSTRUCTION_SEP}${u.instructions ?? ''}`)) {
         return refuse(409, 'compose_unverified', EDITED_WITH_NOTE, { detail: `the ${id} step carries a note from its gate` });
       }
     }

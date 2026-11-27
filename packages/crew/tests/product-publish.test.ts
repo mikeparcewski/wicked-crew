@@ -689,6 +689,15 @@ describe('the run and its plan', () => {
       expect(d.description.endsWith(' (operator amendment: Keep billing small.)')).toBe(true);
       expect(unitOf(REVIEW_NOTE_FIX.view, 'review').instructions).not.toBe(REVIEW_NOTE_FIX.review);
       await withRun(REVIEW_NOTE_FIX, () => {}, (runId) => refusedWith(runId, /^the draft step carries a note from its gate$/, words));
+      // codex r2: a note that itself ends with the edited instructions (the person wrote both) is still a note.
+      await withRun(NOTE_FIX, (v) => {
+        const draft = unitOf(v, 'draft');
+        const text = `${draft.instructions!})`;
+        draft.instructions = text;
+        acceptedOf(v).steps.steps.find((x) => x['id'] === 'draft')!['instructions'] = text;
+        draft.description = `${draft.description.split(' ||| ')[0]} ||| ${text} (operator amendment: see ${text.slice(0, -1)})`;
+        expect(draft.description.endsWith(text)).toBe(true);
+      }, (runId) => refusedWith(runId, /^the draft step carries a note from its gate$/, words));
     });
 
     it('UNTRUSTED TEXT OUT: the edited instructions reach neither the card nor a refusal', async () => {
