@@ -17789,8 +17789,10 @@ export interface ProductComposeResponse {
  * then hold some of the issues, and GET answers `journal_unreadable` too until the journal is repaired): 400 `bad_request`; 403 `publish_human_only`; 404
  * `project_not_found` · `run_not_found` · `repo_not_linked`; 409 `not_a_compose` (no compose facts for this run on
  * this project: a run composed before publishing shipped; compose again) · `compose_unverified` (the run's draft or
- * review step is not the one Compose launched: for a plan edited at its gate `error` says so in plain words; `detail`
- * names what differs) · `run_not_finished` · `plan_unreadable` (the reason names the item) · `ambiguous` ·
+ * review step is not the one Compose launched, and not a plan a person edited at its gate either (wicked-crew#1902: such
+ * a plan publishes, its card's `edited` says so); a step whose kind, review or amendments changed, a gate edit that
+ * carried a note, or a change crew cannot prove was a person's edit at the gate, each in plain words; `detail` names
+ * what differs) · `run_not_finished` · `plan_unreadable` (the reason names the item) · `ambiguous` ·
  * `card_changed` (with the fresh `card` and `publishHash`) · `publication_differs` (this run was already published to
  * that repository with other content; with its `publication`) · `write_tool_off` · `credential_unpinned` ·
  * `unresolved` (with the `publication`) · `journal_unreadable` · `in_progress` (this daemon is sending or resolving it) · `not_unsure` · `resolve_differs`;
@@ -17828,6 +17830,12 @@ export interface ProductPublishCard {
   /** The GitHub account it posts as. */
   identity: string;
   items: PublishItem[];
+  /**
+   * (wicked-crew#1902) Present when a person edited the compose's plan at its gate and its draft and review ran the
+   * edited plan: `planRev` is the accepted plan revision they ran under. Absent for a plan published as Compose
+   * launched it. A person sees it on the card, and it is part of the hash they confirm.
+   */
+  edited?: { planRev: number };
 }
 
 /**
