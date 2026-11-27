@@ -53,6 +53,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  realpathSync,
   readFileSync,
   readlinkSync,
   renameSync,
@@ -63,7 +64,7 @@ import {
   type Stats,
 } from 'node:fs';
 import { lstat, open, rm } from 'node:fs/promises';
-import { dirname, join, relative, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 
 import { ATOMIC_TMP_INFIX } from './root-names.js';
 
@@ -669,22 +670,49 @@ function exactFileMode(fd: number, mode: number): void {
 }
 
 /**
+ * (crew#1955) True when no user other than the daemon's (or root) can rename an entry in `dir` or in any directory
+ * above it: each is a real directory (not a link), owned by the daemon user or root, and either has no group or other
+ * write bit or has the sticky bit (others then cannot rename what they do not own). A static check of directories that
+ * already exist: no other user can change what it read, since none of them can write there.
+ */
+function noOtherUserCanSwap(dir: string): boolean {
+  // Both the path as given (a link on it, like macOS's /var, is only as safe as the directory holding it, which the
+  // walk checks next) and the directories it resolves to.
+  return chainOwnedSafely(resolve(dir), true) && chainOwnedSafely(realpathSync(dir), false);
+}
+
+function chainOwnedSafely(start: string, linksAllowed: boolean): boolean {
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  for (let d = start; ; d = dirname(d)) {
+    const st = lstatSync(d);
+    if (st.isSymbolicLink()) {
+      if (!linksAllowed) return false;
+    } else {
+      if (!st.isDirectory()) return false;
+      if (uid !== null && st.uid !== uid && st.uid !== 0) return false;
+      if ((st.mode & 0o022) !== 0 && (st.mode & 0o1000) === 0) return false;
+    }
+    if (dirname(d) === d) return true;
+  }
+}
+
+/**
  * (crew#1955) `mkdir -p dir`, where every directory this call creates gets {@link SKILL_DIR_MODE} exactly, whatever
  * the daemon's umask; a directory that already existed is left as it is. A no-op past the mkdir on Windows, where
  * modes are advisory.
  *
  * Only the path's last component is opened no-follow, so the walk is safe only while nobody else can swap a directory
  * on it. It goes top-down: each created directory is opened `O_DIRECTORY | O_NOFOLLOW` (a link there fails the open)
- * and set 0755 before its child is opened, so once set, only the owner can rename inside it. The first created
- * directory's parent already existed. When that parent is not ours, or another user can write it, a created
- * directory could be swapped for a link between two opens and a later chmod would land outside the tree (the codex
- * check on crew#1962). So the modes are then not set, and the created directories keep the umask's modes, as before.
+ * and set 0755 before its child is opened, so once set, only the owner can rename inside it. The directories above
+ * the first created one already existed. If another user could rename an entry in any of them, a directory on the
+ * path could be swapped for a link between two opens and a later chmod would land outside the tree (the codex checks
+ * on crew#1962). So the modes are set only when {@link noOtherUserCanSwap} holds for the first created directory's
+ * parent; otherwise the created directories keep the umask's modes, as before.
  */
 export function mkdirExact(dir: string): void {
   const first = mkdirSync(dir, { recursive: true });
   if (first === undefined || process.platform === 'win32') return;
-  const parent = lstatSync(dirname(first));
-  if (!parent.isDirectory() || (parent.mode & 0o022) !== 0 || (typeof process.getuid === 'function' && parent.uid !== process.getuid())) return;
+  if (!noOtherUserCanSwap(dirname(first))) return;
   let cur = first;
   for (const seg of ['', ...relative(first, dir).split(sep).filter((x) => x !== '')]) {
     if (seg !== '') cur = join(cur, seg);
