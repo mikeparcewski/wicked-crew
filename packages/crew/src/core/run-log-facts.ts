@@ -6,8 +6,11 @@
 // the first `sessionStarted.workflowId` and the first terminal frame's `ts`. A negative (no launch frame, no terminal
 // frame) is never kept, so a run whose log later gains the frame is read again on the next start, as before.
 // Bound to the store by a header (the db file's dev, inode and birth time: a new file discards everything) and each
-// line to its run by a hash of the run's `problem` (a run id can be caller-chosen and reused by another store).
-// Residual (crew#1891): a different store copied over the live file in place, reusing an id with the same problem.
+// line to its run by a hash of the run's `problem` and the engine's `finished_at` (a run id can be caller-chosen and
+// reused by another store; crew#1891: a different store copied over the live file in place keeps the inode, so the
+// header alone cannot tell them apart). Residual: a reused id with the same problem AND the same finished_at (or with no
+// finished_at on both, an engine before the field) still matches, as on main. A file found at start and started over
+// says why, once (crew#1891); a missing or empty one says nothing.
 import { appendFile } from 'node:fs/promises';
 import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -35,10 +38,18 @@ export function factsFromEvents(events: readonly RecordedEvent[]): LogFacts {
   };
 }
 
-/** The per-run binding: a short hash of the run's `problem` (immutable on a run; no crew code rewrites it). */
-export function runFingerprint(problem: unknown): string {
-  return createHash('sha256').update(typeof problem === 'string' ? problem : '').digest('hex').slice(0, 16);
+/** The per-run binding: a short hash of the run's `problem` (no crew code rewrites it) and the engine's `finished_at`
+ *  (unix millis at terminal; only terminal runs' facts are kept). crew#1891: another store's run under the same id and
+ *  problem matches only when it also ended in the same millisecond. An engine without `finished_at` binds by the
+ *  problem alone, as main did. */
+export function runFingerprint(problem: unknown, finishedAt?: unknown): string {
+  const end = typeof finishedAt === 'number' && Number.isFinite(finishedAt) ? String(finishedAt) : '';
+  return createHash('sha256').update(typeof problem === 'string' ? problem : '').update('\0').update(end).digest('hex').slice(0, 16);
 }
+
+/** The line and header format. 2 (crew#1891): lines bound by `finished_at` too; a file in an older format is started
+ *  over (one re-read per terminal run), since its lines were bound by the problem alone. */
+const FORMAT = 2;
 
 /** A kept fact set: a key is present only when its fact is (positive facts only). */
 export interface KeptFacts {
@@ -48,7 +59,7 @@ export interface KeptFacts {
 }
 
 interface Header {
-  v: 1;
+  v: typeof FORMAT;
   store: { dev: number; ino: number; birth: number };
 }
 
@@ -66,10 +77,18 @@ const FLUSH_DELAY_MS = 500;
 /** Lines beyond twice the distinct runs that a file may hold before it is compacted at the next start. */
 const COMPACT_SLACK = 64;
 
-const sameStore = (a: Header['store'], b: unknown): boolean => {
-  const o = b as Partial<Header['store']> | null | undefined;
-  return o != null && o.dev === a.dev && o.ino === a.ino && o.birth === a.birth;
-};
+/** Why a file found at start is not this store's (crew#1891: said once, in closed-set words), or null when it is. */
+function foreignBecause(a: Header['store'], h: Partial<Header> | undefined): string | null {
+  if (h === undefined || typeof h !== 'object' || h === null || typeof h.v !== 'number') return 'unreadable header';
+  if (h.v < FORMAT) return 'older format';
+  if (h.v !== FORMAT) return 'unknown format';
+  const o = h.store as Partial<Header['store']> | null | undefined;
+  if (o == null) return 'unreadable header';
+  const differ = (['dev', 'ino', 'birth'] as const).filter((k) => o[k] !== a[k]);
+  if (differ.length === 0) return null;
+  const words = { dev: 'device', ino: 'inode', birth: 'birth time' } as const;
+  return `another store file (${differ.map((k) => words[k]).join(', ')})`;
+}
 
 /**
  * `<db>.run-facts.jsonl` (a `core.db`-prefix sidecar: classified in the state-home registry, fenced from workers).
@@ -90,7 +109,12 @@ export class RunFactsFile {
   /** The file ends inside a line (a torn write): the next append starts a new line first. */
   private torn = false;
 
-  constructor(readonly path: string, private readonly dbPath: string) {}
+  constructor(
+    readonly path: string,
+    private readonly dbPath: string,
+    /** One line when a file found at start is started over (crew#1891). */
+    private readonly say: (line: string) => void = (line) => console.warn(line),
+  ) {}
 
   /** The kept facts for `runId`, when they were derived from the run with this fingerprint. */
   get(runId: string, fp: string): KeptFacts | undefined {
@@ -108,7 +132,7 @@ export class RunFactsFile {
     if (prior !== undefined && prior.fp === fp && prior.launched === kept.launched && prior.endedAt === kept.endedAt) return;
     this.load().set(runId, kept);
     if (this.off) return;
-    this.pending.push(JSON.stringify({ v: 1, run: runId, ...kept }) + '\n');
+    this.pending.push(JSON.stringify({ v: FORMAT, run: runId, ...kept }) + '\n');
     // Batched by time, not by turn: a first list derives runs as their reads land, spread over seconds.
     this.arm();
   }
@@ -158,7 +182,7 @@ export class RunFactsFile {
   /** Start the file over for this store (its header first). */
   private bind(store: Header['store']): void {
     try {
-      writeFileSync(this.path, JSON.stringify({ v: 1, store } satisfies Header) + '\n');
+      writeFileSync(this.path, JSON.stringify({ v: FORMAT, store } satisfies Header) + '\n');
       this.bound = true;
       this.torn = false;
     } catch {
@@ -180,7 +204,7 @@ export class RunFactsFile {
     try {
       text = readFileSync(this.path, 'utf8');
     } catch {
-      text = '';
+      text = ''; // no file yet (a first start): written with its header, nothing to say
     }
     const lines = text.split('\n');
     let header: unknown;
@@ -189,9 +213,11 @@ export class RunFactsFile {
     } catch {
       header = undefined;
     }
-    const h = header as Partial<Header> | undefined;
-    if (h?.v !== 1 || !sameStore(store, h.store)) {
-      // A missing, unreadable or foreign file (a new store at this path): start it over.
+    const because = text === '' ? 'empty' : foreignBecause(store, header as Partial<Header> | undefined);
+    if (because !== null) {
+      // A missing, unreadable or foreign file (a new store at this path): start it over. crew#1891: a file that was
+      // there is named with why (a disk without a stable birth time otherwise re-reads every run each start, silently).
+      if (because !== 'empty') this.say(`[crew] run-facts ${this.path} started over: ${because}; each terminal run's log is read once again`);
       this.bind(store);
       return this.kept;
     }
@@ -210,7 +236,7 @@ export class RunFactsFile {
       const r = row as Record<string, unknown>;
       const run = r['run'];
       const fp = r['fp'];
-      if (r['v'] !== 1 || typeof run !== 'string' || typeof fp !== 'string') continue;
+      if (r['v'] !== FORMAT || typeof run !== 'string' || typeof fp !== 'string') continue;
       const kept: KeptFacts = { fp };
       const launched = r['launched'];
       if (typeof launched === 'string' || launched === null) kept.launched = launched;
@@ -226,8 +252,8 @@ export class RunFactsFile {
   }
 
   private compact(store: Header['store'], all: ReadonlyMap<string, KeptFacts>): void {
-    const out = [JSON.stringify({ v: 1, store } satisfies Header)];
-    for (const [run, kept] of all) out.push(JSON.stringify({ v: 1, run, ...kept }));
+    const out = [JSON.stringify({ v: FORMAT, store } satisfies Header)];
+    for (const [run, kept] of all) out.push(JSON.stringify({ v: FORMAT, run, ...kept }));
     try {
       writeFileSync(this.path, out.join('\n') + '\n');
       this.torn = false;
