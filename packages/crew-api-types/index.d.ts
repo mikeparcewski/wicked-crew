@@ -1864,6 +1864,45 @@ export interface RepoEntry {
    * resolves for this daemon, so `code_graph_db` is empty).
    */
   findings?: RepoFinding[];
+  /**
+   * This repo's own seat base image (wicked-core#2023, core#1043 part 3; api-types 0.235.0): a local
+   * image its seats are built on instead of the daemon's base. Absent when the repo has none. Set or
+   * cleared with `PUT /api/v1/repos/:id/seat-base`. The engine never pulls it: a base the container
+   * runtime lacks refuses the unit (`seat_base_missing`).
+   */
+  seat_base_image?: string;
+  /**
+   * The toolchain layers this repo's seats get (wicked-core core#1043 part 2; api-types 0.235.0),
+   * derived by the engine on the reads a person sees (`GET /repos`, and the `PUT .../seat-base`
+   * reply): one row per layer detected in the checkout, in catalog order. Absent from an engine
+   * predating the field.
+   */
+  seat_layers?: RepoSeatLayer[];
+}
+
+/** One toolchain layer a repo's seats get (`RepoEntry.seat_layers[]`). */
+export interface RepoSeatLayer {
+  /** The layer id: `go`, `java`, `node`, `python` or `rust`. */
+  id: string;
+  /** Whether the layer is added to this repo's seat images. */
+  enabled: boolean;
+  /**
+   * What turned it off, when it is off: `repo` (this repo's own switch), `daemon`
+   * (`WICKED_SEAT_LAYERS=off`), `operator_base` (`WICKED_SEAT_BASE_IMAGE` is the toolchain) or
+   * `repo_base` (this repo's own seat base image is the toolchain). `null` when it is on. A newer
+   * engine may add values.
+   */
+  off_by: string | null;
+}
+
+/**
+ * `PUT /api/v1/repos/:id/seat-base` body (api-types 0.235.0): set this repo's own seat base image,
+ * or clear it with `null` or an empty string. 200 is the engine's updated `RepoEntry`. Refusals:
+ * 400 `{error, details}` (body shape: `image` a string of at most 255 characters, or `null`), 400 `seat_base_invalid` (the engine's words: not a local image
+ * name), 404 `repo_not_found`, 501 `repo_seat_base_unsupported` (an engine predating the setting).
+ */
+export interface SetRepoSeatBaseRequest {
+  image: string | null;
 }
 
 /** One engine diagnostic on a registered repo (`RepoEntry.findings[]`; wicked-core#406). */

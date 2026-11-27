@@ -30,7 +30,7 @@ import { promises as fsp } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { videoPalette } from '../appearance/video-palette.js';
-import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, DomainRulingUnsupportedError, MaintenanceDrainError, RepoUnregisterUnsupportedError, TERMINAL_RUN_STATUSES, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsDomainScope, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, readNewWorkSeats, settingsFilePath, type RunViewsSnapshot } from '../core/adapter.js';
+import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, DomainRulingUnsupportedError, MaintenanceDrainError, RepoSeatBaseUnsupportedError, RepoUnregisterUnsupportedError, TERMINAL_RUN_STATUSES, ElicitationUnsupportedError, GovernanceReplayUnsupportedError, PlanGateNoteUnsupportedError, PlanLaunchUnsupportedError, SteeringUnsupportedError, addonSupportsDomainScope, addonSupportsQeOverride, addonSupportsReducedAssurance, humanGatePhaseIds, readNewWorkSeats, settingsFilePath, type RunViewsSnapshot } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, repoFolderMissing, repoFolderMissingBody } from '../core/repoPaths.js';
 import type {
   ConformanceRule,
@@ -197,7 +197,7 @@ import {
 } from './governance-steering.js';
 import { atProposeGate, draftedSteeringRules, isSteeringAuthorRun, landSteeringProposal, type SteeringProposalSnapshot } from './steering-landing.js';
 import { inventoryComplete, parseInventoryClaims, type InventoryClaim } from '../core/inventory-claim.js';
-import type { DomainRulingBody, DomainScopeCard, GateAction, LaunchPreviewPosture, LaunchPreviewResponse, MaintenanceRequest, RejudgeOffer, RunInventoryResponse, RunLearningsResponse, SeatRecordResponse, SkipQeOffer, UnregisterRepoResponse } from 'wicked-crew-api-types';
+import type { DomainRulingBody, DomainScopeCard, GateAction, LaunchPreviewPosture, LaunchPreviewResponse, MaintenanceRequest, RejudgeOffer, RunInventoryResponse, RunLearningsResponse, SeatRecordResponse, SetRepoSeatBaseRequest, SkipQeOffer, UnregisterRepoResponse } from 'wicked-crew-api-types';
 import { ApproveEditSchema, approveEdited, captureLaunchRoots, editInFlight, FileProposalSchema, registerCaptureRoutes } from './capture.js';
 import { registerTestingRoutes } from './testing.js';
 import { registerDefaultEvalRoutes, runAndRecord, type DefaultEvalDeps } from '../evals/routes.js';
@@ -3504,6 +3504,29 @@ export function registerRoutes(
       // The engine's refusal names the runs or projects in its text (a lease taken after crew's check, or a project).
       const refused = /^(repo_in_use|repo_in_project): /u.exec(message(err));
       if (refused !== null) return reply.code(409).send({ code: refused[1], error: message(err) });
+      throw err;
+    }
+  });
+
+  // crew#1984 (wicked-core#2023, core#1043 part 3): a repo's own seat base image. The engine's single writer checks
+  // the reference (a local image name: no flag, whitespace or shell text) and refuses an unknown repo, writing
+  // nothing; crew bounds the body first and answers with the engine's updated entry, never a list read before it.
+  const SeatBaseSchema = z.strictObject({ image: z.union([z.string().max(255), z.null()]) });
+  app.put(`${V}/repos/:id/seat-base`, { config: { manifest: { requestType: 'SetRepoSeatBaseRequest', responseType: 'RepoEntry', statusCodes: [200, 400, 404, 501] } } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = SeatBaseSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+    const body: SetRepoSeatBaseRequest = parsed.data;
+    const image = body.image === null || body.image.trim() === '' ? null : body.image;
+    try {
+      const entry = await adapter.setRepoSeatBaseImage(id, image);
+      audit.record('repo.seat_base_set', actorOf(req), { detail: { repoId: id, image } });
+      return entry;
+    } catch (err) {
+      if (err instanceof RepoSeatBaseUnsupportedError) return reply.code(501).send({ code: 'repo_seat_base_unsupported', error: message(err) });
+      // The engine's refusals, in its own words (wicked-core `repo::set_seat_base_image`).
+      if (/^no registered repo /u.test(message(err))) return reply.code(404).send({ code: 'repo_not_found', error: message(err) });
+      if (/is not a seat base image reference/u.test(message(err))) return reply.code(400).send({ code: 'seat_base_invalid', error: message(err) });
       throw err;
     }
   });

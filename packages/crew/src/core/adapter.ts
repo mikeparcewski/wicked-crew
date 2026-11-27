@@ -660,7 +660,11 @@ type CoreHandleFull = CoreHandle &
   ProjectMethods &
   PresetMethods &
   TeamMethods &
-  CampaignMethods & { unregisterRepo?: (repoId: string) => Promise<string> };
+  CampaignMethods & {
+    unregisterRepo?: (repoId: string) => Promise<string>;
+    /** wicked-core#2023 (core#1043 part 3): a repo's own seat base image; `null` clears it. */
+    setRepoSeatBaseImage?: (repoId: string, image?: string | null) => Promise<string>;
+  };
 
 /**
  * crew#994: the engine bindings that read the store file directly, on a read-only connection of
@@ -1092,6 +1096,14 @@ export class MaintenanceDrainError extends Error {
   constructor() {
     super('This daemon is draining for maintenance and is refusing new work.');
     this.name = 'MaintenanceDrainError';
+  }
+}
+
+/** The linked engine predates a repo's own seat base image (wicked-core `setRepoSeatBaseImage`, #2023). */
+export class RepoSeatBaseUnsupportedError extends Error {
+  constructor() {
+    super("Setting a repository's seat base image requires an engine with setRepoSeatBaseImage; upgrade wicked-core-ts.");
+    this.name = 'RepoSeatBaseUnsupportedError';
   }
 }
 
@@ -3668,6 +3680,16 @@ export class CoreAdapter {
   async unregisterRepo(id: string): Promise<boolean> {
     if (typeof this.core.unregisterRepo !== 'function') throw new RepoUnregisterUnsupportedError();
     return parseEngineJson<boolean>(await this.core.unregisterRepo(id), 'unregisterRepo');
+  }
+
+  /**
+   * Set (or clear, with `null`) a repo's own seat base image (crew#1984; wicked-core#2023) → the
+   * engine's updated `RepoEntry`, written by its single writer, with the layer rows it derives. The
+   * engine checks the reference (a local image name) and refuses an unknown repo, writing nothing.
+   */
+  async setRepoSeatBaseImage(id: string, image: string | null): Promise<RepoEntry> {
+    if (typeof this.core.setRepoSeatBaseImage !== 'function') throw new RepoSeatBaseUnsupportedError();
+    return parseEngineJson<RepoEntry>(await this.core.setRepoSeatBaseImage(id, image), 'setRepoSeatBaseImage');
   }
 
   /**
