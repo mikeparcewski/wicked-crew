@@ -52,6 +52,23 @@ describe('crew#1972: the base image', () => {
   it('reads the product Dockerfile\'s pinned base (and skips scratch and earlier stages)', () => {
     expect(baseImagesOf(readFileSync(PRODUCT_DOCKERFILE, 'utf8'))).toEqual([BASE]);
     expect(baseImagesOf('FROM --platform=linux/amd64 node:24 AS build\nRUN x\nFROM build\nFROM scratch\nfrom alpine:3 as final\n')).toEqual(['node:24', 'alpine:3']);
+    // A FROM continued over lines is read whole (codex-check r1).
+    expect(baseImagesOf('FROM \\\n  node:24 \\\n  AS build\nFROM build\n')).toEqual(['node:24']);
+  });
+
+  it('a base named through a build argument is refused before anything runs (codex-check r1)', async () => {
+    writeFileSync(join(ctx, 'Dockerfile'), 'ARG BASE=node:24\nFROM ${BASE}\n');
+    const err = await buildImage(ctx, 'wicked-apps/desk:v1', {}, { bin, env }).catch((e: unknown) => e);
+    expect((err as ImageBuildError).code).toBe('build_failed');
+    expect((err as ImageBuildError).message).toMatch(/build argument/);
+    expect(calls()).toEqual([]);
+  });
+
+  it('an engine error that merely says "not found" is not read as a missing base (codex-check r1)', async () => {
+    writeFileSync(join(dir, 'engine-down'), '');
+    writeFileSync(bin, FAKE.replace('Cannot connect to the Docker daemon', 'error: context "rancher" not found'));
+    const err = await buildImage(ctx, 'wicked-apps/desk:v1', {}, { bin, env }).catch((e: unknown) => e);
+    expect((err as ImageBuildError).code).toBe('no_engine');
   });
 
   it('a base missing from the engine is refused with its name and the pull command, and nothing is built or pulled', async () => {

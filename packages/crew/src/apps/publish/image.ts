@@ -58,13 +58,14 @@ function run(bin: string, args: string[], deadlineMs: number, env: NodeJS.Proces
 const INSPECT_DEADLINE_MS = 60 * 1000;
 
 /**
- * The base images a Dockerfile builds FROM, in order: each `FROM [--platform=…] <ref> [AS <stage>]`, without
- * `scratch` and without a reference to an earlier stage of the same file.
+ * The base images a Dockerfile builds FROM, in order: each `FROM [--platform=…] <ref> [AS <stage>]` (a line continued
+ * with `\` read whole), without `scratch` and without a reference to an earlier stage of the same file. The one
+ * Dockerfile a publish builds is crew's own product file (`pack.ts` `writeImageContext`), never the app's.
  */
 export function baseImagesOf(dockerfile: string): string[] {
   const stages = new Set<string>();
   const bases: string[] = [];
-  for (const line of dockerfile.split(/\r?\n/)) {
+  for (const line of dockerfile.replace(/\\[ \t]*\r?\n/g, ' ').split(/\r?\n/)) {
     const m = /^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?\s*$/i.exec(line);
     if (m === null) continue;
     const ref = m[1]!;
@@ -88,9 +89,13 @@ async function requireBases(bin: string, ctx: string, deadlineMs: number, env: N
     throw new ImageBuildError('build_failed', 'the build context has no Dockerfile', '');
   }
   for (const ref of baseImagesOf(dockerfile)) {
+    // A base named through a build argument cannot be checked before the build resolves it: refused, never pulled.
+    if (ref.includes('$')) throw new ImageBuildError('build_failed', `the Dockerfile names its base image through a build argument (${ref}), which crew cannot check is on this engine before building`, '');
     const r = await run(bin, ['image', 'inspect', '--format', '{{.Id}}', ref], Math.min(deadlineMs, INSPECT_DEADLINE_MS), env);
     if (r.code === 0) continue;
-    if (/no such (image|object)|not found/i.test(r.out)) {
+    // The engine's own words for an image it does not hold ("Error response from daemon: No such image: …"); any other
+    // failure (a missing context, a stopped engine) is the engine's, not a missing base.
+    if (/\bno such (image|object)\b/i.test(r.out)) {
       throw new ImageBuildError('base_missing', `the app's base image is not on this container engine, and publishing never downloads it on its own. Pull it, then publish again: ${bin} pull ${ref}`, r.out);
     }
     throw new ImageBuildError('no_engine', `the container engine (${bin}) could not say whether the base image ${ref} is present (exit ${r.code ?? 'signal'})`, r.out);
