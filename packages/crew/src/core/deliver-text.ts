@@ -1004,10 +1004,12 @@ function standInReasonWords(r: unknown): string | null {
 /** (DES-STANDIN-001 §6, K6) The stand-ins from `session.assurance` (`standIns`, `standInLabel`) and the role records
  *  (`roles`): the session's, and every unit's gate receipt (`unit.assurance.roles`), where the engine writes the
  *  answered roles (the session's list starts empty). Absent when none took part. A stand-in is `failed` when its
- *  binding, or a receipt's record of its seat, says so (codex r1 on b7-standin). */
+ *  binding, or a receipt's record of its seat, says so (codex r1 on b7-standin). An abandoned reservation is left out. */
 function standInsOf(a: Record<string, unknown>, units: WorkUnit[] = []): DeliverStandInFact | undefined {
   const bindings = (Array.isArray(a['standIns']) ? a['standIns'] : []) as Array<Record<string, unknown>>;
-  const took = bindings.filter((b) => typeof b['role'] === 'string' && typeof b['key'] === 'string');
+  // (crew#1966) A reservation its asker let go before anything ran on it (`abandoned: true`, always `failed`; wicked-core
+  // #2015) took no part: it is not a stand-in that "did not answer".
+  const took = bindings.filter((b) => typeof b['role'] === 'string' && typeof b['key'] === 'string' && b['abandoned'] !== true);
   if (took.length === 0) return undefined;
   const label = typeof a['standInLabel'] === 'string' ? a['standInLabel'].trim() : '';
   const reason = standInReasonWords(took[0]!['reason']) ?? (label !== '' ? label : 'too few helpers were signed in');

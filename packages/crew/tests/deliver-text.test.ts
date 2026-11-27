@@ -1245,6 +1245,29 @@ describe('the run\'s assurance labels (crew#1186)', () => {
     expect(none).not.toContain('stand-in');
   });
 
+  // crew#1966 (the crew half of wicked-core#2015): a team stand-in reservation its asker let go before anything ran on it
+  // stays on the record `failed` with `abandoned: true`. The binding is the engine's own (stand-in-session.json) as
+  // wicked-core's `abandon_team` leaves it (`src/actor/stand_in_gate.rs` sets `state: failed` and `abandoned = true`;
+  // `src/standin.rs` `StandInBinding.abandoned` serializes last, and only when true; test
+  // `reservations_let_go_are_failed_and_abandoned_2015`).
+  it('an abandoned stand-in reservation is not listed as a stand-in that took part (crew#1966)', () => {
+    const engine = JSON.parse(readFileSync(new URL('./fixtures/stand-in-session.json', import.meta.url), 'utf8')) as { assurance: Record<string, unknown> };
+    const seated = (engine.assurance['standIns'] as Array<Record<string, unknown>>)[0]!;
+    const abandoned = { ...seated, key: 'claude~2', slot: 2, role: 'monitor', state: 'failed', abandoned: true };
+    const alone = composeDeliverText(factsFromRun(withAssurance(engine.assurance), null)).body;
+    const beside = composeDeliverText(factsFromRun(withAssurance({ ...engine.assurance, standIns: [seated, abandoned] }), null)).body;
+    expect(beside).toBe(alone);
+    expect(beside).not.toContain('monitor');
+    // A run whose only stand-in was abandoned shows no stand-in line at all.
+    const only = composeDeliverText(factsFromRun(withAssurance({ ...engine.assurance, standIns: [abandoned] }), null)).body;
+    expect(only).not.toContain('stand-in');
+    // A failed binding with no `abandoned` field still reads "did not answer", as before.
+    const failed: Record<string, unknown> = { ...abandoned };
+    delete failed['abandoned'];
+    const failedBody = composeDeliverText(factsFromRun(withAssurance({ ...engine.assurance, standIns: [seated, failed] }), null)).body;
+    expect(failedBody).toContain('Stood in: reviewer (Claude Code), monitor (Claude Code, did not answer).');
+  });
+
   // (DES-STANDIN-001 §9 T-K6, crew#1940) The leak grep on the STAND-IN PR body: the engine's own stand-in session, on a
   // run whose words name the host's home, temp and state-home paths. The body says who stood in by tool name only: no
   // host path, no binding key (`claude~1`), no seat invocation id.
