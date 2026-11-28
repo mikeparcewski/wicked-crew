@@ -188,5 +188,6 @@ export function projectJiraTracker(
 export function projectJiraTargets(entries: readonly PmEntry[], projectId: string): Array<{ repo: string; source: string; system: 'jira'; label: string }> {
   return trackerSetOf(entries, projectId, [])
     .filter((t) => t.system === 'jira' && t.via.some((v) => v.kind === 'project'))
-    .map((t) => ({ repo: jiraTargetOf(t.key, t.tenant), source: t.source, system: 'jira' as const, label: `${t.key} on ${t.siteHost ?? t.tenantLabel ?? t.tenant}` }));
+    // Named by the host link time confirmed, or the cloudId: never the site's label, which is the vendor's text.
+    .map((t) => ({ repo: jiraTargetOf(t.key, t.tenant), source: t.source, system: 'jira' as const, label: `${t.key} on ${t.siteHost !== null && /^[a-z0-9.-]{1,253}$/i.test(t.siteHost) ? t.siteHost : `site ${t.tenant}`}` }));
 }

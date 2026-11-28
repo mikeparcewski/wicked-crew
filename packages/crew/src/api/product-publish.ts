@@ -294,23 +294,37 @@ export const JIRA_SUMMARY_MAX = 255;
 export const JIRA_BODY_MAX = 5_000;
 
 /**
- * (crew#1901) The footer a Jira description ends with: one visible line naming the run and the item. No HTML comment
- * (ADF has no form for one) and no rule: the read-back finds it by its words ({@link publishWords}).
+ * (crew#1901) The footer a Jira description ends with: one visible line naming the run and the item, and a check word
+ * (hex of sha256 over the exact run id and key) that survives the word comparison: words alone would make runs `r-1`
+ * and `r.1` one footer (codex on #1997). No HTML comment (ADF has no form for one) and no rule: the read-back finds it
+ * by its words ({@link publishWords}).
  */
 export function jiraFooter(runId: string, key: string): string {
-  return `\n\nPublished by wicked-crew from run ${runId} (item ${key})`;
+  const check = sha256Hex(`${runId}\u0000${key}`).slice(0, 20);
+  return `\n\nPublished by wicked-crew from run ${runId} (item ${key}, check ${check})`;
 }
 
 /** A link, left out of the word comparison on both sides: a server may turn it into a card with no text. */
 const LINK = /\b(?:[a-z][a-z0-9+.-]*:\/\/|www\.|mailto:)\S*/giu;
 
+/** The character references a markdown conversion decodes, as their characters. */
+const REFS: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+const decodeRefs = (s: string): string =>
+  s.replace(/&(#[0-9]{1,7}|#x[0-9a-f]{1,6}|[a-z]{2,8});/gi, (m, r: string) => {
+    if (r[0] !== '#') return REFS[r.toLowerCase()] ?? m;
+    const cp = r[1] === 'x' || r[1] === 'X' ? parseInt(r.slice(2), 16) : parseInt(r.slice(1), 10);
+    return cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
+  });
+
 /**
- * (crew#1901) The words of a text: its runs of letters and digits (NFC), links left out, one space apart. A Jira
- * description is compared by its words because markdown to ADF and back is the server's conversion, which may change
- * markup, escapes and line breaks but not the words.
+ * (crew#1901) The words of a text: its runs of letters and digits (NFC), one space apart, with character references
+ * and markdown escapes decoded, links left out, and inline markup that can join two runs (`*`, `_`, `~`, a backtick) dropped, so `**can**not`
+ * is `cannot` on both sides (codex on #1997). A Jira description is compared by its words because markdown to ADF and
+ * back is the server's conversion, which may change markup, escapes and line breaks but not the words.
  */
 export function publishWords(s: string): string {
-  return (s.normalize('NFC').replace(LINK, ' ').match(/[\p{L}\p{N}]+/gu) ?? []).join(' ');
+  // A markdown escape (`\_`) is its character; then the joining marks go.
+  return (decodeRefs(s.normalize('NFC')).replace(/\\([!-/:-@[-`{-~])/g, '$1').replace(LINK, ' ').replace(/[*_~`]/g, '').match(/[\p{L}\p{N}]+/gu) ?? []).join(' ');
 }
 
 /** The card's items from a plan, or the first item that cannot be published as written. */
@@ -686,6 +700,12 @@ export function jiraCreatedKey(result: Record<string, unknown>, who: string, t: 
   return { ok: true, key: m[0] };
 }
 
+/**
+ * (crew#1901) How a card names a Jira site: the host link time confirmed, or its cloudId; never the site's label, which
+ * is the vendor's text (codex on #1997).
+ */
+export const jiraSiteOf = (t: Pick<TrackerSetEntry, 'siteHost' | 'tenant'>): string => (t.siteHost !== null && /^[a-z0-9.-]{1,253}$/i.test(t.siteHost) ? t.siteHost : t.tenant);
+
 /** (crew#1901) A Jira issue's address, built by crew from the site's host confirmed at link time (never the answer's). */
 const jiraUrl = (t: Pick<TrackerSetEntry, 'siteHost'>, key: string): string | null => (t.siteHost !== null && /^[a-z0-9.-]{1,253}$/i.test(t.siteHost) ? `https://${t.siteHost}/browse/${key}` : null);
 
@@ -701,8 +721,8 @@ function jiraTypesOf(payload: unknown): JiraType[] | null {
   for (const x of list as unknown[]) {
     if (typeof x !== 'object' || x === null) continue;
     const r = x as Record<string, unknown>;
-    // A type's name goes on the card: only a plain one (letters, digits, spaces and `_ - . ( )`), never other vendor text.
-    if (typeof r['name'] !== 'string' || !/^[\p{L}\p{N}][\p{L}\p{N} _.()-]{0,59}$/u.test(r['name'])) continue;
+    // Only Jira's standard names are ever taken ({@link jiraTypeFor}); any other is not read at all.
+    if (typeof r['name'] !== 'string' || !/^(?:epic|story|task|sub-task|subtask)$/i.test(r['name'])) continue;
     const level = typeof r['hierarchyLevel'] === 'number' && Number.isInteger(r['hierarchyLevel']) ? r['hierarchyLevel'] : null;
     out.push({ name: r['name'], level, subtask: typeof r['subtask'] === 'boolean' ? r['subtask'] : null });
   }
@@ -711,8 +731,10 @@ function jiraTypesOf(payload: unknown): JiraType[] | null {
 
 /**
  * (crew#1901, DES-1901) The Jira type each level of the plan is created as: an epic the project's Epic type, a feature a
- * standard type under it (Story, else Task), a story the project's subtask type under its feature. By the hierarchy
- * level when Jira says it (1, 0, -1), else by the subtask flag and the usual names. `null`: no such type.
+ * standard type under it (Story, else Task), a story the project's subtask type under its feature. Only Jira's standard
+ * names are taken (a closed set: a type's name goes on the card and into the journal, so no other vendor text does;
+ * codex on #1997), at the hierarchy level Jira says (1, 0, -1) or, when it says none, by the subtask flag. `null`: the
+ * project has no such type.
  */
 export function jiraTypeFor(types: readonly JiraType[], kind: PublishItem['kind']): string | null {
   const named = (list: readonly JiraType[], ...names: string[]): string | null => {
@@ -722,13 +744,9 @@ export function jiraTypeFor(types: readonly JiraType[], kind: PublishItem['kind'
     }
     return null;
   };
-  if (kind === 'epic') {
-    const top = types.filter((t) => t.level === 1);
-    return named(top, 'epic') ?? (top.length === 1 ? top[0]!.name : null) ?? named(types.filter((t) => t.level === null && t.subtask !== true), 'epic');
-  }
+  if (kind === 'epic') return named(types.filter((t) => t.level === 1 || (t.level === null && t.subtask !== true)), 'epic');
   if (kind === 'feature') return named(types.filter((t) => t.level === 0 || (t.level === null && t.subtask !== true)), 'story', 'task');
-  const sub = types.filter((t) => t.level === -1 || t.subtask === true);
-  return named(sub, 'sub-task', 'subtask') ?? (sub.length === 1 ? sub[0]!.name : null);
+  return named(types.filter((t) => t.level === -1 || (t.level === null && t.subtask === true)), 'sub-task', 'subtask');
 }
 
 /** fsync a directory (where the platform can open one). */
@@ -1017,7 +1035,7 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
       const identity = typeof acct === 'string' && /^[A-Za-z0-9:_-]{1,128}$/.test(acct) ? acct : null;
       if (identity === null || !who.ok) return refuse(503, 'source_unavailable', `${e.name} could not say which account it posts as now, so no card is offered`);
       if (who.credential === null) return refuse(409, 'credential_unpinned', `${e.name} has no credential of its own to pin, so crew cannot be sure which account would post; give the source its own credential`);
-      const card: ProductPublishCard = { runId, projectId, repo: jiraTargetOf(t.key, t.tenant), source: e.name, identity, items, ...(plan.edited !== null ? { edited: plan.edited } : {}), system: 'jira', site: t.siteHost ?? t.tenantLabel ?? t.tenant };
+      const card: ProductPublishCard = { runId, projectId, repo: jiraTargetOf(t.key, t.tenant), source: e.name, identity, items, ...(plan.edited !== null ? { edited: plan.edited } : {}), system: 'jira', site: jiraSiteOf(t) };
       const descriptor = pmDescriptorHash(configOf(e.record));
       const publishHash = sha256Hex(canonicalJson({ v: 1, card, contentSha, sourceId: e.id, trackerId: t.trackerId, descriptor, principal: identity, credential: who.credential, write: jira }));
       return { ok: true, b: { card, publishHash, contentSha, e, t, descriptor, principal: identity, credential: who.credential, es, f, publication, path, jira } };
@@ -1049,8 +1067,8 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
     for (const it of items) {
       const issueType = jiraTypeFor(types, it.kind);
       if (issueType === null) {
-        const level = it.kind === 'epic' ? 'an Epic type' : it.kind === 'feature' ? 'a Story or Task type' : 'a subtask type';
-        return refuse(409, 'issue_type_missing', `${t.key} has no issue type for the plan's ${it.kind}s (${level}); a Jira admin adds one, or compose without that level`);
+        const level = it.kind === 'epic' ? 'an Epic type' : it.kind === 'feature' ? 'a Story or Task type' : 'a subtask type, Sub-task or Subtask';
+        return refuse(409, 'issue_type_missing', `${t.key} has no issue type for the plan's ${it.kind}s (${level}, by Jira's standard name); a Jira admin adds one, or compose without that level`);
       }
       out.push({ ...it, issueType });
     }
@@ -1349,11 +1367,15 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
         if (x === null) return reply.code(409).send({ error: 'the publish journal names a target crew cannot read; nothing is sent until it is repaired', code: 'journal_unreadable' });
         publications.push(await stateOf(f, projectId, x, list, 'observer'));
       }
+      // (crew#1901) The project's Jira projects follow its GitHub repositories, each saying whether the plan meets
+      // Jira's own text rules (the top-level answer stays GitHub's, as before).
+      const jiraTargets = projectJiraTargets(list, projectId);
+      const jiraPlan = jiraTargets.length === 0 ? null : await composedPlan(deps, projectId, runId, 'jira');
+      const jiraPublishable = jiraPlan === null ? null : jiraPlan.ok ? { ok: true as const, items: jiraPlan.items.length } : { ok: false as const, code: jiraPlan.code, error: jiraPlan.error };
       const answer: ProductPublicationsResponse = {
         runId,
         publishable: plan.ok ? { ok: true, items: plan.items.length } : { ok: false, code: plan.code, error: plan.error },
-        // (crew#1901) The project's Jira projects follow its GitHub repositories.
-        targets: [...projectGithubTargets(list, projectId), ...projectJiraTargets(list, projectId)],
+        targets: [...projectGithubTargets(list, projectId), ...jiraTargets.map((t) => ({ ...t, publishable: jiraPublishable! }))],
         publications,
       };
       return answer;

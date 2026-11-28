@@ -17898,7 +17898,8 @@ export interface ProductPublishCard {
   edited?: { planRev: number };
   /**
    * (api-types next, wicked-crew#1901) `jira` for a Jira project: `repo` is then `KEY@<cloudId>`, `site` the site's host
-   * (`acme.atlassian.net`) and `identity` the Atlassian account id it posts as. Absent for GitHub.
+   * (`acme.atlassian.net`, or its cloudId when it was linked without one) and `identity` the Atlassian account id it
+   * posts as. Absent for GitHub.
    */
   system?: 'jira';
   site?: string;
@@ -17957,8 +17958,12 @@ export type ProductPublishResponse =
 export interface ProductPublicationsResponse {
   runId: string;
   publishable: { ok: true; items: number } | { ok: false; code: string; error: string };
-  /** (api-types next, wicked-crew#1901) A Jira project has `system: 'jira'` and a `label` to show (`PROJA on acme.atlassian.net`). */
-  targets: Array<{ repo: string; source: string; system?: 'jira'; label?: string }>;
+  /**
+   * (api-types next, wicked-crew#1901) A Jira project has `system: 'jira'`, a `label` to show (`PROJA on
+   * acme.atlassian.net`) and its own `publishable`: the plan judged by Jira's text rules (a summary of at most 255
+   * characters, for one). The top-level `publishable` is GitHub's, as before.
+   */
+  targets: Array<{ repo: string; source: string; system?: 'jira'; label?: string; publishable?: { ok: true; items: number } | { ok: false; code: string; error: string } }>;
   publications: PublicationState[];
 }
 

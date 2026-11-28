@@ -179,7 +179,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     case 'createJiraIssue': {
       if (site === undefined || !site.projects.includes(args.projectKey)) return json({ error: true, message: 'createJiraIssue failed: 404', statusCode: 404 });
       if (existsSync(join(dir, 'createstring'))) return json({ error: 'INVALID_FIELD_VALUE', field: 'summary', reason: CANARY });
-      const type = typesNow().find((t) => t.name === args.issueTypeName);
+      // The schema a person saved may name the type `issueTypeName` or `issueType`; a server honours the one it has.
+      const type = typesNow().find((t) => t.name === (args.issueTypeName ?? args.issueType));
       if (type === undefined) return json({ error: true, message: `createJiraIssue failed: 400 ${CANARY}`, statusCode: 400 });
       const db = created();
       const k = `${site.id}:${args.projectKey}`;
