@@ -214,7 +214,7 @@ beforeEach(() => {
   delete deps.syncJournalDirs;
   deps.pm = gate.pm;
   logs.length = 0;
-  for (const f of ['calls.ndjson', 'created.json', 'createerror', 'createwrong', 'createstring', 'createexit', 'dropparent', 'canary', 'noaddr', 'types.json']) rmSync(join(jiraLog, f), { force: true });
+  for (const f of ['calls.ndjson', 'created.json', 'createerror', 'createwrong', 'createstring', 'createexit', 'dropparent', 'canary', 'noaddr', 'compact', 'types.json']) rmSync(join(jiraLog, f), { force: true });
 });
 
 describe('Jira: the card and the confirm', () => {
@@ -537,5 +537,24 @@ describe('Jira: review round 1 (codex on #1997)', () => {
     world({ createSchema: { type: 'object', properties: { ...Object.fromEntries(Object.entries(props).filter(([n]) => n !== 'issueTypeName')), issueType: str } } });
     expect((await publish()).body).toMatchObject({ publication: { published: true } });
     expect(creates().map((c) => [c.args['issueType'], 'issueTypeName' in c.args])).toEqual([['Epic', false], ['Story', false], ['Sub-task', false], ['Sub-task', false]]);
+  });
+});
+
+describe('Jira: the R-B check on #1997', () => {
+  it('a server that reads issues back in its compact view (no type, no parent; atlassian-mcp-server#256) still publishes: the summary and words are judged', async () => {
+    sw('compact', true);
+    const r = await publish();
+    expect(states(r.body)).toEqual(['created', 'created', 'created', 'created']);
+    expect(items(r.body).map((i) => i.readBack)).toEqual(['ok', 'ok', 'ok', 'ok']);
+    expect(r.body).toMatchObject({ publication: { published: true } });
+    // An edit in Jira still shows.
+    sw('canary', true);
+    nowMs += READ_BACK_FRESH_MS + 1;
+    expect(((await getPub()).json() as { publications: Array<{ published: boolean }> }).publications[0]!.published).toBe(false);
+  });
+
+  it('a full view (it names the type) still judges the type and the parent: a dropped parent is differs', async () => {
+    sw('dropparent', true);
+    expect(items((await publish()).body).map((i) => i.readBack)).toEqual(['ok', 'differs', 'differs', 'differs']);
   });
 });

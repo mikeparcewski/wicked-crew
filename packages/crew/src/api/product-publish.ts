@@ -680,9 +680,15 @@ function jiraIsItem(read: Extract<JiraRead, { ok: true }>, runId: string, it: Pu
   return read.title === it.title && (w === tail || w.endsWith(` ${tail}`));
 }
 
-/** (crew#1901) Whether a Jira issue reads back as approved: summary, issue type, parent, and the description's words. */
+/**
+ * (crew#1901) Whether a Jira issue reads back as approved: summary, the description's words, and, when the answer is
+ * Jira's full view, the issue type and the parent. Every Jira issue has a type, so an answer that names none is the
+ * Atlassian v2 primary tool's compact view, which leaves out `issuetype` and `parent` whatever `fields` asks for
+ * (atlassian-mcp-server#256; the R-B check on #1997): there the type and the parent are not judged, never read as wrong.
+ */
 function jiraReadsAs(read: Extract<JiraRead, { ok: true }>, it: PublishItem, parent: string | null): boolean {
-  return read.title === it.title && read.type === (it.issueType ?? null) && read.parent === parent && publishWords(read.body) === publishWords(it.body);
+  const full = read.type !== null;
+  return read.title === it.title && publishWords(read.body) === publishWords(it.body) && (!full || (read.type === (it.issueType ?? null) && read.parent === parent));
 }
 
 /**

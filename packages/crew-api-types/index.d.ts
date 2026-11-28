@@ -17928,8 +17928,10 @@ export interface PublicationItemState {
   why?: string;
   /**
    * (api-types next, wicked-crew#1901) Jira only: the issue key it was created as (`number` is then `null`). Its
-   * `readBack` is `ok` when Jira shows the approved summary, issue type and parent, and a description with the same
-   * words (letters and digits, links aside: markup and escapes are the server's conversion to and from ADF).
+   * `readBack` is `ok` when Jira shows the approved summary and a description with the same words (letters and digits,
+   * links aside: markup and escapes are the server's conversion to and from ADF), and, when Jira answers its full view
+   * (one that names the issue type), the approved issue type and parent. The Atlassian v2 server's compact view leaves
+   * both out (atlassian-mcp-server#256); then they are not judged.
    */
   ref?: string;
 }

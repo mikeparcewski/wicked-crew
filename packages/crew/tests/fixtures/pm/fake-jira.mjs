@@ -20,6 +20,8 @@
 //   createexit    stores the issue, then exits before it answers (a lost connection);
 //   dropparent    stores the issue WITHOUT its parent (a server that drops an argument it does not know);
 //   noaddr        a create's answer and a created issue's read carry no address (`self`), so nothing proves their site;
+//   compact       a created issue's read is the v2 primary tool's compact view: no `issuetype` and no `parent`, whatever
+//                 `fields` asks for (atlassian-mcp-server#256);
 //   canary        every created issue's read-back carries the canary in its summary and description (an edit in Jira);
 //   types.json    the issue types `listJiraProjectIssueTypesMetadata` answers, instead of the default set.
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -113,8 +115,8 @@ const createdView = (c) => {
       summary: edited ? `${c.summary} ${CANARY}` : c.summary,
       status: { name: 'To Do', statusCategory: { key: 'new' } },
       project: { key: c.key.split('-')[0] },
-      issuetype: { name: c.issuetype },
-      ...(c.parent !== null ? { parent: { key: c.parent, fields: { summary: `parent ${CANARY}` } } } : {}),
+      ...(existsSync(join(dir, 'compact')) ? {} : { issuetype: { name: c.issuetype } }),
+      ...(c.parent !== null && !existsSync(join(dir, 'compact')) ? { parent: { key: c.parent, fields: { summary: `parent ${CANARY}` } } } : {}),
       description: adfOf(edited ? `${c.description}\n${CANARY}` : c.description),
     },
   };
