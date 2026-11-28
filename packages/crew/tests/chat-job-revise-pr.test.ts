@@ -66,11 +66,11 @@ class FakeLauncher implements ProposalDispatcher {
 
 interface Rig { svc: ChatProposals; records: ChatTranscriptRecord[]; launcher: FakeLauncher; runsRead: number }
 
-function rig(runs: SessionView[], chatOf: (runId: string) => string | undefined): Rig {
+function rig(runs: SessionView[], chatOf: (runId: string) => string | undefined, repo = 'wicked'): Rig {
   const r: Rig = { svc: null as unknown as ChatProposals, records: [], launcher: new FakeLauncher(), runsRead: 0 };
   const registry = new LaunchOnceRegistry();
   registry.register('job', r.launcher);
-  const chat: ProposalChat = { projectId: null, repos: [{ id: 'wicked', name: 'wicked' }], lead: 'codex', seats: ['codex', 'claude'], analysis: false };
+  const chat: ProposalChat = { projectId: null, repos: [{ id: repo, name: repo }], lead: 'codex', seats: ['codex', 'claude'], analysis: false };
   const deps: ChatProposalDeps = {
     flags: () => ({ context: true, instructions: true, proposals: true, create: false, refine: false, theme: false, demo: false }),
     catalog: CATALOG_SEEDS,
@@ -163,6 +163,43 @@ describe('crew#1840 a chat job that changes a pull request this chat delivered',
     const p = await turn(r, ASK, 'risk');
     expect(p.shape?.card).toBe('risk');
     expect(p.revisesPr).toBeUndefined();
+  });
+});
+
+// crew#2001 — the live Azure DevOps proof's leg E (2026-11-28): in the chat whose bug fix delivered pull request 2 on
+// tiny-math, the person wrote the words below. The card offered a plain bug fix with no PR line and no note, and its
+// Start would have opened a second PR. The delivering run's record is the one `GET /runs/9e76663c-…` served (its
+// `deliverUrl`, `repo_ref`, `chat_id`, `delivery`); the person's words are theirs, verbatim; codex's block chose `bug`.
+const LEG_E_CHAT = '23884eeb-3183-5865-88a7-3bf30e1bba04';
+const LEG_E_RUN = '9e76663c-3118-5800-a712-8f1d62393cc4';
+const LEG_E_PR = 'https://dev.azure.com/mikeparcewski/wicked/_git/tiny-math/pullrequest/2';
+const LEG_E_ASK = 'change the PR you delivered for tiny-math to also cover sum([])';
+const LEG_E_DELIVERED: SessionView = {
+  session: {
+    id: LEG_E_RUN,
+    status: 'completed',
+    repo_ref: 'tiny-math',
+    workflow_id: 'bug',
+    run_branch: `wicked/${LEG_E_RUN}`,
+    title: 'In tiny-math, fix AB#2',
+    channel: 'studio',
+    delivery: 'delivered',
+    deliver_requested: true,
+    deliverUrl: LEG_E_PR,
+    chat_id: LEG_E_CHAT,
+    from_proposal: `${LEG_E_CHAT}:p:3415ffef47caf1cd6e7c`,
+  },
+  units: [],
+} as unknown as SessionView;
+
+describe('crew#2001 a chat job in a chat that delivered a PR says where it delivers, and one click changes it', () => {
+  it('the leg-E words: the card says it opens a NEW pull request and offers "Update pull request #2 instead"', async () => {
+    const r = rig([LEG_E_DELIVERED], (id) => (id === LEG_E_RUN ? CHAT : undefined), 'tiny-math');
+    const p = await turn(r, LEG_E_ASK, 'bug');
+    expect(p.shape?.card).toBe('bug');
+    expect(p.revisesPr).toBeUndefined();
+    expect(p.sentence!.text).toContain('It opens a new pull request; pull request #2, which this chat delivered on tiny-math, is not changed.');
+    expect(p.suggestions?.[0]).toEqual({ label: 'Update pull request #2 instead', edit: { revisesPr: 2 } });
   });
 });
 
