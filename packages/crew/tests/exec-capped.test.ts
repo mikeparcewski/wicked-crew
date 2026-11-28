@@ -21,6 +21,7 @@ import {
   EXEC_MAX_BUFFER_BYTES,
   ExecOutputTooLarge,
   execCapped,
+  execHeadBytes,
   isMaxBufferError,
   resolveMaxBuffer,
 } from '../src/core/exec.js';
@@ -127,5 +128,21 @@ describe('every child process goes through the capped helper (FINDING-016)', () 
     expect(caught).toBeDefined();
     expect(caught).not.toBeInstanceOf(ExecOutputTooLarge);
     expect(isMaxBufferError(caught)).toBe(false);
+  });
+});
+
+// crew#2006 (codex r1): a capped FILE read holds only what it serves, whatever the child would write.
+describe('execHeadBytes: the first bytes of a child, then the child is stopped', () => {
+  it('returns exactly the limit from a child that writes far more (past the exec buffer), and the whole of a short one', async () => {
+    const big = await execHeadBytes(process.execPath, ['-e', 'const b = Buffer.alloc(1 << 20, 120); for (let i = 0; i < 80; i++) process.stdout.write(b)'], 4096, { timeout: 30_000 });
+    expect(big.length).toBe(4096);
+    expect(big.every((x) => x === 120)).toBe(true);
+    const short = await execHeadBytes(process.execPath, ['-e', 'process.stdout.write(Buffer.from([1, 0, 2]))'], 4096);
+    expect([...short]).toEqual([1, 0, 2]);
+  });
+
+  it('a failing child rejects with its exit code; a child past its timeout rejects as killed', async () => {
+    await expect(execHeadBytes(process.execPath, ['-e', 'process.stderr.write("nope"); process.exit(3)'], 10)).rejects.toMatchObject({ code: 3 });
+    await expect(execHeadBytes(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], 10, { timeout: 200 })).rejects.toMatchObject({ killed: true });
   });
 });

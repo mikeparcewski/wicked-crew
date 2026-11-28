@@ -24,7 +24,7 @@
 // allocation in the daemon process. A finite cap with an ACTIONABLE error beats both a 1 MiB
 // silent kill and an OOM.
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { withoutAdoCredential } from './ado-env.js';
 import { childEnvWithBootEstateDb } from './governance-store.js';
@@ -186,4 +186,53 @@ export async function execCapped(
     }
     throw err;
   }
+}
+
+/**
+ * (crew#2006) The first `limit` bytes a child writes to stdout, then the child is stopped: a capped file read that
+ * holds no more than it serves (a 1 GB blob costs `limit` bytes). Same env as {@link execCapped}. A child that ran
+ * past `opts.timeout` is killed and rejects with `killed: true` (the route's "busy" answer); a non-zero exit of its
+ * own rejects with its `code` and stderr; a missing program rejects with ENOENT.
+ */
+export function execHeadBytes(file: string, args: string[], limit: number, opts: Pick<ExecOpts, 'timeout' | 'cwd' | 'env' | 'windowsHide'> = {}): Promise<Buffer> {
+  return new Promise((resolveOut, rejectOut) => {
+    const child = spawn(file, args, { cwd: opts.cwd, env: childEnvFor(file, opts.env ?? process.env), windowsHide: opts.windowsHide ?? true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const chunks: Buffer[] = [];
+    let got = 0;
+    let full = false;
+    let timedOut = false;
+    let stderr = '';
+    const timer = opts.timeout !== undefined ? setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, opts.timeout) : undefined;
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (full) return;
+      const take = chunk.subarray(0, limit - got);
+      chunks.push(take);
+      got += take.length;
+      if (got >= limit) {
+        full = true;
+        child.stdout.destroy();
+        child.kill('SIGTERM');
+      }
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      if (stderr.length < 4096) stderr += chunk.toString('utf8');
+    });
+    child.on('error', (err) => {
+      if (timer !== undefined) clearTimeout(timer);
+      rejectOut(err);
+    });
+    child.on('close', (code, signal) => {
+      if (timer !== undefined) clearTimeout(timer);
+      if (timedOut) {
+        rejectOut(Object.assign(new Error(`${file} did not answer in time`), { killed: true, signal }));
+        return;
+      }
+      // Stopped by us once the prefix was read: the bytes are the answer, whatever it exited with.
+      if (full || code === 0) {
+        resolveOut(Buffer.concat(chunks, got));
+        return;
+      }
+      rejectOut(Object.assign(new Error(`${file} ${args[0] ?? ''} failed: ${stderr.trim().slice(0, 500)}`), { code, signal }));
+    });
+  });
 }

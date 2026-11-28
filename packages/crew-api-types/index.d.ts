@@ -2466,6 +2466,9 @@ export interface OpenPathBody {
  * file read contained against the SAME root set `POST /open` validates (run workdir + extra
  * write roots + registered repo roots). 404 unknown run / missing file; 400 non-absolute path;
  * 403 outside every allowed root (fail-closed, symlink-safe).
+ * (api-types 0.237.0, crew#2006) A finished run whose worktree was reaped is read from its run branch, the same
+ * branch `GET /runs/:id/diff` reads (`source: 'branch'`); a path in neither is still 404. A directory, a submodule or a
+ * symlink in the branch is 400.
  */
 export interface RunFileContent {
   /** The resolved absolute path that was served. */
@@ -2478,6 +2481,11 @@ export interface RunFileContent {
   truncated: boolean;
   /** NUL byte in the first 8 KB — render "binary file · open externally", never the content. */
   binary: boolean;
+  /** (api-types 0.237.0, crew#2006) Optional. `'branch'`: read from the run branch because the run's worktree is
+   *  gone (the run's committed work, not any uncommitted state it had). ABSENT: read from the file on disk. */
+  source?: 'branch';
+  /** (api-types 0.237.0, crew#2006) With `source: 'branch'`: the branch read, as `RunDiff.branch` names it. */
+  branch?: string;
 }
 
 /**

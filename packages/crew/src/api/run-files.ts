@@ -10,8 +10,8 @@
 
 import { constants as fsConstants, promises as fsp, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { ExecCwdMissing, execCapped, ExecOutputTooLarge } from '../core/exec.js';
+import { join, sep } from 'node:path';
+import { ExecCwdMissing, execCapped, execHeadBytes, ExecOutputTooLarge } from '../core/exec.js';
 import { committedScrubReason, deliverExclusionByName, deliverExclusionReason } from '../core/deliver-exclusions.js';
 
 /** File-content cap (DES-FEEDBACK-002 §3.3): past this, `content` holds the first 512 KB and
@@ -82,14 +82,19 @@ export async function readFileCapped(target: string, opts: CappedReadOptions = {
       if (bytesRead === 0) break; // file shrank underneath us — serve what exists
     off += bytesRead;
     }
-    const got = buf.subarray(0, off);
-    if (got.subarray(0, Math.min(off, BINARY_SNIFF_BYTES)).includes(0)) {
-      return { content: '', size, truncated: false, binary: true };
-    }
-    return { content: got.toString('utf8'), size, truncated: size > FILE_CONTENT_CAP_BYTES, binary: false };
+    return cappedContent(buf.subarray(0, off), size);
   } finally {
     await fh.close();
   }
+}
+
+/** The served body of a file's first bytes (at most the cap) and its full size: the NUL sniff, then the text. One
+ *  rule for both sources (the filesystem and the run branch, crew#2006). */
+function cappedContent(got: Buffer, size: number): CappedFileRead {
+  if (got.subarray(0, Math.min(got.length, BINARY_SNIFF_BYTES)).includes(0)) {
+    return { content: '', size, truncated: false, binary: true };
+  }
+  return { content: got.toString('utf8'), size, truncated: size > FILE_CONTENT_CAP_BYTES, binary: false };
 }
 
 /** `GET /runs/:id/diff` 200 body (published as `RunDiff` in wicked-crew-api-types). */
@@ -129,29 +134,11 @@ export async function branchDiff(
   base: string | null,
   relPath?: string,
 ): Promise<WorktreeDiff | null> {
-  const env = { ...process.env, GIT_OPTIONAL_LOCKS: '0' };
-  const gitOut = (args: string[]) =>
-    execCapped('git', args, { timeout: GIT_TIMEOUT_MS, cwd: repoRoot, windowsHide: true, env });
-  // The LOCAL run branch first; when the engine's retention has pruned it (core#449
-  // `WICKED_COMPLETED_WORKTREE_KEEP_DAYS`), the PUSHED copy `refs/remotes/origin/<branch>` still
-  // carries the delivered work — read that, and say so in `branch` (review L-1 of #536).
-  let ref = `refs/heads/${branch}`;
-  let branchLabel = branch;
-  try {
-    await gitOut(['rev-parse', '--verify', '--quiet', ref]);
-  } catch (err) {
-    // `--verify --quiet` on a missing ref is a CLEAN exit 1 — the one verifiable "branch gone".
-    if ((err as { code?: unknown }).code !== 1) throw err;
-    const remote = `refs/remotes/origin/${branch}`;
-    try {
-      await gitOut(['rev-parse', '--verify', '--quiet', remote]);
-      ref = remote;
-      branchLabel = `origin/${branch}`;
-    } catch (remoteErr) {
-      if ((remoteErr as { code?: unknown }).code === 1) return null;
-      throw remoteErr;
-    }
-  }
+  const gitOut = repoGit(repoRoot);
+  const found = await runBranchRef(repoRoot, branch);
+  if (found === null) return null;
+  // The commit the branch named when it was resolved: one tree for the whole read (crew#2006).
+  const { oid: ref, label: branchLabel } = found;
   let baseRev = base;
   if (baseRev === null || baseRev === '') {
     baseRev = null;
@@ -191,6 +178,72 @@ export async function branchDiff(
     return { diff: outBytes.subarray(0, end).toString('utf8'), truncated: true, source: 'branch', branch: branchLabel, base: shortBase };
   }
   return { diff: stdout, truncated: false, source: 'branch', branch: branchLabel, base: shortBase };
+}
+
+/** Read-only git in the REGISTERED repo root: argv only, `GIT_OPTIONAL_LOCKS=0` (an operator or a deliver may be
+ *  writing in it right now). */
+function repoGit(repoRoot: string) {
+  const env = { ...process.env, GIT_OPTIONAL_LOCKS: '0' };
+  return (args: string[]) => execCapped('git', args, { timeout: GIT_TIMEOUT_MS, cwd: repoRoot, windowsHide: true, env });
+}
+
+/**
+ * Where a run's work lives once its worktree is reaped (wave 6; crew#2006 reads files from it too): the LOCAL run
+ * branch first; when the engine's retention has pruned it (core#449 `WICKED_COMPLETED_WORKTREE_KEEP_DAYS`), the
+ * PUSHED copy `refs/remotes/origin/<branch>` still carries the delivered work, labelled `origin/<branch>` (review L-1
+ * of #536). `oid` is the commit it names now: a read uses it, so one request reads one tree even if the ref moves.
+ * `null` when neither exists (nothing was ever committed for the run), or when the name is not a plain branch name: a
+ * run id is a client's string, and `wicked/<id>` must never be read as revision syntax (`:`, `~`, `^`, `@{`, `..`).
+ */
+export async function runBranchRef(repoRoot: string, branch: string): Promise<{ ref: string; oid: string; label: string } | null> {
+  if (!isPlainRef(branch)) return null;
+  const gitOut = repoGit(repoRoot);
+  for (const [ref, label] of [[`refs/heads/${branch}`, branch], [`refs/remotes/origin/${branch}`, `origin/${branch}`]] as const) {
+    try {
+      const { stdout } = await gitOut(['rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`]);
+      const oid = stdout.trim();
+      if (/^[0-9a-f]{40,64}$/.test(oid)) return { ref, oid, label };
+      return null;
+    } catch (err) {
+      // `--verify --quiet` on a missing ref is a CLEAN exit 1 — the one verifiable "branch gone".
+      if ((err as { code?: unknown }).code !== 1) throw err;
+    }
+  }
+  return null;
+}
+
+/** `GET /runs/:id/files` 200 body when the file was read from the run branch (crew#2006). */
+export interface BranchFileRead extends CappedFileRead {
+  source: 'branch';
+  /** The run branch read, as `GET /runs/:id/diff` names it (`origin/<branch>` for the pushed copy). */
+  branch: string;
+}
+
+/**
+ * A file of a run whose worktree is gone, read from the run branch (crew#2006): the same branch `branchDiff` reads,
+ * through {@link runBranchRef}. `relPath` is the contained path made relative to the branch's tree (the caller's
+ * containment comes first). The entry is named once (`ls-tree`: mode, object, size) and its bytes are read by that
+ * object id, so size and bytes are one object. Capped and sniffed as {@link readFileCapped}. `null` when the run has
+ * no branch; `'no-entry'` when the branch has no such file; a directory (the tree root included), a submodule or a
+ * symlink is {@link NotARegularFileError}.
+ */
+export async function branchFileCapped(repoRoot: string, branch: string, relPath: string): Promise<BranchFileRead | 'no-entry' | null> {
+  const found = await runBranchRef(repoRoot, branch);
+  if (found === null) return null;
+  const path = relPath.split(sep).join('/');
+  if (path === '') throw new NotARegularFileError(relPath === '' ? '.' : relPath);
+  if (path.startsWith('../') || path === '..') return 'no-entry';
+  const { stdout } = await repoGit(repoRoot)(['ls-tree', '-l', '-z', '--full-tree', '--end-of-options', found.oid, '--', path]);
+  // `<mode> SP <type> SP <object> SP+ <size> TAB <path>`, NUL-terminated; only the exact path counts (ls-tree matches
+  // its arguments as prefixes of a directory's entries too).
+  const entry = stdout.split('\0').map((line) => /^(\d+) (\w+) ([0-9a-f]+) +(-|\d+)\t(.*)$/s.exec(line)).find((m) => m !== null && m[5] === path);
+  if (entry === undefined || entry === null) return 'no-entry';
+  const [, mode, type, object, sizeText] = entry as unknown as [string, string, string, string, string];
+  if (type !== 'blob' || mode === '120000') throw new NotARegularFileError(relPath, type === 'blob' ? 'a symlink in the run branch' : 'not a regular file');
+  const size = Number(sizeText);
+  // Only the served prefix is read: a blob of any size costs at most the cap (codex r1).
+  const bytes = size === 0 ? Buffer.alloc(0) : await execHeadBytes('git', ['cat-file', 'blob', object], FILE_CONTENT_CAP_BYTES, { timeout: GIT_TIMEOUT_MS, cwd: repoRoot, windowsHide: true, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } });
+  return { ...cappedContent(bytes, size), source: 'branch', branch: found.label };
 }
 
 const GIT_TIMEOUT_MS = 10_000;

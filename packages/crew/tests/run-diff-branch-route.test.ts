@@ -3,7 +3,7 @@
 // engine-recorded `base_commit` (else the merge-base with the default branch); 409 only when there
 // is neither a worktree nor a branch. The live worktree read now says `source: 'worktree'`.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -53,6 +53,7 @@ describe('GET /runs/:id/diff — branch fallback for a reaped worktree (F-7R2-01
   let gone: string;
   let live: string;
   let mainTip: string;
+  let alias: string;
   let app: FastifyInstance;
 
   beforeAll(async () => {
@@ -90,6 +91,26 @@ describe('GET /runs/:id/diff — branch fallback for a reaped worktree (F-7R2-01
     git(repo, 'checkout', '-q', 'main');
     git(repo, 'update-ref', 'refs/remotes/origin/wicked/run-remote-only', 'wicked/run-remote-only');
     git(repo, 'branch', '-q', '-D', 'wicked/run-remote-only');
+    // (crew#2006) A run branch holding a nested file, a directory, a binary file, a file past the 512 KB cap and a
+    // symlink: what GET /files reads from a reaped worktree.
+    git(repo, 'checkout', '-q', '-b', 'wicked/run-files', mainTip);
+    mkdirSync(join(repo, 'src', 'deep'), { recursive: true });
+    writeFileSync(join(repo, 'src', 'deep', 'nested.ts'), 'export const x = 1;\n');
+    writeFileSync(join(repo, 'blob.bin'), Buffer.from([0x47, 0x49, 0x46, 0x00, 0x01, 0x02]));
+    writeFileSync(join(repo, 'big.txt'), 'a'.repeat(600 * 1024));
+    symlinkSync('src/deep/nested.ts', join(repo, 'link.ts'));
+    // The run changed a file the registered checkout (main) also has.
+    writeFileSync(join(repo, 'base.txt'), 'the run changed this\n');
+    git(repo, 'add', '.');
+    // A submodule (gitlink) entry.
+    git(repo, 'update-index', '--add', '--cacheinfo', `160000,${mainTip},vendored`);
+    git(repo, 'commit', '-q', '-m', 'files run');
+    git(repo, 'checkout', '-q', 'main');
+    mkdirSync(join(base, 'worktrees', 'run-swept'), { recursive: true });
+    writeFileSync(join(base, 'worktrees', 'run-swept', 'committed.txt'), 'uncommitted leftover\n');
+    // Another spelling of the scratch dir (a link to it), as macOS's /var -> /private/var is.
+    alias = `${base}-alias`;
+    symlinkSync(base, alias);
     // A LIVE worktree for the source:'worktree' stamp.
     mkdirSync(live);
     git(live, 'init', '-q', '-b', 'main');
@@ -103,6 +124,12 @@ describe('GET /runs/:id/diff — branch fallback for a reaped worktree (F-7R2-01
         view('run-remote-only', gone, 'repo-1'),
         view('run-norepo', gone, null),
         view('run-live', live, 'repo-1'),
+        view('run-files', join(base, 'worktrees', 'run-files'), 'repo-1'),
+        // A worktree being swept: its files are still there, its `.git` link is gone (crew#1057).
+        view('run-swept', join(base, 'worktrees', 'run-swept'), 'repo-1', { run_branch: 'wicked/run-gone' }),
+        // Run ids are a client's strings: `wicked/<id>` must never be read as revision syntax (codex r1).
+        view('run-files:src', join(base, 'worktrees', 'run-files:src'), 'repo-1'),
+        view('run-files~0', join(base, 'worktrees', 'run-files~0'), 'repo-1'),
       ]),
       listRepos: vi.fn().mockResolvedValue([
         { id: 'repo-1', name: 'r', root_path: repo, default_branch: 'main', registered_at: 1 },
@@ -115,6 +142,7 @@ describe('GET /runs/:id/diff — branch fallback for a reaped worktree (F-7R2-01
 
   afterAll(async () => {
     await app.close();
+    rmSync(alias, { force: true });
     removeScratch(base);
   });
 
@@ -174,6 +202,70 @@ describe('GET /runs/:id/diff — branch fallback for a reaped worktree (F-7R2-01
     const noRepo = await getDiff('run-norepo');
     expect(noRepo.statusCode).toBe(409);
     expect((noRepo.json() as { error: string }).error).toMatch(/no longer exists|no run branch/);
+  });
+
+  // crew#2006 — the live proof (run 62ef0b25, 2026-11-28): every [File] read of a finished run answered 404 (`no such
+  // file`) because the worktree was reaped, while [Diff] on the same row read 200 from the run branch.
+  const getFile = (runId: string, path: string) =>
+    app.inject({ method: 'GET', url: `/api/v1/runs/${runId}/files`, query: { path } });
+
+  it('crew#2006: a reaped worktree\'s file is read from the run branch, the same branch its diff reads', async () => {
+    const res = await getFile('run-gone', join(gone, 'committed.txt'));
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ content: 'committed run work\n', size: 19, truncated: false, binary: false, source: 'branch', branch: 'wicked/run-gone' });
+  });
+
+  it('crew#2006: the recorded run_branch, the pushed copy, and a path under the repo root read as the diff does', async () => {
+    expect((await getFile('run-rec', join(gone, 'recorded.txt'))).json()).toMatchObject({ content: 'recorded run work\n', source: 'branch', branch: 'wicked/custom-branch' });
+    expect((await getFile('run-remote-only', join(gone, 'remote-only.txt'))).json()).toMatchObject({ content: 'pushed, then pruned locally\n', branch: 'origin/wicked/run-remote-only' });
+    // The registered checkout is on main, where the run's file is not: the run branch has it.
+    expect((await getFile('run-gone', join(repo, 'committed.txt'))).json()).toMatchObject({ content: 'committed run work\n', source: 'branch' });
+    const filesGone = join(base, 'worktrees', 'run-files');
+    expect((await getFile('run-files', join(filesGone, 'src', 'deep', 'nested.ts'))).json()).toMatchObject({ content: 'export const x = 1;\n', size: 20 });
+  });
+
+  it('crew#2006: the RunFileContent rules hold on the branch: binary sniff, the 512 KB cap, no directory, no symlink', async () => {
+    const filesGone = join(base, 'worktrees', 'run-files');
+    expect((await getFile('run-files', join(filesGone, 'blob.bin'))).json()).toMatchObject({ content: '', size: 6, truncated: false, binary: true });
+    const big = (await getFile('run-files', join(filesGone, 'big.txt'))).json() as { content: string; size: number; truncated: boolean };
+    expect({ size: big.size, truncated: big.truncated, served: big.content.length }).toEqual({ size: 600 * 1024, truncated: true, served: 512 * 1024 });
+    const dir = await getFile('run-files', join(filesGone, 'src'));
+    expect(dir.statusCode).toBe(400);
+    expect(dir.json().error).toContain('not a regular file in the run branch');
+    expect((await getFile('run-files', join(filesGone, 'link.ts'))).statusCode).toBe(400);
+  });
+
+  it('crew#2006 (codex r1): with the worktree gone the branch answers first, never the registered checkout or a half-swept tree', async () => {
+    // main's base.txt is on disk in the registered checkout; the run's version is on its branch.
+    expect((await getFile('run-files', join(repo, 'base.txt'))).json()).toMatchObject({ content: 'the run changed this\n', source: 'branch' });
+    // A worktree being swept (no .git link) still has an uncommitted leftover on disk: the branch answers.
+    expect((await getFile('run-swept', join(base, 'worktrees', 'run-swept', 'committed.txt'))).json()).toMatchObject({ content: 'committed run work\n', source: 'branch' });
+  });
+
+  it('crew#2006 (codex r1): a run id is never read as revision syntax', async () => {
+    // Read as revisions, `wicked/run-files:src` would be the src tree of run-files' branch, and `~0` its tip.
+    const viaColon = await app.inject({ method: 'GET', url: `/api/v1/runs/${encodeURIComponent('run-files:src')}/files`, query: { path: join(base, 'worktrees', 'run-files:src', 'deep', 'nested.ts') } });
+    expect(viaColon.statusCode, viaColon.body).toBe(404);
+    const viaTilde = await app.inject({ method: 'GET', url: `/api/v1/runs/${encodeURIComponent('run-files~0')}/files`, query: { path: join(base, 'worktrees', 'run-files~0', 'base.txt') } });
+    expect(viaTilde.statusCode, viaTilde.body).toBe(404);
+  });
+
+  it('crew#2006 (codex r1): another spelling of the worktree maps to the same branch path; the tree root and a submodule are 400', async () => {
+    expect((await getFile('run-gone', join(alias, 'worktrees', 'run-gone', 'committed.txt'))).json()).toMatchObject({ content: 'committed run work\n', source: 'branch' });
+    expect((await getFile('run-gone', gone)).statusCode).toBe(400);
+    expect((await getFile('run-files', join(base, 'worktrees', 'run-files', 'vendored'))).statusCode).toBe(400);
+  });
+
+  it('crew#2006: what neither the worktree nor the branch has stays 404, and containment is judged first', async () => {
+    expect((await getFile('run-gone', join(gone, 'never-committed.txt'))).statusCode).toBe(404);
+    expect((await getFile('run-gone', join(gone, 'src'))).statusCode).toBe(404);
+    expect((await getFile('run-nobranch', join(gone, 'committed.txt'))).statusCode).toBe(404);
+    expect((await getFile('run-norepo', join(gone, 'committed.txt'))).statusCode).toBe(404);
+    // A file of another run's branch is not this run's: run-gone's branch has no recorded.txt.
+    expect((await getFile('run-gone', join(gone, 'recorded.txt'))).statusCode).toBe(404);
+    expect((await getFile('run-gone', join(tmpdir(), 'outside.txt'))).statusCode).toBe(403);
+    // A live worktree's missing file is not read from any branch.
+    expect((await getFile('run-live', join(live, 'committed.txt'))).statusCode).toBe(404);
   });
 
   it('a LIVE worktree is still read from the tree, stamped source:worktree', async () => {
