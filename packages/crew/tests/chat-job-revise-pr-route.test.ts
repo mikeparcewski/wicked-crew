@@ -145,4 +145,27 @@ describe('crew#1840 Go on a chat job that revises the PR this chat delivered lau
     expect(launched.baseRef).toBe(HEAD);
     expect(launched.deliver).toBe('pr');
   });
+
+  it('crew#2001: the route takes a revision naming where the job delivers, and checks its number against the chat\'s runs', async () => {
+    const made = await app.inject({ method: 'POST', url: `/api/v1/chats/${CHAT}/proposals`, payload: { card: 'bug', source: 'pick', requestId: 'r2001', words: ASK } });
+    expect(made.statusCode, made.body).toBe(201);
+    const p = (made.json() as { view: ChatProposalView }).view.proposal;
+    expect(p.revisesPr?.number).toBe(1);
+    const revise = (revises: string, revisesPr: unknown, requestId: string) =>
+      app.inject({ method: 'POST', url: `/api/v1/chats/${CHAT}/proposals`, payload: { revises, edits: { revisesPr }, source: 'suggestion', requestId } });
+    expect((await revise(p.pid, 'two', 'r2001-bad')).statusCode).toBe(400);
+    expect((await revise(p.pid, 0, 'r2001-zero')).statusCode).toBe(400);
+    // A number this chat's runs did not deliver changes nothing, and says so.
+    const refused = await revise(p.pid, 99, 'r2001-99');
+    expect(refused.statusCode, refused.body).toBe(201);
+    const q = (refused.json() as { view: ChatProposalView }).view.proposal;
+    expect(q.revisesPr?.number).toBe(1);
+    expect(q.sentence!.notes).toContain('Not changed: pull request #99 is not one this chat delivered on wicked');
+    // null: a new pull request, whatever the words said.
+    const fresh = await revise(q.pid, null, 'r2001-new');
+    expect(fresh.statusCode, fresh.body).toBe(201);
+    const n = (fresh.json() as { view: ChatProposalView }).view.proposal;
+    expect(n.revisesPr).toBeUndefined();
+    expect(n.suggestions?.[0]).toEqual({ label: 'Update pull request #1 instead', edit: { revisesPr: 1 } });
+  });
 });

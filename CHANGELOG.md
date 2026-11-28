@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **chat jobs**: a job card in a chat whose earlier job delivered a pull request on the same repository now says where its work goes. It reads "It opens a new pull request; pull request #N, which this chat delivered on <repo>, is not changed." and offers "Update pull request #N instead" as a one-click suggestion. A card that updates a pull request offers "Open a new pull request instead". Before, words that asked to change the delivered pull request without a verb crew knew (the live proof's "change the PR you delivered…") got a card that said nothing and opened a second pull request. The choice is a new revision edit, `revisesPr` (a number or `null`; api-types 0.237.0 adds `ProposalRevisionEdits.revisesPr` and `ArtifactProposal.prChoice`). The daemon checks a number against the pull requests this chat's own runs delivered on the job's repository and never takes it on trust: any other number, or one it can't check because the chat's runs could not be read, changes nothing and a note says so. Moving the job to another repository drops the choice (crew#2001).
+
 ## [0.21.0] — 2026-11-28
 
 Minor release on the train-19 cut dda1624a, carrying 5 PRs since 0.20.1: #1981, #1990, #1988, #1995 and #1994. The minor bump is for the new `PUT /api/v1/repos/:id/seat-base` route (#1990) and the new api-types fields (#1990, #1995).

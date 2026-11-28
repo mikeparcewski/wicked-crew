@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import type { Actor, ArtifactProposal, ChatTranscriptRecord, SessionView } from '../src/core/types.js';
+import type { Actor, ArtifactProposal, ChatTranscriptRecord, ProposalRevisionEdits, SessionView } from '../src/core/types.js';
 import { CoreAdapter } from '../src/core/adapter.js';
 import { CATALOG_SEEDS } from '../src/workflow-catalog/catalog-data.js';
 import { buildWorkflowCatalogV2, resolveOption, servedState, type ServedState } from '../src/workflow-catalog/build-v2.js';
@@ -64,13 +64,13 @@ class FakeLauncher implements ProposalDispatcher {
   async live(): Promise<boolean> { return false; }
 }
 
-interface Rig { svc: ChatProposals; records: ChatTranscriptRecord[]; launcher: FakeLauncher; runsRead: number }
+interface Rig { svc: ChatProposals; records: ChatTranscriptRecord[]; launcher: FakeLauncher; runsRead: number; runsFail: boolean }
 
-function rig(runs: SessionView[], chatOf: (runId: string) => string | undefined, repo = 'wicked'): Rig {
-  const r: Rig = { svc: null as unknown as ChatProposals, records: [], launcher: new FakeLauncher(), runsRead: 0 };
+function rig(runs: SessionView[], chatOf: (runId: string) => string | undefined, repo = 'wicked', more: string[] = []): Rig {
+  const r: Rig = { svc: null as unknown as ChatProposals, records: [], launcher: new FakeLauncher(), runsRead: 0, runsFail: false };
   const registry = new LaunchOnceRegistry();
   registry.register('job', r.launcher);
-  const chat: ProposalChat = { projectId: null, repos: [{ id: repo, name: repo }], lead: 'codex', seats: ['codex', 'claude'], analysis: false };
+  const chat: ProposalChat = { projectId: null, repos: [repo, ...more].map((x) => ({ id: x, name: x })), lead: 'codex', seats: ['codex', 'claude'], analysis: false };
   const deps: ChatProposalDeps = {
     flags: () => ({ context: true, instructions: true, proposals: true, create: false, refine: false, theme: false, demo: false }),
     catalog: CATALOG_SEEDS,
@@ -80,7 +80,11 @@ function rig(runs: SessionView[], chatOf: (runId: string) => string | undefined,
     projectOf: () => null,
     chat: () => chat,
     rosterEligible: () => [{ key: 'codex', name: 'Codex' }, { key: 'claude', name: 'Claude Code' }],
-    runs: async () => (r.runsRead += 1, runs),
+    runs: async () => {
+      r.runsRead += 1;
+      if (r.runsFail) throw new Error('the run store is busy');
+      return runs;
+    },
     chatOfRun: chatOf,
     isAskPath: () => false,
     docsRoot: async () => null,
@@ -110,6 +114,17 @@ async function turn(r: Rig, text: string, entry = 'write-tests'): Promise<Artifa
   const f = [...foldProposals(r.records).values()].find((x) => x.state === 'open');
   expect(f).toBeDefined();
   return f!.proposal;
+}
+
+function open(r: Rig): ArtifactProposal {
+  const f = [...foldProposals(r.records).values()].find((x) => x.state === 'open');
+  expect(f).toBeDefined();
+  return f!.proposal;
+}
+
+/** The person's press on a card (a suggestion's edit, or any revision the studio sends). */
+function press(r: Rig, p: ArtifactProposal, edits: ProposalRevisionEdits, requestId: string) {
+  return r.svc.propose(CHAT, { revises: p.pid, edits, source: 'suggestion', requestId }, ME, 'i1');
 }
 
 describe('crew#1840 a chat job that changes a pull request this chat delivered', () => {
@@ -200,6 +215,87 @@ describe('crew#2001 a chat job in a chat that delivered a PR says where it deliv
     expect(p.revisesPr).toBeUndefined();
     expect(p.sentence!.text).toContain('It opens a new pull request; pull request #2, which this chat delivered on tiny-math, is not changed.');
     expect(p.suggestions?.[0]).toEqual({ label: 'Update pull request #2 instead', edit: { revisesPr: 2 } });
+  });
+
+  it('the press attaches PR #2, Go launches the revision of it; "Open a new pull request instead" detaches it and stays', async () => {
+    const r = rig([LEG_E_DELIVERED], (id) => (id === LEG_E_RUN ? CHAT : undefined), 'tiny-math');
+    const p = await turn(r, LEG_E_ASK, 'bug');
+    expect((await press(r, p, p.suggestions![0]!.edit, 'press-1')).code).toBe(201);
+    const q = open(r);
+    expect(q.revisesPr).toEqual({ number: 2, url: LEG_E_PR, runId: LEG_E_RUN });
+    expect(q.sentence!.text).toContain('It updates pull request #2, which an earlier job of this chat delivered; no new pull request is opened.');
+    expect(q.suggestions?.[0]).toEqual({ label: 'Open a new pull request instead', edit: { revisesPr: null } });
+    expect(jobRevisionLaunch(q)).toEqual({ revisesPr: 2, deliver: 'pr' });
+    // Back to a new pull request, and a later revision of something else keeps that pick.
+    expect((await press(r, q, q.suggestions![0]!.edit, 'press-2')).code).toBe(201);
+    const n = open(r);
+    expect(n.revisesPr).toBeUndefined();
+    expect(n.sentence!.text).toContain('It opens a new pull request; pull request #2, which this chat delivered on tiny-math, is not changed.');
+    expect((await press(r, n, { depth: 'deep' }, 'press-3')).code).toBe(201);
+    expect(open(r).revisesPr).toBeUndefined();
+    // Go on the attached version launched the revision: re-attach and start.
+    const a = open(r);
+    expect((await press(r, a, a.suggestions![0]!.edit, 'press-4')).code).toBe(201);
+    const go = await r.svc.decide(CHAT, open(r).pid, { decision: 'go' }, ME, 'i1');
+    expect(go.code).toBe(200);
+    expect(jobRevisionLaunch(r.launcher.launched[0]!.resolution)).toEqual({ revisesPr: 2, deliver: 'pr' });
+  });
+
+  it('words that attach a PR (crew#1840) get "Open a new pull request instead", and the press wins over the words', async () => {
+    const r = rig([DELIVERED], (id) => (id === RUN ? CHAT : undefined));
+    const p = await turn(r, ASK);
+    expect(p.revisesPr?.number).toBe(1);
+    expect(p.suggestions?.[0]).toEqual({ label: 'Open a new pull request instead', edit: { revisesPr: null } });
+    await press(r, p, { revisesPr: null }, 'press-1');
+    expect(open(r).revisesPr).toBeUndefined();
+    expect(jobRevisionLaunch(open(r))).toEqual({});
+  });
+
+  it('never trusts the number: a PR this chat did not deliver is refused with a plain note, from the person or a seat', async () => {
+    const r = rig([LEG_E_DELIVERED], (id) => (id === LEG_E_RUN ? CHAT : undefined), 'tiny-math');
+    const p = await turn(r, LEG_E_ASK, 'bug');
+    const res = await press(r, p, { revisesPr: 7 }, 'press-1');
+    expect(JSON.stringify(res.body)).toContain('Not changed: pull request #7 is not one this chat delivered on tiny-math');
+    expect(open(r).revisesPr).toBeUndefined();
+    // Another chat's PR with the same repository: not this chat's, so refused too.
+    const other = rig([LEG_E_DELIVERED], () => 'another-chat', 'tiny-math');
+    const o = await turn(other, LEG_E_ASK, 'bug');
+    expect(o.suggestions?.some((s) => 'revisesPr' in s.edit)).toBe(false);
+    await press(other, o, { revisesPr: 2 }, 'press-1');
+    expect(open(other).revisesPr).toBeUndefined();
+  });
+
+  it('a seat\'s revision block naming a PR goes through the same check', async () => {
+    const r = rig([LEG_E_DELIVERED], (id) => (id === LEG_E_RUN ? CHAT : undefined), 'tiny-math');
+    const seatRevises = async (turnId: string, edits: ProposalRevisionEdits): Promise<ArtifactProposal> => {
+      const before = open(r).pid;
+      r.records.push({ at: 3, turnId, kind: 'user', text: 'use the PR', seats: [], owner: true });
+      await r.svc.holdForMessage(CHAT, turnId);
+      r.svc.onReply({ chat: CHAT, cliKey: 'codex', turnId, ok: true, blocks: [JSON.stringify({ revises: before, edits })] });
+      await r.svc.settled();
+      expect(open(r).pid).not.toBe(before);
+      return open(r);
+    };
+    await turn(r, LEG_E_ASK, 'bug');
+    const bad = await seatRevises('t2', { revisesPr: 9 });
+    expect(bad.revisesPr).toBeUndefined();
+    expect(bad.sentence!.notes).toContain('Not changed: pull request #9 is not one this chat delivered on tiny-math');
+    expect((await seatRevises('t3', { revisesPr: 2 })).revisesPr?.number).toBe(2);
+  });
+
+  it('runs that cannot be read: the pick is refused and says so; a repository swap drops a pick', async () => {
+    const r = rig([LEG_E_DELIVERED], (id) => (id === LEG_E_RUN ? CHAT : undefined), 'tiny-math', ['wicked']);
+    const p = await turn(r, LEG_E_ASK, 'bug');
+    r.runsFail = true;
+    const res = await press(r, p, { revisesPr: 2 }, 'press-1');
+    expect(JSON.stringify(res.body)).toContain("Not changed: this chat's delivered pull requests could not be read, so this job can't update pull request #2");
+    expect(open(r).revisesPr).toBeUndefined();
+    r.runsFail = false;
+    await press(r, open(r), { revisesPr: 2 }, 'press-2');
+    expect(open(r).revisesPr?.number).toBe(2);
+    await press(r, open(r), { repoRef: 'wicked' }, 'press-3');
+    expect(open(r).revisesPr).toBeUndefined();
+    expect(open(r).repoRefs).toEqual(['wicked']);
   });
 });
 

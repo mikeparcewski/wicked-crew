@@ -245,6 +245,9 @@ export const RevisionEditsSchema = z.looseObject({
   confirmLoss: z.union([z.literal(true), z.array(z.string().min(1).max(40)).min(1).max(12)]).optional(),
   /** (crew#1884) The person's press on the `stand_in` question; any other use is dropped with a note. */
   standIns: z.literal(true).optional(),
+  /** (crew#2001) Where a pull request job delivers: a pull request this chat delivered (checked against the chat's own
+   *  runs, never taken on trust), or `null` for a new one. */
+  revisesPr: z.int().positive().nullable().optional(),
 });
 
 /** A seat's typed revision block: `{"revises":"<pid>","edits":{…}}`. `null` for anything else. */
@@ -2762,9 +2765,16 @@ export class ChatProposals {
     return { chatId, pid, turnId, seat, chat, served, roster, pool, projectLabel, qeOff, powerPresets, ...(standInsFor !== undefined ? { standInsFor: (w: string | null) => standInsFor(w) } : {}), ...(this.deps.coverage !== undefined ? { coverage: (keys: readonly string[], bound: boolean) => this.deps.coverage!(keys, bound) } : {}), ...extra, ...(refusal !== undefined ? { seatsUnread: true } : {}) };
   }
 
+  /** (crew#2001) {@link deliveredPrs} into a context, with whether the read failed: a pick then can't be checked. */
+  private async withDeliveredPrs<C extends JobContext>(chatId: string, ctx: C): Promise<C> {
+    if (ctx.deliveredPrs !== undefined) return ctx;
+    const { prs, unread } = await this.deliveredPrs(chatId);
+    return { ...ctx, deliveredPrs: prs, ...(unread ? { deliveredPrsUnread: true as const } : {}) };
+  }
+
   /** (crew#1840) The pull requests this chat's runs delivered (a run record's `deliverUrl`), newest run last. A failed
-   *  read is none: the job then opens its own pull request, and its card says so when the words asked otherwise. */
-  private async deliveredPrs(chatId: string): Promise<DeliveredPr[]> {
+   *  read is none and `unread`: the job then opens its own pull request, and its card says so. */
+  private async deliveredPrs(chatId: string): Promise<{ prs: DeliveredPr[]; unread: boolean }> {
     try {
       const out: DeliveredPr[] = [];
       for (const v of await this.deps.runs()) {
@@ -2775,10 +2785,10 @@ export class ChatProposals {
         const repo = (v.session as { repo_ref?: unknown }).repo_ref;
         out.push({ number, url: url as string, runId: v.session.id, repoRef: typeof repo === 'string' ? repo : null });
       }
-      return out;
+      return { prs: out, unread: false };
     } catch (err) {
       this.log(`[proposals] chat ${chatId}: its runs could not be read for a delivered pull request: ${err instanceof Error ? err.message : String(err)}`);
-      return [];
+      return { prs: [], unread: true };
     }
   }
 
@@ -2840,6 +2850,8 @@ export class ChatProposals {
 
   /** Resolve the revision's shape first, then load only the choices that its input checks need. */
   private async mergeJobRevision(parent: ArtifactProposal, edits: ProposalRevisionEdits, ctx: JobContext): Promise<ReturnType<typeof mergeRevision>> {
+    // (crew#2001) A revision naming a pull request is checked against this chat's own delivered ones.
+    if (typeof edits.revisesPr === 'number') ctx = await this.withDeliveredPrs(ctx.chatId, ctx);
     const shape = mergeRevision(parent, {
       ...(edits.card !== undefined ? { card: edits.card } : {}),
       ...(edits.option !== undefined ? { option: edits.option } : {}),
@@ -2950,7 +2962,8 @@ export class ChatProposals {
     ctx = await this.reviewRoster(facts, ctx);
     // (crew#1840) Words that name a pull request: the ones this chat's runs delivered, so a job asked to change one
     // updates it (the resolution decides; it is pure).
-    if (ctx.deliveredPrs === undefined && mentionsPullRequest(facts.words)) ctx = { ...ctx, deliveredPrs: await this.deliveredPrs(chatId) };
+    // (crew#2001) A pick of a pull request is checked against the same read, whatever the words say.
+    if (mentionsPullRequest(facts.words) || typeof facts.prChoice === 'number') ctx = await this.withDeliveredPrs(chatId, ctx);
     if (r?.resolved.inputs.some((i) => i.id === 'documents')) {
       if (facts.inputs['documents'] === undefined) {
         const { binding } = bindingOf(records, ctx.turnId ?? '\u0000');
