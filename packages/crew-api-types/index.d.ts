@@ -7922,6 +7922,75 @@ export interface SystemSettings {
    * 115fabdb: a codex review sat 30 min with no output and ~1 s of seat CPU; pi then did it in 2.
    */
   workerSilentTurnMinutes?: number;
+  // ── Advanced settings (crew#2013, api-types next) ─────────────────────────────────────────────
+  // Each key below is saved here and exported by the daemon as the environment variable named in
+  // its comment, at boot and after every save; the engine reads that variable where it uses it,
+  // so a change applies from the next helper start, turn, check or delivery (work already running
+  // keeps its value). A variable the daemon's host environment already sets wins: the key is then
+  // listed in `SettingsResponse.environment` and a `PUT` naming it is refused 409
+  // {@link SettingsEnvPinnedError}. In a `PUT`, `null` clears a key (its default applies); a
+  // `GET` never returns `null`. Only a person may change these keys (a worker's bearer gets 403).
+  /**
+   * Helpers use this computer's own CLI configs, MCP servers and signed-in accounts instead of
+   * their own separate copies (`WICKED_WORKER_INHERIT_OPERATOR_CONFIG`). Default off. Off deletes
+   * the variable: the engine treats any value, `0` included, as on.
+   */
+  inheritOperatorCliConfig?: boolean | null;
+  /** The longest one helper turn may run, seconds (`WICKED_UNIT_TIMEOUT_SECS`). Integer 300..86400; default 7200. */
+  unitTimeoutSecs?: number | null;
+  /** How long a helper's question waits for a person, seconds (`WICKED_ASK_TIMEOUT_SECS`). Integer 10..3600; default 600. */
+  askTimeoutSecs?: number | null;
+  /** How long a delivery waits for a pull request's required checks, seconds (`WICKED_DELIVER_CHECKS_TIMEOUT_SECS`). Integer 60..14400; default 2700. */
+  deliverChecksTimeoutSecs?: number | null;
+  /** How often a delivery re-reads those checks, seconds (`WICKED_DELIVER_CHECKS_POLL_SECS`). Integer 5..300; default 20. */
+  deliverChecksPollSecs?: number | null;
+  /** The time budget for one chat answer, seconds (`WICKED_CHAT_TURN_SECS`). Integer 60..3600; default 600. */
+  chatTurnSecs?: number | null;
+  /**
+   * Memory limit of each helper container (`WICKED_SEAT_MEMORY`): a whole number of megabytes or
+   * gigabytes, `"<n>m"` or `"<n>g"`, 1g..64g; default `3g`. A repository's own seat memory wins.
+   */
+  seatMemory?: string | null;
+  /** Memory limit of the checks container (`WICKED_FLOOR_MEMORY`): `"<n>m"` or `"<n>g"`, 2g..64g; default `6g`. */
+  floorMemory?: string | null;
+  /** Largest check cache one repository may keep, GB (`WICKED_REPO_CHECKS_CACHE_CAP_GB`). Integer 1..1000; default 20. */
+  checkCacheRepoCapGb?: number | null;
+  /** Largest check cache all repositories together may keep, GB (`WICKED_REPO_CHECKS_TOTAL_CAP_GB`). Integer 1..2000; default 40. */
+  checkCacheTotalCapGb?: number | null;
+  /**
+   * Free disk a check run needs before it starts, GB (`WICKED_FLOOR_MIN_FREE_GB`). Integer 1..500;
+   * default 15. Never 0 here: 0 turns the disk guard off, which only the host environment can do.
+   */
+  floorMinFreeGb?: number | null;
+  /** Days a finished job's worktree is kept (`WICKED_COMPLETED_WORKTREE_KEEP_DAYS`). Integer 0..365 (0 = removed when the job finishes); default 14. */
+  completedWorktreeKeepDays?: number | null;
+  /**
+   * What helpers may reach on the internet (`WICKED_SEAT_EGRESS_HOSTS`): `open` (the default; the
+   * variable is deleted), `allowlist` (only {@link seatEgressHosts}; an empty list reaches
+   * nothing) or `none` (nothing beyond the model gateway, `WICKED_SEAT_EGRESS_HOSTS=none`). Every
+   * choice only narrows the default. `WICKED_SEAT_NETWORK` is not a setting: set on the host it
+   * removes the model gateway too, and it pins this key read-only.
+   */
+  seatNetwork?: 'open' | 'allowlist' | 'none' | null;
+  /**
+   * The hosts an `allowlist` lets helpers reach: lowercase host names, a leading `*.` for a
+   * suffix (`*.crates.io`); at most 100, each at most 253 characters.
+   */
+  seatEgressHosts?: string[] | null;
+  /**
+   * Extra commit trailers on delivered commits (`WICKED_CREW_DELIVER_TRAILERS`, one per line):
+   * each `Token: value` (`Co-Authored-By: Name <address>`), at most 200 characters, no control
+   * characters; at most 10.
+   */
+  deliverTrailers?: string[] | null;
+  /**
+   * The public studio address a pull request links its run to (`WICKED_CREW_PUBLIC_ORIGIN`): an
+   * http(s) ORIGIN only (scheme, host, optional port; no path), not a loopback address. Unset, a
+   * pull request names the run id and carries no link.
+   */
+  publicOrigin?: string | null;
+  /** After-job learnings (`WICKED_CREW_RUN_LEARNINGS`): `off`, `extract` (no helper) or `distill` (the default; spends a helper). */
+  runLearnings?: 'off' | 'extract' | 'distill' | null;
   /**
    * SKIN-OWNED preference blobs (crew#323). The settings store is shared: alongside the
    * engine's keys it carries the studio's own state — `studio.appearance` (accent/logo/theme),
@@ -7977,6 +8046,49 @@ export interface VideoPaletteResponse {
 export interface SettingsResponse {
   settings: SystemSettings;
   path?: string;
+  /**
+   * (crew#2013, api-types next) The Advanced settings the daemon's host environment already sets:
+   * key → the variables found and the value (cut to 200 characters, control characters dropped).
+   * Such a key is read-only: the environment wins and a `PUT` naming it is refused 409. ABSENT on
+   * a daemon before the field; `{}` when nothing is pinned.
+   */
+  environment?: Partial<Record<EnvSettingKey, EnvSettingPin>>;
+}
+
+/** (crew#2013, api-types next) The {@link SystemSettings} keys exported as environment variables. */
+export type EnvSettingKey =
+  | 'inheritOperatorCliConfig'
+  | 'councilSize'
+  | 'councilSpawnStaggerMs'
+  | 'unitTimeoutSecs'
+  | 'askTimeoutSecs'
+  | 'deliverChecksTimeoutSecs'
+  | 'deliverChecksPollSecs'
+  | 'chatTurnSecs'
+  | 'seatMemory'
+  | 'floorMemory'
+  | 'checkCacheRepoCapGb'
+  | 'checkCacheTotalCapGb'
+  | 'floorMinFreeGb'
+  | 'completedWorktreeKeepDays'
+  | 'seatNetwork'
+  | 'seatEgressHosts'
+  | 'deliverTrailers'
+  | 'publicOrigin'
+  | 'runLearnings';
+
+/** (crew#2013, api-types next) A setting the host environment pins: the variables set, and the value. */
+export interface EnvSettingPin {
+  env: string[];
+  value: string;
+}
+
+/** (crew#2013, api-types next) `PUT /settings` → 409 when the patch names a key the host environment pins. */
+export interface SettingsEnvPinnedError {
+  error: string;
+  code: 'env_pinned';
+  key: EnvSettingKey;
+  env: string[];
 }
 
 // ── Requirements management (server-side search + overrides; crew api/requirements.ts) ──
