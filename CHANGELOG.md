@@ -10,6 +10,27 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-11-28
+
+Minor release on the train-19 cut dda1624a, carrying 5 PRs since 0.20.1: #1981, #1990, #1988, #1995 and #1994. The minor bump is for the new `PUT /api/v1/repos/:id/seat-base` route (#1990) and the new api-types fields (#1990, #1995).
+
+Ships with wicked-crew-api-types 0.236.0 (tag api-types-v0.236.0), pins wicked-core-ts ^0.17.0 and bundles wicked-studio 0.18.0. #1990 needs wicked-core's #2023 (core-ts 0.17.0, `setRepoSeatBaseImage`); on an engine without it the route answers 501. The entries below come from each PR's changelog entry, or from its body where it had none (#1995, #1994).
+
+### Added
+
+- **repos**: a repository's own seat base image can be set over HTTP (crew#1984). `PUT /api/v1/repos/:id/seat-base` with `{image}` (or `null` to clear) stores a local image that this repository's seats are built on instead of the daemon's default (wicked-core#2023), and answers with the updated repository. A reference the engine refuses is a 400 in its words; an engine without the setting is a 501. api-types 0.236.0 adds `RepoEntry.seat_base_image`, `RepoEntry.seat_layers` and `SetRepoSeatBaseRequest` (#1990).
+- **publish**: product publish takes a compose whose plan a person edited at its gate (the engine applies the edit since wicked-core#1929). The card says it is the edited plan (`edited.planRev`). A gate edit with a note, or any change crew cannot prove was a person's edit at the gate, is still refused in plain words (#1902, #1988).
+
+### Fixed
+
+- **gate**: requests that read the same gate at once (studio's surfaces reading one gate together) no longer each run an engine read of its answers side by side. Normally one runs at a time, and the requests that arrive during it share the next one, so each answer is still as fresh as the request. A read that runs past 10 s (`GATE_READ_STALL_MS`) releases its waiters, whose read then starts while the stalled one is left to finish, so two reads can run at once in that case (#1950, #1981).
+- **learn**: the steering draft read (`GET /governance/steering/author/:runId/draft`) names the gate opening it was read at, as `gateOrd` and `gateSeq` (api-types `SteeringDraftResponse`) when `ready`. An answer that carries them after the gate re-opened is refused (409 `gate_changed`) instead of landing on an opening the person did not review. `POST /runs/:id/gate` is unchanged, so an older studio that sends neither field behaves as before. This is the crew half of crew#1982; the studio half (studio#1510, in wicked-studio 0.18.0, which this release bundles) sends the two fields (#1995).
+- **runs**: the kept run facts beside the store (`<db>.run-facts.jsonl`, crew#1880) are bound to each run's end time (`finished_at`) as well as its problem. A store copied over the live db file in place no longer serves an old run's launch name and `ended_at` for a new run with the same id and problem, unless the new run also ended in the same millisecond (or neither run has a `finished_at`, an engine before the field). A facts file found at start that is started over for an older format, an unknown format, an unreadable header or another store file now logs one warn line saying why; an existing empty file is started over silently, as a missing one is (crew#1891, #1994).
+
+### Upgrade note (one time)
+
+- **run facts format 2** (#1994): a facts file in the older format is started over once, with one warn line. Each terminal run's log is then read once to re-derive its facts, so the first run list after the upgrade is slow once at about 4k runs, then warm.
+
 ## [0.20.1] — 2026-11-27
 
 Patch release on main 5a881a24 (train 18), carrying 11 PRs since the 0.20.0 cut 993a5051: #1962, #1963, #1967, #1968, #1971, #1973, #1975, #1976, #1977, #1979 and #1980. The entries below come from each PR's changelog entry; #1963 and #1971 are CI only and have no entry.
