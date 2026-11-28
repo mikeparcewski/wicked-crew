@@ -28,6 +28,7 @@ import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { registerDef } from '../support/register-def.js';
 import { createServer } from '../../src/api/server.js';
+import { deliveredCommitFor, deliverUnitOf } from '../../src/api/delivery-index.js';
 import { removeScratch } from '../setup/scratch.js';
 import { baseSkillOff } from '../setup/base-skill-off.js';
 import { deliveryCannotCome, optInWhenFloorCannotArm } from '../support/nested-floor.js';
@@ -289,6 +290,22 @@ describe('crew#393 end to end — default-on delivery, stranded surfacing, post-
     // And it carries the work the Tool phase wrote.
     const files = git(origin, 'show', '--name-only', '--format=', `wicked/${runId}`).trim();
     expect(files).toContain('crew-e2e-work.txt');
+
+    // (crew#2008) The anchor the delivered-commit read keys on is in the engine's own run log, in the shape the unit
+    // tests (tests/delivery-commit.test.ts) copy: a `unitDispatched {session, ord, attempt}` frame for the deliver
+    // unit, with the run's `seq`. With nothing dispatched after it, the record reads the pushed branch tip.
+    const runView = (await adapter.runView(runId))!;
+    const deliverOrd = deliverUnitOf(runView)!.ord;
+    const events = (await adapter.runEvents(runId))!;
+    const deliverDispatch = events.filter((e) => e.type === 'unitDispatched' && (e as { ord?: unknown }).ord === deliverOrd);
+    expect(deliverDispatch.length).toBeGreaterThanOrEqual(1);
+    for (const e of deliverDispatch) {
+      expect(e).toMatchObject({ type: 'unitDispatched', session: runId, ord: deliverOrd });
+      expect(typeof (e as { attempt?: unknown }).attempt).toBe('number');
+      expect(typeof e.seq).toBe('number');
+    }
+    const commit = await deliveredCommitFor(runView, async () => clone, undefined, (id) => adapter.runEvents(id));
+    expect(commit).toBe(git(origin, 'rev-parse', `refs/heads/wicked/${runId}`).trim());
   }, 120_000);
 
   it("deliver:'none' completes stranded (the 83052f0b shape); POST /runs/:id/deliver lifts it", async () => {
