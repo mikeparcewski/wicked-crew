@@ -176,6 +176,17 @@ describe('GET /runs/:id/diff — branch fallback for a reaped worktree (F-7R2-01
     expect((noRepo.json() as { error: string }).error).toMatch(/no longer exists|no run branch/);
   });
 
+  // crew#2006 — the live proof (run 62ef0b25, 2026-11-28): every [File] read of a finished run answered 404 (`no such
+  // file`) because the worktree was reaped, while [Diff] on the same row read 200 from the run branch.
+  const getFile = (runId: string, path: string) =>
+    app.inject({ method: 'GET', url: `/api/v1/runs/${runId}/files`, query: { path } });
+
+  it('crew#2006: a reaped worktree\'s file is read from the run branch, the same branch its diff reads', async () => {
+    const res = await getFile('run-gone', join(gone, 'committed.txt'));
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ content: 'committed run work\n', size: 19, truncated: false, binary: false, source: 'branch', branch: 'wicked/run-gone' });
+  });
+
   it('a LIVE worktree is still read from the tree, stamped source:worktree', async () => {
     const body = (await getDiff('run-live')).json() as Body;
     expect(body.source).toBe('worktree');
