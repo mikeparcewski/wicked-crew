@@ -154,6 +154,25 @@ describe('deliver text grants (crew#1885)', () => {
     }
   });
 
+  it('counts the deliver unit a send-back left pending, as it counted it before the send-back (crew#2004)', () => {
+    // The engine's own writes: the plan stamps every unit `distributed` (wicked-core src/pipeline.rs:849,
+    // `apply_distributions`), and a send-back's rewind stamps every unit after its target `pending` (wicked-core
+    // src/actor.rs:24049, `rewind_writes`; the target itself goes back to `distributed`). Dispatch writes no status, so
+    // the deliver unit runs its script still reading `pending` once the run had any rework (the release cert: 4 of 4).
+    const d = deliverUnit('pending');
+    const units = [
+      { id: `${RUN}:fix`, status: 'done', tool_cmd: null },
+      { id: `${RUN}:review`, status: 'done', tool_cmd: null },
+      d.unit,
+    ];
+    expect(deliverTextAllowed(units, d.key, false)).toBe(true);
+    // The same unit before any send-back reads `distributed`, and counts the same.
+    expect(deliverTextAllowed([{ ...d.unit, status: 'distributed' }], d.key, false)).toBe(true);
+    // Still only its own key, and nothing once the run has ended.
+    expect(deliverTextAllowed(units, 'f'.repeat(64), false)).toBe(false);
+    expect(deliverTextAllowed(units, d.key, true)).toBe(false);
+  });
+
   it('never reads a key file out of another command: a deliverable path a worker declared, or a deliver-looking script on another unit (codex r1)', () => {
     const d = deliverUnit('distributed');
     // The real deliverable-floor command, whose argv carries the declared paths verbatim.
