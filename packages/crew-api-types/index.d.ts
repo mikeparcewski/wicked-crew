@@ -17847,12 +17847,20 @@ export interface ProductComposeResponse {
  * `unresolved` (with the `publication`) · `journal_unreadable` · `in_progress` (this daemon is sending or resolving it) · `not_unsure` · `resolve_differs`;
  * 503 `registry_unavailable` · `source_unavailable` · `journal_unavailable`. Audited `product.publish` and
  * `product.publish.resolve`.
+ *
+ * (api-types next, wicked-crew#1901) A Jira project linked to the project itself is a target too: `repo` names it as
+ * `KEY@<cloudId>` (or `<source>:KEY@<cloudId>`), the `repo` of its entry in `targets`. Each item becomes one Jira issue:
+ * an epic the project's Epic type, a feature a standard type under it (Story, else Task), a story the project's subtask
+ * type under its feature, each linked by Jira's `parent` field. `resolve.issue` is then the issue key (`PROJA-12`).
+ * More refusals for Jira: 409 `write_tool_shape` (the saved `createJiraIssue` does not take an argument publishing
+ * needs) · `issue_type_missing` (the project has no type for a level the plan has) · `read_tool_off` (no saved,
+ * switched-on `getJiraIssue` to read the issues back).
  */
 export interface ProductPublishBody {
   runId: string;
   repo: string;
   confirm?: string;
-  resolve?: { key: string; issue: number | null };
+  resolve?: { key: string; issue: number | string | null };
 }
 
 /**
@@ -17866,6 +17874,8 @@ export interface PublishItem {
   title: string;
   body: string;
   parentKey: string | null;
+  /** (api-types next, wicked-crew#1901) Jira only: the issue type it is created as (the project's own name for it). */
+  issueType?: string;
 }
 
 /** What a confirm would create, where, and as whom. */
@@ -17886,6 +17896,13 @@ export interface ProductPublishCard {
    * it. A person sees it on the card, and it is part of the hash they confirm.
    */
   edited?: { planRev: number };
+  /**
+   * (api-types next, wicked-crew#1901) `jira` for a Jira project: `repo` is then `KEY@<cloudId>`, `site` the site's host
+   * (`acme.atlassian.net`, or its cloudId when it was linked without one) and `identity` the Atlassian account id it
+   * posts as. Absent for GitHub.
+   */
+  system?: 'jira';
+  site?: string;
 }
 
 /**
@@ -17909,10 +17926,20 @@ export interface PublicationItemState {
   readBack: 'ok' | 'differs' | 'unreadable' | null;
   /** Why it is `not_sent` or `unsure`. */
   why?: string;
+  /**
+   * (api-types next, wicked-crew#1901) Jira only: the issue key it was created as (`number` is then `null`). Its
+   * `readBack` is `ok` when Jira shows the approved summary and a description with the same words (letters and digits,
+   * links aside: markup and escapes are the server's conversion to and from ADF), and, when Jira answers its full view
+   * (one that names the issue type), the approved issue type and parent. The Atlassian v2 server's compact view leaves
+   * both out (atlassian-mcp-server#256); then they are not judged.
+   */
+  ref?: string;
 }
 
 /** One run published to one repository. `published`: every item `created` and read back `ok`. */
 export interface PublicationState {
+  /** (api-types next, wicked-crew#1901) `jira` for a Jira project (`repo` is `KEY@<cloudId>`); absent for GitHub. */
+  system?: 'jira';
   repo: string;
   source: string;
   publishHash: string;
@@ -17933,7 +17960,12 @@ export type ProductPublishResponse =
 export interface ProductPublicationsResponse {
   runId: string;
   publishable: { ok: true; items: number } | { ok: false; code: string; error: string };
-  targets: Array<{ repo: string; source: string }>;
+  /**
+   * (api-types next, wicked-crew#1901) A Jira project has `system: 'jira'`, a `label` to show (`PROJA on
+   * acme.atlassian.net`) and its own `publishable`: the plan judged by Jira's text rules (a summary of at most 255
+   * characters, for one). The top-level `publishable` is GitHub's, as before.
+   */
+  targets: Array<{ repo: string; source: string; system?: 'jira'; label?: string; publishable?: { ok: true; items: number } | { ok: false; code: string; error: string } }>;
   publications: PublicationState[];
 }
 

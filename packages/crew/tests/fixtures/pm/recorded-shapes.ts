@@ -13,6 +13,10 @@
 //    answers `{issues, nextPageToken, isLast}` (issues `{key, fields}`), comments `{appliedContentFormat, comments}`.
 //  - A5 atlassian/atlassian-mcp-server#118, #221, #225: the enveloped search `{issues: {totalCount, nodes, remainingCount,
 //    webUrl, pageInfo}}`, nodes carrying `webUrl` (`https://<site>/browse/<KEY>`).
+//  - A7 (crew#1901) `createJiraIssue`: atlassian/atlassian-mcp-server skills/spec-to-backlog/SKILL.md (create an Epic, then
+//    children with `parent` = the epic's key; the answer `{key, id, self}`, `self` a REST URL); the failure shapes from
+//    #202 (the answer names an unrelated, existing issue), #279 (`{error: 'INVALID_FIELD_VALUE', field, reason}`, a STRING
+//    error) and #132 (duplicates on one call). The v2 server may wrap it as `{data: …}` (A1, A2); crew reads both.
 //  - A6 `listJiraIssueComments` (v2 tool description, the server's tools/list): `{comments, startAt, maxResults, total,
 //    isLast}`, each comment with `visibility`, `jsdPublic`, `parentId`.
 //
@@ -57,6 +61,10 @@ export const atlassianV2 = {
   authError: text('{"error":true,"message":"Failed to fetch accessible products: 401","statusCode":401}'),
   /** A1: an error flagged `isError`, its words naming a vendor detail. */
   flaggedError: { isError: true, content: [{ type: 'text', text: '{"error":true,"message":"getJiraIssue failed: 404. Details: {\\"errors\\":[{\\"status\\":404}]}","statusCode":404}' }] },
+  /** A7 (crew#1901): a create's answer, bare, its `self` in the site's own form. */
+  created: text(`{"key":"PROJA-100","id":"10100","self":"${SITE_URL}/rest/api/3/issue/10100"}`),
+  /** A7, #279: a create refused with a STRING `error` (no `isError`, no `error: true`). */
+  createInvalidField: text('{"error":"INVALID_FIELD_VALUE","field":"versions","reason":"Field \\"versions\\" was not found in the project\'s issue type metadata."}'),
   /** A #213-style answer with a `context` sibling beside `data`. */
   resourcesWithContext: text(`{"data":{"resources":[{"cloudId":"${SITE_ID}","url":"${SITE_URL}","products":[{"id":"jira"}]}]},"context":{"mcpClientName":"unknown","endpoint":"v2:streamable-http"}}`),
 };

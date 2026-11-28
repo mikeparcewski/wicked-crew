@@ -19,6 +19,13 @@
  * resends: an item whose outcome crew cannot prove is `unsure` until a person resolves it. "Published" is the journal
  * plus a read-back of every created issue, never the run's own claim.
  *
+ * (crew#1901, DES-1901) A Jira project linked to the project itself is a target too (`KEY@<cloudId>`,
+ * {@link projectJiraTracker}): each plan item becomes one Jira issue through the source's saved `createJiraIssue` (its
+ * argument names from the saved schema, the `cloudId` crew's own), an epic as the project's Epic type, a feature as a
+ * standard type under it (Story, else Task), a story as the project's subtask type under its feature, each linked by
+ * Jira's `parent` field. An item is `created` only once reading the answered key back shows THIS item; the read-back
+ * compares the summary, the type, the parent and the description's words ({@link publishWords}).
+ *
  * A publication is sent or resolved by one request at a time IN THIS DAEMON (the slot), as tracker actions are
  * (`actions.ts` inFlight) and settings writes (`adapter.ts` updateSettings): the state-home fence does not make one
  * daemon per home, and a second daemon on the same state home is not covered here either.
@@ -48,9 +55,22 @@ import type {
 import { canonicalJson } from '../mcp/classify.js';
 import { configOf, pmDescriptorHash } from '../mcp/registry.js';
 import { mcpStateDir, type McpRegistryStore } from '../mcp/registry-store.js';
-import { bindingInForce, githubUrlIdentity, readPayload, vendorText } from '../knowledge/trackers/bindings.js';
+import { bindingInForce, githubUrlIdentity, JIRA_ISSUE_KEY, jiraProof, readPayload, vendorText } from '../knowledge/trackers/bindings.js';
 import { liveTool, type PmGate, projectOptsVia } from '../knowledge/trackers/gate-pm.js';
-import { type PmEntry, pmEntriesOf, projectGithubTargets, projectGithubTracker, type RepoSelector, parseRepoSelector, type TrackerSetEntry } from '../knowledge/trackers/set.js';
+import {
+  type JiraSelector,
+  jiraTargetOf,
+  parseJiraSelector,
+  type PmEntry,
+  pmEntriesOf,
+  projectGithubTargets,
+  projectGithubTracker,
+  projectJiraTargets,
+  projectJiraTracker,
+  type RepoSelector,
+  parseRepoSelector,
+  type TrackerSetEntry,
+} from '../knowledge/trackers/set.js';
 
 const V = API_PREFIX;
 
@@ -64,7 +84,8 @@ const PARENT = '{{parent}}';
 
 export interface ProductPublishDeps {
   store?: Pick<McpRegistryStore, 'read'>;
-  pm?: Pick<PmGate, 'vendorRead'>;
+  /** `personOp` reads a Jira project's issue types (crew#1901); a gate without it publishes to GitHub only. */
+  pm?: Pick<PmGate, 'vendorRead'> & Partial<Pick<PmGate, 'personOp'>>;
   /** Whether the project exists (`false` = 404). */
   projectExists: (projectId: string) => Promise<boolean>;
   /** The compose facts a run's launch recorded (RunTimingIndex.composeOf). */
@@ -248,30 +269,93 @@ function titleRefusal(t: string): string | null {
   return null;
 }
 
+/** (crew#1901) Why a Jira summary would not read back as written, or `null`. */
+function jiraTitleRefusal(t: string): string | null {
+  const c = strippedCharacter(t);
+  if (c !== null) return `has an invisible character (${c}) that crew cannot read back from Jira`;
+  if (t.length > JIRA_SUMMARY_MAX) return `is longer than the ${JIRA_SUMMARY_MAX} characters a Jira summary holds`;
+  return null;
+}
+
 /** The footer every body ends with: a visible line and a marker naming the run and the item. */
 export function publishFooter(runId: string, key: string): string {
   return `\n\n---\nPublished by wicked-crew from run ${runId}\n<!-- wicked-publish run=${runId} key=${key} -->`;
 }
 
+/** Where a plan is published: a GitHub repository, or (crew#1901) a Jira project. */
+export type PublishSystem = 'github' | 'jira';
+
+/** (crew#1901) What a Jira summary holds. */
+export const JIRA_SUMMARY_MAX = 255;
+/**
+ * (crew#1901) A Jira description's budget: under what the read-back keeps of it (`PM_TEXT_MAX`), with room for the
+ * escapes and markup the server's conversion to and from ADF may add.
+ */
+export const JIRA_BODY_MAX = 5_000;
+
+/**
+ * (crew#1901) The footer a Jira description ends with: one visible line naming the run and the item, and a check word
+ * (hex of sha256 over the exact run id and key) that survives the word comparison: words alone would make runs `r-1`
+ * and `r.1` one footer (codex on #1997). No HTML comment (ADF has no form for one) and no rule: the read-back finds it
+ * by its words ({@link publishWords}).
+ */
+export function jiraFooter(runId: string, key: string): string {
+  const check = sha256Hex(`${runId}\u0000${key}`).slice(0, 20);
+  return `\n\nPublished by wicked-crew from run ${runId} (item ${key}, check ${check})`;
+}
+
+/** A link, left out of the word comparison on both sides: a server may turn it into a card with no text. */
+const LINK = /\b(?:[a-z][a-z0-9+.-]*:\/\/|www\.|mailto:)\S*/giu;
+
+/** The character references a markdown conversion decodes, as their characters. */
+const REFS: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+const decodeRefs = (s: string): string =>
+  s.replace(/&(#[0-9]{1,7}|#x[0-9a-f]{1,6}|[a-z]{2,8});/gi, (m, r: string) => {
+    if (r[0] !== '#') return REFS[r.toLowerCase()] ?? m;
+    const cp = r[1] === 'x' || r[1] === 'X' ? parseInt(r.slice(2), 16) : parseInt(r.slice(1), 10);
+    return cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
+  });
+
+/**
+ * (crew#1901) The words of a text: its runs of letters and digits (NFC), one space apart, with character references
+ * and markdown escapes decoded, links left out, and inline markup that can join two runs (`*`, `_`, `~`, a backtick) dropped, so `**can**not`
+ * is `cannot` on both sides (codex on #1997). A Jira description is compared by its words because markdown to ADF and
+ * back is the server's conversion, which may change markup, escapes and line breaks but not the words.
+ */
+export function publishWords(s: string): string {
+  // A markdown escape (`\_`) is its character; then the joining marks go.
+  return (decodeRefs(s.normalize('NFC')).replace(/\\([!-/:-@[-`{-~])/g, '$1').replace(LINK, ' ').replace(/[*_~`]/g, '').match(/[\p{L}\p{N}]+/gu) ?? []).join(' ');
+}
+
 /** The card's items from a plan, or the first item that cannot be published as written. */
-export function publishItems(runId: string, plan: Plan, facts: ComposeFacts): { ok: true; items: PublishItem[] } | { ok: false; error: string } {
+export function publishItems(runId: string, plan: Plan, facts: ComposeFacts, system: PublishSystem = 'github'): { ok: true; items: PublishItem[] } | { ok: false; error: string } {
+  const jira = system === 'jira';
+  /** A checklist line: GitHub's task box; a plain list item for Jira (its conversion owns the task form). */
+  const box = jira ? '- ' : '- [ ] ';
   const selected = new Set(facts.requirements.map((r) => `${r.repoId}\u0000${r.key}`));
   const covered = new Set<string>();
   const items: PublishItem[] = [];
   const title = (key: string, raw: string): string | { error: string } => {
     const t = oneLine(normal(raw));
     if (t === '') return { error: `${key} has an empty title` };
-    const why = titleRefusal(t);
+    const why = jira ? jiraTitleRefusal(t) : titleRefusal(t);
     return why === null ? t : { error: `the title of ${key} ${why}` };
   };
   const text = (key: string, raw: string): string | { error: string } => {
     const t = oneLine(normal(raw));
     const c = strippedCharacter(t);
-    if (c !== null) return { error: `${key} has an invisible character (${c}) that GitHub's server removes` };
-    if (t.includes(PARENT)) return { error: `${key} has the text ${PARENT}, which crew uses for the parent issue` };
+    if (c !== null) return { error: `${key} has an invisible character (${c}) that ${jira ? 'crew cannot read back from Jira' : "GitHub's server removes"}` };
+    if (!jira && t.includes(PARENT)) return { error: `${key} has the text ${PARENT}, which crew uses for the parent issue` };
     return t;
   };
   const push = (key: string, kind: PublishItem['kind'], t: string, lines: string[], parentKey: string | null): string | null => {
+    if (jira) {
+      // The parent is Jira's own field, never a line of the description.
+      const body = `${lines.join('\n')}${jiraFooter(runId, key)}`;
+      if (body.length > JIRA_BODY_MAX) return `${kind} ${key} is too long to publish`;
+      items.push({ key, kind, title: t, body, parentKey });
+      return null;
+    }
     const body = `${lines.join('\n')}${parentKey !== null ? `\n\nPart of ${PARENT}` : ''}${publishFooter(runId, key)}`;
     if (body.split(PARENT).join(PARENT_REF_MAX).length > PUBLISH_BODY_MAX) return `${kind} ${key} is too long to publish`;
     items.push({ key, kind, title: t, body, parentKey });
@@ -311,18 +395,18 @@ export function publishItems(runId: string, plan: Plan, facts: ComposeFacts): { 
         const st = title(sk, s.title);
         if (typeof st !== 'string') return { ok: false, ...st };
         const lines: string[] = ['Acceptance criteria:'];
-        if (s.acceptance.length === 0) lines.push('- [ ] (none given)');
+        if (s.acceptance.length === 0) lines.push(`${box}(none given)`);
         for (const a of s.acceptance) {
           const t = text(sk, a);
           if (typeof t !== 'string') return { ok: false, ...t };
-          lines.push(`- [ ] ${t}`);
+          lines.push(`${box}${t}`);
         }
         if ((s.tasks ?? []).length > 0) {
           lines.push('', 'Tasks:');
           for (const [ti, task] of (s.tasks ?? []).entries()) {
             const tt = title(`${sk} task ${ti + 1}`, task.title);
             if (typeof tt !== 'string') return { ok: false, ...tt };
-            lines.push(`- [ ] ${tt}`);
+            lines.push(`${box}${tt}`);
           }
         }
         const serr = push(sk, 'story', st, lines, fk);
@@ -337,7 +421,7 @@ export function publishItems(runId: string, plan: Plan, facts: ComposeFacts): { 
 
 /** The ordered publication content, each body a template (`{{parent}}` for the parent's issue). */
 export function contentShaOf(items: readonly PublishItem[]): string {
-  return sha256Hex(canonicalJson(items.map((i) => ({ key: i.key, kind: i.kind, title: i.title, body: i.body, parentKey: i.parentKey }))));
+  return sha256Hex(canonicalJson(items.map((i) => ({ key: i.key, kind: i.kind, title: i.title, body: i.body, parentKey: i.parentKey, ...(i.issueType !== undefined ? { issueType: i.issueType } : {}) }))));
 }
 
 /** One run published to one repository, whatever connector reaches it. */
@@ -354,7 +438,7 @@ const sameGate = (g: unknown): boolean => typeof g === 'object' && g !== null &&
  * instructions a person changed at the plan's gate is taken as edited when {@link gateEditOf} proves it; `edited`
  * names the revision.
  */
-export async function composedPlan(deps: Pick<ProductPublishDeps, 'composeOf' | 'runView' | 'workOutput'>, projectId: string, runId: string): Promise<{ ok: true; facts: ComposeFacts; items: PublishItem[]; edited: { planRev: number } | null } | Refusal> {
+export async function composedPlan(deps: Pick<ProductPublishDeps, 'composeOf' | 'runView' | 'workOutput'>, projectId: string, runId: string, system: PublishSystem = 'github'): Promise<{ ok: true; facts: ComposeFacts; items: PublishItem[]; edited: { planRev: number } | null } | Refusal> {
   const view = await deps.runView(runId);
   if (view === undefined) return refuse(404, 'run_not_found', `no run ${runId}`);
   const facts = deps.composeOf(runId);
@@ -416,30 +500,50 @@ export async function composedPlan(deps: Pick<ProductPublishDeps, 'composeOf' | 
     const why = parsed.error.issues.slice(0, 3).map((i) => `${i.path.join('.') || 'plan'}: ${i.message}`).join('; ');
     return refuse(409, 'plan_unreadable', `the draft's plan is not the shape Compose asks for (${why})`);
   }
-  const items = publishItems(runId, parsed.data, facts);
+  const items = publishItems(runId, parsed.data, facts, system);
   if (!items.ok) return refuse(409, 'plan_unreadable', items.error);
   return { ok: true, facts, items: items.items, edited: edited === null ? null : { planRev: edited } };
 }
 
 // ── The journal ────────────────────────────────────────────────────────────────────────────────────────
 
-const ItemSchema = z.strictObject({ key: z.string().min(1).max(40), kind: z.enum(['epic', 'feature', 'story']), title: z.string(), body: z.string(), parentKey: z.string().nullable() });
-const CardSchema = z.strictObject({ runId: z.string(), projectId: z.string(), repo: z.string(), source: z.string(), identity: z.string(), items: z.array(ItemSchema).min(1).max(PUBLISH_ITEMS_MAX), edited: z.strictObject({ planRev: z.number().int().positive() }).optional() });
+const ItemSchema = z.strictObject({ key: z.string().min(1).max(40), kind: z.enum(['epic', 'feature', 'story']), title: z.string(), body: z.string(), parentKey: z.string().nullable(), issueType: z.string().optional() });
+const CardSchema = z.strictObject({
+  runId: z.string(),
+  projectId: z.string(),
+  repo: z.string(),
+  source: z.string(),
+  identity: z.string(),
+  items: z.array(ItemSchema).min(1).max(PUBLISH_ITEMS_MAX),
+  edited: z.strictObject({ planRev: z.number().int().positive() }).optional(),
+  system: z.literal('jira').optional(),
+  site: z.string().optional(),
+});
+/** (crew#1901) A Jira issue key, as crew keeps one. */
+const JiraKey = z.string().regex(JIRA_ISSUE_KEY);
 const Envelope = { v: z.literal(1), publication: z.string(), runId: z.string(), projectId: z.string(), repo: z.string(), at: z.string(), by: z.string() };
 const LineSchema = z.discriminatedUnion('kind', [
   z.strictObject({ ...Envelope, kind: z.literal('approved'), publishHash: z.string(), contentSha: z.string(), card: CardSchema, sourceId: z.string(), trackerId: z.string(), descriptor: z.string(), principal: z.string() }),
   z.strictObject({ ...Envelope, kind: z.literal('sending'), key: z.string() }),
-  z.strictObject({ ...Envelope, kind: z.literal('created'), key: z.string(), number: z.number().int().positive(), url: z.string() }),
+  // A GitHub issue is `number`; a Jira one (crew#1901) is `ref`, its key, with no number.
+  z.strictObject({ ...Envelope, kind: z.literal('created'), key: z.string(), number: z.number().int().positive().optional(), ref: JiraKey.optional(), url: z.string().nullable() }).refine((l) => (l.number === undefined) !== (l.ref === undefined) && (l.url !== null || l.ref !== undefined)),
   z.strictObject({ ...Envelope, kind: z.literal('not_sent'), key: z.string(), reason: z.string() }),
   z.strictObject({ ...Envelope, kind: z.literal('unsure'), key: z.string(), why: z.string() }),
-  z.strictObject({ ...Envelope, kind: z.literal('resolved'), key: z.string(), number: z.number().int().positive().nullable(), url: z.string().nullable() }),
+  z.strictObject({ ...Envelope, kind: z.literal('resolved'), key: z.string(), number: z.number().int().positive().nullable(), ref: JiraKey.optional(), url: z.string().nullable() }).refine((l) => l.ref === undefined || l.number === null),
 ]);
 type Line = z.infer<typeof LineSchema>;
+/**
+ * A card as the journal holds it, as the wire types it: zod infers an optional key as `T | undefined`, while the parse
+ * never sets a key it did not read (the same object, typed for `exactOptionalPropertyTypes`).
+ */
+const journalCard = (c: z.infer<typeof CardSchema>): ProductPublishCard => c as ProductPublishCard;
 type Approved = Extract<Line, { kind: 'approved' }>;
 
 interface ItemFold {
   state: 'created' | 'sending' | 'not_sent' | 'unsure' | 'absent';
   number: number | null;
+  /** (crew#1901) A Jira issue's key. */
+  ref?: string;
   url: string | null;
   why: string | null;
 }
@@ -498,9 +602,10 @@ async function fold(path: string, publication: string, live: () => boolean): Pro
     if (out.first === null || !out.first.card.items.some((x) => x.key === line.key)) throw new JournalUnreadable(`line ${i + 1} of the publish journal names an item no approval lists`);
     const s: ItemFold =
       line.kind === 'sending' ? { state: 'sending', number: null, url: null, why: null }
-      : line.kind === 'created' ? { state: 'created', number: line.number, url: line.url, why: null }
+      : line.kind === 'created' ? (line.ref !== undefined ? { state: 'created', number: null, ref: line.ref, url: line.url, why: null } : { state: 'created', number: line.number!, url: line.url, why: null })
       : line.kind === 'not_sent' ? { state: 'not_sent', number: null, url: null, why: line.reason }
       : line.kind === 'unsure' ? { state: 'unsure', number: null, url: null, why: line.why }
+      : line.ref !== undefined ? { state: 'created', number: null, ref: line.ref, url: line.url, why: null }
       : line.number === null ? { state: 'absent', number: null, url: null, why: null }
       : { state: 'created', number: line.number, url: line.url, why: null };
     out.items.set(line.key, s);
@@ -540,6 +645,116 @@ async function readIssue(pm: Pick<PmGate, 'vendorRead'>, e: PmEntry, t: TrackerS
   return { ok: true, title: decodeTitle(v['title']), body: typeof v['body'] === 'string' ? v['body'] : '', url: v['url'] };
 }
 
+/** (crew#1901) A Jira issue as the bound `getJiraIssue` read and its projector show it. */
+type JiraRead = { ok: true; title: string; body: string; type: string | null; parent: string | null } | { ok: false };
+
+/**
+ * (crew#1901) Read one Jira issue of the tracker through its bound read and projector (the reading an agent gets): the
+ * projector admits it only for the linked project on the site crew set, proved by its address (or by Atlassian's own
+ * server and a credential that reaches that one site). Nothing it says leaves this module: it is only compared.
+ */
+async function readJiraIssue(pm: Pick<PmGate, 'vendorRead'>, e: PmEntry, t: TrackerSetEntry, key: string): Promise<JiraRead> {
+  const stored = e.record.tools.find((x) => x.name === 'getJiraIssue' && x.present);
+  const binding = stored === undefined ? null : bindingInForce('jira', stored);
+  if (binding === null) return { ok: false };
+  const prepared = binding.bindArgs({ cloudId: t.tenant, issueIdOrKey: key }, [{ trackerId: t.trackerId, tenant: t.tenant, key: t.key, siteHost: t.siteHost }]);
+  if (!prepared.ok) return { ok: false };
+  const r = await pm.vendorRead(e, 'getJiraIssue', prepared.args, 'person');
+  if (!r.ok) return { ok: false };
+  const p = binding.project(r.result, prepared, await projectOptsVia(pm, e, r.credential));
+  const v = p.ok && p.items.length === 1 ? p.items[0]!.value : null;
+  if (v === null || v['key'] !== key || typeof v['summary'] !== 'string') return { ok: false };
+  return {
+    ok: true,
+    title: v['summary'],
+    body: typeof v['description'] === 'string' ? v['description'] : '',
+    type: typeof v['issuetype'] === 'string' ? v['issuetype'] : null,
+    parent: typeof v['parent'] === 'string' ? v['parent'] : null,
+  };
+}
+
+/** (crew#1901) Whether a Jira issue is THIS item: its summary, and a description that ends with the item's footer words. */
+function jiraIsItem(read: Extract<JiraRead, { ok: true }>, runId: string, it: PublishItem): boolean {
+  const tail = publishWords(jiraFooter(runId, it.key));
+  const w = publishWords(read.body);
+  return read.title === it.title && (w === tail || w.endsWith(` ${tail}`));
+}
+
+/**
+ * (crew#1901) Whether a Jira issue reads back as approved: summary, the description's words, and, when the answer is
+ * Jira's full view, the issue type and the parent. Every Jira issue has a type, so an answer that names none is the
+ * Atlassian v2 primary tool's compact view, which leaves out `issuetype` and `parent` whatever `fields` asks for
+ * (atlassian-mcp-server#256; the R-B check on #1997): there the type and the parent are not judged, never read as wrong.
+ */
+function jiraReadsAs(read: Extract<JiraRead, { ok: true }>, it: PublishItem, parent: string | null): boolean {
+  const full = read.type !== null;
+  return read.title === it.title && publishWords(read.body) === publishWords(it.body) && (!full || (read.type === (it.issueType ?? null) && read.parent === parent));
+}
+
+/**
+ * (crew#1901) The key a `createJiraIssue` answer names, when crew can take it as a key of the tracker's project: one
+ * JSON answer (bare or in the v2 server's `{data: …}`), a `key` of the linked project, and an address, when it carries
+ * one, that names the site crew called. This proves only what the answer SAYS: the read-back proves it is the item.
+ * `vendorError`: the closed-set words of an error the vendor answered (its status and vetted scopes, never its text).
+ */
+export function jiraCreatedKey(result: Record<string, unknown>, who: string, t: Pick<TrackerSetEntry, 'key' | 'tenant' | 'siteHost'>): { ok: true; key: string } | { ok: false; vendorError: string | null } {
+  const a = readPayload(result, who, 'jira');
+  if (!a.ok) return { ok: false, vendorError: a.code === 'vendor_error' ? a.reason : null };
+  const p = typeof a.payload === 'object' && a.payload !== null && !Array.isArray(a.payload) ? (a.payload as Record<string, unknown>) : null;
+  const m = p !== null && typeof p['key'] === 'string' ? JIRA_ISSUE_KEY.exec(p['key']) : null;
+  if (m === null || m[1] !== t.key || jiraProof(p!, t.tenant, t.siteHost) === 'contradicted') return { ok: false, vendorError: null };
+  return { ok: true, key: m[0] };
+}
+
+/**
+ * (crew#1901) How a card names a Jira site: the host link time confirmed, or its cloudId; never the site's label, which
+ * is the vendor's text (codex on #1997).
+ */
+export const jiraSiteOf = (t: Pick<TrackerSetEntry, 'siteHost' | 'tenant'>): string => (t.siteHost !== null && /^[a-z0-9.-]{1,253}$/i.test(t.siteHost) ? t.siteHost : t.tenant);
+
+/** (crew#1901) A Jira issue's address, built by crew from the site's host confirmed at link time (never the answer's). */
+const jiraUrl = (t: Pick<TrackerSetEntry, 'siteHost'>, key: string): string | null => (t.siteHost !== null && /^[a-z0-9.-]{1,253}$/i.test(t.siteHost) ? `https://${t.siteHost}/browse/${key}` : null);
+
+/** (crew#1901) The issue types of a Jira project, as `listJiraProjectIssueTypesMetadata` answers them. */
+type JiraType = { name: string; level: number | null; subtask: boolean | null };
+
+/** The issue types of an answer (`{issueTypes: […]}` or `{values: […]}`), or `null` for a shape crew does not know. */
+function jiraTypesOf(payload: unknown): JiraType[] | null {
+  const o = typeof payload === 'object' && payload !== null && !Array.isArray(payload) ? (payload as Record<string, unknown>) : null;
+  const list = o === null ? null : Array.isArray(o['issueTypes']) ? o['issueTypes'] : Array.isArray(o['values']) ? o['values'] : null;
+  if (list === null) return null;
+  const out: JiraType[] = [];
+  for (const x of list as unknown[]) {
+    if (typeof x !== 'object' || x === null) continue;
+    const r = x as Record<string, unknown>;
+    // Only Jira's standard names are ever taken ({@link jiraTypeFor}); any other is not read at all.
+    if (typeof r['name'] !== 'string' || !/^(?:epic|story|task|sub-task|subtask)$/i.test(r['name'])) continue;
+    const level = typeof r['hierarchyLevel'] === 'number' && Number.isInteger(r['hierarchyLevel']) ? r['hierarchyLevel'] : null;
+    out.push({ name: r['name'], level, subtask: typeof r['subtask'] === 'boolean' ? r['subtask'] : null });
+  }
+  return out;
+}
+
+/**
+ * (crew#1901, DES-1901) The Jira type each level of the plan is created as: an epic the project's Epic type, a feature a
+ * standard type under it (Story, else Task), a story the project's subtask type under its feature. Only Jira's standard
+ * names are taken (a closed set: a type's name goes on the card and into the journal, so no other vendor text does;
+ * codex on #1997), at the hierarchy level Jira says (1, 0, -1) or, when it says none, by the subtask flag. `null`: the
+ * project has no such type.
+ */
+export function jiraTypeFor(types: readonly JiraType[], kind: PublishItem['kind']): string | null {
+  const named = (list: readonly JiraType[], ...names: string[]): string | null => {
+    for (const n of names) {
+      const hit = list.find((t) => t.name.toLowerCase() === n);
+      if (hit !== undefined) return hit.name;
+    }
+    return null;
+  };
+  if (kind === 'epic') return named(types.filter((t) => t.level === 1 || (t.level === null && t.subtask !== true)), 'epic');
+  if (kind === 'feature') return named(types.filter((t) => t.level === 0 || (t.level === null && t.subtask !== true)), 'story', 'task');
+  return named(types.filter((t) => t.level === -1 || (t.level === null && t.subtask === true)), 'sub-task', 'subtask');
+}
+
 /** fsync a directory (where the platform can open one). */
 async function syncDir(d: string): Promise<void> {
   let fh;
@@ -569,6 +784,48 @@ async function syncChain(path: string): Promise<void> {
 
 // ── The routes ─────────────────────────────────────────────────────────────────────────────────────────
 
+/** (crew#1901) Where a publication goes, as a person named it: a GitHub repository, or a Jira project on one site. */
+type Target = { system: 'github'; sel: RepoSelector } | { system: 'jira'; sel: JiraSelector };
+
+/** `owner/repo` and `<source>:owner/repo` name a repository; `KEY@<cloudId>` and `<source>:KEY@<cloudId>` a Jira project. */
+function parseTarget(raw: string): Target | null {
+  const g = parseRepoSelector(raw);
+  if (g !== null) return { system: 'github', sel: g };
+  const j = parseJiraSelector(raw);
+  return j === null ? null : { system: 'jira', sel: j };
+}
+
+/** A target's name in a publication's id and on the wire: `owner/repo`, or `KEY@<cloudId>`. */
+const targetName = (x: Target): string => (x.system === 'github' ? x.sel.repo : jiraTargetOf(x.sel.key, x.sel.tenant));
+
+/** The same target, through the source named (`null`: any). */
+const ofSource = (x: Target, source: string | null): Target => (x.system === 'github' ? { system: 'github', sel: { source, repo: x.sel.repo } } : { system: 'jira', sel: { ...x.sel, source } });
+
+/** The target a card names (its `repo`, and `system` for Jira), or `null` for a Jira name crew cannot read. */
+function targetOfCard(card: { repo: string; system?: 'jira' | undefined }): Target | null {
+  if (card.system !== 'jira') return { system: 'github', sel: { source: null, repo: card.repo } };
+  const j = parseJiraSelector(card.repo);
+  return j === null ? null : { system: 'jira', sel: j };
+}
+
+/** The one tracker a project's own act may use for `x` ({@link projectGithubTracker}, {@link projectJiraTracker}). */
+function admitTarget(es: readonly PmEntry[], projectId: string, x: Target): ReturnType<typeof projectGithubTracker> {
+  return x.system === 'github' ? projectGithubTracker(es, projectId, x.sel) : projectJiraTracker(es, projectId, x.sel);
+}
+
+/** (crew#1901) The names the saved `createJiraIssue` takes for what publishing sends: from its stored input schema. */
+type JiraWrite = { issueType: string; parent: string | null; schemaHash: string | null };
+const JIRA_WRITE_BASE = ['cloudId', 'projectKey', 'summary', 'description'] as const;
+function jiraWriteOf(tool: { inputSchema: Record<string, unknown> | null; schemaHash: string | null }, needParent: boolean): { ok: true; w: JiraWrite } | { ok: false; missing: string[] } {
+  const props = tool.inputSchema !== null && typeof tool.inputSchema['properties'] === 'object' && tool.inputSchema['properties'] !== null ? Object.keys(tool.inputSchema['properties'] as Record<string, unknown>) : [];
+  const has = (n: string): boolean => props.includes(n);
+  const missing: string[] = JIRA_WRITE_BASE.filter((n) => !has(n));
+  const issueType = has('issueTypeName') ? 'issueTypeName' : has('issueType') ? 'issueType' : null;
+  if (issueType === null) missing.push('issueTypeName');
+  if (needParent && !has('parent')) missing.push('parent');
+  return missing.length > 0 || issueType === null ? { ok: false, missing } : { ok: true, w: { issueType, parent: has('parent') ? 'parent' : null, schemaHash: tool.schemaHash } };
+}
+
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 export const ProductPublishSchema = z
   .strictObject({
@@ -578,7 +835,8 @@ export const ProductPublishSchema = z
     resolve: z
       .strictObject({
         key: z.string().regex(/^e[1-9][0-9]{0,2}(\.f[1-9][0-9]{0,2}(\.s[1-9][0-9]{0,2})?)?$/, 'an item key (e1, e1.f2, e1.f2.s3)'),
-        issue: z.number().int().min(1).max(9_999_999_999).nullable(),
+        // A GitHub issue's number, or (crew#1901) a Jira issue's key.
+        issue: z.union([z.number().int().min(1).max(9_999_999_999), JiraKey]).nullable(),
       })
       .optional(),
   })
@@ -610,7 +868,7 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
    * So a panel's polling never queues reads beside a create on the source's scheduler (knowledge/gate/scheduler.ts
    * refuses a full queue `busy`), for this publication or another on the same source.
    */
-  const readBacks = new Map<string, { number: number; expect: string; readBack: 'ok' | 'differs' | 'unreadable'; url: string | null; at: number }>();
+  const readBacks = new Map<string, { number: number | string; expect: string; readBack: 'ok' | 'differs' | 'unreadable'; url: string | null; at: number }>();
   // Monotonic (crew#1919): a wall clock stepped back never keeps a read-back fresh. `now` is the tests' clock.
   const clock = (): number => (deps.now !== undefined ? deps.now() : performance.now());
   /** Observer reads running now, and the slots waiting for them to finish. */
@@ -635,8 +893,10 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
   }
 
   /** One created issue read back against what was sent, or the last read-back of it when that is trusted for `reads`. */
-  async function readBackOf(publication: string, reader: { e: PmEntry; t: TrackerSetEntry } | null, it: PublishItem, number: number, parent: number | null, reads: Reads): Promise<{ readBack: 'ok' | 'differs' | 'unreadable' | null; url: string | null }> {
-    const expectBody = normal(bodyWith(it.body, parent));
+  async function readBackOf(publication: string, reader: { e: PmEntry; t: TrackerSetEntry } | null, it: PublishItem, number: number | string, parent: number | string | null, reads: Reads): Promise<{ readBack: 'ok' | 'differs' | 'unreadable' | null; url: string | null }> {
+    // (crew#1901) A Jira issue (its key) reads back by its summary, type, parent and the description's words.
+    if (typeof number === 'string') return jiraReadBackOf(publication, reader, it, number, typeof parent === 'string' ? parent : null, reads);
+    const expectBody = normal(bodyWith(it.body, parent as number | null));
     const expect = sha256Hex(`${it.title}\u0000${expectBody}`);
     const key = `${publication}\u0000${it.key}`;
     const memo = readBacks.get(key);
@@ -662,50 +922,97 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
     return { readBack, url };
   }
 
+  /** (crew#1901) What a Jira read-back is judged against: the summary, the type, the parent and the description's words. */
+  const jiraExpect = (it: PublishItem, parent: string | null): string => sha256Hex(canonicalJson({ jira: 1, title: it.title, type: it.issueType ?? null, parent, words: publishWords(it.body) }));
+
+  /** (crew#1901) Keep a Jira read-back (the read a send already made), as {@link readBackOf} keeps one. */
+  function noteJiraReadBack(publication: string, it: PublishItem, ref: string, parent: string | null, read: JiraRead, t: TrackerSetEntry): 'ok' | 'differs' | 'unreadable' {
+    const readBack = !read.ok ? 'unreadable' : jiraReadsAs(read, it, parent) ? 'ok' : 'differs';
+    readBacks.set(`${publication}\u0000${it.key}`, { number: ref, expect: jiraExpect(it, parent), readBack, url: jiraUrl(t, ref), at: clock() });
+    return readBack;
+  }
+
+  /** (crew#1901) {@link readBackOf} for a Jira issue: the same freshness and the same observer rule. */
+  async function jiraReadBackOf(publication: string, reader: { e: PmEntry; t: TrackerSetEntry } | null, it: PublishItem, ref: string, parent: string | null, reads: Reads): Promise<{ readBack: 'ok' | 'differs' | 'unreadable' | null; url: string | null }> {
+    const memo = readBacks.get(`${publication}\u0000${it.key}`);
+    const known = memo !== undefined && memo.number === ref && memo.expect === jiraExpect(it, parent) ? memo : undefined;
+    if (known !== undefined && known.readBack === 'ok' && clock() - known.at < READ_BACK_FRESH_MS) return { readBack: 'ok', url: known.url };
+    if (reads === 'observer' && slots.size > 0) return known !== undefined ? { readBack: known.readBack, url: known.url } : { readBack: null, url: null };
+    if (reader === null) {
+      readBacks.set(`${publication}\u0000${it.key}`, { number: ref, expect: jiraExpect(it, parent), readBack: 'unreadable', url: null, at: clock() });
+      return { readBack: 'unreadable', url: null };
+    }
+    let read: JiraRead;
+    if (reads === 'owner') read = await readJiraIssue(deps.pm!, reader.e, reader.t, ref);
+    else {
+      observing++;
+      try {
+        read = await readJiraIssue(deps.pm!, reader.e, reader.t, ref);
+      } finally {
+        if (--observing === 0) for (const w of drained.splice(0)) w();
+      }
+    }
+    const readBack = noteJiraReadBack(publication, it, ref, parent, read, reader.t);
+    return { readBack, url: jiraUrl(reader.t, ref) };
+  }
+
   /** A publication's state now: its journal, each created issue read back as {@link readBackOf} allows `reads`. */
-  async function stateOf(f: Folded, projectId: string, sel: RepoSelector, es: PmEntry[] | null, reads: Reads): Promise<PublicationState> {
+  async function stateOf(f: Folded, projectId: string, x: Target, es: PmEntry[] | null, reads: Reads): Promise<PublicationState> {
     const approved = f.last!;
-    const card = f.first!.card;
+    const card = journalCard(f.first!.card);
     let reader: { e: PmEntry; t: TrackerSetEntry } | null = null;
     if (es !== null) {
-      const adm = projectGithubTracker(es, projectId, { source: approved.card.source, repo: sel.repo });
+      const adm = admitTarget(es, projectId, ofSource(x, approved.card.source));
       if (adm.ok && adm.e.id === approved.sourceId) reader = { e: adm.e, t: adm.t };
     }
-    const numbers = new Map<string, number>();
-    for (const [k, s] of f.items) if (s.state === 'created' && s.number !== null) numbers.set(k, s.number);
+    // A GitHub issue's number, or (crew#1901) a Jira issue's key.
+    const numbers = new Map<string, number | string>();
+    for (const [k, s] of f.items) if (s.state === 'created' && (s.ref !== undefined || s.number !== null)) numbers.set(k, s.ref ?? s.number!);
     const items: PublicationItemState[] = [];
     for (const it of card.items) {
       const s = f.items.get(it.key);
       const state: PublicationItemState['state'] = s?.state ?? 'missing';
       let readBack: PublicationItemState['readBack'] = null;
       let url = s?.url ?? null;
-      if (state === 'created' && s!.number !== null) {
+      const id = s?.ref ?? s?.number ?? null;
+      if (state === 'created' && id !== null) {
         const parent = it.parentKey === null ? null : (numbers.get(it.parentKey) ?? null);
-        const got = await readBackOf(f.first!.publication, reader, it, s!.number, parent, reads);
+        const got = await readBackOf(f.first!.publication, reader, it, id, parent, reads);
         readBack = got.readBack;
         if (got.url !== null) url = got.url;
       }
-      items.push({ key: it.key, kind: it.kind, title: it.title, state, number: s?.number ?? null, url, readBack, ...(s?.why != null ? { why: s.why } : {}) });
+      items.push({ key: it.key, kind: it.kind, title: it.title, state, number: s?.number ?? null, url, readBack, ...(s?.why != null ? { why: s.why } : {}), ...(s?.ref !== undefined ? { ref: s.ref } : {}) });
     }
-    return { repo: card.repo, source: approved.card.source, publishHash: approved.publishHash, items, published: items.every((i) => i.state === 'created' && i.readBack === 'ok') };
+    return { ...(card.system === 'jira' ? { system: 'jira' as const } : {}), repo: card.repo, source: approved.card.source, publishHash: approved.publishHash, items, published: items.every((i) => i.state === 'created' && i.readBack === 'ok') };
   }
 
-  type Built = { card: ProductPublishCard; publishHash: string; contentSha: string; e: PmEntry; t: TrackerSetEntry; descriptor: string; principal: string; credential: string; es: PmEntry[]; f: Folded; publication: string; path: string };
+  type Built = { card: ProductPublishCard; publishHash: string; contentSha: string; e: PmEntry; t: TrackerSetEntry; descriptor: string; principal: string; credential: string; es: PmEntry[]; f: Folded; publication: string; path: string; jira: JiraWrite | null };
 
-  /** The card for `sel` built NOW (DES "The card"), or why there is none. */
-  async function build(projectId: string, runId: string, sel: RepoSelector, holding: boolean): Promise<{ ok: true; b: Built } | Refusal> {
+  /** The card for `x` built NOW (DES "The card"), or why there is none. */
+  async function build(projectId: string, runId: string, x: Target, holding: boolean): Promise<{ ok: true; b: Built } | Refusal> {
     if (!(await deps.projectExists(projectId))) return refuse(404, 'project_not_found', `no project ${projectId}`);
-    const plan = await composedPlan(deps, projectId, runId);
+    const plan = await composedPlan(deps, projectId, runId, x.system);
     if (!plan.ok) return plan;
     const es = await entries();
     if (!Array.isArray(es)) return es;
-    const adm = projectGithubTracker(es, projectId, sel);
+    const adm = admitTarget(es, projectId, x);
     if (!adm.ok) return refuse(adm.code === 'ambiguous' ? 409 : 404, adm.code, adm.error);
     const { e, t } = adm;
-    if (!liveTool(e.record.tools.find((x) => x.name === 'issue_write' && x.present))) {
-      return refuse(409, 'write_tool_off', `${e.name} has no saved, switched-on issue_write tool: a person grants it on the source's sheet`);
+    const writeTool = x.system === 'github' ? 'issue_write' : 'createJiraIssue';
+    const tool = e.record.tools.find((y) => y.name === writeTool && y.present);
+    if (!liveTool(tool)) {
+      return refuse(409, 'write_tool_off', `${e.name} has no saved, switched-on ${writeTool} tool: a person grants it on the source's sheet`);
     }
-    const publication = publicationOf(runId, t.key);
+    let jira: JiraWrite | null = null;
+    if (x.system === 'jira') {
+      // (crew#1901) The names the saved write takes, from its schema: the server drops a name it does not know.
+      const shape = jiraWriteOf(tool, plan.items.some((i) => i.parentKey !== null));
+      if (!shape.ok) return refuse(409, 'write_tool_shape', `${e.name}'s saved createJiraIssue does not take ${shape.missing.join(', ')}, which publishing needs; crew sends only the arguments the saved tool names`);
+      jira = shape.w;
+      const read = e.record.tools.find((y) => y.name === 'getJiraIssue' && y.present);
+      if (!liveTool(read) || bindingInForce('jira', read) === null) return refuse(409, 'read_tool_off', `${e.name} has no saved, switched-on getJiraIssue tool, so crew could not read the issues back: a person saves it on the source's sheet`);
+    }
+    const publication = publicationOf(runId, x.system === 'github' ? t.key : jiraTargetOf(t.key, t.tenant));
     const path = journalPath(dir(), runId, publication);
     let f: Folded;
     try {
@@ -714,9 +1021,30 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
       if (err instanceof JournalUnreadable) return refuse(409, 'journal_unreadable', `${err.message}; nothing is sent until it is repaired`);
       throw err;
     }
-    const contentSha = contentShaOf(plan.items);
+    let items = plan.items;
+    if (x.system === 'jira') {
+      // (crew#1901, DES-1901) Each level's Jira type, read from the project now: part of the card and of its content.
+      const typed = await jiraTyped(e, t, items);
+      if (!typed.ok) return typed;
+      items = typed.items;
+    }
+    const contentSha = contentShaOf(items);
     if (f.first !== null && f.first.contentSha !== contentSha) {
-      return refuse(409, 'publication_differs', `this run was already published to ${t.key} with other content; nothing more is sent to it`, { publication: await stateOf(f, projectId, sel, es, holding ? 'owner' : 'observer') });
+      return refuse(409, 'publication_differs', `this run was already published to ${x.system === 'github' ? t.key : jiraTargetOf(t.key, t.tenant)} with other content; nothing more is sent to it`, { publication: await stateOf(f, projectId, x, es, holding ? 'owner' : 'observer') });
+    }
+    if (x.system === 'jira') {
+      const who = await deps.pm!.vendorRead(e, 'atlassianUserInfo', {}, 'person');
+      const me = who.ok ? readPayload(who.result, e.name, 'jira') : null;
+      const m = me !== null && me.ok && typeof me.payload === 'object' && me.payload !== null ? (me.payload as Record<string, unknown>) : null;
+      // The Atlassian account id only: a display name is the vendor's text, never shown on the card.
+      const acct = m === null ? null : (m['accountId'] ?? m['account_id']);
+      const identity = typeof acct === 'string' && /^[A-Za-z0-9:_-]{1,128}$/.test(acct) ? acct : null;
+      if (identity === null || !who.ok) return refuse(503, 'source_unavailable', `${e.name} could not say which account it posts as now, so no card is offered`);
+      if (who.credential === null) return refuse(409, 'credential_unpinned', `${e.name} has no credential of its own to pin, so crew cannot be sure which account would post; give the source its own credential`);
+      const card: ProductPublishCard = { runId, projectId, repo: jiraTargetOf(t.key, t.tenant), source: e.name, identity, items, ...(plan.edited !== null ? { edited: plan.edited } : {}), system: 'jira', site: jiraSiteOf(t) };
+      const descriptor = pmDescriptorHash(configOf(e.record));
+      const publishHash = sha256Hex(canonicalJson({ v: 1, card, contentSha, sourceId: e.id, trackerId: t.trackerId, descriptor, principal: identity, credential: who.credential, write: jira }));
+      return { ok: true, b: { card, publishHash, contentSha, e, t, descriptor, principal: identity, credential: who.credential, es, f, publication, path, jira } };
     }
     const who = await deps.pm!.vendorRead(e, 'get_me', {}, 'person');
     const me = who.ok ? readPayload(who.result, e.name, 'github') : null;
@@ -730,7 +1058,27 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
     const card: ProductPublishCard = { runId, projectId, repo: t.key.toLowerCase(), source: e.name, identity, items: plan.items, ...(plan.edited !== null ? { edited: plan.edited } : {}) };
     const descriptor = pmDescriptorHash(configOf(e.record));
     const publishHash = sha256Hex(canonicalJson({ v: 1, card, contentSha, sourceId: e.id, trackerId: t.trackerId, descriptor, principal, credential: who.credential }));
-    return { ok: true, b: { card, publishHash, contentSha, e, t, descriptor, principal, credential: who.credential, es, f, publication, path } };
+    return { ok: true, b: { card, publishHash, contentSha, e, t, descriptor, principal, credential: who.credential, es, f, publication, path, jira: null } };
+  }
+
+  /** (crew#1901) The items with each one's Jira type, read from the project now, or why a level has none. */
+  async function jiraTyped(e: PmEntry, t: TrackerSetEntry, items: PublishItem[]): Promise<{ ok: true; items: PublishItem[] } | Refusal> {
+    const unread = refuse(503, 'source_unavailable', `${e.name} could not list ${t.key}'s issue types now, so no card is offered`);
+    if (deps.pm?.personOp === undefined) return unread;
+    const r = await deps.pm.personOp(e, 'listJiraProjectIssueTypesMetadata', t.tenant, { projectIdOrKey: t.key }).catch(() => null);
+    const p = r !== null && r.ok ? readPayload(r.result, e.name, 'jira') : null;
+    const types = p !== null && p.ok ? jiraTypesOf(p.payload) : null;
+    if (types === null) return unread;
+    const out: PublishItem[] = [];
+    for (const it of items) {
+      const issueType = jiraTypeFor(types, it.kind);
+      if (issueType === null) {
+        const level = it.kind === 'epic' ? 'an Epic type' : it.kind === 'feature' ? 'a Story or Task type' : 'a subtask type, Sub-task or Subtask';
+        return refuse(409, 'issue_type_missing', `${t.key} has no issue type for the plan's ${it.kind}s (${level}, by Jira's standard name); a Jira admin adds one, or compose without that level`);
+      }
+      out.push({ ...it, issueType });
+    }
+    return { ok: true, items: out };
   }
 
   const envelope = (b: { publication: string; runId: string; projectId: string; repo: string }, actor: Actor) => ({ v: 1 as const, publication: b.publication, runId: b.runId, projectId: b.projectId, repo: b.repo, at: nowIso(), by: actor.id });
@@ -739,12 +1087,12 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
     await (deps.appendLine ?? appendLineSynced)(path, `${JSON.stringify(line)}\n`, 0o600);
   };
 
-  async function confirm(projectId: string, runId: string, sel: RepoSelector, hash: string, actor: Actor, log: FastifyRequest['log']): Promise<{ ok: true; body: ProductPublishResponse } | Refusal> {
-    const built = await build(projectId, runId, sel, true);
+  async function confirm(projectId: string, runId: string, x: Target, hash: string, actor: Actor, log: FastifyRequest['log']): Promise<{ ok: true; body: ProductPublishResponse } | Refusal> {
+    const built = await build(projectId, runId, x, true);
     if (!built.ok) return built;
     const b = built.b;
     if ([...b.f.items.values()].some((s) => s.state === 'unsure')) {
-      return refuse(409, 'unresolved', 'an earlier publish could not tell whether some issues were created; say for each whether it exists (resolve) before publishing again', { publication: await stateOf(b.f, projectId, sel, b.es, 'owner') });
+      return refuse(409, 'unresolved', 'an earlier publish could not tell whether some issues were created; say for each whether it exists (resolve) before publishing again', { publication: await stateOf(b.f, projectId, x, b.es, 'owner') });
     }
     if (hash !== b.publishHash) {
       return refuse(409, 'card_changed', 'the card changed since it was shown (the plan, the account, the source or the link); nothing was sent: look at it again', { card: b.card, publishHash: b.publishHash });
@@ -768,17 +1116,21 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
     const admission = async (): Promise<PmEntry | null> => {
       try {
         const es = pmEntriesOf(await deps.store!.read());
-        const adm = projectGithubTracker(es, projectId, sel);
+        const adm = admitTarget(es, projectId, x);
         if (!adm.ok || adm.e.id !== b.e.id || adm.t.trackerId !== b.t.trackerId || !adm.e.enabled) return null;
         if (pmDescriptorHash(configOf(adm.e.record)) !== b.descriptor) return null;
-        if (!liveTool(adm.e.record.tools.find((x) => x.name === 'issue_write' && x.present))) return null;
+        const tool = adm.e.record.tools.find((y) => y.name === (b.jira === null ? 'issue_write' : 'createJiraIssue') && y.present);
+        if (!liveTool(tool)) return null;
+        // (crew#1901) The write's schema is the one the card's argument names were read from.
+        if (b.jira !== null && tool.schemaHash !== b.jira.schemaHash) return null;
         return adm.e;
       } catch {
         return null;
       }
     };
-    const numbers = new Map<string, number>();
-    for (const [k, s] of b.f.items) if (s.state === 'created' && s.number !== null) numbers.set(k, s.number);
+    // A GitHub issue's number, or (crew#1901) a Jira issue's key.
+    const numbers = new Map<string, number | string>();
+    for (const [k, s] of b.f.items) if (s.state === 'created' && (s.ref !== undefined || s.number !== null)) numbers.set(k, s.ref ?? s.number!);
     const tally = { created: 0, refused: 0, unsure: 0 };
     const [owner, repo] = b.t.key.split('/');
     for (const it of b.card.items) {
@@ -792,7 +1144,22 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
         break;
       }
       revoked = false;
-      const r = await deps.pm!.vendorRead(b.e, 'issue_write', { method: 'create', owner, repo, title: it.title, body: bodyWith(it.body, parent) }, 'person', admittedFor, b.credential);
+      if (b.jira !== null) {
+        const sent = await sendJira(b, b.jira, runId, it, typeof parent === 'string' ? parent : null, admittedFor, () => revoked);
+        try {
+          await write(b.path, { ...envelope(env, actor), ...sent.outcome });
+        } catch (err) {
+          log.warn(`[publish] the outcome of ${it.key} could not be recorded; sending stops: ${err instanceof Error ? err.message : String(err)}`);
+          break;
+        }
+        tally[sent.outcome['kind'] === 'created' ? 'created' : sent.outcome['kind'] === 'not_sent' ? 'refused' : 'unsure']++;
+        if (sent.outcome['kind'] !== 'created') break;
+        numbers.set(it.key, sent.outcome['ref'] as string);
+        // (crew#1911) The read that proved it is this item is its read-back too: no second read.
+        noteJiraReadBack(b.publication, it, sent.outcome['ref'] as string, typeof parent === 'string' ? parent : null, sent.read, b.t);
+        continue;
+      }
+      const r = await deps.pm!.vendorRead(b.e, 'issue_write', { method: 'create', owner, repo, title: it.title, body: bodyWith(it.body, parent as number | null) }, 'person', admittedFor, b.credential);
       let outcome: Record<string, unknown>;
       // `changed` is a refusal before dispatch only when this admission said so: never read from the vendor's words.
       if (!r.ok && (r.code === 'changed' ? revoked : NOT_SENT.has(r.code))) {
@@ -834,15 +1201,44 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
       if (err instanceof JournalUnreadable) return refuse(409, 'journal_unreadable', `${err.message}; nothing more is sent until it is repaired`);
       throw err;
     }
-    const publication = await stateOf(f, projectId, sel, b.es, 'owner');
+    const publication = await stateOf(f, projectId, x, b.es, 'owner');
     deps.audit.record('product.publish', actor, { runId, detail: { projectId, repo: b.card.repo, source: b.e.name, identity: b.card.identity, ...tally, published: publication.published } });
     return { ok: true, body: { done: true, card: b.card, publication } };
   }
 
-  async function resolve(projectId: string, runId: string, sel: RepoSelector, want: { key: string; issue: number | null }, actor: Actor): Promise<{ ok: true; body: ProductPublishResponse } | Refusal> {
+  /**
+   * (crew#1901) Create one item in the Jira project, with the saved write's argument names and crew's own `cloudId`, then
+   * prove the answer: `created` only when the answered key is the linked project's, its address (when it has one) names
+   * the site, and reading it back shows THIS item (its summary and its footer's words). A server can answer another,
+   * existing issue (atlassian-mcp-server#202): that is `unsure`, and nothing is parented to it. Only crew's own refusals
+   * before dispatch are `not_sent`. The words of every outcome are crew's (a vendor error's status, at most).
+   */
+  async function sendJira(b: Built, w: JiraWrite, runId: string, it: PublishItem, parent: string | null, admittedFor: () => Promise<PmEntry | null>, revoked: () => boolean): Promise<{ outcome: Record<string, unknown>; read: JiraRead }> {
+    const args: Record<string, unknown> = { cloudId: b.t.tenant, projectKey: b.t.key, summary: it.title, description: it.body, [w.issueType]: it.issueType };
+    if (parent !== null && w.parent !== null) args[w.parent] = parent;
+    const r = await deps.pm!.vendorRead(b.e, 'createJiraIssue', args, 'person', admittedFor, b.credential);
+    if (!r.ok && (r.code === 'changed' ? revoked() : NOT_SENT.has(r.code))) return { outcome: { kind: 'not_sent', key: it.key, reason: r.reason }, read: { ok: false } };
+    const answered = r.ok ? jiraCreatedKey(r.result, b.e.name, b.t) : null;
+    const key = answered !== null && answered.ok ? answered.key : null;
+    if (key === null) {
+      const why = !r.ok
+        ? `${r.reason}; Jira may have created it`
+        : answered !== null && !answered.ok && answered.vendorError !== null
+          ? `Jira answered an error, which it may also do after it created an issue (${answered.vendorError})`
+          : `Jira answered in a shape crew could not read as ${b.t.key}'s new issue`;
+      return { outcome: { kind: 'unsure', key: it.key, why }, read: { ok: false } };
+    }
+    const read = await readJiraIssue(deps.pm!, b.e, b.t, key);
+    if (!read.ok) return { outcome: { kind: 'unsure', key: it.key, why: `Jira answered ${key}, which crew could not read back to prove it is this item` }, read };
+    if (!jiraIsItem(read, runId, it)) return { outcome: { kind: 'unsure', key: it.key, why: `Jira answered ${key}, which does not read back as this item; the new issue may exist under another key` }, read: { ok: false } };
+    return { outcome: { kind: 'created', key: it.key, ref: key, url: jiraUrl(b.t, key) }, read };
+  }
+
+  async function resolve(projectId: string, runId: string, x: Target, want: { key: string; issue: number | string | null }, actor: Actor): Promise<{ ok: true; body: ProductPublishResponse } | Refusal> {
     if (!(await deps.projectExists(projectId))) return refuse(404, 'project_not_found', `no project ${projectId}`);
     const es = await entries();
     if (!Array.isArray(es)) return es;
+    const sel = { repo: targetName(x) };
     const publication = publicationOf(runId, sel.repo);
     const path = journalPath(dir(), runId, publication);
     let f: Folded;
@@ -854,12 +1250,24 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
     }
     if (f.first === null || f.first.projectId !== projectId) return refuse(409, 'not_unsure', `this run has no publication to ${sel.repo} in this project`);
     const s = f.items.get(want.key);
-    const it = f.first.card.items.find((x) => x.key === want.key);
+    const it = journalCard(f.first.card).items.find((y) => y.key === want.key);
     if (it === undefined || s === undefined || s.state !== 'unsure') return refuse(409, 'not_unsure', `${want.key} is not waiting to be resolved (it is ${s?.state ?? (it === undefined ? 'not an item of this publication' : 'missing')})`);
     const env = { publication, runId, projectId, repo: f.first.card.repo };
     let line: Record<string, unknown>;
+    if (want.issue !== null && (typeof want.issue === 'string') !== (x.system === 'jira')) {
+      return refuse(409, 'resolve_differs', x.system === 'jira' ? `${sel.repo} is a Jira project: name the issue by its key (${x.sel.key}-12)` : `${sel.repo} is a GitHub repository: name the issue by its number`);
+    }
     if (want.issue === null) {
       line = { ...envelope(env, actor), kind: 'resolved', key: it.key, number: null, url: null };
+    } else if (typeof want.issue === 'string') {
+      // (crew#1901) A Jira key: of this project, read back through the bound read, and THIS item (summary and footer).
+      const adm = admitTarget(es, projectId, ofSource(x, f.last!.card.source));
+      if (!adm.ok || adm.e.id !== f.last!.sourceId) return refuse(adm.ok ? 404 : adm.code === 'ambiguous' ? 409 : 404, adm.ok ? 'repo_not_linked' : adm.code, adm.ok ? `${sel.repo} is no longer reached through ${f.last!.card.source}` : adm.error);
+      if (JIRA_ISSUE_KEY.exec(want.issue)?.[1] !== adm.t.key) return refuse(409, 'resolve_differs', `${want.issue} is not an issue of ${adm.t.key}`);
+      const read = await readJiraIssue(deps.pm!, adm.e, adm.t, want.issue);
+      if (!read.ok) return refuse(503, 'source_unavailable', `${adm.e.name} could not read ${want.issue} now`);
+      if (!jiraIsItem(read, runId, it)) return refuse(409, 'resolve_differs', `${want.issue} is not ${it.key}: its summary or description is not what was approved for it`);
+      line = { ...envelope(env, actor), kind: 'resolved', key: it.key, number: null, ref: want.issue, url: jiraUrl(adm.t, want.issue) };
     } else {
       const adm = projectGithubTracker(es, projectId, { source: f.last!.card.source, repo: sel.repo });
       if (!adm.ok || adm.e.id !== f.last!.sourceId) return refuse(adm.ok ? 404 : adm.code === 'ambiguous' ? 409 : 404, adm.ok ? 'repo_not_linked' : adm.code, adm.ok ? `${sel.repo} is no longer reached through ${f.last!.card.source}` : adm.error);
@@ -880,8 +1288,8 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
     }
     deps.audit.record('product.publish.resolve', actor, { runId, detail: { projectId, repo: f.first.card.repo, key: it.key, issue: want.issue } });
     const after = await fold(path, publication, () => false);
-    const { edited, ...kept } = after.last!.card;
-    return { ok: true, body: { done: true, card: edited === undefined ? kept : { ...kept, edited }, publication: await stateOf(after, projectId, sel, es, 'owner') } };
+    const { edited, ...kept } = journalCard(after.last!.card);
+    return { ok: true, body: { done: true, card: edited === undefined ? kept : { ...kept, edited }, publication: await stateOf(after, projectId, x, es, 'owner') } };
   }
 
   app.post<{ Params: { id: string } }>(
@@ -892,8 +1300,8 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
       if (!allowed(actor)) return reply.code(403).send(humanOnly(actor));
       const parsed = ProductPublishSchema.safeParse(req.body);
       if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; '), code: 'bad_request' });
-      const sel = parseRepoSelector(parsed.data.repo);
-      if (sel === null) return reply.code(400).send({ error: 'repo: owner/repo, or <source>:owner/repo', code: 'bad_request' });
+      const sel = parseTarget(parsed.data.repo);
+      if (sel === null) return reply.code(400).send({ error: 'repo: owner/repo, or <source>:owner/repo; a Jira project as KEY@<cloudId>, or <source>:KEY@<cloudId>', code: 'bad_request' });
       const { runId, confirm: hash, resolve: want } = parsed.data;
       const projectId = req.params.id;
       if (hash === undefined && want === undefined) {
@@ -912,7 +1320,7 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
         }
       }
       // Taken synchronously, before any await: a second send or resolve of this publication is refused here.
-      const slot = publicationOf(runId, sel.repo);
+      const slot = publicationOf(runId, targetName(sel));
       if (slots.has(slot)) return reply.code(409).send({ error: 'this publication is being sent or resolved right now; look again in a moment', code: 'in_progress' });
       slots.add(slot);
       let out: { ok: true; body: ProductPublishResponse } | Refusal;
@@ -961,12 +1369,19 @@ export function registerProductPublishRoutes(app: FastifyInstance, deps: Product
           throw err;
         }
         if (f.first === null || f.first.projectId !== projectId || f.first.runId !== runId) continue;
-        publications.push(await stateOf(f, projectId, { source: null, repo: f.first.card.repo }, list, 'observer'));
+        const x = targetOfCard(f.first.card);
+        if (x === null) return reply.code(409).send({ error: 'the publish journal names a target crew cannot read; nothing is sent until it is repaired', code: 'journal_unreadable' });
+        publications.push(await stateOf(f, projectId, x, list, 'observer'));
       }
+      // (crew#1901) The project's Jira projects follow its GitHub repositories, each saying whether the plan meets
+      // Jira's own text rules (the top-level answer stays GitHub's, as before).
+      const jiraTargets = projectJiraTargets(list, projectId);
+      const jiraPlan = jiraTargets.length === 0 ? null : await composedPlan(deps, projectId, runId, 'jira');
+      const jiraPublishable = jiraPlan === null ? null : jiraPlan.ok ? { ok: true as const, items: jiraPlan.items.length } : { ok: false as const, code: jiraPlan.code, error: jiraPlan.error };
       const answer: ProductPublicationsResponse = {
         runId,
         publishable: plan.ok ? { ok: true, items: plan.items.length } : { ok: false, code: plan.code, error: plan.error },
-        targets: projectGithubTargets(list, projectId),
+        targets: [...projectGithubTargets(list, projectId), ...jiraTargets.map((t) => ({ ...t, publishable: jiraPublishable! }))],
         publications,
       };
       return answer;
