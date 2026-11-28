@@ -348,6 +348,8 @@ function jiraIssueValue(issue: Record<string, unknown>, tenant: string, siteHost
     status: name(f['status']),
     statusCategory: category,
     issuetype: name(f['issuetype']),
+    // (crew#1901) The parent's key only (never its fields): product publish reads back the link it set.
+    parent: isObj(f['parent']) && typeof f['parent']['key'] === 'string' && JIRA_ISSUE_KEY.test(f['parent']['key']) ? f['parent']['key'] : null,
     priority: name(f['priority']),
     assignee: name(f['assignee']),
     reporter: name(f['reporter']),

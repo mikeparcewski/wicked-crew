@@ -21,7 +21,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 
 import { AuditLog } from '../src/api/audit.js';
 import { composeFactsOf } from '../src/api/compose-facts.js';
-import { type ProductPublishDeps, READ_BACK_FRESH_MS, registerProductPublishRoutes } from '../src/api/product-publish.js';
+import { jiraCreatedKey, type ProductPublishDeps, publishWords, READ_BACK_FRESH_MS, registerProductPublishRoutes } from '../src/api/product-publish.js';
 import { RunTimingIndex } from '../src/api/run-timing-index.js';
 import type { Actor, SessionView } from '../src/core/types.js';
 import { DataGate } from '../src/knowledge/gate/gate.js';
@@ -30,6 +30,7 @@ import { trackerIdOf, trackerLinkIdOf, type StoredTracker } from '../src/knowled
 import { bindingFor, bindingPolicy } from '../src/knowledge/trackers/bindings.js';
 import { McpRegistryStore } from '../src/mcp/registry-store.js';
 import { SourceCatalogStore } from '../src/sources/store.js';
+import { atlassianV2, SITE_HOST, SITE_ID } from './fixtures/pm/recorded-shapes.js';
 
 vi.setConfig({ testTimeout: 180_000, hookTimeout: 60_000 });
 
@@ -452,5 +453,35 @@ describe('Jira: SHARED/CACHED READS', () => {
     expect(states(r.body)).toEqual(['unsure', 'missing', 'missing', 'missing']);
     expect((await publish()).body).toMatchObject({ code: 'unresolved' });
     expect(creates()).toHaveLength(1);
+  });
+});
+
+describe('Jira: the create answer, on its recorded shapes', () => {
+  const t = { key: 'PROJA', tenant: SITE_ID, siteHost: SITE_HOST };
+  it('the bare answer {key, id, self} (A7) names its key; wrapped in v2\'s {data} it does too', () => {
+    expect(jiraCreatedKey(atlassianV2.created, 'jira', t)).toEqual({ ok: true, key: 'PROJA-100' });
+    const wrapped = { content: [{ type: 'text', text: JSON.stringify({ data: JSON.parse((atlassianV2.created['content'] as Array<{ text: string }>)[0]!.text) }) }] };
+    expect(jiraCreatedKey(wrapped, 'jira', t)).toEqual({ ok: true, key: 'PROJA-100' });
+  });
+
+  it('another project\'s key, or an address on another site, is not taken; an error says only its status', () => {
+    expect(jiraCreatedKey(atlassianV2.created, 'jira', { ...t, key: 'PROJB' })).toEqual({ ok: false, vendorError: null });
+    expect(jiraCreatedKey(atlassianV2.created, 'jira', { ...t, siteHost: 'elsewhere.atlassian.net' })).toEqual({ ok: false, vendorError: null });
+    // #279's string error is no key: unsure, never not_sent (the route tests send it through the fake).
+    expect(jiraCreatedKey(atlassianV2.createInvalidField, 'jira', t)).toEqual({ ok: false, vendorError: null });
+    const e = jiraCreatedKey(atlassianV2.flaggedError, 'jira', t);
+    expect(e.ok).toBe(false);
+    expect(JSON.stringify(e)).not.toContain('getJiraIssue failed');
+  });
+});
+
+describe('Jira: the words a description is read back by', () => {
+  it('markup, escapes, list marks and links do not count; a changed, missing or added word does', () => {
+    const sent = 'Acceptance criteria:\n- A user signs in (see https://example.invalid/x)\n- `A_B` is refused\n\nPublished by wicked-crew from run r-1 (item e1.f1.s1)';
+    // As a server's markdown -> ADF -> markdown might hand it back: escapes, another list mark, the link as a card.
+    const back = 'Acceptance criteria:\n\n* A user signs in (see )\n* `A\\_B` is refused\n\nPublished by wicked\\-crew from run r\\-1 (item e1.f1.s1)';
+    expect(publishWords(back)).toBe(publishWords(sent));
+    expect(publishWords(back.replace('refused', 'accepted'))).not.toBe(publishWords(sent));
+    expect(publishWords(back.replace(' (item e1.f1.s1)', ''))).not.toBe(publishWords(sent));
   });
 });

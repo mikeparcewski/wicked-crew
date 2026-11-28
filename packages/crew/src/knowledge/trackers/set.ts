@@ -145,3 +145,48 @@ export function projectGithubTargets(entries: readonly PmEntry[], projectId: str
     .filter((t) => t.system === 'github' && t.tenant === 'github.com' && t.via.some((v) => v.kind === 'project'))
     .map((t) => ({ repo: t.key.toLowerCase(), source: t.source }));
 }
+
+/** (crew#1901) A Jira project a person names for a project's act: `KEY@<cloudId>`, or `<source>:KEY@<cloudId>`. */
+export interface JiraSelector {
+  source: string | null;
+  /** The project key (`PROJA`). */
+  key: string;
+  /** The site's `cloudId`: a key names one project on one site only. */
+  tenant: string;
+}
+
+/** `KEY@<cloudId>` or `<source>:KEY@<cloudId>`, or `null` when it is neither (an `owner/repo` never is one). */
+export function parseJiraSelector(raw: string): JiraSelector | null {
+  const m = /^(?:([^\s:/@]{1,100}):)?([A-Z][A-Z0-9_]{0,19})@([A-Za-z0-9-]{1,64})$/.exec(raw.trim());
+  return m === null ? null : { source: m[1] ?? null, key: m[2]!, tenant: m[3]! };
+}
+
+/** The one string a Jira target is named by, on the wire and in a publication's id: `KEY@<cloudId>`. */
+export const jiraTargetOf = (key: string, tenant: string): string => `${key}@${tenant}`;
+
+/**
+ * (crew#1901) The ONE Jira tracker a project's own act may use for `sel`, as {@link projectGithubTracker} admits a
+ * repository: a Jira tracker linked to the project ITSELF, for that key on that site, of the named source when one is
+ * named. Product publish's card, its confirm, every dispatch re-check and every read go through this.
+ */
+export function projectJiraTracker(
+  entries: readonly PmEntry[],
+  projectId: string,
+  sel: JiraSelector,
+): { ok: true; t: TrackerSetEntry; e: PmEntry } | { ok: false; code: 'repo_not_linked' | 'ambiguous'; error: string } {
+  const named = jiraTargetOf(sel.key, sel.tenant);
+  const hits = trackerSetOf(entries, projectId, []).filter(
+    (t) => t.system === 'jira' && t.via.some((v) => v.kind === 'project') && t.key === sel.key && t.tenant === sel.tenant && (sel.source === null || t.source === sel.source),
+  );
+  if (hits.length === 0) return { ok: false, code: 'repo_not_linked', error: `${sel.source !== null ? `${sel.source}:` : ''}${named} is not a Jira project linked to this project as a tracker` };
+  if (hits.length > 1) return { ok: false, code: 'ambiguous', error: `${hits.length} Jira sources link ${named} to this project: name it as <source>:${named} (${hits.map((h) => `${h.source}:${named}`).join(', ')})` };
+  const t = hits[0]!;
+  return { ok: true, t, e: entries.find((x) => x.id === t.sourceId)! };
+}
+
+/** The Jira projects linked to `projectId` itself, as {@link projectJiraTracker} admits them, each with its site. */
+export function projectJiraTargets(entries: readonly PmEntry[], projectId: string): Array<{ repo: string; source: string; system: 'jira'; label: string }> {
+  return trackerSetOf(entries, projectId, [])
+    .filter((t) => t.system === 'jira' && t.via.some((v) => v.kind === 'project'))
+    .map((t) => ({ repo: jiraTargetOf(t.key, t.tenant), source: t.source, system: 'jira' as const, label: `${t.key} on ${t.siteHost ?? t.tenantLabel ?? t.tenant}` }));
+}
