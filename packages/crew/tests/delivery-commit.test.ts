@@ -436,7 +436,7 @@ describe('CS11 slice B — the production terminal-frame wiring (noUnitDispatche
   });
 });
 
-describe('crew#2008 — "a later unit ran" is read off the engine run log, never off unit status', () => {
+describe('crew#2008 — the engine run log vetoes "nothing ran after Deliver" where unit status cannot tell', () => {
   const okExec: DeliveredCommitExec = async () => ({ stdout: `${SHA}\n`, stderr: '', code: 0 });
 
   /**

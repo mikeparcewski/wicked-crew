@@ -1077,7 +1077,7 @@ export async function createServer(
     // deliveredCommitFor}) so tests exercise the production code, not a copy (cs11-b review
     // P1/P2): it records NO commit when a later phase ran after the deliver unit (the pushed tip
     // may have moved) and when the SHA cannot be read — the join then keeps the run (fail-closed).
-    // (crew#2008) "a later phase ran" is read off the engine's run log, never off unit status.
+    // (crew#2008) "nothing ran after Deliver" needs the unit status AND the engine's run log to agree.
     deliveredCommit: (view) =>
       deliveredCommitFor(
         view,
