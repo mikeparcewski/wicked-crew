@@ -413,6 +413,24 @@ describe('POST /runs/:id/gate use_stand_ins → grantStandIns (crew#1856)', () =
   const post = (body: Record<string, unknown>, actor = 'human/operator') =>
     app.inject({ method: 'POST', url: '/api/v1/runs/run-s/gate', headers: { 'x-test-actor': actor }, payload: body });
 
+  // crew#1998: the hold as the engine writes it. A mid-run judge hold is an ESCALATION gate (wicked-core
+  // src/actor.rs:11018-11027 `escalate_denied_unit` → ESCALATION_GATE_KIND); `stand_in_needed` is its condition and denial
+  // source, which the engine's own refusal keys on (src/actor/stand_in_gate.rs:28-33, :52-58). The row is the one
+  // `pause_for_human_keyed` commits with the `awaitingHuman` frame, field for field (src/actor.rs:12104-12150): built here
+  // from run eae863c7's real frame (fixtures/stand-in-hold-eae863c7.json), as `interactionRequests` serves it.
+  it('crew#1998: the engine\'s own judge hold (gate_kind escalation, opening 4) takes use_stand_ins', async () => {
+    const asked = (JSON.parse(fixture('stand-in-hold-eae863c7.json')) as { events: Array<Record<string, unknown>> }).events
+      .find((e) => e['type'] === 'awaitingHuman')!;
+    row = { kind: 'gate', status: 'open', ord: asked['ord'], reviewing_ord: asked['reviewingOrd'], prompt: asked['prompt'],
+      gate_kind: asked['gateKind'], gate_seq: asked['gateSeq'], created_at: asked['ts'] };
+    expect(row['gate_kind']).toBe('escalation');
+    // Studio's exact answer on that run (the issue's request body).
+    const res = await post({ approve: true, action: 'use_stand_ins', scope: 'job', ord: 3, gateSeq: 4 });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(grants).toEqual([['run-s', 'job', 4, 'test-human (human)', 3]]);
+    expect(confirms).toEqual([]);
+  });
+
   it('this job: the grant names the open opening, the person and the ord; no plain confirm', async () => {
     const res = await post({ approve: true, action: 'use_stand_ins', scope: 'job', ord: 4 });
     expect(res.statusCode, res.body).toBe(200);
