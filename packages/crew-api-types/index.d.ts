@@ -10409,6 +10409,13 @@ export interface ProposalRevisionEdits {
    *  this job may fill a role its helpers are short of with a labelled stand-in (consent for this job only). A seat's
    *  block, or the field on any other proposal, changes nothing (a note says so). */
   standIns?: true;
+  /** (api-types 0.237.0, crew#2001) Optional. Where a job that makes a pull request delivers: the NUMBER (a positive
+   *  integer; anything else is a 400) of a pull request this chat's own runs delivered on the job's repository, or
+   *  `null` for a new pull request. The daemon checks a number against those runs and never takes it on trust: any
+   *  other number, or one it can't check because the runs could not be read, changes nothing and a note says so. The
+   *  card's suggestions carry it ("Update pull request #N instead", "Open a new pull request instead"); a seat's
+   *  revision block may send it too, under the same check. Moving the job to another repository drops the pick. */
+  revisesPr?: number | null;
 }
 
 /**
@@ -10781,6 +10788,11 @@ export interface ArtifactProposal {
    * no new one is opened. The sentence says so. ABSENT: the job opens a pull request of its own (when it makes one).
    */
   revisesPr?: { number: number; url: string; runId: string };
+  /** (api-types 0.237.0, crew#2001) Optional. The pick of where this job delivers (`ProposalRevisionEdits.revisesPr`),
+   *  kept across revisions on the same repository: a delivered pull request's number (`revisesPr` is then set, or, when
+   *  the chat's runs could not be read to check it, the card is `blocked` until they can) or `'new'` (Go launches with
+   *  `deliver: "pr"`). ABSENT: read from the job's words (crew#1840). */
+  prChoice?: number | 'new';
   /** (§2.5) What else a reshape launches with, from the held run's launch envelope. */
   relaunch?: Pick<LaunchEnvelope, 'deliver' | 'deliverGate' | 'campaignId' | 'groupLabel' | 'revisesPr' | 'forceQeAcceptance' | 'clisJson'>;
 }

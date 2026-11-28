@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **chat jobs**: a job card that makes a pull request, in a chat whose earlier job delivered one on the same repository, now says where its work goes, whatever its words. It reads "It doesn't change pull request #N, which this chat delivered on <repo>." and offers "Update pull request #N instead" as a one-click suggestion. A card that updates a pull request offers "Open a new pull request instead"; after that press the card reads "It opens a new pull request; pull request #N, which this chat delivered on <repo>, is not changed.", and its Go launches with `deliver: "pr"`. Before, words that asked to change the delivered pull request without a verb crew knew (the live proof's "change the PR you delivered…") got a card that said nothing and opened a second pull request. The choice is a new revision edit, `revisesPr` (a number or `null`; api-types 0.237.0 adds `ProposalRevisionEdits.revisesPr` and `ArtifactProposal.prChoice`). The daemon checks a number against the pull requests this chat's own runs delivered on the job's repository, and never takes it on trust. Any other number changes nothing, and a note says so. A pick it can't check because the chat's runs could not be read is kept, and the card's Start waits until the check can run. Go on a picked pull request is refused when that number now resolves to another pull request's URL (the repository id was re-pointed). The pick holds across revisions on the same repository, including a pass through a report card, and is dropped when the job moves to another repository. A reshape keeps its held run's delivery (crew#2001).
+
 ## [0.21.0] — 2026-11-28
 
 Minor release on the train-19 cut dda1624a, carrying 5 PRs since 0.20.1: #1981, #1990, #1988, #1995 and #1994. The minor bump is for the new `PUT /api/v1/repos/:id/seat-base` route (#1990) and the new api-types fields (#1990, #1995).
