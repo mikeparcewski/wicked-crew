@@ -238,6 +238,26 @@ describe('POST /deliver/text (crew#1885)', () => {
     expect((await post(app, { run: encodeURIComponent(RUN_ID), key: d.key.toUpperCase() })).statusCode).toBe(200);
   });
 
+  it('answers the deliver script on its first try after a send-back, while the engine reads its unit pending (crew#2004)', async () => {
+    // The shape a send-back leaves (wicked-core src/actor.rs:24049, `rewind_writes`): the target re-dispatched as
+    // `distributed` with `rework_of` set, and every unit after it `pending`, the deliver unit included, while it runs.
+    const d = delivering();
+    d.view.session = { ...d.view.session, attempt: 1 } as SessionView['session'];
+    d.view.units = d.view.units.map((u) => {
+      if (u.id.endsWith(':deliver')) return { ...u, status: 'pending' as const };
+      if (u.id.endsWith(':fix')) return { ...u, rework_of: 2 } as WorkUnit;
+      return u;
+    });
+    const { app } = await buildApp([d.view], [], REQUIRED);
+    const res = await post(app, { run: RUN_ID, key: d.key });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(parseFramedDeliverText(res.body)!.body).toContain('**Reduced assurance**');
+    // A wrong key on that run is still refused, the same 403.
+    const wrong = await post(app, { run: RUN_ID, key: 'f'.repeat(64) });
+    expect(wrong.statusCode).toBe(403);
+    expect(wrong.json()).toMatchObject({ code: 'not_the_deliver_script' });
+  });
+
   it('refuses another key, another run\'s deliver key, a finished deliver unit, a key file outside crew\'s dir, a tampered key file and an unknown run alike (403, so it says nothing of which runs exist), and a bad body (400)', async () => {
     const mine = delivering();
     const KEY = mine.key;
