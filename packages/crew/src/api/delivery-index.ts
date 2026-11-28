@@ -23,7 +23,7 @@
 
 import type { DeliveryAssurance } from 'wicked-crew-api-types';
 import type { AuditLog } from './audit.js';
-import type { AgentSession, SessionView, WorkUnit, WorkflowDef } from '../core/types.js';
+import type { AgentSession, RecordedEvent, SessionView, WorkUnit, WorkflowDef } from '../core/types.js';
 import { execCapped } from '../core/exec.js';
 import { lastDeliverMarker, trustedDeliverOutcome } from '../core/deliver-triage.js';
 import {
@@ -558,8 +558,26 @@ export async function readDeliveredCommit(
 
 /**
  * Was the deliver unit's push still the branch tip when this terminal frame fired (CS11, cs11-b
- * review P1/correctness)? TRUE only when NO unit after the deliver unit was ever dispatched — every
- * unit with `ord` greater than the deliver unit's `ord` is still `pending`.
+ * review P1/correctness)? TRUE only when BOTH records say so:
+ *   - every unit after the deliver unit still reads `pending` (the CS11 check), AND
+ *   - the engine's run log (`adapter.runEvents`) shows the deliver unit dispatched and NO unit with a
+ *     greater `ord` dispatched after the deliver unit's last dispatch (crew#2008).
+ *
+ * (crew#2008) Status alone cannot say a later phase ran: the plan stamps every unit `distributed`
+ * (wicked-core `apply_distributions`), a send-back's rewind stamps every unit after its target `pending`
+ * (wicked-core `rewind_writes`), and dispatch writes no status. So after a send-back a phase after Deliver
+ * can run, and commit, while it reads `pending`. The engine emits `unitDispatched {session, ord, attempt}`
+ * from its one dispatch funnel before the unit runs, and the log reader returns frames in emission (file)
+ * order, which is the order read here. `seq` is NOT a sort key: an engine before core#408 reset it on
+ * restart (wicked-core `event_log.rs`, `read_run`).
+ *
+ * The log alone is not enough either: it is best effort (the engine's writer drops a failed write, and the
+ * read barrier gives up after 5 s), so a later dispatch can be missing from it. Hence BOTH: a commit is
+ * recorded only where the status check alone would also record one, so this can never record a commit
+ * main would not.
+ *
+ * FALSE, so no commit is recorded, on every unknown: no log (`null`/`undefined`, an addon without the
+ * binding), no dispatch of the deliver unit in it, or no deliver unit at all.
  *
  * WHY it gates the terminal-frame commit read: the engine supports a deliver phase that is not the
  * last phase. If delivery pushes C1 and a LATER phase then commits C2 onto `wicked/<id>` before the
@@ -573,10 +591,25 @@ export async function readDeliveredCommit(
  * RESIDUAL (stated, not chased): a person who hand-commits on the retained `wicked/<id>` branch after a
  * daemon crash and before this record is written moves the tip too; no crew actor does that.
  */
-export function noUnitDispatchedAfterDeliver(view: SessionView): boolean {
+export function noUnitDispatchedAfterDeliver(view: SessionView, events: readonly RecordedEvent[] | null | undefined): boolean {
   const deliver = deliverUnitOf(view);
-  if (deliver === null) return false;
-  return (view.units ?? []).every((u) => u.ord <= deliver.ord || u.status === 'pending');
+  if (deliver === null || events == null) return false;
+  if (!(view.units ?? []).every((u) => u.ord <= deliver.ord || u.status === 'pending')) return false;
+  const runId = view.session.id;
+  // Walk in the reader's order (emission order): after the deliver unit's LAST dispatch, no later ord.
+  let deliverSeen = false;
+  let laterSinceDeliver = false;
+  for (const e of events) {
+    const f = e as RecordedEvent & { session?: unknown; ord?: unknown };
+    if (f.type !== 'unitDispatched' || f.session !== runId || typeof f.ord !== 'number') continue;
+    if (f.ord === deliver.ord) {
+      deliverSeen = true;
+      laterSinceDeliver = false;
+    } else if (f.ord > deliver.ord) {
+      laterSinceDeliver = true;
+    }
+  }
+  return deliverSeen && !laterSinceDeliver;
 }
 
 /**
@@ -589,8 +622,9 @@ export function noUnitDispatchedAfterDeliver(view: SessionView): boolean {
  * WITHOUT a commit) when:
  *   - the run has no repo (nothing to read),
  *   - the repo root is unresolved,
- *   - a later unit ran after the deliver unit ({@link noUnitDispatchedAfterDeliver} is false), so the
- *     local branch may no longer be the pushed tip,
+ *   - the engine's run log cannot be read (no `eventsOf`, a `null` log, a failed read), or it shows a
+ *     later unit dispatched after the deliver unit ({@link noUnitDispatchedAfterDeliver} is false), so
+ *     the local branch may no longer be the pushed tip,
  *   - the SHA could not be read.
  * A `null` keeps the run a contributor at join time — reading the commit must never block or distort
  * the delivery record.
@@ -599,11 +633,20 @@ export async function deliveredCommitFor(
   view: SessionView,
   repoRootOf: (repoRef: string) => Promise<string | undefined>,
   exec?: DeliveredCommitExec,
+  eventsOf?: (runId: string) => Promise<readonly RecordedEvent[] | null>,
 ): Promise<string | null> {
   const repoRef = view.session.repo_ref;
   if (repoRef == null) return null;
-  // P1/correctness: only record the commit while the deliver push is still the branch tip.
-  if (!noUnitDispatchedAfterDeliver(view)) return null;
+  // P1/correctness: only record the commit while the deliver push is still the branch tip, as the engine's
+  // run log says (crew#2008). No log reader, no log, or a failed read: no commit.
+  if (eventsOf === undefined) return null;
+  let events: readonly RecordedEvent[] | null;
+  try {
+    events = await eventsOf(view.session.id);
+  } catch {
+    return null;
+  }
+  if (!noUnitDispatchedAfterDeliver(view, events)) return null;
   const root = await repoRootOf(repoRef);
   if (root == null) return null;
   const session = view.session as typeof view.session & { run_branch?: string };

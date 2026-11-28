@@ -26,7 +26,7 @@ import {
   type DeliveryRecord,
 } from '../src/api/delivery-index.js';
 import { AuditLog } from '../src/api/audit.js';
-import type { SessionView } from '../src/core/types.js';
+import type { RecordedEvent, SessionView } from '../src/core/types.js';
 
 const PR_URL = 'https://github.com/o/r/pull/1';
 const SHA = 'a'.repeat(40);
@@ -391,19 +391,27 @@ describe('CS11 slice B — the production terminal-frame wiring (noUnitDispatche
     } as unknown as SessionView;
   }
 
-  it('noUnitDispatchedAfterDeliver: true when every unit after the deliver unit is still pending', () => {
-    expect(noUnitDispatchedAfterDeliver(view('run-a'))).toBe(true); // no later unit at all
-    expect(noUnitDispatchedAfterDeliver(withLater('pending'))).toBe(true);
+  /** The engine's run log (crew#2008): one `unitDispatched` per ord, in order. */
+  const logOf = (...ords: number[]) => async () =>
+    ords.map((ord, i) => ({ type: 'unitDispatched', session: 'run-a', ord, attempt: 0, ts: i, seq: i })) as never;
+
+  it('noUnitDispatchedAfterDeliver: true when the log shows no unit after the deliver unit dispatched and every later unit reads pending', async () => {
+    expect(noUnitDispatchedAfterDeliver(view('run-a'), await logOf(4, 5)())).toBe(true); // no later unit at all
+    expect(noUnitDispatchedAfterDeliver(withLater('pending'), await logOf(4, 5)())).toBe(true);
+    // A later unit that reads anything but pending still records nothing, as before crew#2008 (the log can miss a
+    // dispatch, so it only ever narrows what the status check allowed).
+    expect(noUnitDispatchedAfterDeliver(withLater('distributed'), await logOf(4, 5)())).toBe(false);
   });
 
-  it('noUnitDispatchedAfterDeliver: false once a later phase ran (its commit could outrun the pushed tip)', () => {
-    expect(noUnitDispatchedAfterDeliver(withLater('done'))).toBe(false);
-    expect(noUnitDispatchedAfterDeliver(withLater('rejected'))).toBe(false);
+  it('noUnitDispatchedAfterDeliver: false once a later phase was dispatched (its commit could outrun the pushed tip)', async () => {
+    for (const status of ['done', 'rejected', 'pending', 'distributed']) {
+      expect(noUnitDispatchedAfterDeliver(withLater(status), await logOf(4, 5, 6)()), status).toBe(false);
+    }
   });
 
   it('deliveredCommitFor: reads refs/heads/<branch> when no later unit ran', async () => {
     const exec = vi.fn(okExec);
-    const got = await deliveredCommitFor(view('run-a'), async () => '/repo', exec);
+    const got = await deliveredCommitFor(view('run-a'), async () => '/repo', exec, logOf(4, 5));
     expect(got).toBe(SHA);
     expect(exec).toHaveBeenCalledWith(
       ['show-ref', '--verify', '--hash', 'refs/heads/wicked/run-a'],
@@ -413,7 +421,7 @@ describe('CS11 slice B — the production terminal-frame wiring (noUnitDispatche
 
   it('deliveredCommitFor: records NO commit (null) when a later unit ran, without touching git', async () => {
     const exec = vi.fn(okExec);
-    expect(await deliveredCommitFor(withLater('done'), async () => '/repo', exec)).toBeNull();
+    expect(await deliveredCommitFor(withLater('done'), async () => '/repo', exec, logOf(4, 5, 6))).toBeNull();
     expect(exec).not.toHaveBeenCalled();
   });
 
@@ -423,7 +431,84 @@ describe('CS11 slice B — the production terminal-frame wiring (noUnitDispatche
       session: { ...view('run-a').session, repo_ref: null },
       units: view('run-a').units,
     } as unknown as SessionView;
-    expect(await deliveredCommitFor(noRepo, async () => '/repo', exec)).toBeNull();
-    expect(await deliveredCommitFor(view('run-a'), async () => undefined, exec)).toBeNull();
+    expect(await deliveredCommitFor(noRepo, async () => '/repo', exec, logOf(4, 5))).toBeNull();
+    expect(await deliveredCommitFor(view('run-a'), async () => undefined, exec, logOf(4, 5))).toBeNull();
+  });
+});
+
+describe('crew#2008 — the engine run log vetoes "nothing ran after Deliver" where unit status cannot tell', () => {
+  const okExec: DeliveredCommitExec = async () => ({ stdout: `${SHA}\n`, stderr: '', code: 0 });
+
+  /**
+   * One `unitDispatched` frame as the engine's run log records it. The engine emits `unitDispatched {session, ord, attempt}`
+   * from `dispatch_unit`, the one funnel every dispatch reaches, before the unit runs (wicked-core src/actor.rs:14315).
+   * Its event sink appends each frame to the run's durable log before fanning it out (src/event_log.rs:659), and
+   * `adapter.runEvents` answers that log oldest first, each frame with its capture `ts` and the run's `seq`
+   * (`RecordedEvent`). `tests/integration/deliver-e2e.test.ts` checks this shape on a real engine's log.
+   */
+  const dispatched = (ord: number, attempt: number, seq: number, session = 'run-a'): RecordedEvent =>
+    ({ type: 'unitDispatched', session, ord, attempt, ts: 1_764_000_000_000 + seq, seq }) as unknown as RecordedEvent;
+
+  /** The run a send-back left: the deliver unit (ord 5) done, the phase after it (ord 6) still `pending`, as a rewind
+   *  stamps every unit after its target (wicked-core src/actor.rs:24049) and dispatch writes no status. */
+  function reworked(): SessionView {
+    return {
+      session: { ...view('run-a', 'done', 'cancelled').session, attempt: 1 },
+      units: [
+        { id: 'run-a:u3', ord: 3, status: 'done', tool_cmd: [] },
+        { id: 'run-a:u4', ord: 4, status: 'done', tool_cmd: [] },
+        { id: 'run-a:deliver', ord: 5, status: 'done', tool_cmd: [] },
+        { id: 'run-a:u6', ord: 6, status: 'pending', tool_cmd: [] },
+      ],
+    } as unknown as SessionView;
+  }
+  /** Its log: the first pass reached ord 4, which sent the work back to ord 3; the re-run then delivered (ord 5) and
+   *  dispatched the phase after Deliver (ord 6), which committed before the run was cancelled. */
+  const reworkedLog = (): RecordedEvent[] => [
+    dispatched(3, 0, 10), dispatched(4, 0, 20),
+    dispatched(3, 1, 30), dispatched(4, 1, 40), dispatched(5, 1, 50), dispatched(6, 1, 60),
+  ];
+
+  it('a phase after Deliver that ran after a send-back counts as run, though it still reads pending', () => {
+    expect(noUnitDispatchedAfterDeliver(reworked(), reworkedLog())).toBe(false);
+  });
+
+  it('records NO commit for that run, without touching git', async () => {
+    const exec = vi.fn(okExec);
+    expect(await deliveredCommitFor(reworked(), async () => '/repo', exec, async () => reworkedLog())).toBeNull();
+    expect(exec).not.toHaveBeenCalled();
+  });
+
+  it('reads the commit when nothing after Deliver was dispatched after its last dispatch, and the later units read pending', async () => {
+    // The phase after Deliver ran on the first pass, then a send-back re-ran Deliver; nothing ran after that push.
+    const log = [dispatched(4, 0, 10), dispatched(5, 0, 20), dispatched(6, 0, 30), dispatched(3, 1, 40), dispatched(4, 1, 50), dispatched(5, 1, 60)];
+    expect(noUnitDispatchedAfterDeliver(reworked(), log)).toBe(true);
+    const exec = vi.fn(okExec);
+    expect(await deliveredCommitFor(reworked(), async () => '/repo', exec, async () => log)).toBe(SHA);
+    // Never more than the status check allows: a later unit that reads `distributed` (planned on a first pass) records
+    // nothing, even with a log that shows it never ran (the log is best effort; it may have missed the dispatch).
+    const planned = { ...reworked(), units: reworked().units.map((u) => (u.ord === 6 ? { ...u, status: 'distributed' } : u)) } as SessionView;
+    expect(noUnitDispatchedAfterDeliver(planned, [dispatched(4, 0, 10), dispatched(5, 0, 20)])).toBe(false);
+  });
+
+  it('reads the log in the order the engine reader returns it (emission order), never sorting by seq, and only this run\'s frames', () => {
+    // An engine before core#408 reset `seq` on restart, so a later frame can carry a smaller seq (wicked-core
+    // event_log.rs `read_run`: file order is emission order, and seq is not a sort key). Deliver at seq 100, a restart,
+    // Deliver again at seq 5, then the phase after it at seq 6: that phase ran after the last push.
+    expect(noUnitDispatchedAfterDeliver(reworked(), [dispatched(5, 0, 100), dispatched(5, 1, 5), dispatched(6, 1, 6)])).toBe(false);
+    // Another run's later dispatch is not this run's.
+    expect(noUnitDispatchedAfterDeliver(reworked(), [dispatched(5, 1, 50), dispatched(6, 0, 60, 'run-b')])).toBe(true);
+  });
+
+  it('fails closed (no commit, no git) on every unknown: no log binding, a failed read, no deliver dispatch, no log reader', async () => {
+    const simple = view('run-a'); // deliver last; the status read used to say "nothing after it ran"
+    expect(noUnitDispatchedAfterDeliver(simple, null)).toBe(false);
+    expect(noUnitDispatchedAfterDeliver(simple, undefined)).toBe(false);
+    expect(noUnitDispatchedAfterDeliver(simple, [dispatched(4, 0, 10)])).toBe(false); // the deliver unit was never dispatched
+    const exec = vi.fn(okExec);
+    expect(await deliveredCommitFor(simple, async () => '/repo', exec, async () => null)).toBeNull();
+    expect(await deliveredCommitFor(simple, async () => '/repo', exec, async () => { throw new Error('log unreadable'); })).toBeNull();
+    expect(await deliveredCommitFor(simple, async () => '/repo', exec)).toBeNull();
+    expect(exec).not.toHaveBeenCalled();
   });
 });
