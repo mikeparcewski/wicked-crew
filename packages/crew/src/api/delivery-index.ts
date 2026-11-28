@@ -23,7 +23,7 @@
 
 import type { DeliveryAssurance } from 'wicked-crew-api-types';
 import type { AuditLog } from './audit.js';
-import type { AgentSession, SessionView, WorkUnit, WorkflowDef } from '../core/types.js';
+import type { AgentSession, RecordedEvent, SessionView, WorkUnit, WorkflowDef } from '../core/types.js';
 import { execCapped } from '../core/exec.js';
 import { lastDeliverMarker, trustedDeliverOutcome } from '../core/deliver-triage.js';
 import {
@@ -573,7 +573,8 @@ export async function readDeliveredCommit(
  * RESIDUAL (stated, not chased): a person who hand-commits on the retained `wicked/<id>` branch after a
  * daemon crash and before this record is written moves the tip too; no crew actor does that.
  */
-export function noUnitDispatchedAfterDeliver(view: SessionView): boolean {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- (crew#2008 red) the run log is read by the fix
+export function noUnitDispatchedAfterDeliver(view: SessionView, _events?: readonly RecordedEvent[] | null): boolean {
   const deliver = deliverUnitOf(view);
   if (deliver === null) return false;
   return (view.units ?? []).every((u) => u.ord <= deliver.ord || u.status === 'pending');
@@ -599,6 +600,8 @@ export async function deliveredCommitFor(
   view: SessionView,
   repoRootOf: (repoRef: string) => Promise<string | undefined>,
   exec?: DeliveredCommitExec,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- (crew#2008 red) the run log is read by the fix
+  _eventsOf?: (runId: string) => Promise<readonly RecordedEvent[] | null>,
 ): Promise<string | null> {
   const repoRef = view.session.repo_ref;
   if (repoRef == null) return null;
