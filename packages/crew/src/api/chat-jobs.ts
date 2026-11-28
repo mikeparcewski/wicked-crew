@@ -152,8 +152,9 @@ export interface JobFacts {
   by: ProposalShape['by'];
   source: ProposalShape['source'];
   guess?: ProposalShape['guess'];
-  /** (crew#2001) The person's pick of where a pull request job delivers: a pull request this chat delivered on the
-   *  job's repository (its number), or `'new'`. Absent: read from the words (crew#1840). */
+  /** (crew#2001) The pick of where a pull request job delivers (a person's press or a seat's revision, checked against
+   *  this chat's delivered pull requests either way): one delivered on the job's repository (its number), or `'new'`.
+   *  Absent: read from the words (crew#1840). */
   prChoice?: number | 'new';
 }
 
@@ -198,6 +199,8 @@ export interface JobContext {
   deliveredPrs?: readonly DeliveredPr[];
   /** (crew#2001) The chat's runs could not be read for its delivered pull requests (`deliveredPrs` is then empty). */
   deliveredPrsUnread?: true;
+  /** (crew#2001) A reshape keeps its held run's delivery (`relaunch`): the card offers no pick of a pull request. */
+  heldDelivery?: true;
   /** (crew#1884) Whether a job of this workflow can take stand-ins here (the linked engine fills a short checker role
    *  with a labelled stand-in, asked at Start; not a review, the evals or a demo): such a card needs only a seat that
    *  builds. Absent = none can (this module stays free of the engine and the launch modules). */
@@ -221,10 +224,16 @@ export function prNumberOfUrl(url: string): number | null {
   return m === null ? null : Number(m[1]);
 }
 
-/** (crew#2001) The pull requests this chat delivered on `repoRef`, one per URL, in ascending number. */
+/** (crew#2001) The pull requests this chat delivered on `repoRef`, one per number (its latest delivery), in the order
+ *  they were last delivered (the most recent last). */
 export function deliveredOn(delivered: readonly DeliveredPr[], repoRef: string): DeliveredPr[] {
-  const mine = delivered.filter((d) => d.repoRef === repoRef);
-  return [...new Map(mine.map((d) => [d.url.toLowerCase(), d])).values()].sort((a, b) => a.number - b.number);
+  const byNumber = new Map<number, DeliveredPr>();
+  for (const d of delivered) {
+    if (d.repoRef !== repoRef) continue;
+    byNumber.delete(d.number);
+    byNumber.set(d.number, d);
+  }
+  return [...byNumber.values()];
 }
 
 const PR_WORD = String.raw`(?:PRs?|pull[ -]?requests?)`;
@@ -318,8 +327,12 @@ export function prRevisionOf(
 
 /** (crew#1840) What a job's Go adds to its run launch when the job updates a delivered pull request: `revisesPr` and
  *  `deliver: "pr"` (a revision needs its deliver phase). Empty for any other job. */
-export function jobRevisionLaunch(p: Pick<ArtifactProposal, 'revisesPr' | 'repoRefs'>): { revisesPr?: number; deliver?: 'pr' } {
-  return p.revisesPr !== undefined && p.repoRefs?.[0] !== undefined ? { revisesPr: p.revisesPr.number, deliver: 'pr' } : {};
+export function jobRevisionLaunch(p: Pick<ArtifactProposal, 'revisesPr' | 'repoRefs' | 'prChoice' | 'relaunch'>, makesPr = false): { revisesPr?: number; deliver?: 'pr' } {
+  if (p.repoRefs?.[0] === undefined) return {};
+  if (p.revisesPr !== undefined) return { revisesPr: p.revisesPr.number, deliver: 'pr' };
+  // (crew#2001) "Open a new pull request instead" opens one, whatever the daemon's delivery default (codex r1). A reshape
+  // keeps its held run's delivery.
+  return makesPr && p.prChoice === 'new' && p.relaunch === undefined ? { deliver: 'pr' } : {};
 }
 
 export class JobRefusal extends Error {
@@ -757,34 +770,45 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
   // delivered PR is revised. Nothing else in the proposal ever says where the work is delivered.
   // (crew#2001) The person's own pick (a press on the card's PR suggestion, or a revision naming it) wins over the words,
   // and a number is checked against this chat's own delivered pull requests on the job's repository: never trusted.
+  // A reshape keeps its held run's delivery (`relaunch`): its card offers no pick, and the words read as before.
   const makesPr = launch === 'run' && delivers === 'pr' && repo !== null;
-  const minePrs = makesPr ? deliveredOn(ctx.deliveredPrs ?? [], repo.id) : [];
-  const choice = makesPr ? facts.prChoice : undefined;
-  let prChoice: number | 'new' | undefined;
+  const pickable = makesPr && ctx.heldDelivery !== true;
+  const minePrs = pickable ? deliveredOn(ctx.deliveredPrs ?? [], repo.id) : [];
+  const choice = facts.prChoice;
+  // A shape that offers no pick carries the pick unchanged (a pass through a report card keeps it, codex r1).
+  let prChoice: number | 'new' | undefined = pickable ? undefined : choice;
   let chosen: DeliveredPr | null = null;
-  if (typeof choice === 'number') {
+  // A pick that can't be checked now (the chat's runs could not be read) is kept, and Start waits for the check.
+  let unchecked = false;
+  if (pickable && typeof choice === 'number') {
     chosen = minePrs.find((d) => d.number === choice) ?? null;
     if (chosen !== null) prChoice = choice;
-    else notes.push(`This job opens a new pull request: ${ctx.deliveredPrsUnread === true ? "this chat's delivered pull requests could not be read" : `pull request #${choice} is not one this chat delivered on ${repo!.name}`}.`);
-  } else if (choice === 'new') {
+    else if (ctx.deliveredPrsUnread === true) {
+      prChoice = choice;
+      unchecked = true;
+      blockedBy.push(`This job is to update pull request #${choice}, but this chat's delivered pull requests could not be read to check it: try again`);
+    } else notes.push(`This job opens a new pull request: pull request #${choice} is not one this chat delivered on ${repo.name}.`);
+  } else if (pickable && choice === 'new') {
     prChoice = 'new';
   }
-  const prAsk = makesPr && choice === undefined ? prRevisionOf(facts.words, ctx.deliveredPrs ?? [], repo.id) : null;
+  const prAsk = makesPr && (!pickable || choice === undefined) ? prRevisionOf(facts.words, ctx.deliveredPrs ?? [], repo.id) : null;
   const revisesPr = chosen ?? prAsk?.pr ?? null;
-  // The one PR offered in the card's suggestion: the newest this chat delivered here (pull request numbers only grow).
-  const offerPr = minePrs.at(-1) ?? null;
+  // The one PR offered in the card's suggestion: the one this chat delivered here most recently.
+  const offerPr = unchecked ? null : (minePrs.at(-1) ?? null);
   if (revisesPr !== null) {
     parts.push(`It updates pull request #${revisesPr.number}, which an earlier job of this chat delivered; no new pull request is opened.`);
   } else if (offerPr !== null) {
-    const others = minePrs.map((d) => `#${d.number}`);
+    const others = minePrs.map((d) => d.number).sort((a, b) => a - b).map((n) => `#${n}`);
     parts.push(`It opens a new pull request; ${others.length === 1 ? `pull request ${others[0]}` : `pull requests ${list(others)}`}, which this chat delivered on ${repo!.name}, ${others.length === 1 ? 'is' : 'are'} not changed.`);
   }
   if (revisesPr === null && prAsk !== null && prAsk.miss !== undefined) {
-    const why = prAsk.miss === 'not-delivered'
-      ? `${prAsk.named ?? 'the pull request you named'} is not one this chat delivered on ${repo!.name}`
-      : prAsk.miss === 'several'
-        ? `you named more than one pull request this chat delivered on ${repo!.name}`
-        : `this chat has no one pull request on ${repo!.name} it delivered to update`;
+    const why = ctx.deliveredPrsUnread === true
+      ? "this chat's delivered pull requests could not be read"
+      : prAsk.miss === 'not-delivered'
+        ? `${prAsk.named ?? 'the pull request you named'} is not one this chat delivered on ${repo!.name}`
+        : prAsk.miss === 'several'
+          ? `you named more than one pull request this chat delivered on ${repo!.name}`
+          : `this chat has no one pull request on ${repo!.name} it delivered to update`;
     notes.push(`This job won't update an existing pull request: ${why}. To change a delivered pull request, use Revise this PR on the job that delivered it.`);
   }
   // crew#1570: a domain extraction runs many hours on a large repository; the catalog's fixed range would mislead.
@@ -801,10 +825,11 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     ? `${label} comes in ${card.release}.${coming.nearest !== null ? ` Today, the closest is ${nounOf(CATALOG_V2_CARDS.find((c) => c.id === coming!.nearest!.card) ?? card, coming.nearest.option)}.` : ''}`
     : null;
   const sentence: ProposalSentence = { text: comingText ?? parts.filter((p) => p !== '').join(' '), tokens: comingText !== null ? [] : tokens, notes, ask };
-  // At most two suggestions: another option that runs a different plan, and another repository in scope.
+  // At most two suggestions: where a pull request job delivers, another option that runs a different plan, and another
+  // repository in scope.
   const suggestions: ProposalSuggestion[] = [];
   // (crew#2001) Where a pull request job delivers is one press away, first so the cap of two never cuts it.
-  if (coming === undefined && question === null) {
+  if (pickable && !unchecked && coming === undefined && question === null) {
     if (revisesPr !== null) suggestions.push({ label: 'Open a new pull request instead', edit: { revisesPr: null } });
     else if (offerPr !== null) suggestions.push({ label: `Update pull request #${offerPr.number} instead`, edit: { revisesPr: offerPr.number } });
   }
@@ -1208,11 +1233,11 @@ export function mergeRevision(
   if (edits.revisesPr !== undefined) {
     if (edits.revisesPr === null) facts.prChoice = 'new';
     else {
-      const repoName = ctx.chat.repos.find((x) => x.id === facts.repoRef)?.name ?? facts.repoRef;
-      const hit = facts.repoRef === null ? undefined : deliveredOn(ctx.deliveredPrs ?? [], facts.repoRef).find((d) => d.number === edits.revisesPr);
+      const repo = ctx.chat.repos.find((x) => x.id === facts.repoRef) ?? null;
+      const hit = repo === null ? undefined : deliveredOn(ctx.deliveredPrs ?? [], repo.id).find((d) => d.number === edits.revisesPr);
       if (hit !== undefined) facts.prChoice = hit.number;
       else if (ctx.deliveredPrsUnread === true) notes.push(`Not changed: this chat's delivered pull requests could not be read, so this job can't update pull request #${edits.revisesPr}`);
-      else notes.push(`Not changed: pull request #${edits.revisesPr} is not one this chat delivered${repoName !== null ? ` on ${repoName}` : ''}`);
+      else notes.push(`Not changed: pull request #${edits.revisesPr} is not one this chat delivered${repo !== null ? ` on ${repo.name}` : ''}`);
     }
   }
   // 7. The checks compared with the parent's: what the result lacks is lost (the caller asks before writing it).

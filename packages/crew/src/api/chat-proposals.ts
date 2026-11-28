@@ -2557,7 +2557,8 @@ export class ChatProposals {
   private async reshapeOffer(chatId: string, held: ArtifactProposal, edits: Pick<ProposalRevisionEdits, 'card' | 'option' | 'depth'>, base: Pick<ChatPlanOffer, 'id' | 'runId' | 'pid' | 'ord' | 'planRev'>): Promise<ChatPlanOffer | null> {
     const chat = this.jobChat(chatId);
     if (chat === null) return null;
-    const ctx = await this.jobContext(chatId, base.id, null, 'person', chat, { revises: held.pid, lineage: held.lineage ?? held.pid, notes: [] });
+    let ctx = await this.jobContext(chatId, base.id, null, 'person', chat, { revises: held.pid, lineage: held.lineage ?? held.pid, notes: [] });
+    if (this.concernsPr(held, edits, ctx)) ctx = await this.withDeliveredPrs(ctx);
     const merged = await this.mergeJobRevision(held, edits, ctx);
     const card = CATALOG_V2_CARDS.find((c) => c.id === merged.facts.card);
     if (card === undefined || (merged.facts.card === held.shape?.card && optionFor(card, merged.facts.option) === held.shape?.option && merged.facts.depth === held.shape?.depth)) return null;
@@ -2765,10 +2766,11 @@ export class ChatProposals {
     return { chatId, pid, turnId, seat, chat, served, roster, pool, projectLabel, qeOff, powerPresets, ...(standInsFor !== undefined ? { standInsFor: (w: string | null) => standInsFor(w) } : {}), ...(this.deps.coverage !== undefined ? { coverage: (keys: readonly string[], bound: boolean) => this.deps.coverage!(keys, bound) } : {}), ...extra, ...(refusal !== undefined ? { seatsUnread: true } : {}) };
   }
 
-  /** (crew#2001) {@link deliveredPrs} into a context, with whether the read failed: a pick then can't be checked. */
-  private async withDeliveredPrs<C extends JobContext>(chatId: string, ctx: C): Promise<C> {
+  /** (crew#2001) {@link deliveredPrs} into a context, once per operation (every check in it reads the same list), with
+   *  whether the read failed: a pick then can't be checked. */
+  private async withDeliveredPrs<C extends JobContext>(ctx: C): Promise<C> {
     if (ctx.deliveredPrs !== undefined) return ctx;
-    const { prs, unread } = await this.deliveredPrs(chatId);
+    const { prs, unread } = await this.deliveredPrs(ctx.chatId);
     return { ...ctx, deliveredPrs: prs, ...(unread ? { deliveredPrsUnread: true as const } : {}) };
   }
 
@@ -2848,10 +2850,21 @@ export class ChatProposals {
     return { ...ctx, roster, reviewNote, ...(ctx.pool !== undefined ? { pool: ctx.pool.filter((s) => !seats.includes(s.key)) } : {}) };
   }
 
+  /** (crew#2001) A revision whose checks read this chat's delivered pull requests: of a job that makes one (before or
+   *  after), or that names or holds a pick. The caller loads them once for the merge and the card it composes. */
+  private concernsPr(parent: ArtifactProposal, edits: ProposalRevisionEdits, ctx: JobContext): boolean {
+    if (edits.revisesPr !== undefined || parent.prChoice !== undefined || parent.revisesPr !== undefined) return true;
+    const makes = (cardId: string | undefined, option: string | null | undefined): boolean => {
+      const card = CATALOG_V2_CARDS.find((c) => c.id === cardId);
+      return card !== undefined && resolveOption(card.id, optionFor(card, option ?? undefined), ctx.served)?.resolved.delivers === 'pr';
+    };
+    return makes(parent.shape?.card, parent.shape?.option) || (edits.card !== undefined && makes(edits.card, edits.option));
+  }
+
   /** Resolve the revision's shape first, then load only the choices that its input checks need. */
   private async mergeJobRevision(parent: ArtifactProposal, edits: ProposalRevisionEdits, ctx: JobContext): Promise<ReturnType<typeof mergeRevision>> {
-    // (crew#2001) A revision naming a pull request is checked against this chat's own delivered ones.
-    if (typeof edits.revisesPr === 'number') ctx = await this.withDeliveredPrs(ctx.chatId, ctx);
+    // (crew#2001) A revision of a pull request job checks its pick against this chat's own delivered pull requests.
+    if (this.concernsPr(parent, edits, ctx)) ctx = await this.withDeliveredPrs(ctx);
     const shape = mergeRevision(parent, {
       ...(edits.card !== undefined ? { card: edits.card } : {}),
       ...(edits.option !== undefined ? { option: edits.option } : {}),
@@ -2962,8 +2975,10 @@ export class ChatProposals {
     ctx = await this.reviewRoster(facts, ctx);
     // (crew#1840) Words that name a pull request: the ones this chat's runs delivered, so a job asked to change one
     // updates it (the resolution decides; it is pure).
-    // (crew#2001) A pick of a pull request is checked against the same read, whatever the words say.
-    if (mentionsPullRequest(facts.words) || typeof facts.prChoice === 'number') ctx = await this.withDeliveredPrs(chatId, ctx);
+    // (crew#2001) Any job that makes a pull request says where it delivers, whatever the words say; a pick is checked
+    // against the same read. A reshape keeps its held run's delivery.
+    if (relaunch !== undefined) ctx = { ...ctx, heldDelivery: true };
+    if (r?.resolved.delivers === 'pr' || mentionsPullRequest(facts.words) || facts.prChoice !== undefined) ctx = await this.withDeliveredPrs(ctx);
     if (r?.resolved.inputs.some((i) => i.id === 'documents')) {
       if (facts.inputs['documents'] === undefined) {
         const { binding } = bindingOf(records, ctx.turnId ?? '\u0000');
@@ -3196,6 +3211,8 @@ export class ChatProposals {
       edits.inputs = rest;
       extraNotes.push("Not changed: the job's own words are yours; say them again to change them");
     }
+    // (crew#2001) One read of the delivered pull requests for the merge and the card it composes (codex r1).
+    if (this.concernsPr(parent.proposal, edits, ctx0)) ctx0 = await this.withDeliveredPrs(ctx0);
     const merged = await this.mergeJobRevision(parent.proposal, edits, ctx0);
     merged.notes.push(...extraNotes);
     const ctx: JobContext = { ...ctx0, notes: merged.notes };

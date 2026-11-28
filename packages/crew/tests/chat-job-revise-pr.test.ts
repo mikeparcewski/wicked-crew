@@ -16,7 +16,7 @@ import { CoreAdapter } from '../src/core/adapter.js';
 import { CATALOG_SEEDS } from '../src/workflow-catalog/catalog-data.js';
 import { buildWorkflowCatalogV2, resolveOption, servedState, type ServedState } from '../src/workflow-catalog/build-v2.js';
 import { ChatProposals, foldProposals, LaunchOnceRegistry, type ChatProposalDeps, type ProposalChat, type ProposalDispatch, type ProposalDispatcher } from '../src/api/chat-proposals.js';
-import { jobRevisionLaunch, prNumberOfUrl, prRevisionOf } from '../src/api/chat-jobs.js';
+import { deliveredOn, jobRevisionLaunch, prNumberOfUrl, prRevisionOf } from '../src/api/chat-jobs.js';
 import { removeScratch } from './setup/scratch.js';
 
 const ME: Actor = { id: 'maria', kind: 'human', trust: 'operator' };
@@ -164,12 +164,18 @@ describe('crew#1840 a chat job that changes a pull request this chat delivered',
     );
   });
 
-  it('a request that names no pull request reads no runs and changes nothing', async () => {
+  it('a request that names no pull request updates none, and (crew#2001) its card still says where it delivers', async () => {
     const r = rig([DELIVERED], () => CHAT);
     const p = await turn(r, 'add a test in test/math.test.js that sum([0, 2, 3]) is 5');
-    expect(r.runsRead).toBe(0);
+    expect(r.runsRead).toBe(1);
     expect(p.revisesPr).toBeUndefined();
     expect(p.sentence!.notes.join(' ')).not.toContain('pull request');
+    expect(p.sentence!.text).toContain('It opens a new pull request; pull request #1, which this chat delivered on wicked, is not changed.');
+    expect(p.suggestions?.[0]).toEqual({ label: 'Update pull request #1 instead', edit: { revisesPr: 1 } });
+    // A card that makes no pull request, with words that name none, reads no runs.
+    const q = rig([DELIVERED], () => CHAT);
+    expect((await turn(q, 'what could go wrong with the math module', 'risk')).revisesPr).toBeUndefined();
+    expect(q.runsRead).toBe(0);
   });
 
   it('a card that makes no pull request never carries one', async () => {
@@ -296,6 +302,96 @@ describe('crew#2001 a chat job in a chat that delivered a PR says where it deliv
     await press(r, open(r), { repoRef: 'wicked' }, 'press-3');
     expect(open(r).revisesPr).toBeUndefined();
     expect(open(r).repoRefs).toEqual(['wicked']);
+  });
+});
+
+describe('crew#2001 review round 1: the pick holds, is checked once per change, and says when it can\'t be', () => {
+  const tiny = (): Rig => rig([LEG_E_DELIVERED], (id) => (id === LEG_E_RUN ? CHAT : undefined), 'tiny-math');
+  const detail = (r: Rig, add: string, id: string) => press(r, open(r), { detail: { add: [add] } }, id);
+
+  it('words with no PR in them: the card offers PR #2; the pick holds across another revision; "new" launches a PR', async () => {
+    const r = tiny();
+    const p = await turn(r, 'also cover sum([]) in tiny-math', 'bug');
+    expect(p.sentence!.text).toContain('It opens a new pull request; pull request #2, which this chat delivered on tiny-math, is not changed.');
+    expect(p.suggestions?.[0]).toEqual({ label: 'Update pull request #2 instead', edit: { revisesPr: 2 } });
+    await press(r, p, { revisesPr: 2 }, 'press-1');
+    const a = open(r);
+    expect(a.revisesPr?.number).toBe(2);
+    expect(await detail(r, 'cover sum([1])', 'press-2')).toMatchObject({ code: 201 });
+    expect(open(r).pid).not.toBe(a.pid);
+    expect(open(r)).toMatchObject({ prChoice: 2, revisesPr: { number: 2, url: LEG_E_PR, runId: LEG_E_RUN } });
+    await press(r, open(r), { revisesPr: null }, 'press-3');
+    await detail(r, 'cover sum([2])', 'press-4');
+    const n = open(r);
+    expect(n.prChoice).toBe('new');
+    expect(n.revisesPr).toBeUndefined();
+    // Go on a new pull request launches with deliver: pr, whatever the daemon's delivery default.
+    expect(jobRevisionLaunch(n, true)).toEqual({ deliver: 'pr' });
+    expect(jobRevisionLaunch(n, false)).toEqual({});
+    expect(jobRevisionLaunch({ ...n, relaunch: { deliver: 'none' } }, true)).toEqual({});
+  });
+
+  it('runs that can\'t be read keep a stored pick and hold Start until they can; then the pick is back', async () => {
+    const r = tiny();
+    const p = await turn(r, 'also cover sum([]) in tiny-math', 'bug');
+    await press(r, p, { revisesPr: 2 }, 'press-1');
+    r.runsFail = true;
+    await detail(r, 'cover sum([1])', 'press-2');
+    const held = open(r);
+    expect(held.prChoice).toBe(2);
+    expect(held.revisesPr).toBeUndefined();
+    expect(held.blocked).toBe("This job is to update pull request #2, but this chat's delivered pull requests could not be read to check it: try again");
+    expect(held.suggestions?.some((s) => 'revisesPr' in s.edit)).toBe(false);
+    expect((await r.svc.decide(CHAT, held.pid, { decision: 'go' }, ME, 'i1')).body).toMatchObject({ code: 'proposal_blocked' });
+    expect(r.launcher.launched).toHaveLength(0);
+    r.runsFail = false;
+    await detail(r, 'cover sum([2])', 'press-3');
+    expect(open(r)).toMatchObject({ prChoice: 2, revisesPr: { number: 2 }, blocked: null });
+  });
+
+  it('a revision reads the chat\'s runs once for its check and its card', async () => {
+    const r = tiny();
+    const p = await turn(r, 'also cover sum([]) in tiny-math', 'bug');
+    const reads = r.runsRead;
+    await press(r, p, { revisesPr: 2 }, 'press-1');
+    expect(r.runsRead - reads).toBe(1);
+    expect(open(r).revisesPr?.number).toBe(2);
+  });
+
+  it('a pass through a report card keeps the pick on the same repository', async () => {
+    const r = rig([DELIVERED], (id) => (id === RUN ? CHAT : undefined));
+    const p = await turn(r, ASK);
+    expect(p.revisesPr?.number).toBe(1);
+    await press(r, p, { revisesPr: null }, 'press-1');
+    // A change of card that drops a check asks first; the person's press on that question applies it.
+    const move = async (card: string, id: string) => {
+      await press(r, open(r), { card }, id);
+      const q = open(r).question;
+      if (q?.kind === 'lost_check') await press(r, open(r), q.choices[0]!.edit, `${id}-ok`);
+    };
+    await move('plan-it', 'press-2');
+    expect(open(r)).toMatchObject({ shape: { card: 'plan-it' }, prChoice: 'new' });
+    await move('write-tests', 'press-3');
+    expect(open(r).shape?.card).toBe('write-tests');
+    expect(open(r).prChoice).toBe('new');
+    expect(open(r).revisesPr).toBeUndefined();
+  });
+
+  it('words naming a PR when the runs can\'t be read: the note says they could not be read', async () => {
+    const r = rig([DELIVERED], (id) => (id === RUN ? CHAT : undefined));
+    r.runsFail = true;
+    const p = await turn(r, ASK);
+    expect(p.revisesPr).toBeUndefined();
+    expect(p.sentence!.notes).toContain(
+      "This job won't update an existing pull request: this chat's delivered pull requests could not be read. To change a delivered pull request, use Revise this PR on the job that delivered it.",
+    );
+  });
+
+  it('deliveredOn: one per number (its latest delivery), the most recently delivered last', () => {
+    const d = (number: number, runId: string, url = `https://github.com/o/r/pull/${number}`) => ({ number, url, runId, repoRef: 'r' });
+    expect(deliveredOn([d(10, 'a'), d(8, 'b')], 'r').map((x) => x.number)).toEqual([10, 8]);
+    expect(deliveredOn([d(8, 'a'), d(10, 'b'), d(8, 'c', 'https://github.com/O/R/pull/8')], 'r').map((x) => [x.number, x.runId])).toEqual([[10, 'b'], [8, 'c']]);
+    expect(deliveredOn([d(8, 'a'), { ...d(9, 'b'), repoRef: 'other' }], 'r').map((x) => x.number)).toEqual([8]);
   });
 });
 

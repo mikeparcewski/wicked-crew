@@ -629,6 +629,9 @@ export interface LaunchContext {
   fromProposal?: string;
   /** The compose route's own plan launch: a `shape` is judged as a compose, not as a run. */
   target?: 'compose';
+  /** (crew#2001) A chat job's Go updating a pull request its chat delivered: the URL that run recorded. A `revisesPr`
+   *  that resolves to another URL (the repository id re-pointed since) is refused. */
+  revisesPrUrl?: string;
   /** (crew#372) The compose route's own facts, recorded on the launch entry for publish (only with `target: 'compose'`). */
   compose?: import('./compose-facts.js').ComposeFacts;
   /** (api-types 0.196.0) A chat job's Start chose a power run: a launch that would run phased is refused (409
@@ -4117,6 +4120,11 @@ export function registerRoutes(
       }
       const resolved = await resolvePullRequest(root, b.revisesPr, revisedRepo);
       if (!resolved.ok) return reply.code(409).send({ error: resolved.error });
+      // (crew#2001, codex r1) A chat job updates the pull request its chat delivered: the same number on a repository id
+      // re-pointed since is another pull request, refused.
+      if (ctx.revisesPrUrl !== undefined && resolved.pr.url.toLowerCase() !== ctx.revisesPrUrl.toLowerCase()) {
+        return reply.code(409).send({ error: `pull request #${b.revisesPr} on ${revisedRepo} is now ${resolved.pr.url}, not ${ctx.revisesPrUrl}, which this chat delivered: it is not updated` });
+      }
       revisesPr = { number: b.revisesPr, headRef: resolved.pr.headRef, url: resolved.pr.url };
       input.baseRef = revisesPr.headRef;
       input.revisesPr = revisesPr;
@@ -4818,12 +4826,13 @@ export function registerRoutes(
             ...(p.relaunch?.deliverGate !== undefined && p.relaunch.deliver !== 'none' ? { deliverGate: p.relaunch.deliverGate } : {}),
             ...(p.relaunch?.revisesPr !== undefined && p.relaunch.deliver === 'pr' && p.repoRefs?.[0] !== undefined ? { revisesPr: p.relaunch.revisesPr } : {}),
             // (crew#1840) A job asked to change a pull request this chat delivered updates it: no second PR.
-            ...jobRevisionLaunch(p),
+            // (crew#2001) A press on "Open a new pull request instead" opens one.
+            ...jobRevisionLaunch(p, resolved.resolved.delivers === 'pr'),
           },
           // (crew#1884) A person's Start asks the stand-in choice, as studio's Start on POST /runs does: a short roster
           // with no consent reopens the card with the stand_in question. A reshape does not ask: its Start rejects the
           // held plan first, so the question would come after the plan it replaces was gone.
-          { ...ctx, fromProposal: d.pid, ...chatStartStandIns(p), ...(d.power === true ? { powerRequired: true } : {}) },
+          { ...ctx, fromProposal: d.pid, ...chatStartStandIns(p), ...(d.power === true ? { powerRequired: true } : {}), ...(p.revisesPr !== undefined ? { revisesPrUrl: p.revisesPr.url } : {}) },
         );
         if (out.statusCode !== 201) throw jobRefusal(out.statusCode, out.payload);
         return;
