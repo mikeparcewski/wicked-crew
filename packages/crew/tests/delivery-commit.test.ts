@@ -391,19 +391,25 @@ describe('CS11 slice B — the production terminal-frame wiring (noUnitDispatche
     } as unknown as SessionView;
   }
 
-  it('noUnitDispatchedAfterDeliver: true when every unit after the deliver unit is still pending', () => {
-    expect(noUnitDispatchedAfterDeliver(view('run-a'))).toBe(true); // no later unit at all
-    expect(noUnitDispatchedAfterDeliver(withLater('pending'))).toBe(true);
+  /** The engine's run log (crew#2008): one `unitDispatched` per ord, in order. */
+  const logOf = (...ords: number[]) => async () =>
+    ords.map((ord, i) => ({ type: 'unitDispatched', session: 'run-a', ord, attempt: 0, ts: i, seq: i })) as never;
+
+  it('noUnitDispatchedAfterDeliver: true when the log shows no unit after the deliver unit dispatched, whatever its status', async () => {
+    expect(noUnitDispatchedAfterDeliver(view('run-a'), await logOf(4, 5)())).toBe(true); // no later unit at all
+    expect(noUnitDispatchedAfterDeliver(withLater('pending'), await logOf(4, 5)())).toBe(true);
+    expect(noUnitDispatchedAfterDeliver(withLater('distributed'), await logOf(4, 5)())).toBe(true); // planned, never run
   });
 
-  it('noUnitDispatchedAfterDeliver: false once a later phase ran (its commit could outrun the pushed tip)', () => {
-    expect(noUnitDispatchedAfterDeliver(withLater('done'))).toBe(false);
-    expect(noUnitDispatchedAfterDeliver(withLater('rejected'))).toBe(false);
+  it('noUnitDispatchedAfterDeliver: false once a later phase was dispatched (its commit could outrun the pushed tip)', async () => {
+    for (const status of ['done', 'rejected', 'pending', 'distributed']) {
+      expect(noUnitDispatchedAfterDeliver(withLater(status), await logOf(4, 5, 6)()), status).toBe(false);
+    }
   });
 
   it('deliveredCommitFor: reads refs/heads/<branch> when no later unit ran', async () => {
     const exec = vi.fn(okExec);
-    const got = await deliveredCommitFor(view('run-a'), async () => '/repo', exec);
+    const got = await deliveredCommitFor(view('run-a'), async () => '/repo', exec, logOf(4, 5));
     expect(got).toBe(SHA);
     expect(exec).toHaveBeenCalledWith(
       ['show-ref', '--verify', '--hash', 'refs/heads/wicked/run-a'],
@@ -413,7 +419,7 @@ describe('CS11 slice B — the production terminal-frame wiring (noUnitDispatche
 
   it('deliveredCommitFor: records NO commit (null) when a later unit ran, without touching git', async () => {
     const exec = vi.fn(okExec);
-    expect(await deliveredCommitFor(withLater('done'), async () => '/repo', exec)).toBeNull();
+    expect(await deliveredCommitFor(withLater('done'), async () => '/repo', exec, logOf(4, 5, 6))).toBeNull();
     expect(exec).not.toHaveBeenCalled();
   });
 
@@ -423,8 +429,8 @@ describe('CS11 slice B — the production terminal-frame wiring (noUnitDispatche
       session: { ...view('run-a').session, repo_ref: null },
       units: view('run-a').units,
     } as unknown as SessionView;
-    expect(await deliveredCommitFor(noRepo, async () => '/repo', exec)).toBeNull();
-    expect(await deliveredCommitFor(view('run-a'), async () => undefined, exec)).toBeNull();
+    expect(await deliveredCommitFor(noRepo, async () => '/repo', exec, logOf(4, 5))).toBeNull();
+    expect(await deliveredCommitFor(view('run-a'), async () => undefined, exec, logOf(4, 5))).toBeNull();
   });
 });
 

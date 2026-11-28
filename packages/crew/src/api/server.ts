@@ -1077,8 +1077,14 @@ export async function createServer(
     // deliveredCommitFor}) so tests exercise the production code, not a copy (cs11-b review
     // P1/P2): it records NO commit when a later phase ran after the deliver unit (the pushed tip
     // may have moved) and when the SHA cannot be read — the join then keeps the run (fail-closed).
+    // (crew#2008) "a later phase ran" is read off the engine's run log, never off unit status.
     deliveredCommit: (view) =>
-      deliveredCommitFor(view, async (repoRef) => (await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path),
+      deliveredCommitFor(
+        view,
+        async (repoRef) => (await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path,
+        undefined,
+        typeof adapter.runEvents === 'function' ? (runId) => adapter.runEvents(runId) : undefined,
+      ),
     log: (m) => app.log.warn(m),
   });
   const resolveRunDelivery = (runId: string): Promise<void> => deliveryResolver.resolve(runId);

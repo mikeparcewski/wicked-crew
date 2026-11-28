@@ -558,8 +558,19 @@ export async function readDeliveredCommit(
 
 /**
  * Was the deliver unit's push still the branch tip when this terminal frame fired (CS11, cs11-b
- * review P1/correctness)? TRUE only when NO unit after the deliver unit was ever dispatched — every
- * unit with `ord` greater than the deliver unit's `ord` is still `pending`.
+ * review P1/correctness)? TRUE only when the engine's run log (`adapter.runEvents`) shows the deliver
+ * unit dispatched and NO unit with a greater `ord` dispatched after the deliver unit's last dispatch.
+ *
+ * (crew#2008) Read off the log, never off unit status: the engine's status does not track dispatch. The
+ * plan stamps every unit `distributed` (wicked-core `apply_distributions`), a send-back's rewind stamps
+ * every unit after its target `pending` (wicked-core `rewind_writes`), and dispatch writes none. So a
+ * phase after Deliver can run, and commit, while it reads `pending`. The log is the record: the engine
+ * emits `unitDispatched {session, ord, attempt}` from its one dispatch funnel before the unit runs, and
+ * appends every frame to the run's durable log before it fans it out, so a unit that ran is in the log
+ * before the terminal frame that triggers this read. Order is the run's `seq`.
+ *
+ * FALSE, so no commit is recorded, on every unknown: no log (`null`/`undefined`, an addon without the
+ * binding), no dispatch of the deliver unit in it, or no deliver unit at all.
  *
  * WHY it gates the terminal-frame commit read: the engine supports a deliver phase that is not the
  * last phase. If delivery pushes C1 and a LATER phase then commits C2 onto `wicked/<id>` before the
@@ -573,11 +584,20 @@ export async function readDeliveredCommit(
  * RESIDUAL (stated, not chased): a person who hand-commits on the retained `wicked/<id>` branch after a
  * daemon crash and before this record is written moves the tip too; no crew actor does that.
  */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars -- (crew#2008 red) the run log is read by the fix
-export function noUnitDispatchedAfterDeliver(view: SessionView, _events?: readonly RecordedEvent[] | null): boolean {
+export function noUnitDispatchedAfterDeliver(view: SessionView, events: readonly RecordedEvent[] | null | undefined): boolean {
   const deliver = deliverUnitOf(view);
-  if (deliver === null) return false;
-  return (view.units ?? []).every((u) => u.ord <= deliver.ord || u.status === 'pending');
+  if (deliver === null || events == null) return false;
+  const runId = view.session.id;
+  let lastDeliver: number | null = null;
+  let lastLater: number | null = null;
+  for (const e of events) {
+    const f = e as RecordedEvent & { session?: unknown; ord?: unknown };
+    if (f.type !== 'unitDispatched' || f.session !== runId || typeof f.ord !== 'number' || typeof f.seq !== 'number') continue;
+    if (f.ord === deliver.ord) lastDeliver = Math.max(lastDeliver ?? f.seq, f.seq);
+    else if (f.ord > deliver.ord) lastLater = Math.max(lastLater ?? f.seq, f.seq);
+  }
+  if (lastDeliver === null) return false;
+  return lastLater === null || lastLater < lastDeliver;
 }
 
 /**
@@ -590,8 +610,9 @@ export function noUnitDispatchedAfterDeliver(view: SessionView, _events?: readon
  * WITHOUT a commit) when:
  *   - the run has no repo (nothing to read),
  *   - the repo root is unresolved,
- *   - a later unit ran after the deliver unit ({@link noUnitDispatchedAfterDeliver} is false), so the
- *     local branch may no longer be the pushed tip,
+ *   - the engine's run log cannot be read (no `eventsOf`, a `null` log, a failed read), or it shows a
+ *     later unit dispatched after the deliver unit ({@link noUnitDispatchedAfterDeliver} is false), so
+ *     the local branch may no longer be the pushed tip,
  *   - the SHA could not be read.
  * A `null` keeps the run a contributor at join time — reading the commit must never block or distort
  * the delivery record.
@@ -600,13 +621,20 @@ export async function deliveredCommitFor(
   view: SessionView,
   repoRootOf: (repoRef: string) => Promise<string | undefined>,
   exec?: DeliveredCommitExec,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- (crew#2008 red) the run log is read by the fix
-  _eventsOf?: (runId: string) => Promise<readonly RecordedEvent[] | null>,
+  eventsOf?: (runId: string) => Promise<readonly RecordedEvent[] | null>,
 ): Promise<string | null> {
   const repoRef = view.session.repo_ref;
   if (repoRef == null) return null;
-  // P1/correctness: only record the commit while the deliver push is still the branch tip.
-  if (!noUnitDispatchedAfterDeliver(view)) return null;
+  // P1/correctness: only record the commit while the deliver push is still the branch tip, as the engine's
+  // run log says (crew#2008). No log reader, no log, or a failed read: no commit.
+  if (eventsOf === undefined) return null;
+  let events: readonly RecordedEvent[] | null;
+  try {
+    events = await eventsOf(view.session.id);
+  } catch {
+    return null;
+  }
+  if (!noUnitDispatchedAfterDeliver(view, events)) return null;
   const root = await repoRootOf(repoRef);
   if (root == null) return null;
   const session = view.session as typeof view.session & { run_branch?: string };
