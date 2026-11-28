@@ -26,10 +26,9 @@ export function isStandInReview(v: unknown): v is StandInReview {
   return v === 'ask' || v === 'always';
 }
 
-/** The gate answer that grants stand-ins at a `stand_in_needed` gate (`GateDecision.action`). */
+/** The gate answer that grants stand-ins at a stand-in hold (`GateDecision.action`): an `escalation` gate whose denial
+ *  source is `stand_in_needed`, which the engine judges (crew#1998). */
 export const USE_STAND_INS_ACTION = 'use_stand_ins' as const;
-/** The gate class (`gate_kind`) a run holds on for want of a stand-in consent. */
-export const STAND_IN_NEEDED_GATE = 'stand_in_needed' as const;
 export const STAND_IN_SCOPES = ['job', 'always'] as const;
 export type StandInScope = (typeof STAND_IN_SCOPES)[number];
 

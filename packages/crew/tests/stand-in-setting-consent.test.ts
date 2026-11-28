@@ -64,7 +64,7 @@ beforeEach(async () => {
     // One run held at a stand_in_needed gate, as stand-in-launch.test.ts builds it (the engine's durable gate row,
     // wicked-core `src/interaction.rs` `InteractionRequest`, serde snake_case).
     sessions: async () => [], sessionsDetail: async () => [HELD], listRepos: async () => [], listWorkflows: () => [], getWorkflow: () => null,
-    interactionRequests: vi.fn(async () => [{ kind: 'gate', ord: 4, prompt: 'No helper left to judge this step', gate_kind: 'stand_in_needed', gate_seq: 3, created_at: 1 }]),
+    interactionRequests: vi.fn(async () => [{ kind: 'gate', ord: 4, prompt: 'No helper left to judge this step', gate_kind: 'escalation', gate_seq: 3, created_at: 1 }]),
     runEvents: vi.fn(async () => []),
     launchRun: vi.fn(async (input: LaunchRunInput) => { launched.push(input); return input.sessionId; }),
     supportsStandIns: () => true,

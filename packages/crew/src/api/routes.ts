@@ -244,7 +244,7 @@ import type { EvalRunStore } from './eval-store.js';
 import { isSeatKeyList } from '../core/job-seats.js';
 import { engineRosterJson, noEligibleSeatBody, parseNoEligibleSeat, toEngineSeat } from '../core/engine-roster.js';
 import { launchAssuranceNotice, readJudgeCoverage } from '../core/assurance.js';
-import { STAND_IN_NEEDED_GATE, USE_STAND_INS_ACTION, consentFor, isStandInReview, noStandInsWhy, preflightRefusal, readPreflight, settingConsent } from '../core/stand-in.js';
+import { USE_STAND_INS_ACTION, consentFor, isStandInReview, noStandInsWhy, preflightRefusal, readPreflight, settingConsent } from '../core/stand-in.js';
 import { launchPosture, type PostureFacts } from '../core/launch-posture.js';
 import { launchRequiresQe, mayRequireQe, qeAcceptanceMode, qeSettingSkipReason } from '../core/qe-acceptance-setting.js';
 import {
@@ -8246,26 +8246,24 @@ export function registerRoutes(
   }
 
   /**
-   * (DES-STANDIN-001 §3.10, crew#1856) `{approve: true, action: 'use_stand_ins', scope}` at a `stand_in_needed` gate:
+   * (DES-STANDIN-001 §3.10, crew#1856) `{approve: true, action: 'use_stand_ins', scope}` at a stand-in hold:
    * the engine's `grantStandIns` with the open gate's opening (`gateSeq`, from the record) and the person as `actor`,
    * so a gate that closed and re-opened since is refused `gate_changed`. `always` also saves `standInReview:
    * 'always'` (after the grant took: a refused grant changes nothing). Runs inside {@link decideExclusively}.
+   *
+   * (crew#1998) Whether the open gate takes stand-ins is the engine's to say, and only the engine's: a hold is an
+   * `escalation` gate whose denial source is `stand_in_needed`, and the gate row carries no denial source, so crew
+   * cannot judge it from the record. The engine refuses `use_stand_ins` at any other gate (wicked-core
+   * `stand_in_gate::refuse_use_stand_ins`), and that refusal is the answer.
    */
   async function useStandInsAtGate(
     id: string,
-    decided: { ord: number | undefined; gateKind: string | undefined; gateSeq?: number },
+    decided: { ord: number | undefined; gateSeq?: number },
     scope: 'job' | 'always',
     actor: import('../core/types.js').Actor,
     input: 'voice' | undefined,
     extraDetail: Record<string, unknown>,
   ): Promise<{ code: number; body: unknown }> {
-    if (decided.gateKind !== STAND_IN_NEEDED_GATE) {
-      return { code: 409, body: {
-        code: 'gate_changed',
-        error: `Gate changed: use_stand_ins answers a stand-in gate (stand_in_needed), but the open gate is ${decided.gateKind ?? 'not one'}. Read the gate again.`,
-        ...(decided.ord !== undefined ? { openOrd: decided.ord } : {}),
-      } };
-    }
     if (decided.gateSeq === undefined) {
       return { code: 409, body: { code: 'gate_unknown', error: 'Gate unknown: the engine\'s record does not say which opening of this gate is open, so stand-ins cannot be granted for it — refresh and decide again.' } };
     }
