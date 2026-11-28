@@ -1,6 +1,6 @@
 // crew#1840 — asked in chat to change a pull request the chat's own job delivered, the seat's routing block becomes a
 // job that UPDATES that pull request (`revisesPr`, Go launches it with `revisesPr` + `deliver: "pr"`), and the card
-// says so. Asked to change one crew cannot attach, the card says it opens a new pull request and where a delivered one
+// says so. Asked to change one crew cannot attach, the card says it updates none and where a delivered one
 // is revised. Never "the existing PR" without the field behind it.
 //
 // Real shapes: the run record is the one the live Azure DevOps proof served for the delivering run (`GET /runs/:id`,
@@ -170,7 +170,7 @@ describe('crew#1840 a chat job that changes a pull request this chat delivered',
     expect(r.runsRead).toBe(1);
     expect(p.revisesPr).toBeUndefined();
     expect(p.sentence!.notes.join(' ')).not.toContain('pull request');
-    expect(p.sentence!.text).toContain('It opens a new pull request; pull request #1, which this chat delivered on wicked, is not changed.');
+    expect(p.sentence!.text).toContain("It doesn't change pull request #1, which this chat delivered on wicked.");
     expect(p.suggestions?.[0]).toEqual({ label: 'Update pull request #1 instead', edit: { revisesPr: 1 } });
     // A card that makes no pull request, with words that name none, reads no runs.
     const q = rig([DELIVERED], () => CHAT);
@@ -214,12 +214,14 @@ const LEG_E_DELIVERED: SessionView = {
 } as unknown as SessionView;
 
 describe('crew#2001 a chat job in a chat that delivered a PR says where it delivers, and one click changes it', () => {
-  it('the leg-E words: the card says it opens a NEW pull request and offers "Update pull request #2 instead"', async () => {
+  it('the leg-E words: the card says PR #2 is not changed and offers "Update pull request #2 instead"', async () => {
     const r = rig([LEG_E_DELIVERED], (id) => (id === LEG_E_RUN ? CHAT : undefined), 'tiny-math');
     const p = await turn(r, LEG_E_ASK, 'bug');
     expect(p.shape?.card).toBe('bug');
     expect(p.revisesPr).toBeUndefined();
-    expect(p.sentence!.text).toContain('It opens a new pull request; pull request #2, which this chat delivered on tiny-math, is not changed.');
+    // (R-B) No promise of a new pull request without a press: the daemon's delivery default decides that.
+    expect(p.sentence!.text).toContain("It doesn't change pull request #2, which this chat delivered on tiny-math.");
+    expect(p.sentence!.text).not.toContain('opens a new pull request');
     expect(p.suggestions?.[0]).toEqual({ label: 'Update pull request #2 instead', edit: { revisesPr: 2 } });
   });
 
@@ -237,6 +239,7 @@ describe('crew#2001 a chat job in a chat that delivered a PR says where it deliv
     const n = open(r);
     expect(n.revisesPr).toBeUndefined();
     expect(n.sentence!.text).toContain('It opens a new pull request; pull request #2, which this chat delivered on tiny-math, is not changed.');
+    expect(jobRevisionLaunch(n, true)).toEqual({ deliver: 'pr' });
     expect((await press(r, n, { depth: 'deep' }, 'press-3')).code).toBe(201);
     expect(open(r).revisesPr).toBeUndefined();
     // Go on the attached version launched the revision: re-attach and start.
@@ -312,7 +315,7 @@ describe('crew#2001 review round 1: the pick holds, is checked once per change, 
   it('words with no PR in them: the card offers PR #2; the pick holds across another revision; "new" launches a PR', async () => {
     const r = tiny();
     const p = await turn(r, 'also cover sum([]) in tiny-math', 'bug');
-    expect(p.sentence!.text).toContain('It opens a new pull request; pull request #2, which this chat delivered on tiny-math, is not changed.');
+    expect(p.sentence!.text).toContain("It doesn't change pull request #2, which this chat delivered on tiny-math.");
     expect(p.suggestions?.[0]).toEqual({ label: 'Update pull request #2 instead', edit: { revisesPr: 2 } });
     await press(r, p, { revisesPr: 2 }, 'press-1');
     const a = open(r);

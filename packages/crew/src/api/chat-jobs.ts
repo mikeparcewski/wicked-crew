@@ -787,7 +787,7 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
       prChoice = choice;
       unchecked = true;
       blockedBy.push(`This job is to update pull request #${choice}, but this chat's delivered pull requests could not be read to check it: try again`);
-    } else notes.push(`This job opens a new pull request: pull request #${choice} is not one this chat delivered on ${repo.name}.`);
+    } else notes.push(`This job doesn't update pull request #${choice}: it is not one this chat delivered on ${repo.name}.`);
   } else if (pickable && choice === 'new') {
     prChoice = 'new';
   }
@@ -799,7 +799,12 @@ export function resolveJob(facts: JobFacts, ctx: JobContext, opts: { allowHidden
     parts.push(`It updates pull request #${revisesPr.number}, which an earlier job of this chat delivered; no new pull request is opened.`);
   } else if (offerPr !== null) {
     const others = minePrs.map((d) => d.number).sort((a, b) => a - b).map((n) => `#${n}`);
-    parts.push(`It opens a new pull request; ${others.length === 1 ? `pull request ${others[0]}` : `pull requests ${list(others)}`}, which this chat delivered on ${repo!.name}, ${others.length === 1 ? 'is' : 'are'} not changed.`);
+    const named = others.length === 1 ? `pull request ${others[0]}` : `pull requests ${list(others)}`;
+    // Only a press on "a new pull request" launches with `deliver: "pr"`; without one the daemon's delivery default
+    // decides (R-B: `deliverDefault: none` delivers nothing), so the card promises no new pull request.
+    parts.push(prChoice === 'new'
+      ? `It opens a new pull request; ${named}, which this chat delivered on ${repo!.name}, ${others.length === 1 ? 'is' : 'are'} not changed.`
+      : `It doesn't change ${named}, which this chat delivered on ${repo!.name}.`);
   }
   if (revisesPr === null && prAsk !== null && prAsk.miss !== undefined) {
     const why = ctx.deliveredPrsUnread === true

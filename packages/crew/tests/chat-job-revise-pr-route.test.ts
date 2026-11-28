@@ -30,6 +30,8 @@ const ASK = `Revise the pull request this job delivered (${PR_URL}) on the same 
 const resolved: Array<{ root: string; number: number }> = [];
 /** The URL the provider answers for the pull request (a repository id re-pointed since answers another). */
 let resolvedUrl = PR_URL;
+/** The daemon's delivery default (an operator may set `none`). */
+let deliverDefault: 'pr' | 'none' = 'pr';
 vi.mock('../src/core/deliver.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../src/core/deliver.js')>();
   return {
@@ -58,7 +60,7 @@ describe('crew#1840 Go on a chat job that revises the PR this chat delivered lau
   const adapter = (): CoreAdapter => ({
     dbPath: join(home, 'core.db'),
     projectsSupported: () => true,
-    getSettings: async () => ({ deliverDefault: 'pr' }),
+    getSettings: async () => ({ deliverDefault }),
     ping: async () => 'ok',
     onLaunch: (): (() => void) => () => undefined,
     onEvent: (fn: (e: CoreEvent) => void): (() => void) => {
@@ -177,6 +179,28 @@ describe('crew#1840 Go on a chat job that revises the PR this chat delivered lau
     expect(launches.length).toBe(before + 1);
     expect(launches.at(-1)!.deliver).toBe('pr');
     expect(launches.at(-1)!.revisesPr).toBeUndefined();
+  });
+
+  it('crew#2001 (R-B): with deliverDefault none the card promises no new pull request; "a new pull request" Go delivers one', async () => {
+    deliverDefault = 'none';
+    try {
+      const made = await app.inject({ method: 'POST', url: `/api/v1/chats/${CHAT}/proposals`, payload: { card: 'bug', source: 'pick', requestId: 'r2001-none', words: 'add a test that sum([]) is 0' } });
+      expect(made.statusCode, made.body).toBe(201);
+      const p = (made.json() as { view: ChatProposalView }).view.proposal;
+      expect(p.revisesPr).toBeUndefined();
+      expect(p.sentence!.text).toContain("It doesn't change pull request #1, which this chat delivered on wicked.");
+      expect(p.sentence!.text).not.toContain('opens a new pull request');
+      const fresh = await app.inject({ method: 'POST', url: `/api/v1/chats/${CHAT}/proposals`, payload: { revises: p.pid, edits: { revisesPr: null }, source: 'suggestion', requestId: 'r2001-none-new' } });
+      const n = (fresh.json() as { view: ChatProposalView }).view.proposal;
+      expect(n.sentence!.text).toContain('It opens a new pull request; pull request #1, which this chat delivered on wicked, is not changed.');
+      const before = launches.length;
+      const go = await app.inject({ method: 'POST', url: `/api/v1/chats/${CHAT}/proposals/${encodeURIComponent(n.pid)}`, payload: { decision: 'go' } });
+      expect(go.statusCode, go.body).toBe(200);
+      for (let i = 0; i < 100 && launches.length === before; i += 1) await new Promise((r) => setTimeout(r, 20));
+      expect(launches.at(-1)!.deliver).toBe('pr');
+    } finally {
+      deliverDefault = 'pr';
+    }
   });
 
   it('crew#2001 (codex r1): the same number now resolving to another pull request (the repository id re-pointed) is refused at Go', async () => {
