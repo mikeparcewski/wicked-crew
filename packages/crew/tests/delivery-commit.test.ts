@@ -395,10 +395,12 @@ describe('CS11 slice B — the production terminal-frame wiring (noUnitDispatche
   const logOf = (...ords: number[]) => async () =>
     ords.map((ord, i) => ({ type: 'unitDispatched', session: 'run-a', ord, attempt: 0, ts: i, seq: i })) as never;
 
-  it('noUnitDispatchedAfterDeliver: true when the log shows no unit after the deliver unit dispatched, whatever its status', async () => {
+  it('noUnitDispatchedAfterDeliver: true when the log shows no unit after the deliver unit dispatched and every later unit reads pending', async () => {
     expect(noUnitDispatchedAfterDeliver(view('run-a'), await logOf(4, 5)())).toBe(true); // no later unit at all
     expect(noUnitDispatchedAfterDeliver(withLater('pending'), await logOf(4, 5)())).toBe(true);
-    expect(noUnitDispatchedAfterDeliver(withLater('distributed'), await logOf(4, 5)())).toBe(true); // planned, never run
+    // A later unit that reads anything but pending still records nothing, as before crew#2008 (the log can miss a
+    // dispatch, so it only ever narrows what the status check allowed).
+    expect(noUnitDispatchedAfterDeliver(withLater('distributed'), await logOf(4, 5)())).toBe(false);
   });
 
   it('noUnitDispatchedAfterDeliver: false once a later phase was dispatched (its commit could outrun the pushed tip)', async () => {
@@ -477,20 +479,23 @@ describe('crew#2008 — "a later unit ran" is read off the engine run log, never
     expect(exec).not.toHaveBeenCalled();
   });
 
-  it('reads the commit when nothing after Deliver was dispatched after its last dispatch, whatever the later units read', async () => {
+  it('reads the commit when nothing after Deliver was dispatched after its last dispatch, and the later units read pending', async () => {
     // The phase after Deliver ran on the first pass, then a send-back re-ran Deliver; nothing ran after that push.
     const log = [dispatched(4, 0, 10), dispatched(5, 0, 20), dispatched(6, 0, 30), dispatched(3, 1, 40), dispatched(4, 1, 50), dispatched(5, 1, 60)];
     expect(noUnitDispatchedAfterDeliver(reworked(), log)).toBe(true);
-    // A first pass whose later phase was planned (`distributed`) but never dispatched.
-    const planned = { ...reworked(), units: reworked().units.map((u) => (u.ord === 6 ? { ...u, status: 'distributed' } : u)) } as SessionView;
-    expect(noUnitDispatchedAfterDeliver(planned, [dispatched(4, 0, 10), dispatched(5, 0, 20)])).toBe(true);
     const exec = vi.fn(okExec);
-    expect(await deliveredCommitFor(planned, async () => '/repo', exec, async () => [dispatched(4, 0, 10), dispatched(5, 0, 20)])).toBe(SHA);
+    expect(await deliveredCommitFor(reworked(), async () => '/repo', exec, async () => log)).toBe(SHA);
+    // Never more than the status check allows: a later unit that reads `distributed` (planned on a first pass) records
+    // nothing, even with a log that shows it never ran (the log is best effort; it may have missed the dispatch).
+    const planned = { ...reworked(), units: reworked().units.map((u) => (u.ord === 6 ? { ...u, status: 'distributed' } : u)) } as SessionView;
+    expect(noUnitDispatchedAfterDeliver(planned, [dispatched(4, 0, 10), dispatched(5, 0, 20)])).toBe(false);
   });
 
-  it('orders by the run\'s seq, not by where a frame sits in the answer, and reads only this run\'s frames', () => {
-    const shuffled = [dispatched(6, 1, 60), dispatched(5, 1, 50), dispatched(4, 1, 40)];
-    expect(noUnitDispatchedAfterDeliver(reworked(), shuffled)).toBe(false);
+  it('reads the log in the order the engine reader returns it (emission order), never sorting by seq, and only this run\'s frames', () => {
+    // An engine before core#408 reset `seq` on restart, so a later frame can carry a smaller seq (wicked-core
+    // event_log.rs `read_run`: file order is emission order, and seq is not a sort key). Deliver at seq 100, a restart,
+    // Deliver again at seq 5, then the phase after it at seq 6: that phase ran after the last push.
+    expect(noUnitDispatchedAfterDeliver(reworked(), [dispatched(5, 0, 100), dispatched(5, 1, 5), dispatched(6, 1, 6)])).toBe(false);
     // Another run's later dispatch is not this run's.
     expect(noUnitDispatchedAfterDeliver(reworked(), [dispatched(5, 1, 50), dispatched(6, 0, 60, 'run-b')])).toBe(true);
   });

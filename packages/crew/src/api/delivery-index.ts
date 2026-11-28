@@ -558,16 +558,23 @@ export async function readDeliveredCommit(
 
 /**
  * Was the deliver unit's push still the branch tip when this terminal frame fired (CS11, cs11-b
- * review P1/correctness)? TRUE only when the engine's run log (`adapter.runEvents`) shows the deliver
- * unit dispatched and NO unit with a greater `ord` dispatched after the deliver unit's last dispatch.
+ * review P1/correctness)? TRUE only when BOTH records say so:
+ *   - every unit after the deliver unit still reads `pending` (the CS11 check), AND
+ *   - the engine's run log (`adapter.runEvents`) shows the deliver unit dispatched and NO unit with a
+ *     greater `ord` dispatched after the deliver unit's last dispatch (crew#2008).
  *
- * (crew#2008) Read off the log, never off unit status: the engine's status does not track dispatch. The
- * plan stamps every unit `distributed` (wicked-core `apply_distributions`), a send-back's rewind stamps
- * every unit after its target `pending` (wicked-core `rewind_writes`), and dispatch writes none. So a
- * phase after Deliver can run, and commit, while it reads `pending`. The log is the record: the engine
- * emits `unitDispatched {session, ord, attempt}` from its one dispatch funnel before the unit runs, and
- * appends every frame to the run's durable log before it fans it out, so a unit that ran is in the log
- * before the terminal frame that triggers this read. Order is the run's `seq`.
+ * (crew#2008) Status alone cannot say a later phase ran: the plan stamps every unit `distributed`
+ * (wicked-core `apply_distributions`), a send-back's rewind stamps every unit after its target `pending`
+ * (wicked-core `rewind_writes`), and dispatch writes no status. So after a send-back a phase after Deliver
+ * can run, and commit, while it reads `pending`. The engine emits `unitDispatched {session, ord, attempt}`
+ * from its one dispatch funnel before the unit runs, and the log reader returns frames in emission (file)
+ * order, which is the order read here. `seq` is NOT a sort key: an engine before core#408 reset it on
+ * restart (wicked-core `event_log.rs`, `read_run`).
+ *
+ * The log alone is not enough either: it is best effort (the engine's writer drops a failed write, and the
+ * read barrier gives up after 5 s), so a later dispatch can be missing from it. Hence BOTH: a commit is
+ * recorded only where the status check alone would also record one, so this can never record a commit
+ * main would not.
  *
  * FALSE, so no commit is recorded, on every unknown: no log (`null`/`undefined`, an addon without the
  * binding), no dispatch of the deliver unit in it, or no deliver unit at all.
@@ -587,17 +594,22 @@ export async function readDeliveredCommit(
 export function noUnitDispatchedAfterDeliver(view: SessionView, events: readonly RecordedEvent[] | null | undefined): boolean {
   const deliver = deliverUnitOf(view);
   if (deliver === null || events == null) return false;
+  if (!(view.units ?? []).every((u) => u.ord <= deliver.ord || u.status === 'pending')) return false;
   const runId = view.session.id;
-  let lastDeliver: number | null = null;
-  let lastLater: number | null = null;
+  // Walk in the reader's order (emission order): after the deliver unit's LAST dispatch, no later ord.
+  let deliverSeen = false;
+  let laterSinceDeliver = false;
   for (const e of events) {
     const f = e as RecordedEvent & { session?: unknown; ord?: unknown };
-    if (f.type !== 'unitDispatched' || f.session !== runId || typeof f.ord !== 'number' || typeof f.seq !== 'number') continue;
-    if (f.ord === deliver.ord) lastDeliver = Math.max(lastDeliver ?? f.seq, f.seq);
-    else if (f.ord > deliver.ord) lastLater = Math.max(lastLater ?? f.seq, f.seq);
+    if (f.type !== 'unitDispatched' || f.session !== runId || typeof f.ord !== 'number') continue;
+    if (f.ord === deliver.ord) {
+      deliverSeen = true;
+      laterSinceDeliver = false;
+    } else if (f.ord > deliver.ord) {
+      laterSinceDeliver = true;
+    }
   }
-  if (lastDeliver === null) return false;
-  return lastLater === null || lastLater < lastDeliver;
+  return deliverSeen && !laterSinceDeliver;
 }
 
 /**
