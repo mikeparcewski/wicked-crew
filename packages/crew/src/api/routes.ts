@@ -166,6 +166,7 @@ import {
   NotARegularFileError,
   UnresolvableDiffBaseError,
   branchDiff,
+  branchFileCapped,
   isGitStopped,
   isPlainRef,
   readFileCapped,
@@ -3273,6 +3274,62 @@ export function registerRoutes(
     return true;
   };
 
+  /** A git read for the viewer routes (the worktree diff, the run branch's diff and file) that failed: one mapping. */
+  const gitReadError = (reply: FastifyReply, err: unknown) => {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return reply.code(500).send({ error: 'git executable not found on server' });
+    }
+    // execCapped throws (no partial output attached) past its 64 MiB daemon-wide buffer —
+    // beyond graceful truncation, so the answer is an explicit, actionable refusal
+    // rather than a generic 500 (Copilot, #305).
+    if (err instanceof ExecOutputTooLarge) {
+      return reply.code(507).send({
+        error: "git output exceeds the server's execution buffer — narrow the request with ?path=",
+      });
+    }
+    // crew#790: git stopped before it answered (the daemon's 10 s timeout on a busy host) is not a
+    // server fault to report as a bare 500 — say it is busy and when to ask again.
+    if (isGitStopped(err)) {
+      return reply
+        .code(503)
+        .header('retry-after', '5')
+        .send({ error: 'git did not answer in time — the host is busy; try again shortly', code: 'diff_busy' });
+    }
+    return reply.code(500).send({ error: message(err) });
+  };
+
+  /** A run's worktree is there to read: the directory exists and, for a run bound to a registered repository, its
+   *  `.git` link too (crew#1057: the delivered-worktree sweep deletes the link before the directory). */
+  const worktreeIntact = (session: SessionView['session']): boolean => {
+    const workdir = session.workdir;
+    if (typeof workdir !== 'string' || workdir.length === 0 || !existsSync(workdir)) return false;
+    return session.repo_ref === null || existsSync(join(workdir, '.git'));
+  };
+
+  /**
+   * (wave 6, F-7R2-013; crew#2006) Where a run's work lives once its worktree is gone: the registered repository root,
+   * the run branch (the engine-recorded `run_branch`, else `wicked/<id>`), its recorded `base_commit`, and a contained
+   * path made relative to the branch's tree: under the (gone) worktree first (engine worktrees live UNDER the repo
+   * root, `wicked-worktrees/<id>`, and a path inside one is worktree-relative on the branch, codex r1), else under the
+   * repo root. `{ outside }` when the path is in neither; `null` when the run has no registered repository.
+   */
+  const runBranchOf = async (
+    session: SessionView['session'],
+    id: string,
+    target: string | undefined,
+  ): Promise<{ root: string; branch: string; base: string | null; rel: string | undefined } | { outside: string } | null> => {
+    const root = session.repo_ref !== null ? await repoRootOf(session.repo_ref) : undefined;
+    if (root === undefined) return null;
+    const recorded = session as typeof session & { run_branch?: string; base_commit?: string };
+    const branch = typeof recorded.run_branch === 'string' && recorded.run_branch !== '' ? recorded.run_branch : `wicked/${id}`;
+    const base = typeof recorded.base_commit === 'string' && recorded.base_commit !== '' ? recorded.base_commit : null;
+    if (target === undefined) return { root, branch, base, rel: undefined };
+    const workdir = session.workdir;
+    if (typeof workdir === 'string' && workdir.length > 0 && isInsideRoot(workdir, target)) return { root, branch, base, rel: relative(workdir, target) };
+    if (isInsideRoot(root, target)) return { root, branch, base, rel: relative(root, target) };
+    return { outside: root };
+  };
+
   // Fastify parses a repeated param as string[] (Copilot, #250/#266). These are FILE-READ
   // routes: `?path=a&path=b` is rejected outright (400) rather than silently reading as
   // either (Copilot, #305).
@@ -3284,7 +3341,8 @@ export function registerRoutes(
 
   // File content from the run's contained roots: 512 KB cap (`truncated: true` past it, first
   // 512 KB served), NUL-in-first-8KB binary sniff (`binary: true`, `content: ""`). Read-only by
-  // construction (`fs` read); no directory listing — the studio already has the file list.
+  // construction (`fs` read, or read-only git on the run branch once the worktree is reaped,
+  // crew#2006); no directory listing — the studio already has the file list.
   app.get(`${V}/runs/:id/files`, async (req, reply) => {
     const { id } = req.params as { id: string };
     const rawPath = singlePathQ((req.query as { path?: string | string[] }).path);
@@ -3303,6 +3361,21 @@ export function registerRoutes(
       return { path: target, ...read };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        // (crew#2006) A finished run's worktree is reaped; its work is on the run branch, which its diff reads too.
+        if (!worktreeIntact(resolved.session)) {
+          const at = await runBranchOf(resolved.session, id, target);
+          if (at !== null && 'rel' in at && at.rel !== undefined) {
+            try {
+              const fromBranch = await branchFileCapped(at.root, at.branch, at.rel);
+              if (fromBranch !== null) return { path: target, ...fromBranch };
+            } catch (branchErr) {
+              if (branchErr instanceof NotARegularFileError) {
+                return reply.code(400).send({ error: `\`path\` is not a regular file in the run branch: ${target}` });
+              }
+              return gitReadError(reply, branchErr);
+            }
+          }
+        }
         return reply.code(404).send({ error: `no such file: ${target}` });
       }
       if (err instanceof NotARegularFileError) {
@@ -3342,28 +3415,8 @@ export function registerRoutes(
       if (err instanceof InvalidDiffBaseError || err instanceof UnresolvableDiffBaseError) {
         return reply.code(400).send({ error: `${err.name}: ${message(err)}` });
       }
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        return reply.code(500).send({ error: 'git executable not found on server' });
-      }
-      // execCapped throws (no partial output attached) past its 64 MiB daemon-wide buffer —
-      // beyond graceful truncation, so the answer is an explicit, actionable refusal
-      // rather than a generic 500 (Copilot, #305).
-      if (err instanceof ExecOutputTooLarge) {
-        return reply.code(507).send({
-          error: "diff output exceeds the server's execution buffer — narrow the request with ?path=",
-        });
-      }
-      // crew#790: git stopped before it answered (the daemon's 10 s timeout on a busy host) is not a
-      // server fault to report as a bare 500 — say it is busy and when to ask again.
-      if (isGitStopped(err)) {
-        return reply
-          .code(503)
-          .header('retry-after', '5')
-          .send({ error: 'git did not answer in time — the host is busy; try again shortly', code: 'diff_busy' });
-      }
-      return reply.code(500).send({ error: message(err) });
+      return gitReadError(reply, err);
     };
-    const worktreeLive = typeof workdir === 'string' && workdir.length > 0 && existsSync(workdir);
     /** The run branch's diff, when the worktree is gone (or went while this request ran). */
     const fromBranchOr409 = async () => {
       // Wave 6 (F-7R2-013): the engine reaps a completed run's worktree, and the run page went dark
@@ -3373,17 +3426,9 @@ export function registerRoutes(
       // (else `wicked/<id>`) against the recorded base (else its merge-base with the default
       // branch), `?base=<ref>` overriding the base with a plain in-repo ref. Only when there is
       // neither a worktree nor a branch does the 409 stand — and then it says so.
-      const repoRef = resolved.session.repo_ref;
-      const root = repoRef !== null ? await repoRootOf(repoRef) : undefined;
-      if (root !== undefined) {
-        const session = resolved.session as typeof resolved.session & {
-          run_branch?: string;
-          base_commit?: string;
-        };
-        const branch =
-          typeof session.run_branch === 'string' && session.run_branch !== '' ? session.run_branch : `wicked/${id}`;
-        let base: string | null =
-          typeof session.base_commit === 'string' && session.base_commit !== '' ? session.base_commit : null;
+      const at = await runBranchOf(resolved.session, id, resolved.target);
+      if (at !== null) {
+        let base: string | null = 'base' in at ? at.base : null;
         if (rawBase !== undefined && rawBase !== '' && rawBase !== MERGE_BASE_LITERAL) {
           if (!isPlainRef(rawBase)) {
             return reply.code(400).send({
@@ -3393,22 +3438,13 @@ export function registerRoutes(
           base = rawBase;
         }
         // Narrowing: a path under the (gone) worktree or under the repo root, made repo-relative.
-        let rel: string | undefined;
-        if (resolved.target !== undefined) {
-          // The worktree first: engine worktrees live UNDER the repo root (`wicked-worktrees/<id>`),
-          // and a path inside one is worktree-relative on the branch (codex r1).
-          if (typeof workdir === 'string' && workdir.length > 0 && isInsideRoot(workdir, resolved.target)) {
-            rel = relative(workdir, resolved.target);
-          } else if (isInsideRoot(root, resolved.target)) {
-            rel = relative(root, resolved.target);
-          } else {
-            return reply.code(400).send({
-              error: `\`path\` must be inside the run's worktree or its repository to diff: ${root}`,
-            });
-          }
+        if ('outside' in at) {
+          return reply.code(400).send({
+            error: `\`path\` must be inside the run's worktree or its repository to diff: ${at.outside}`,
+          });
         }
         try {
-          const fromBranch = await branchDiff(root, branch, base, rel);
+          const fromBranch = await branchDiff(at.root, at.branch, base, at.rel);
           if (fromBranch !== null) return fromBranch;
         } catch (err) {
           return diffError(err);
@@ -3421,15 +3457,13 @@ export function registerRoutes(
         error: `run ${id}'s workdir no longer exists (${workdir}) and its run branch holds no commits — nothing to diff`,
       });
     };
-    if (!worktreeLive) return fromBranchOr409();
     // crew#1057: the delivered-worktree sweep (`git worktree remove`) deletes the worktree's files,
     // its `.git` link among them, BEFORE the directory itself. A bound run's worktree with no `.git`
     // link is being swept: git run in it finds the registered repo above it instead, and answers
     // about that checkout (an empty diff) or fails with no named error ("no merge base between
     // origin/main and HEAD"). Such a worktree is gone, checked before the read and again after it.
-    const bound = resolved.session.repo_ref !== null;
-    const worktreeIntact = () => existsSync(workdir) && (!bound || existsSync(join(workdir, '.git')));
-    if (!worktreeIntact()) return fromBranchOr409();
+    const intact = () => worktreeIntact(resolved.session);
+    if (typeof workdir !== 'string' || !intact()) return fromBranchOr409();
     // Narrowing is WORKTREE-scoped: a contained-but-outside-the-worktree path (extra write
     // root / repo root) is a valid FILE read but has no meaning as a diff pathspec — rejected
     // explicitly here rather than handing git a `../`-prefixed pathspec and surfacing its
@@ -3452,14 +3486,14 @@ export function registerRoutes(
       if (defaultBase !== undefined) {
         try {
           const read = await worktreeDiff(workdir, rel, defaultBase);
-          if (!worktreeIntact()) return fromBranchOr409();
+          if (!intact()) return fromBranchOr409();
           return { ...read, source: 'worktree' as const, base: defaultBase };
         } catch (err) {
           if (!(err instanceof UnresolvableDiffBaseError)) throw err;
         }
       }
       const read = await worktreeDiff(workdir, rel, rawBase);
-      if (!worktreeIntact()) return fromBranchOr409();
+      if (!intact()) return fromBranchOr409();
       return { ...read, source: 'worktree' as const };
     } catch (err) {
       // The worktree was removed WHILE this request ran (the delivered-worktree sweep, an engine
@@ -3470,7 +3504,7 @@ export function registerRoutes(
       // caller's 400 (codex r1). The `merge-base` literal names no ref: when the worktree is being
       // swept, its failure is the sweep's, not the caller's (crew#1057).
       const callersRef = err instanceof UnresolvableDiffBaseError && err.base !== MERGE_BASE_LITERAL;
-      if (!callersRef && !worktreeIntact()) return fromBranchOr409();
+      if (!callersRef && !intact()) return fromBranchOr409();
       return diffError(err);
     }
   });

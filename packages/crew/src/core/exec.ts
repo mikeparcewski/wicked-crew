@@ -152,6 +152,25 @@ export async function execCapped(
   args: string[],
   opts: ExecOpts = {},
 ): Promise<{ stdout: string; stderr: string }> {
+  return runCapped(file, args, opts, 'utf8') as Promise<{ stdout: string; stderr: string }>;
+}
+
+/** {@link execCapped} with the output as bytes (a file's content read from git, crew#2006): the same cap, env and
+ *  errors. */
+export async function execCappedBytes(
+  file: string,
+  args: string[],
+  opts: ExecOpts = {},
+): Promise<{ stdout: Buffer; stderr: Buffer }> {
+  return runCapped(file, args, opts, 'buffer') as Promise<{ stdout: Buffer; stderr: Buffer }>;
+}
+
+async function runCapped(
+  file: string,
+  args: string[],
+  opts: ExecOpts,
+  encoding: 'utf8' | 'buffer',
+): Promise<{ stdout: string | Buffer; stderr: string | Buffer }> {
   // Resolve the cap BEFORE spreading. `{ maxBuffer: DEFAULT, ...opts }` lets a caller that passes
   // `maxBuffer: undefined` — trivially produced by `{ maxBuffer: cfg?.limit }` — overwrite the
   // default. Flagged in review; measured rather than assumed, because the consequence is the
@@ -175,6 +194,7 @@ export async function execCapped(
     return await execFileAsync(file, args, {
       ...opts,
       maxBuffer,
+      encoding,
       env: childEnvFor(file, opts.env ?? process.env),
     });
   } catch (err) {
