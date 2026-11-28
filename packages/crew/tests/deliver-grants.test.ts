@@ -141,15 +141,15 @@ describe('deliver text grants (crew#1885)', () => {
     for (const value of script.match(/[0-9a-fA-F]{16,}/g) ?? []) expect(deliverTextAllowed([d.unit], value, false), value.length.toString()).toBe(false);
   });
 
-  it('counts only while the script can be running: dispatched, or refused on a live run (the gate retry re-runs it); not pending from composition, not done, and never once the run has ended', () => {
+  it('counts only while the script can still run: not done (or refused, as the gate retry re-runs it) on a live run; never once done, of an unknown status, or once the run has ended', () => {
     const d = deliverUnit('distributed');
     expect(deliverTextAllowed([d.unit], d.key, false)).toBe(true);
     // Approving the deliver-refusal gate re-runs the same script while the engine still marks the unit rejected.
     expect(deliverTextAllowed([{ ...d.unit, status: 'rejected' }], d.key, false)).toBe(true);
-    for (const status of ['pending', 'done', 'failed', 'cancelled', null, undefined]) {
+    for (const status of ['done', 'failed', 'cancelled', 'Pending', '', null, undefined]) {
       expect(deliverTextAllowed([{ ...d.unit, status }], d.key, false), String(status)).toBe(false);
     }
-    for (const status of ['distributed', 'rejected']) {
+    for (const status of ['pending', 'distributed', 'rejected']) {
       expect(deliverTextAllowed([{ ...d.unit, status }], d.key, true), `${status}, run ended`).toBe(false);
     }
   });

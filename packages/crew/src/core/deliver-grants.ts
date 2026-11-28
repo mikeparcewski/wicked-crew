@@ -11,11 +11,14 @@
  *
  *  - for the engine-run deliver phase: the key in the file that run's DELIVER unit's script names, read only from the
  *    script crew composes (`bash -lc` of a script opening `set -euo pipefail` with a `DELIVER_KEY_FILE='<path>'` line
- *    whose file name gives its id in crew's key dir), and only while that script can be running: the unit dispatched
- *    (`distributed`), or refused (`rejected`) while its run has not ended, since approving the deliver-refusal gate
- *    re-runs the same script with the unit still marked `rejected` (seen in
+ *    whose file name gives its id in crew's key dir), and only while that script can still run: the deliver unit is
+ *    not done and its run has not ended. The engine's unit status does not say whether the script has started: the
+ *    plan stamps every unit `distributed` (wicked-core `apply_distributions`), a send-back's rewind stamps every unit
+ *    after its target `pending` (wicked-core `rewind_writes`, crew#2004), and dispatch writes no status. So the script
+ *    runs while its unit reads `distributed` (no rework) or `pending` (after any rework). Approving the deliver-refusal
+ *    gate re-runs the same script with the unit still marked `rejected` (seen in
  *    `tests/integration/deliver-revision-e2e.test.ts`). A path named in any other command never counts; nor does a
- *    deliver unit not yet dispatched (`pending`), one that is done, or any unit of a run that has ended. The key is
+ *    deliver unit that is done, one of a status crew does not know, or any unit of a run that has ended. The key is
  *    always the file's, never a value read off a command line;
  *  - for a post-hoc delivery: the text the daemon composed for it, registered here with its key file while its script
  *    runs, so the PR says what that delivery was approved on (its own QE check).
@@ -71,14 +74,18 @@ export interface DeliverTextUnit {
 // Either separator before the id: a Windows state home's path is written with backslashes (codex r2 re-check).
 const SCRIPT_KEY_FILE_LINE = new RegExp(`^${DELIVER_KEY_FILE_VAR}='[^\\n]*[\\\\/]([0-9a-f]{32})\\.key'$`, 'm');
 
+/** The deliver unit statuses whose script can still run (see the header): every engine status but `done`. */
+const DELIVER_CAN_RUN: ReadonlySet<string> = new Set(['pending', 'distributed', 'rejected']);
+
 /**
  * The key file of a deliver unit's script that can be running now, or null: the run's deliver unit (by id or catalog
- * entry, as `deliverUnitOf` finds it), running crew's script exactly as composed (`['bash', '-lc', <script>]`), either
- * dispatched or (the gate retry) refused while its run has not ended. Only a path: the key is read from the file.
+ * entry, as `deliverUnitOf` finds it), running crew's script exactly as composed (`['bash', '-lc', <script>]`), not done
+ * (`pending` after a send-back, `distributed` before one, `rejected` on the gate retry) while its run has not ended.
+ * Only a path: the key is read from the file.
  */
 function liveDeliverKeyFile(u: DeliverTextUnit, runEnded: boolean): string | null {
   if (runEnded) return null;
-  if (u.status !== 'distributed' && u.status !== 'rejected') return null;
+  if (u.status == null || !DELIVER_CAN_RUN.has(u.status)) return null;
   if (!((u.id ?? '').endsWith(`:${DELIVER_PHASE_ID}`) || u.catalog === DELIVER_PHASE_ID)) return null;
   const cmd = u.tool_cmd;
   if (cmd == null || cmd.length !== 3 || cmd[0] !== 'bash' || cmd[1] !== '-lc') return null;
