@@ -3,7 +3,7 @@
 // engine-recorded `base_commit` (else the merge-base with the default branch); 409 only when there
 // is neither a worktree nor a branch. The live worktree read now says `source: 'worktree'`.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -53,6 +53,7 @@ describe('GET /runs/:id/diff — branch fallback for a reaped worktree (F-7R2-01
   let gone: string;
   let live: string;
   let mainTip: string;
+  let alias: string;
   let app: FastifyInstance;
 
   beforeAll(async () => {
@@ -98,9 +99,18 @@ describe('GET /runs/:id/diff — branch fallback for a reaped worktree (F-7R2-01
     writeFileSync(join(repo, 'blob.bin'), Buffer.from([0x47, 0x49, 0x46, 0x00, 0x01, 0x02]));
     writeFileSync(join(repo, 'big.txt'), 'a'.repeat(600 * 1024));
     symlinkSync('src/deep/nested.ts', join(repo, 'link.ts'));
+    // The run changed a file the registered checkout (main) also has.
+    writeFileSync(join(repo, 'base.txt'), 'the run changed this\n');
     git(repo, 'add', '.');
+    // A submodule (gitlink) entry.
+    git(repo, 'update-index', '--add', '--cacheinfo', `160000,${mainTip},vendored`);
     git(repo, 'commit', '-q', '-m', 'files run');
     git(repo, 'checkout', '-q', 'main');
+    mkdirSync(join(base, 'worktrees', 'run-swept'), { recursive: true });
+    writeFileSync(join(base, 'worktrees', 'run-swept', 'committed.txt'), 'uncommitted leftover\n');
+    // Another spelling of the scratch dir (a link to it), as macOS's /var -> /private/var is.
+    alias = `${base}-alias`;
+    symlinkSync(base, alias);
     // A LIVE worktree for the source:'worktree' stamp.
     mkdirSync(live);
     git(live, 'init', '-q', '-b', 'main');
@@ -115,6 +125,11 @@ describe('GET /runs/:id/diff — branch fallback for a reaped worktree (F-7R2-01
         view('run-norepo', gone, null),
         view('run-live', live, 'repo-1'),
         view('run-files', join(base, 'worktrees', 'run-files'), 'repo-1'),
+        // A worktree being swept: its files are still there, its `.git` link is gone (crew#1057).
+        view('run-swept', join(base, 'worktrees', 'run-swept'), 'repo-1', { run_branch: 'wicked/run-gone' }),
+        // Run ids are a client's strings: `wicked/<id>` must never be read as revision syntax (codex r1).
+        view('run-files:src', join(base, 'worktrees', 'run-files:src'), 'repo-1'),
+        view('run-files~0', join(base, 'worktrees', 'run-files~0'), 'repo-1'),
       ]),
       listRepos: vi.fn().mockResolvedValue([
         { id: 'repo-1', name: 'r', root_path: repo, default_branch: 'main', registered_at: 1 },
@@ -127,6 +142,7 @@ describe('GET /runs/:id/diff — branch fallback for a reaped worktree (F-7R2-01
 
   afterAll(async () => {
     await app.close();
+    rmSync(alias, { force: true });
     removeScratch(base);
   });
 
@@ -217,6 +233,27 @@ describe('GET /runs/:id/diff — branch fallback for a reaped worktree (F-7R2-01
     expect(dir.statusCode).toBe(400);
     expect(dir.json().error).toContain('not a regular file in the run branch');
     expect((await getFile('run-files', join(filesGone, 'link.ts'))).statusCode).toBe(400);
+  });
+
+  it('crew#2006 (codex r1): with the worktree gone the branch answers first, never the registered checkout or a half-swept tree', async () => {
+    // main's base.txt is on disk in the registered checkout; the run's version is on its branch.
+    expect((await getFile('run-files', join(repo, 'base.txt'))).json()).toMatchObject({ content: 'the run changed this\n', source: 'branch' });
+    // A worktree being swept (no .git link) still has an uncommitted leftover on disk: the branch answers.
+    expect((await getFile('run-swept', join(base, 'worktrees', 'run-swept', 'committed.txt'))).json()).toMatchObject({ content: 'committed run work\n', source: 'branch' });
+  });
+
+  it('crew#2006 (codex r1): a run id is never read as revision syntax', async () => {
+    // Read as revisions, `wicked/run-files:src` would be the src tree of run-files' branch, and `~0` its tip.
+    const viaColon = await app.inject({ method: 'GET', url: `/api/v1/runs/${encodeURIComponent('run-files:src')}/files`, query: { path: join(base, 'worktrees', 'run-files:src', 'deep', 'nested.ts') } });
+    expect(viaColon.statusCode, viaColon.body).toBe(404);
+    const viaTilde = await app.inject({ method: 'GET', url: `/api/v1/runs/${encodeURIComponent('run-files~0')}/files`, query: { path: join(base, 'worktrees', 'run-files~0', 'base.txt') } });
+    expect(viaTilde.statusCode, viaTilde.body).toBe(404);
+  });
+
+  it('crew#2006 (codex r1): another spelling of the worktree maps to the same branch path; the tree root and a submodule are 400', async () => {
+    expect((await getFile('run-gone', join(alias, 'worktrees', 'run-gone', 'committed.txt'))).json()).toMatchObject({ content: 'committed run work\n', source: 'branch' });
+    expect((await getFile('run-gone', gone)).statusCode).toBe(400);
+    expect((await getFile('run-files', join(base, 'worktrees', 'run-files', 'vendored'))).statusCode).toBe(400);
   });
 
   it('crew#2006: what neither the worktree nor the branch has stays 404, and containment is judged first', async () => {

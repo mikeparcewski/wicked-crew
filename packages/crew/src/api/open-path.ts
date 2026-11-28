@@ -17,6 +17,15 @@ import { childEnvWithBootEstateDb } from '../core/governance-store.js';
  * whose name merely starts with dots (`/a/..hidden`) is not wrongly excluded.
  */
 export function isInsideRoot(root: string, target: string): boolean {
+  return relativeInside(root, target) !== null;
+}
+
+/**
+ * `target`'s path inside `root`, judged as {@link isInsideRoot} judges it (on REAL paths), relative to `root` (`''` for
+ * the root itself); `null` when it is outside or cannot be judged. Built from the same real paths as the containment,
+ * so an alias spelling of the root (macOS `/var` → `/private/var`) maps to the same relative path (crew#2006).
+ */
+export function relativeInside(root: string, target: string): string | null {
   // Symlink-safe (Copilot, PR#279): containment is judged on REAL paths, or a
   // `<root>/symlink-to-outside` opens a file the validation never looked at. A missing
   // leaf resolves through its deepest EXISTING ancestor (never a bare lexical fallback:
@@ -38,11 +47,11 @@ export function isInsideRoot(root: string, target: string): boolean {
   };
   const realRoot = real(root);
   const realTarget = real(target);
-  if (realRoot === null || realTarget === null) return false;
+  if (realRoot === null || realTarget === null) return null;
   const rel = relative(realRoot, realTarget);
-  if (rel === '') return true; // the root itself
-  if (isAbsolute(rel)) return false; // different drive/tree entirely (win32)
-  return rel.split(sep)[0] !== '..';
+  if (rel === '') return ''; // the root itself
+  if (isAbsolute(rel)) return null; // different drive/tree entirely (win32)
+  return rel.split(sep)[0] !== '..' ? rel : null;
 }
 
 /** `target` under `root` by the path text alone (both resolved, nothing read from disk). */

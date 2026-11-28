@@ -11,7 +11,7 @@
 import { constants as fsConstants, promises as fsp, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, sep } from 'node:path';
-import { ExecCwdMissing, execCapped, execCappedBytes, ExecOutputTooLarge } from '../core/exec.js';
+import { ExecCwdMissing, execCapped, execHeadBytes, ExecOutputTooLarge } from '../core/exec.js';
 import { committedScrubReason, deliverExclusionByName, deliverExclusionReason } from '../core/deliver-exclusions.js';
 
 /** File-content cap (DES-FEEDBACK-002 §3.3): past this, `content` holds the first 512 KB and
@@ -137,7 +137,8 @@ export async function branchDiff(
   const gitOut = repoGit(repoRoot);
   const found = await runBranchRef(repoRoot, branch);
   if (found === null) return null;
-  const { ref, label: branchLabel } = found;
+  // The commit the branch named when it was resolved: one tree for the whole read (crew#2006).
+  const { oid: ref, label: branchLabel } = found;
   let baseRev = base;
   if (baseRev === null || baseRev === '') {
     baseRev = null;
@@ -190,14 +191,19 @@ function repoGit(repoRoot: string) {
  * Where a run's work lives once its worktree is reaped (wave 6; crew#2006 reads files from it too): the LOCAL run
  * branch first; when the engine's retention has pruned it (core#449 `WICKED_COMPLETED_WORKTREE_KEEP_DAYS`), the
  * PUSHED copy `refs/remotes/origin/<branch>` still carries the delivered work, labelled `origin/<branch>` (review L-1
- * of #536). `null` when neither exists (nothing was ever committed for the run).
+ * of #536). `oid` is the commit it names now: a read uses it, so one request reads one tree even if the ref moves.
+ * `null` when neither exists (nothing was ever committed for the run), or when the name is not a plain branch name: a
+ * run id is a client's string, and `wicked/<id>` must never be read as revision syntax (`:`, `~`, `^`, `@{`, `..`).
  */
-export async function runBranchRef(repoRoot: string, branch: string): Promise<{ ref: string; label: string } | null> {
+export async function runBranchRef(repoRoot: string, branch: string): Promise<{ ref: string; oid: string; label: string } | null> {
+  if (!isPlainRef(branch)) return null;
   const gitOut = repoGit(repoRoot);
   for (const [ref, label] of [[`refs/heads/${branch}`, branch], [`refs/remotes/origin/${branch}`, `origin/${branch}`]] as const) {
     try {
-      await gitOut(['rev-parse', '--verify', '--quiet', ref]);
-      return { ref, label };
+      const { stdout } = await gitOut(['rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`]);
+      const oid = stdout.trim();
+      if (/^[0-9a-f]{40,64}$/.test(oid)) return { ref, oid, label };
+      return null;
     } catch (err) {
       // `--verify --quiet` on a missing ref is a CLEAN exit 1 — the one verifiable "branch gone".
       if ((err as { code?: unknown }).code !== 1) throw err;
@@ -217,24 +223,27 @@ export interface BranchFileRead extends CappedFileRead {
  * A file of a run whose worktree is gone, read from the run branch (crew#2006): the same branch `branchDiff` reads,
  * through {@link runBranchRef}. `relPath` is the contained path made relative to the branch's tree (the caller's
  * containment comes first). The entry is named once (`ls-tree`: mode, object, size) and its bytes are read by that
- * object id, so size and bytes are one object. Capped and sniffed as {@link readFileCapped}. `null` when the branch
- * or the path in it does not exist; a directory, a submodule or a symlink is {@link NotARegularFileError}.
+ * object id, so size and bytes are one object. Capped and sniffed as {@link readFileCapped}. `null` when the run has
+ * no branch; `'no-entry'` when the branch has no such file; a directory (the tree root included), a submodule or a
+ * symlink is {@link NotARegularFileError}.
  */
-export async function branchFileCapped(repoRoot: string, branch: string, relPath: string): Promise<BranchFileRead | null> {
+export async function branchFileCapped(repoRoot: string, branch: string, relPath: string): Promise<BranchFileRead | 'no-entry' | null> {
   const found = await runBranchRef(repoRoot, branch);
   if (found === null) return null;
   const path = relPath.split(sep).join('/');
-  if (path === '' || path.startsWith('../') || path === '..') return null;
-  const { stdout } = await repoGit(repoRoot)(['ls-tree', '-l', '-z', '--full-tree', '--end-of-options', found.ref, '--', path]);
+  if (path === '') throw new NotARegularFileError(relPath === '' ? '.' : relPath);
+  if (path.startsWith('../') || path === '..') return 'no-entry';
+  const { stdout } = await repoGit(repoRoot)(['ls-tree', '-l', '-z', '--full-tree', '--end-of-options', found.oid, '--', path]);
   // `<mode> SP <type> SP <object> SP+ <size> TAB <path>`, NUL-terminated; only the exact path counts (ls-tree matches
   // its arguments as prefixes of a directory's entries too).
   const entry = stdout.split('\0').map((line) => /^(\d+) (\w+) ([0-9a-f]+) +(-|\d+)\t(.*)$/s.exec(line)).find((m) => m !== null && m[5] === path);
-  if (entry === undefined || entry === null) return null;
+  if (entry === undefined || entry === null) return 'no-entry';
   const [, mode, type, object, sizeText] = entry as unknown as [string, string, string, string, string];
   if (type !== 'blob' || mode === '120000') throw new NotARegularFileError(relPath, type === 'blob' ? 'a symlink in the run branch' : 'not a regular file');
   const size = Number(sizeText);
-  const { stdout: bytes } = await execCappedBytes('git', ['cat-file', 'blob', object], { timeout: GIT_TIMEOUT_MS, cwd: repoRoot, windowsHide: true, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } });
-  return { ...cappedContent(bytes.subarray(0, FILE_CONTENT_CAP_BYTES), size), source: 'branch', branch: found.label };
+  // Only the served prefix is read: a blob of any size costs at most the cap (codex r1).
+  const bytes = size === 0 ? Buffer.alloc(0) : await execHeadBytes('git', ['cat-file', 'blob', object], FILE_CONTENT_CAP_BYTES, { timeout: GIT_TIMEOUT_MS, cwd: repoRoot, windowsHide: true, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } });
+  return { ...cappedContent(bytes, size), source: 'branch', branch: found.label };
 }
 
 const GIT_TIMEOUT_MS = 10_000;

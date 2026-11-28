@@ -159,7 +159,7 @@ import { buildRequirementsMaps, publishRequirementsMaps, REQUIREMENTS_MAP_DIR } 
 import { ASK_TURN_BUDGET_SECS, AskPathIndex, isAskTurn } from './ask-paths.js';
 import { chatTurnStep, resolveChatWorkflow, servedChatWorkflows, writeCapableStep, type ChatWorkflow } from './chat-workflow.js';
 import { reassignRefusedSeats } from '../core/reassign-refusal.js';
-import { allowedRootsFor, isInsideRoot, mayBeInsideRoot, openWithSystemDefault } from './open-path.js';
+import { allowedRootsFor, isInsideRoot, mayBeInsideRoot, openWithSystemDefault, relativeInside } from './open-path.js';
 import {
   InvalidDiffBaseError,
   MERGE_BASE_LITERAL,
@@ -3275,7 +3275,7 @@ export function registerRoutes(
   };
 
   /** A git read for the viewer routes (the worktree diff, the run branch's diff and file) that failed: one mapping. */
-  const gitReadError = (reply: FastifyReply, err: unknown) => {
+  const gitReadError = (reply: FastifyReply, err: unknown, what: 'diff' | 'file' = 'diff') => {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       return reply.code(500).send({ error: 'git executable not found on server' });
     }
@@ -3284,7 +3284,9 @@ export function registerRoutes(
     // rather than a generic 500 (Copilot, #305).
     if (err instanceof ExecOutputTooLarge) {
       return reply.code(507).send({
-        error: "git output exceeds the server's execution buffer — narrow the request with ?path=",
+        error: what === 'diff'
+          ? "diff output exceeds the server's execution buffer — narrow the request with ?path="
+          : "the file's git read exceeds the server's execution buffer",
       });
     }
     // crew#790: git stopped before it answered (the daemon's 10 s timeout on a busy host) is not a
@@ -3324,9 +3326,13 @@ export function registerRoutes(
     const branch = typeof recorded.run_branch === 'string' && recorded.run_branch !== '' ? recorded.run_branch : `wicked/${id}`;
     const base = typeof recorded.base_commit === 'string' && recorded.base_commit !== '' ? recorded.base_commit : null;
     if (target === undefined) return { root, branch, base, rel: undefined };
+    // The relative path comes from the same real paths the containment judged (an alias spelling of the root maps
+    // to the same path, codex r1 on crew#2006).
     const workdir = session.workdir;
-    if (typeof workdir === 'string' && workdir.length > 0 && isInsideRoot(workdir, target)) return { root, branch, base, rel: relative(workdir, target) };
-    if (isInsideRoot(root, target)) return { root, branch, base, rel: relative(root, target) };
+    const inWorktree = typeof workdir === 'string' && workdir.length > 0 ? relativeInside(workdir, target) : null;
+    if (inWorktree !== null) return { root, branch, base, rel: inWorktree };
+    const inRepo = relativeInside(root, target);
+    if (inRepo !== null) return { root, branch, base, rel: inRepo };
     return { outside: root };
   };
 
@@ -3356,25 +3362,38 @@ export function registerRoutes(
     if (resolved === null) return reply;
     if (await appFilesRefused(req, reply, resolved.session, resolved.target)) return reply;
     const target = resolved.target as string;
+    // (crew#2006) A finished run's worktree is reaped (or being swept): its work is the run branch, which its diff reads
+    // too. Chosen BEFORE any disk read, as the diff chooses it, so neither the registered checkout nor a half-swept
+    // worktree answers for the run (codex r1). A run with no branch keeps today's disk read.
+    const NO_BRANCH = Symbol('no run branch');
+    const fromBranch = async () => {
+      const at = await runBranchOf(resolved.session, id, target);
+      if (at === null || 'outside' in at || at.rel === undefined) return NO_BRANCH;
+      try {
+        const read = await branchFileCapped(at.root, at.branch, at.rel);
+        if (read === null) return NO_BRANCH;
+        if (read === 'no-entry') return reply.code(404).send({ error: `no such file: ${target}` });
+        return { path: target, ...read };
+      } catch (branchErr) {
+        if (branchErr instanceof NotARegularFileError) {
+          return reply.code(400).send({ error: `\`path\` is not a regular file in the run branch: ${target}` });
+        }
+        return gitReadError(reply, branchErr, 'file');
+      }
+    };
+    if (!worktreeIntact(resolved.session)) {
+      const answer = await fromBranch();
+      if (answer !== NO_BRANCH) return answer;
+    }
     try {
       const read = await readFileCapped(target);
       return { path: target, ...read };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        // (crew#2006) A finished run's worktree is reaped; its work is on the run branch, which its diff reads too.
+        // The worktree went while this request read it.
         if (!worktreeIntact(resolved.session)) {
-          const at = await runBranchOf(resolved.session, id, target);
-          if (at !== null && 'rel' in at && at.rel !== undefined) {
-            try {
-              const fromBranch = await branchFileCapped(at.root, at.branch, at.rel);
-              if (fromBranch !== null) return { path: target, ...fromBranch };
-            } catch (branchErr) {
-              if (branchErr instanceof NotARegularFileError) {
-                return reply.code(400).send({ error: `\`path\` is not a regular file in the run branch: ${target}` });
-              }
-              return gitReadError(reply, branchErr);
-            }
-          }
+          const answer = await fromBranch();
+          if (answer !== NO_BRANCH) return answer;
         }
         return reply.code(404).send({ error: `no such file: ${target}` });
       }
