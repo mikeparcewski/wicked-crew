@@ -1,0 +1,34 @@
+{
+ "_source": "wicked-crew#1998: the two frames the engine wrote when run eae863c7's review (ord 3) reached its judge hold, copied verbatim from that run's GET /api/v1/runs/:id/events (train-19 proof daemon, crew 0.21.0, core-ts 0.17.0; crew#1120's proof leg). The engine opens this hold through escalate_denied_unit as gate_kind `escalation` (wicked-core src/actor.rs:11018-11027, ESCALATION_GATE_KIND at :21634); `stand_in_needed` is the escalation's condition and denial source, never a gate kind.",
+ "runId": "eae863c7-3c0d-5e87-b514-8a18e5033159",
+ "events": [
+  {
+   "attempt": 1,
+   "condition": "stand_in_needed",
+   "defGate": false,
+   "denialSource": "stand_in_needed",
+   "discarded": [],
+   "ord": 3,
+   "outputCaptured": true,
+   "restored": false,
+   "seq": 2336,
+   "session": "eae863c7-3c0d-5e87-b514-8a18e5033159",
+   "suggestionRef": null,
+   "ts": 1795852551640,
+   "type": "gateEscalated",
+   "verdictSummary": "The job needs a judge, and no helper that did not build the work can be it: no eligible judge seat distinct from creator 'codex' and validator author 'claude' (seats: claude: excluded (validator author), codex: excluded (creator); benched: none)",
+   "verdictSummaryTrimmed": false
+  },
+  {
+   "gateKind": "escalation",
+   "gateSeq": 4,
+   "ord": 3,
+   "prompt": "Unit 3: its work is done and waits for its check. The job needs a judge, and no helper that did not build the work can be it: no eligible judge seat distinct from creator 'codex' and validator author 'claude' (seats: claude: excluded (validator author), codex: excluded (creator); benched: …. Use a stand-in (for this job, or for every job), sign another helper in and approve to retry, or reject to stop the run [engine gate: a denied unit pauses for a decision instead of failing the run (core#464); run-level human_confirm=none silences only run-level pauses, never a denial gate]",
+   "reviewingOrd": 3,
+   "seq": 2337,
+   "session": "eae863c7-3c0d-5e87-b514-8a18e5033159",
+   "ts": 1795852551647,
+   "type": "awaitingHuman"
+  }
+ ]
+}

@@ -36,10 +36,11 @@ const ADJUDICATION: EngineGateActions = {
   actions: [a('approve', 'land_with_carried_items', 'optional'), a('request_changes', 'send_back', 'optional'), a('reject', 'stop', 'optional')],
 };
 /** (DES-STANDIN-001 §3.10) A stand-in hold, as wicked-core's `gate_actions` lists it (`src/actor/gate_actions.rs`: the
- *  token is its own intent, no note). */
+ *  token is its own intent, no note). Its `gateKind` is the open row's, `escalation` (`gate_actions.rs:175-188`); the
+ *  hold is that escalation's denial source, `stand_in_needed` (crew#1998). */
 const STAND_IN: EngineGateActions = {
   ord: 4,
-  gateKind: 'stand_in_needed',
+  gateKind: 'escalation',
   actions: [a('approve', 'operator_judgment', 'optional'), a('use_stand_ins', 'use_stand_ins', 'none'), a('reject', 'stop', 'none')],
 };
 /** A deliver gate: approve delivers; the in-place QE skip; reject. */
